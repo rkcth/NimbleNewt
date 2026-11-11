@@ -7,7 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PROTOCOL_HEADER, REMOTE_LIMITS, SESSION_HEADER, type ThinkingWire } from "./protocol.js";
 import { RemoteOfferRunner } from "./runner.js";
 import { WorkerRequestError } from "./client.js";
-import { remoteSuite, wireRefuses } from "./testing/suite.js";
+import { FULL_ABILITIES, remoteSuite, wireRefuses } from "./testing/suite.js";
 import { rawRequest } from "./testing/world.js";
 
 after(stopServer);
@@ -142,6 +142,10 @@ for (const backend of backends) {
     assert.equal(old.status, 426);
     const get = await rawRequest(c.transport.url, "GET", `/worker/attempts/${attemptId}/thinking`, { token: r1.token, headers: { [SESSION_HEADER]: session.sessionId, [PROTOCOL_HEADER]: String(session.protocol) } });
     assert.ok(get.status === 405 || get.status === 404, String(get.status));
+    // What a controller without the route answers (it reads the message as one it does not know, as this controller does a route it lacks): the very refusal the worker's runner takes for "not supported".
+    const unknown = await r1.client.send("POST", `/worker/attempts/${attemptId}/no-such-message`, { body: { placement, blocks: [block(1)] } as never, session: true, key: "k3" }).then(() => undefined, (e: unknown) => e as WorkerRequestError);
+    assert.ok(unknown instanceof WorkerRequestError);
+    assert.deepEqual([unknown.status, unknown.code, unknown.message.startsWith("blocks is not a field")], [400, "invalid_command", true]);
     assert.deepEqual(c.thinking.calls, []);
   });
 
@@ -173,6 +177,33 @@ for (const backend of backends) {
     assert.deepEqual(await other.attempt.thinking([block(1)]), { kept: 1 });
   }, { thinkingMessages: 3 });
 
+  suite("the message budget is the placement's: a move to another host starts it again, so what the old holder spent is not taken from the new one", async (c) => {
+    const r1 = await c.host("r1");
+    const r2 = await c.host("r2");
+    const { attemptId, attempt } = await c.started(r1, "Order seeds");
+    for (let i = 0; i < 3; i++) assert.deepEqual(await attempt.thinking([block(i)]), { kept: 1 });
+    assert.deepEqual(await attempt.thinking([block(9)]), { kept: 0, reason: "limit" });
+    await c.remote.relocate(c.owner, { commandId: "mv-1", attemptId, toHostId: r2.id, reason: "r1 retired" });
+    assert.deepEqual((await c.tick()).started, [attemptId]);
+    const offer = (await r2.client.offers())[0]!;
+    const next = r2.client.attempt(attemptId, offer.placement);
+    await next.accept();
+    assert.deepEqual(await next.honorContract(offer.order, FULL_ABILITIES, c.clock.now()), { ok: true });
+    assert.deepEqual(await next.thinking([block(10)]), { kept: 1 }, "the new placement has its own budget");
+    await wireRefuses("fenced", () => attempt.thinking([block(11)]), 409);
+  }, { thinkingMessages: 3, policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
+
+  suite("a block longer than the route takes (the worker channel allows 20,000 characters) is cut by the client, not refused", async (c) => {
+    const r1 = await c.host("r1");
+    const { attempt } = await c.started(r1, "Order seeds");
+    // A surrogate pair across the cut: the cut keeps whole characters.
+    const long = "z".repeat(REMOTE_LIMITS.thinkingChars - 1) + "\u{1F600}" + "z".repeat(12_000);
+    assert.deepEqual(await attempt.thinking([block(1, long), block(2)]), { kept: 2 });
+    const sent = c.thinking.calls[0]!.blocks;
+    assert.equal(sent[0]!.text, "z".repeat(REMOTE_LIMITS.thinkingChars - 1));
+    assert.equal(sent[1]!.text, "thought 2");
+  });
+
   suite("the text is not kept by the route: it is not in the placement or the controller's operations", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, attempt } = await c.started(r1, "Order seeds");
@@ -192,10 +223,11 @@ const fakeRunner = (thinking: (blocks: readonly ThinkingWire[]) => Promise<unkno
 const offer = { placement: 1, order: { attemptId: "att-aaaaaaaaaaaaaaaaaaaa", taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa", agentId: "agent:ann", generation: 1 } } as never;
 
 test("version skew: a controller without the thinking route (404 or a refused message) is not asked again for the attempt; the report is dropped silently and nothing carries the text", async () => {
-  for (const status of [404, 400]) {
+  // What an older controller answers: its body check refuses the unknown `blocks` field (400), or the route is unknown (404/405).
+  for (const [status, code, message] of [[404, "not_found", "no such route"], [405, "method_not_allowed", "use POST"], [400, "invalid_command", "blocks is not a field of this message"]] as const) {
     const troubles: string[] = [];
     let asked = 0;
-    const runner = fakeRunner(async () => { asked++; throw new WorkerRequestError(status, status === 404 ? "not_found" : "invalid_command", "no such route"); }, troubles);
+    const runner = fakeRunner(async () => { asked++; throw new WorkerRequestError(status, code, message); }, troubles);
     const running = runner.run(offer);
     for (let i = 0; i < 100 && runner.running.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
     await runner.thinking("att-aaaaaaaaaaaaaaaaaaaa", [block(1, MARK)]);
@@ -205,6 +237,20 @@ test("version skew: a controller without the thinking route (404 or a refused me
     assert.equal(troubles.join().includes(MARK), false);
     await running;
   }
+});
+
+test("a refusal of one message by a controller that has the route (400 naming a block's field) drops that message only; later reports are sent", async () => {
+  const troubles: string[] = [];
+  let asked = 0;
+  const runner = fakeRunner(async () => { asked++; if (asked === 1) throw new WorkerRequestError(400, "invalid_command", "model: must be text of 1 to 200 characters"); return { kept: 1 }; }, troubles);
+  const running = runner.run(offer);
+  for (let i = 0; i < 100 && runner.running.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+  await runner.thinking("att-aaaaaaaaaaaaaaaaaaaa", [block(1, MARK)]);
+  await runner.thinking("att-aaaaaaaaaaaaaaaaaaaa", [block(2)]);
+  await runner.thinking("att-aaaaaaaaaaaaaaaaaaaa", [block(3)]);
+  assert.equal(asked, 3, "one malformed message does not turn reports off for the attempt");
+  assert.deepEqual(troubles, []);
+  await running;
 });
 
 test("a failing connection or a busy controller drops that message only; an attempt the runner does not run, and an empty report, send nothing", async () => {

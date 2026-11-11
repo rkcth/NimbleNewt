@@ -257,10 +257,13 @@ export class RemoteAttempt implements ToolGateway {
   }
   /**
    * The model's thinking the machine's agent process reported (card U09c), carried to the controller's thinking store. The text is untrusted and goes as it came (the controller cleans and bounds it); a message too large for the route is sent in
-   * parts, each part its own message with a key made from its content, so a part sent again is kept once. Throws `WorkerRequestError` (a controller without the route answers 404 `not_found`); the caller drops it.
+   * parts, each part its own message with a key made from its content, so a part sent again is kept once. Throws `WorkerRequestError` (an older controller refuses the body with 400 "blocks is not a field of this message"); the caller drops it.
    */
-  async thinking(blocks: readonly ThinkingWire[], key?: string): Promise<ThinkingAnswer> {
+  async thinking(given: readonly ThinkingWire[], key?: string): Promise<ThinkingAnswer> {
     await this.watchdog?.assertProductive();
+    // The worker channel lets a process report up to 20,000 characters a block (the local path keeps them, cut by the store); the route takes 8000, so a longer text is cut here (at a character boundary) rather than refused.
+    const cutText = (t: string): string => { if (t.length <= REMOTE_LIMITS.thinkingChars) return t; let end: number = REMOTE_LIMITS.thinkingChars; const c = t.charCodeAt(end - 1); if (c >= 0xd800 && c <= 0xdbff) end -= 1; return t.slice(0, end); };
+    const blocks = given.map((b) => (typeof b.text === "string" && b.text.length > REMOTE_LIMITS.thinkingChars ? { ...b, text: cutText(b.text) } : b));
     const size = (part: readonly ThinkingWire[]): number => Buffer.byteLength(JSON.stringify(part), "utf8");
     if (blocks.length > 1 && size(blocks) > REMOTE_LIMITS.thinkingBytes - 4096) {
       const half = Math.ceil(blocks.length / 2);

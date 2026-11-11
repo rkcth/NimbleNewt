@@ -79,14 +79,15 @@ export class RemoteOfferRunner {
 
   /**
    * The model's thinking the agent process of an attempt this runner is running reported (card U09c): sent to the controller's thinking store through the attempt. It is told, not asked: it never throws and never changes the turn. A report for an
-   * attempt this runner does not run is dropped; a controller that has no such route (an older one: 404, or a refusal of the message), or that fenced the attempt, is not asked again for this attempt (said once, without any text); any other
+   * attempt this runner does not run is dropped; a controller that has no such route (an older one: 404/405, or its refusal of the `blocks` field), or that fenced the attempt, is not asked again for this attempt (said once, without any text); any other
    * failure (the connection, a busy controller) drops that message only. The text is untrusted and is in no log line and no error made here.
    */
   async thinking(attemptId: string, blocks: readonly ThinkingWire[]): Promise<void> {
     const live = this.#live.get(attemptId);
     if (live === undefined || live.noThinking === true || blocks.length === 0) return;
     try { await live.attempt.thinking(blocks); } catch (error) {
-      if (error instanceof WorkerRequestError && (error.fenced || error.status === 404 || error.status === 400 || error.status === 405)) {
+      // An older controller refuses the route's body ("blocks is not a field of this message") or does not know the route (404/405): it is not asked again. Any other refusal (400) is of that one message, which is dropped alone.
+      if (error instanceof WorkerRequestError && (error.fenced || error.status === 404 || error.status === 405 || (error.status === 400 && error.code === "invalid_command" && error.message.startsWith("blocks is not a field")))) {
         live.noThinking = true;
         try { this.#o.onTrouble?.(attemptId, "thinking report", new Error(error.fenced ? "the attempt is fenced" : `the controller does not take thinking reports (${error.status})`)); } catch { /* ignored */ }
       }

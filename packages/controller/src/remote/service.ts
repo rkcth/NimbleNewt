@@ -351,7 +351,7 @@ export class RemoteWorkerService {
   readonly #monitors = new Map<string, RelayMonitor>();
   /** The tool bridge requests being handled now, by attempt, call ID and placement (card L05e). */
   /** Per attempt: the thinking messages taken so far and those being kept now (card U09c). Bounded like the other per-attempt memos; an attempt that falls out starts counting again. */
-  readonly #thinkingFlow = new Map<string, { messages: number; open: number }>();
+  readonly #thinkingFlow = new Map<string, { readonly placement: number; messages: number; open: number }>();
   readonly #bridging = new Map<string, { readonly request: string; readonly answer: Promise<ToolBridgeAnswer> }>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
@@ -1349,8 +1349,9 @@ export class RemoteWorkerService {
     this.#needsConfirmation(b, "any thinking report");
     const keep = this.#deps.thinking;
     if (keep === undefined) return { kept: 0, reason: "unavailable" };
+    // The budget is the placement's, as a local process's is the process's: a move or restart (a new placement) starts again, so what one holding spent (a hostile host's included) is not taken from the next.
     let flow = this.#thinkingFlow.get(b.attemptId);
-    if (flow === undefined) { flow = { messages: 0, open: 0 }; this.#thinkingFlow.set(b.attemptId, flow); while (this.#thinkingFlow.size > 256) this.#thinkingFlow.delete(this.#thinkingFlow.keys().next().value as string); }
+    if (flow === undefined || flow.placement !== b.placement) { flow = { placement: b.placement, messages: 0, open: 0 }; this.#thinkingFlow.delete(b.attemptId); this.#thinkingFlow.set(b.attemptId, flow); while (this.#thinkingFlow.size > 256) this.#thinkingFlow.delete(this.#thinkingFlow.keys().next().value as string); }
     if (flow.open >= REMOTE_LIMITS.thinkingInFlight || flow.messages >= (this.#deps.thinkingMessages ?? REMOTE_LIMITS.thinkingMessages)) return { kept: 0, reason: "limit" };
     flow.messages++; flow.open++;
     try { return await keep({ attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation }, wire); } finally { flow.open--; }
