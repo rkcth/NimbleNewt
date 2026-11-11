@@ -830,6 +830,28 @@ export class StopService {
   }
 
   /**
+   * Whether an agent is at rest because a Suspend or Stop of its own, or of a team above it, finished (card M04h): `suspended` or `stopped`, with the request. Undefined when no such request is finished and still the cause of the
+   * gate (a resume, a newer pause or an unfinished or failed stop all end it), and for a stop of the whole installation, which is the emergency brake and is never treated as a rest an invitation could lift. No viewer check: the
+   * caller is a lifecycle service deciding availability, not an answer shown to anyone.
+   */
+  async agentRest(agentId: string): Promise<{ state: "suspended" | "stopped"; intentId: string; scope: PauseScope } | undefined> {
+    if (!/^agt-[a-z2-7]{20}$/.test(agentId)) return undefined;
+    const own: PauseScope = { kind: "agent", id: agentId };
+    for (const scope of [own, ...(await this.#covering(own))]) {
+      if (scope.kind === "installation") continue;
+      const id = await this.#activeId(scope);
+      const found = id === undefined ? undefined : await this.#runner.get(KIND, id);
+      if (id === undefined || found === undefined) continue;
+      const b = found.body as unknown as StopIntentBody;
+      if (b.phase !== "done" || (b.outcome?.state !== "suspended" && b.outcome?.state !== "stopped")) continue;
+      const gate = await this.#pauses.gateState(scope);
+      if (gate === undefined || gate.intent !== "pause" || (b.gateRequestId !== undefined && gate.requestId !== b.gateRequestId)) continue;
+      return { state: b.outcome.state, intentId: id, scope };
+    }
+    return undefined;
+  }
+
+  /**
    * Whether a Stop or Suspend of this task is in force: its request is not cancelled and the task is still paused. The dispatcher asks it for the swarm ancestors of a task before it starts an attempt, so a child of a stopped
    * task is not started again while the parent's stop holds (card L02d). Resuming the parent, or cancelling the request, lets go.
    * With `wider`, a Stop or Suspend of a scope above the task (its agent, a team above that, the installation) whose pause blocks the task holds too: such a Stop ends the work of the task's swarm children (card L02e), so the

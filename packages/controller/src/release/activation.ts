@@ -10,7 +10,8 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
-import { Launcher, parseCompat } from "./launcher.js";
+import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type LauncherNotice } from "./launcher.js";
+import { DEFAULT_START_FAILURE_LEVEL, type StartFailureLevel, type StartNoticeSink } from "./start-notices.js";
 import { RELEASE_KINDS, candidateIdOf, type ApprovalBody, type CandidateBody, type Cell } from "./release.js";
 
 /**
@@ -58,7 +59,7 @@ export interface HistoryEntry { readonly at: string; readonly kind: "activated" 
 /** The release that last started and reported itself healthy (or that the owner confirmed). Rollback after a failed start goes here, never to an unproven release. */
 export interface KnownGoodRef extends ReleaseRef { readonly confirmedAt: string; readonly via: "startup" | "owner" }
 export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string; /** When this release reported a healthy start; absent until then. */ readonly confirmedAt?: string }; readonly lastKnownGood?: KnownGoodRef; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
-export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; /** The hard caps, when the owner moved them from the built-in ones (`ACTIVATION_LIMITS`). */ readonly maxStaged?: number; readonly maxFiles?: number; readonly maxFileBytes?: number; readonly updatedBy: string; readonly updatedAt: string }
+export interface ActivationSettingsBody { readonly requireApproval?: boolean; readonly maxStagedBytes?: number; readonly keepStaged?: number; /** The hard caps, when the owner moved them from the built-in ones (`ACTIVATION_LIMITS`). */ readonly maxStaged?: number; readonly maxFiles?: number; readonly maxFileBytes?: number; /** Seconds a started release may stay unconfirmed before the launcher's watchdog counts the start as failed (K02e). */ readonly startupWindowSeconds?: number; /** The level of the owner's notice when the launcher fell back (K02f). */ readonly startFailureLevel?: StartFailureLevel; readonly updatedBy: string; readonly updatedAt: string }
 
 /** The place the launcher reads the active release from. */
 export interface Switcher { read(): Promise<string | undefined | "invalid">; write(id: string): Promise<void>; clear(): Promise<void> }
@@ -183,6 +184,8 @@ export interface ActivationOptions {
   readonly compat?: { readonly workers: VersionRange; readonly required?: boolean };
   /** The release this process was started from (given by the launcher). When the activation record names it as current, `confirmStartup` records it as the last known good. */
   readonly runningRelease?: string;
+  /** Where the owner is told of a fall-back or a failed start (K02f); without it the notices stay in the launcher's file and `release.status`. */
+  readonly notices?: StartNoticeSink;
 }
 export interface ActivationStatus {
   readonly revision: number;
@@ -199,7 +202,9 @@ export interface ActivationStatus {
   readonly diverged: boolean;
   readonly history: readonly HistoryEntry[];
   readonly staged: readonly { readonly candidateId: string; readonly digest: string; readonly stagedAt: string; readonly bytes: number }[];
-  readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly keepStaged: number | null; readonly revision: number };
+  readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly keepStaged: number | null; readonly startupWindowSeconds: number; readonly startFailureLevel: StartFailureLevel; readonly revision: number };
+  /** What the launcher wrote for the owner (a fall-back, a failed start), newest last, with whether it was told and whether it is still open. */
+  readonly startNotices: readonly { readonly kind: LauncherNotice["kind"]; readonly release: string; readonly to?: string; readonly reason: string; readonly at: string; readonly told: boolean; readonly state: "open" | "acknowledged" | "confirmed" }[];
 }
 
 /** Settings and the staging/activation service in one place, because the settings are read inside the same checks. */
@@ -240,17 +245,21 @@ export class ReleaseActivationService {
 
   // ---- settings ----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; maxStaged: number; maxFiles: number; maxFileBytes: number; set: { requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number; maxStaged?: number; maxFiles?: number; maxFileBytes?: number } }> {
+  async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; maxStaged: number; maxFiles: number; maxFileBytes: number; startupWindowSeconds: number; startFailureLevel: StartFailureLevel; set: { startupWindowSeconds?: number; startFailureLevel?: StartFailureLevel; requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number; maxStaged?: number; maxFiles?: number; maxFileBytes?: number } }> {
     strictOwner(owner, "read the release activation settings");
     const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     const b = found?.body as unknown as ActivationSettingsBody | undefined;
-    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, maxStaged: b?.maxStaged ?? ACTIVATION_LIMITS.staged, maxFiles: b?.maxFiles ?? ACTIVATION_LIMITS.files, maxFileBytes: b?.maxFileBytes ?? ACTIVATION_LIMITS.fileBytes, set: { ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }), ...(b?.maxStaged === undefined ? {} : { maxStaged: b.maxStaged }), ...(b?.maxFiles === undefined ? {} : { maxFiles: b.maxFiles }), ...(b?.maxFileBytes === undefined ? {} : { maxFileBytes: b.maxFileBytes }) } };
+    return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, maxStaged: b?.maxStaged ?? ACTIVATION_LIMITS.staged, maxFiles: b?.maxFiles ?? ACTIVATION_LIMITS.files, maxFileBytes: b?.maxFileBytes ?? ACTIVATION_LIMITS.fileBytes, startupWindowSeconds: b?.startupWindowSeconds ?? DEFAULT_STARTUP_WINDOW_SECONDS, startFailureLevel: b?.startFailureLevel ?? DEFAULT_START_FAILURE_LEVEL, set: { ...(b?.startupWindowSeconds === undefined ? {} : { startupWindowSeconds: b.startupWindowSeconds }), ...(b?.startFailureLevel === undefined ? {} : { startFailureLevel: b.startFailureLevel }), ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }), ...(b?.maxStaged === undefined ? {} : { maxStaged: b.maxStaged }), ...(b?.maxFiles === undefined ? {} : { maxFiles: b.maxFiles }), ...(b?.maxFileBytes === undefined ? {} : { maxFileBytes: b.maxFileBytes }) } };
   }
   /** `requireApproval`: activation needs the candidate approved through `release.approve` (default on). `maxStagedBytes`: an optional cap on all staged releases together (off by default; null turns it off). `keepStaged`: keep only the newest N staged releases (never the current, the previous or one being switched to); off by default, null turns it off. */
-  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; keepStaged?: unknown; maxStaged?: unknown; maxFiles?: unknown; maxFileBytes?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  async setSettings(owner: Principal, command: NoActor & { requireApproval?: unknown; maxStagedBytes?: unknown; keepStaged?: unknown; maxStaged?: unknown; maxFiles?: unknown; maxFileBytes?: unknown; startupWindowSeconds?: unknown; startFailureLevel?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     strictOwner(owner, "change the release activation settings");
-    known(command, ["commandId", "requireApproval", "maxStagedBytes", "keepStaged", "maxStaged", "maxFiles", "maxFileBytes", "expectedRevision"]);
-    if (command.requireApproval === undefined && command.maxStagedBytes === undefined && command.keepStaged === undefined && command.maxStaged === undefined && command.maxFiles === undefined && command.maxFileBytes === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes, keepStaged or several");
+    known(command, ["commandId", "requireApproval", "maxStagedBytes", "keepStaged", "maxStaged", "maxFiles", "maxFileBytes", "startupWindowSeconds", "startFailureLevel", "expectedRevision"]);
+    if (command.requireApproval === undefined && command.maxStagedBytes === undefined && command.keepStaged === undefined && command.maxStaged === undefined && command.maxFiles === undefined && command.maxFileBytes === undefined && command.startupWindowSeconds === undefined && command.startFailureLevel === undefined) bad("requireApproval", "give requireApproval, maxStagedBytes, keepStaged, startupWindowSeconds, startFailureLevel or several");
+    const win = command.startupWindowSeconds;
+    if (win !== undefined && win !== null && !(typeof win === "number" && Number.isSafeInteger(win) && win >= STARTUP_WINDOW_BOUNDS.min && win <= STARTUP_WINDOW_BOUNDS.max)) bad("startupWindowSeconds", `must be a whole number of seconds from ${STARTUP_WINDOW_BOUNDS.min} to ${STARTUP_WINDOW_BOUNDS.max}, or null for the default (${DEFAULT_STARTUP_WINDOW_SECONDS})`);
+    const lvl = command.startFailureLevel;
+    if (lvl !== undefined && lvl !== null && lvl !== "needs-you" && lvl !== "urgent") bad("startFailureLevel", "must be needs-you or urgent, or null for the default (needs-you)");
     if (command.requireApproval !== undefined && typeof command.requireApproval !== "boolean") bad("requireApproval", "must be true or false");
     const m = command.maxStagedBytes;
     if (m !== undefined && m !== null && !(typeof m === "number" && Number.isSafeInteger(m) && m >= 1)) bad("maxStagedBytes", "must be a whole number of bytes, or null for no cap");
@@ -260,7 +269,7 @@ export class ReleaseActivationService {
     const mS = cap(command.maxStaged, "maxStaged", 10_000), mF = cap(command.maxFiles, "maxFiles", 100_000), mB = cap(command.maxFileBytes, "maxFileBytes", Number.MAX_SAFE_INTEGER);
     wholeRev(command.expectedRevision);
     const r = await this.#runner.command("release.staging.settings.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), keepStaged: kp === undefined ? "keep" : (kp as number | null), maxStaged: mS === undefined ? "keep" : mS, maxFiles: mF === undefined ? "keep" : mF, maxFileBytes: mB === undefined ? "keep" : mB, expectedRevision: command.expectedRevision ?? null },
+      payload: { requireApproval: (command.requireApproval as boolean | undefined) ?? null, maxStagedBytes: m === undefined ? "keep" : (m as number | null), keepStaged: kp === undefined ? "keep" : (kp as number | null), maxStaged: mS === undefined ? "keep" : mS, maxFiles: mF === undefined ? "keep" : mF, maxFileBytes: mB === undefined ? "keep" : mB, startupWindowSeconds: win === undefined ? "keep" : (win as number | null), startFailureLevel: lvl === undefined ? "keep" : (lvl as string | null), expectedRevision: command.expectedRevision ?? null },
       build: async () => {
         const current = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
         if (command.expectedRevision !== undefined && (current?.revision ?? 0) !== command.expectedRevision) throw new DomainError("stale_revision", `the release settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision}`, { currentRevision: current?.revision ?? 0 });
@@ -270,11 +279,15 @@ export class ReleaseActivationService {
         const keep = kp === undefined ? before?.keepStaged : kp === null ? undefined : (kp as number);
         const pick = (v: number | null | undefined, was: number | undefined): number | undefined => (v === undefined ? was : v === null ? undefined : v);
         const nS = pick(mS, before?.maxStaged), nF = pick(mF, before?.maxFiles), nB = pick(mB, before?.maxFileBytes);
-        const body: ActivationSettingsBody = { ...(nS === undefined ? {} : { maxStaged: nS }), ...(nF === undefined ? {} : { maxFiles: nF }), ...(nB === undefined ? {} : { maxFileBytes: nB }), ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), ...(keep === undefined ? {} : { keepStaged: keep }), updatedBy: owner.id, updatedAt: this.#runner.now() };
+        const nW = win === undefined ? before?.startupWindowSeconds : win === null ? undefined : (win as number);
+        const nL = lvl === undefined ? before?.startFailureLevel : lvl === null ? undefined : (lvl as StartFailureLevel);
+        const body: ActivationSettingsBody = { ...(nW === undefined ? {} : { startupWindowSeconds: nW }), ...(nL === undefined ? {} : { startFailureLevel: nL }), ...(nS === undefined ? {} : { maxStaged: nS }), ...(nF === undefined ? {} : { maxFiles: nF }), ...(nB === undefined ? {} : { maxFileBytes: nB }), ...(requireApproval === undefined ? {} : { requireApproval }), ...(cap === undefined ? {} : { maxStagedBytes: cap }), ...(keep === undefined ? {} : { keepStaged: keep }), updatedBy: owner.id, updatedAt: this.#runner.now() };
         const change = current === undefined ? { type: "create" as const, ref: SETTINGS, body: body as unknown as JsonObject } : { type: "update" as const, ref: SETTINGS, expectedRevision: current.revision, body: body as unknown as JsonObject };
-        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null, keepStaged: keep ?? null, maxStaged: nS ?? null, maxFiles: nF ?? null, maxFileBytes: nB ?? null } };
+        return { ref: SETTINGS, creates: current === undefined, changes: [change], detail: { requireApproval: requireApproval ?? null, maxStagedBytes: cap ?? null, keepStaged: keep ?? null, maxStaged: nS ?? null, maxFiles: nF ?? null, maxFileBytes: nB ?? null, startupWindowSeconds: nW ?? null, startFailureLevel: nL ?? null } };
       },
     }));
+    // The launcher cannot read the database, so it keeps its own copy of the window. A launcher file that cannot be written now is synced again at the next start.
+    await this.syncLauncherWindow().catch(() => undefined);
     return { revision: r.revision };
   }
 
@@ -594,6 +607,38 @@ export class ReleaseActivationService {
     return true;
   }
 
+  /** Copies the owner's startup window into the launcher's file (no-op when it already holds it). */
+  async syncLauncherWindow(): Promise<void> {
+    const b = (await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as ActivationSettingsBody | undefined;
+    await this.#launcher.setWindow(b?.startupWindowSeconds ?? null);
+  }
+
+  /**
+   * Tells the owner what the launcher wrote for them (a fall-back, a failed start) and closes the inbox items of what was acknowledged or confirmed since. Reads the launcher's file, so a fall-back made while the
+   * database was down is told at the first start that can; a notice that cannot be sent now stays pending and is tried again by the next call (the controller's sweep runs it). Never throws for a send that failed.
+   */
+  async deliverStartNotices(): Promise<{ raised: number; settled: number; failed: number }> {
+    const sink = this.#o.notices;
+    if (sink === undefined) return { raised: 0, settled: 0, failed: 0 };
+    const level = (await this.settingsFor()).startFailureLevel;
+    try { return await this.#launcher.deliver({ raise: (n) => sink.raise(n, level), settle: (n) => sink.settle(n) }); } catch (error) { if (error instanceof LauncherStateError) return { raised: 0, settled: 0, failed: 1 }; throw error; }
+  }
+  /** The settings as the service itself reads them (no principal): used by the controller's own paths. */
+  private async settingsFor(): Promise<{ startFailureLevel: StartFailureLevel }> {
+    const b = (await this.#runner.get(SETTINGS.kind, SETTINGS.id))?.body as unknown as ActivationSettingsBody | undefined;
+    return { startFailureLevel: b?.startFailureLevel ?? DEFAULT_START_FAILURE_LEVEL };
+  }
+
+  /** Owner only: the owner has seen the failed start or fall-back. The open notices (all, or those of one release) are closed and their inbox items leave the inbox. */
+  async acknowledgeStart(owner: Principal, command: NoActor & { releaseId?: string }): Promise<{ acknowledged: number }> {
+    strictOwner(owner, "acknowledge a failed start");
+    known(command, ["commandId", "releaseId"]);
+    const only = command.releaseId === undefined ? undefined : idOf(command.releaseId);
+    const acknowledged = await this.#launcher.closeNotices((n) => only === undefined || n.release === only, "acknowledged");
+    await this.deliverStartNotices().catch(() => undefined);
+    return { acknowledged };
+  }
+
   /**
    * The controller started from the current release reports that it is healthy (called by `startController` when everything is up). The launcher's record makes the release the last known good, and the activation record says
    * so. Only the release this process was started from (`runningRelease`), only when the record names it as current with no switch open. Safe to call again.
@@ -785,7 +830,8 @@ export class ReleaseActivationService {
       diverged: body?.journal === undefined && (pointer ?? null) !== (body?.current?.id ?? null),
       history: body?.history ?? [],
       staged: listed.map((a) => { const b = a.body as unknown as StagedBody; return { candidateId: b.candidateId, digest: b.digest, stagedAt: b.stagedAt, bytes: b.bytes }; }),
-      settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, revision: s.revision },
+      settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, startupWindowSeconds: s.startupWindowSeconds, startFailureLevel: s.startFailureLevel, revision: s.revision },
+      startNotices: ((await this.#launcher.read().catch(() => undefined))?.notices ?? []).map((n) => ({ kind: n.kind, release: n.release, ...(n.to === undefined ? {} : { to: n.to }), reason: n.reason, at: n.at, told: n.sentAt !== undefined, state: n.closedBy ?? "open" })),
     };
   }
 }

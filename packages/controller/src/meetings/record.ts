@@ -1560,7 +1560,8 @@ export class MeetingRecordService {
     const meetings = this.#deps.meetings;
     if (meetings === undefined) throw new DomainError("unavailable", "the meeting service is not available here");
     const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
-    if (rec === undefined || !(isService(by) || allows(by, "meeting.manage", rec.projectId))) throw forbidden(by, "return that meeting's outcomes");
+    // Settling each item goes through `setAgendaState`, where a task credential's management grant does not reach other agents' topics (M03h follow-up): such a credential is refused here, before any motion is marked returned.
+    if (rec === undefined || !this.#controls(by, rec)) throw forbidden(by, "return that meeting's outcomes");
     const returned: string[] = [];
     const pending: string[] = [];
     for (const motionId of rec.motions) {

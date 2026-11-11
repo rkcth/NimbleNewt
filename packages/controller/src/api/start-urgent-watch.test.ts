@@ -82,3 +82,38 @@ test("a host that stops reporting is found through the real host service in the 
     assert.equal((await open()).length, 0, "reporting again closes it");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a service reports a security event through the state API; the owner is told at once, an agent and the owner's own call are refused, and the hourly limit is set by the same settings call the chat uses (card U11c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-urgs-"));
+  const sent: { text: string }[] = [];
+  const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, notifications: { channels } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const rob = (await s.principals.authenticate(boot.token))!;
+    await s.principals.enroll(rob, { commandId: "e-svc", kind: "service", name: "scanner", grants: [] });
+    await s.principals.enroll(rob, { commandId: "e-agt", kind: "agent", name: "agt-abcdefghijklmnopqrst", grants: [] });
+    const svcToken = (await s.principals.issueCredential(rob, "service:scanner")).token;
+    const agentToken = (await s.principals.issueCredential(rob, "agent:agt-abcdefghijklmnopqrst")).token;
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<any>;
+    const rev = async () => (await call(boot.token, "notifications.settings", {})).result.item.revision as number;
+    const set = async (args: Record<string, unknown>, id: string) => { const r = await call(boot.token, "notifications.configure", { ...args, expectedRevision: await rev() }, id); assert.ok(r.ok, JSON.stringify(r)); };
+    await set({ channel: "external", channelName: "chat", securityReportsPerHour: 1 }, "s1");
+    const ok = await call(svcToken, "security.report", { kind: "integrity-check-failed", key: "blob-7" }, "r1");
+    assert.ok(ok.ok, JSON.stringify(ok));
+    assert.equal(ok.result.held, false);
+    const held = await call(svcToken, "security.report", { kind: "integrity-check-failed", key: "blob-8" }, "r2");
+    assert.ok(held.ok, JSON.stringify(held));
+    assert.equal(held.result.held, true, "beyond the limit the owner set");
+    for (const [token, who] of [[agentToken, "agent"], [boot.token, "owner"]] as const) {
+      const bad = await call(token, "security.report", { kind: "integrity-check-failed", key: "x" }, `bad-${who}`);
+      assert.equal(bad.ok, false, who);
+    }
+    assert.equal((await call(svcToken, "security.report", { kind: "weird", key: "x" }, "r3")).ok, false);
+    await c.dispatch!.dispatcher.tick(); await c.dispatch!.dispatcher.tick();
+    assert.equal(sent.filter((m) => /integrity check failed/i.test(m.text)).length, 1, JSON.stringify(sent));
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
