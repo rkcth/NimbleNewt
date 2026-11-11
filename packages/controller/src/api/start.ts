@@ -79,7 +79,7 @@ import { ReportInterrogator, WorkEndService, checkpointVerdict, dispatcherEnding
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
-import { CutoverService, DifficultyService, FallbackService, RoutingService } from "../routing/index.js";
+import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute } from "../routing/index.js";
 import { landingPolicyFrom } from "./landing-policy.js";
 import { SecurityDetectors } from "../notifications/security-detect.js";
 import { checkLocalWorkerLimits } from "./worker-limits.js";
@@ -1035,6 +1035,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           lifecycle: agentLifecycle({ agents, pauses, stops }),
           // A hosted coordinator's routes follow its agent's profile unless the owner stated routes, and its model calls are usage of that agent (card U03d): recorded, never refused.
           profileRoutes: c.profileRoutes ?? ((profile) => chatRoutes(routing, { role: "coordinator", profile })()),
+          // Routes the owner states are judged against the routing table like the role's own (local data, no paid route, not disabled or excluded, a configured route), each alone, as dispatch judges a route; no table: none.
+          eligibleRoutes: async (stated) => {
+            const table = await routing.get();
+            if (table === undefined) return [];
+            const picked = selectRoute({ ...table, profiles: { ...table.profiles, "coordinator-stated": [...stated] } }, { role: "coordinator", profile: "coordinator-stated", contextTokens: 8000, needs: [], data: "local-only", paidAuthorized: false });
+            return picked.candidates.filter((x) => x.eligible).map((x) => x.route);
+          },
           attribute: async (by, agentPrincipal, use) => { await budgets.charge(by, { commandId: `coord-use-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 120), activity: "model-call", sharedOverheadRule: "the coordinator's own model calls (hosted agent)", agentId: agentPrincipal, computeMs: use.computeMs, ...(use.projectId === undefined ? {} : { projectId: use.projectId }) }); },
           ...(options.onInternalError === undefined ? {} : { onAttributionFailure: options.onInternalError }),
         });

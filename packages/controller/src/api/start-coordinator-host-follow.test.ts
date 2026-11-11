@@ -134,10 +134,60 @@ test("a set-up refused after its pause (a concurrent change took the record) lif
   } finally { await w.close(); }
 });
 
+test("review: a set-up refused after its pause keeps that pause when a concurrent set-up of the same agent took the record; that coordinator is not left running unstarted (U03d d)", async () => {
+  const w = await world();
+  try {
+    const ada = await w.agent("Ada");
+    const gate = async () => (await w.call(w.boot.token, "lifecycle.status", { scope: { kind: "agent", id: ada.id } })).result.item;
+    const real = w.c.services.pauses.pause.bind(w.c.services.pauses);
+    let race = true;
+    // The owner's second set-up of the same agent (another command, say from the chat) lands between the first one's pause and its write; it finds the agent already paused and makes no pause of its own.
+    w.c.services.pauses.pause = async (...a: Parameters<typeof real>) => { const made = await real(...a); if (race) { race = false; await w.c.coordinator!.configure(w.rob, { commandId: "other", principalId: ada.principalId, routes: ["role/route"] }); } return made; };
+    await assert.rejects(w.c.coordinator!.configure(w.rob, { commandId: "c1", principalId: ada.principalId, routes: ["role/route"] }), (e: unknown) => (e as { code?: string }).code === "stale_revision");
+    const view = (await w.c.coordinator!.get(w.rob))!;
+    assert.equal(view.hosted?.agentId, ada.id);
+    assert.equal((await gate()).intent, "pause", "the coordinator that was set up waits for the owner to start it");
+    assert.equal(view.state, "paused");
+    assert.equal((await w.ask("1")).kind, "unavailable", "nobody started it");
+  } finally { await w.close(); }
+});
+
+test("review: the owner's stated routes are used only where the routing table lets the coordinator use them (no paid, cloud or unknown route); otherwise the profile or role decides (U03d b)", async () => {
+  const used: string[] = [];
+  const w = await world({ used, roleRoutes: () => ["mine/big-local"] });
+  try {
+    const added = await w.call(w.boot.token, "routing.provider.add", { providers: [
+      { name: "mine", location: "local", endpoint: "http://127.0.0.1:8002/v1", models: ["big-local", "small-local"], contextTokens: 65536 },
+      { name: "pricey", location: "local", paid: true, endpoint: "http://127.0.0.1:8003/v1", models: ["top"], contextTokens: 200000 },
+      { name: "far", location: "cloud", paid: false, endpoint: "https://free.example.invalid/v1", credentialName: "far-key", models: ["free"], contextTokens: 32000 },
+    ] }, "rt-1");
+    assert.equal(added.ok, true, JSON.stringify(added));
+    const ada = await w.agent("Ada");
+    const cfg = await w.c.coordinator!.configure(w.rob, { commandId: "c1", principalId: ada.principalId, routes: ["pricey/top", "far/free", "ghost/none"] });
+    await w.c.coordinator!.setState(w.rob, { commandId: "s1", expectedRevision: cfg.revision, to: "running" });
+    assert.equal((await w.c.coordinator!.get(w.rob))!.routeSource, "role", "none of the stated routes may be used");
+    assert.equal((await w.ask("1")).kind, "answer");
+    assert.deepEqual(used, ["mine/big-local"], "the paid, the cloud and the unknown route are never called");
+
+    // An eligible route among them is used, in the owner's order.
+    const rev = (await w.c.coordinator!.get(w.rob))!.revision;
+    await w.c.coordinator!.configure(w.rob, { commandId: "c2", principalId: ada.principalId, routes: ["pricey/top", "mine/small-local"], expectedRevision: rev });
+    assert.equal((await w.c.coordinator!.get(w.rob))!.routeSource, "owner");
+    used.length = 0;
+    await w.ask("2");
+    assert.deepEqual(used, ["mine/small-local"]);
+  } finally { await w.close(); }
+});
+
 test("a hosted coordinator's routes: the owner's stated routes, else its agent's profile, else the coordinator role's; and its calls are the agent's usage without ever blocking (U03d b)", async () => {
   const used: string[] = [];
   const w = await world({ used, profileRoutes: (p) => (p === "fast" ? ["fast/one", "fast/two"] : []) });
   try {
+    // The owner's stated route is one the routing table knows (a local, unpaid route).
+    assert.equal((await w.call(w.boot.token, "routing.provider.add", { providers: [
+      { name: "mine", location: "local", endpoint: "http://127.0.0.1:8002/v1", models: ["route"], contextTokens: 65536 },
+      { name: "spare", location: "local", endpoint: "http://127.0.0.1:8003/v1", models: ["other"], contextTokens: 65536 },
+    ] }, "rt-1")).ok, true);
     const ada = await w.agent("Ada", "fast");
     const cfg = await w.c.coordinator!.configure(w.rob, { commandId: "c1", principalId: ada.principalId });
     const run = await w.c.coordinator!.setState(w.rob, { commandId: "s1", expectedRevision: cfg.revision, to: "running" });
@@ -188,6 +238,13 @@ test("the state API sets the coordinator up and takes it off its agent, owner on
     await w.c.services.principals.enroll(w.rob, { commandId: "e-boss", kind: "agent", name: "boss", grants: [{ action: "agent.manage", project: "*" }] });
     const boss = (await w.c.services.principals.issueCredential(w.rob, "agent:boss")).token;
     for (const token of [boss, ada.token]) assert.equal((await w.call(token, "coordinator.configure", { principalId: ada.principalId }, "x1")).ok, false);
+    // The service refuses them too, on its own (not only the operation's check).
+    for (const token of [boss, ada.token]) {
+      const who = await w.c.services.principals.authenticate(token);
+      await assert.rejects(w.c.coordinator!.configure(who, { commandId: "x1s", principalId: ada.principalId }), (e: unknown) => (e as { code?: string }).code === "forbidden");
+      await assert.rejects(w.c.coordinator!.setState(who, { commandId: "x2s", expectedRevision: 1, to: "running" }), (e: unknown) => (e as { code?: string }).code === "forbidden");
+      await assert.rejects(w.c.coordinator!.get(who), (e: unknown) => (e as { code?: string }).code === "forbidden");
+    }
 
     const set = await w.call(w.boot.token, "coordinator.configure", { principalId: ada.principalId }, "api-1");
     assert.equal(set.ok, true, JSON.stringify(set));

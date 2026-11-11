@@ -90,6 +90,8 @@ export interface CoordinatorDeps {
   readonly lifecycle?: AgentLifecyclePort;
   /** The routes the routing table gives a profile (card U03d), for a hosted coordinator whose agent has a `defaultProfile`. Absent: the profile is not read. */
   readonly profileRoutes?: (profile: string) => Promise<readonly string[]> | readonly string[];
+  /** Of the routes the owner stated for a hosted coordinator, those the routing table lets it use, in the owner's order (as the coordinator role's own routes are judged). Absent: they are used as stated. */
+  readonly eligibleRoutes?: (routes: readonly string[]) => Promise<readonly string[]> | readonly string[];
   /** Records a hosted coordinator's model call against its agent's budget (card U03d): usage by agent, as any agent's calls are. It records and never refuses; a failure to record is told to `onAttributionFailure` and changes nothing. */
   readonly attribute?: (by: Principal, principalId: string, use: CoordinatorUse) => Promise<void>;
   readonly onAttributionFailure?: (error: unknown) => void;
@@ -154,8 +156,11 @@ export class CoordinatorService {
       return await this.#configured(owner, command, routes, hostedId);
     } catch (error) {
       // A set-up refused after its pause (a concurrent change took the record meanwhile) must not leave the agent paused for a coordinator that does not exist: the pause this call made is taken back, and only that pause (card U03d).
-      if (ours !== undefined && hostedId !== undefined) {
-        const lifted = await this.#deps.lifecycle!.undoPause(owner, hostedId, `coord-undo-${command.commandId}`.slice(0, 120), ours, "the coordinator's set-up was refused, so the pause it made is lifted").then((l) => l, () => undefined);
+      // But when the record now hosts this very agent (the owner's concurrent set-up of the same agent, which found it paused and made no pause of its own, or this call's own write that landed before the error),
+      // that pause is what keeps the coordinator from running before the owner starts it, and it stays. A record that cannot be read is treated the same way: the pause stays, and the refusal says so.
+      const now = ours === undefined ? undefined : await this.#runner.get("coordinator", COORDINATOR_ID).then((f) => ({ hosts: (f?.body as unknown as CoordinatorBody | undefined)?.hosted?.agentId === hostedId }), () => ({ hosts: undefined }));
+      if (ours !== undefined && hostedId !== undefined && now?.hosts !== true) {
+        const lifted = now?.hosts === undefined ? undefined : await this.#deps.lifecycle!.undoPause(owner, hostedId, `coord-undo-${command.commandId}`.slice(0, 120), ours, "the coordinator's set-up was refused, so the pause it made is lifted").then((l) => l, () => undefined);
         if (lifted === undefined && error instanceof DomainError) throw new DomainError(error.code, `${error.message} (the pause this set-up made on the agent could not be lifted; resume the agent if it is not wanted)`, { ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }), ...(error.field === undefined ? {} : { field: error.field }) });
       }
       throw error;
@@ -426,7 +431,11 @@ export class CoordinatorService {
   async #routesOf(body: CoordinatorBody, profile: string | undefined): Promise<{ routes: readonly string[]; source: RouteSource }> {
     const read = async (get: () => Promise<readonly string[]> | readonly string[]): Promise<readonly string[]> => (async () => get())().then((r) => r, () => [] as readonly string[]);
     if (body.hosted !== undefined) {
-      if (body.explicitRoutes === true && body.routes.length > 0) return { routes: body.routes, source: "owner" };
+      if (body.explicitRoutes === true && body.routes.length > 0) {
+        // The owner's routes are an order of preference, not a way past the routing table: only those it lets the coordinator use (local data, no paid route, not disabled or excluded) are tried.
+        const usable = this.#deps.eligibleRoutes === undefined ? body.routes : await read(() => this.#deps.eligibleRoutes!(body.routes));
+        if (usable.length > 0) return { routes: usable, source: "owner" };
+      }
       if (profile !== undefined && this.#deps.profileRoutes !== undefined) {
         const fromProfile = await read(() => this.#deps.profileRoutes!(profile));
         if (fromProfile.length > 0) return { routes: fromProfile, source: "profile" };
