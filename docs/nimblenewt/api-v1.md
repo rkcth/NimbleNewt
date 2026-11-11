@@ -3327,9 +3327,10 @@ Arguments:
 - `handoffId`: the hand-off
 - `acceptGaps` (optional): true to hand over an incomplete package
 - `reassignResponsibilities` (optional): IDs of the sender's responsibilities (listed in the package) to move to the recipient with the task; needs the rights to assign and write responsibilities in the project, and the recipient must be an active agent (all checked before anything moves); not with a temporary reassignment; a repeat must name the same list. Moved at once; a recipient lacking rights for a duty is warned about to the owner, naming them. A failure for one leaves it with the sender and is reported in `reassigned`
+- `moveIntegratorLease` (optional): owner only: true moves the sender's integrator leases for the task (listed in the package's locks) to the recipient with a new fence; otherwise they are released when the task moves. Not with a temporary reassignment; a repeat must make the same choice. A lease that expired or changed hands meanwhile is left as it is and reported in `leasesSettled`
 - `commandId`: required
 
-Result: `{ item: { id, phase, reassign?: { ids, by, at }, reassigned?: { at, moved: [id], failed: [{ id, reason }] }, … } }`: `reassign` is what was asked, `reassigned` what came of it (present once the task has moved).
+Result: `{ item: { id, phase, reassign?: { ids, by, at }, reassigned?: { at, moved: [id], failed: [{ id, reason }] }, leaseMove?: { by, at }, leasePlan?: { at, entries: [{ leaseId, branch, fence, action }] }, leasesSettled?: { at, entries: [{ leaseId, branch, outcome, fence?, reason? }] }, … } }`: `reassign` is what was asked, `reassigned` what came of it (present once the task has moved); `leasePlan` the sender's lease holds read just before the move, `leasesSettled` what came of each (released, moved, or skipped when no longer the sender's).
 
 #### `handoff.takeover`
 

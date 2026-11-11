@@ -41,6 +41,17 @@ export interface ResponsibilityHandover {
   apply(by: Principal | undefined, request: { handoffId: string; ids: readonly string[]; from: Owner; to: Owner }): Promise<{ moved: readonly string[]; failed: readonly { id: string; reason: string }[] }>;
 }
 
+/**
+ * The integrator leases the sender holds for the task (card L03j). When the task moves, each live hold the sender had at the moment of the transfer is released, or, when the owner chose so on completing the hand-off, moved to
+ * the recipient with a new fence; each by exactly its fence, so a hold that expired and was taken by someone else, or was let go already, is skipped (never released twice, never taken from its new holder). A skipped entry is a
+ * final answer; any other failure is thrown so the step is repeated under the same command ID.
+ */
+export interface LeaseHandover {
+  held(request: { taskId: string; from: Owner }): Promise<readonly { leaseId: string; branch: string; fence: number; expiresAt: string }[]>;
+  release(request: { commandId: string; leaseId: string; fence: number; note: string }): Promise<{ outcome: "released" } | { outcome: "skipped"; reason: string }>;
+  moveTo(request: { commandId: string; leaseId: string; fence: number; to: Owner; taskId: string; note: string }): Promise<{ outcome: "moved"; fence: number } | { outcome: "skipped"; reason: string }>;
+}
+
 /** What the controller reads from the rest of the system to build the package. Reading must be repeatable and must return only what the recipient may see. */
 export interface HandoffSources {
   collect(request: { taskId: string; from: Owner; to: Owner }): Promise<{ sections: Readonly<Record<string, string>> }>;
@@ -90,6 +101,12 @@ export interface TaskHandoffBody {
   readonly reassign?: { readonly ids: readonly string[]; readonly by: string; readonly at: string };
   /** What came of it: each entry moved or failed with a reason. A failure leaves that responsibility with the sender; it never undoes the move of the task. */
   readonly reassigned?: { readonly at: string; readonly moved: readonly string[]; readonly failed: readonly { readonly id: string; readonly reason: string }[] };
+  /** The owner chose to move the sender's integrator leases for this task to the recipient (card L03j); without it they are released when the task moves. */
+  readonly leaseMove?: { readonly by: string; readonly at: string };
+  /** The sender's live lease holds for the task, read just before the transfer, and what is to be done with each: written before the task moves, so a crash after the move settles exactly these. */
+  readonly leasePlan?: { readonly at: string; readonly entries: readonly { readonly leaseId: string; readonly branch: string; readonly fence: number; readonly action: "release" | "move" }[] };
+  /** What came of each planned entry, written once after all were carried out. */
+  readonly leasesSettled?: { readonly at: string; readonly entries: readonly { readonly leaseId: string; readonly branch: string; readonly outcome: "released" | "moved" | "skipped"; readonly fence?: number; readonly reason?: string }[] };
   /** A temporary reassignment: when the task goes back to `from` (card L03e). The return is a hand-off of its own, made on this time, as the one who asked, if they still hold the right. */
   readonly returnAt?: string;
   /** This hand-off is a return: when it is ready the controller completes it (accepting gaps, which are recorded) for the one who asked, if they still hold the right. */
@@ -165,11 +182,12 @@ export class HandoffService {
   readonly #assignments: Pick<AssignmentService, "getAssignment" | "transferTask">;
   readonly #sources: HandoffSources;
   readonly #responsibilities: ResponsibilityHandover | undefined;
+  #leases: LeaseHandover | undefined;
   readonly #asker: ((principalId: string) => Promise<Principal | undefined>) | undefined;
-  readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"] }) => Promise<void>) | undefined;
+  readonly #onTransferred: ((by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"]; leases?: TaskHandoffBody["leasesSettled"] }) => Promise<void>) | undefined;
   readonly #onReturnGivenUp: ((by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"] }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>, onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>, responsibilities?: ResponsibilityHandover) {
+  private constructor(runner: CommandRunner, pauses: PauseService, stops: Pick<StopService, "request" | "advance" | "force" | "get">, assignments: Pick<AssignmentService, "getAssignment" | "transferTask">, sources: HandoffSources, onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"]; leases?: TaskHandoffBody["leasesSettled"] }) => Promise<void>, asker?: (principalId: string) => Promise<Principal | undefined>, onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>, responsibilities?: ResponsibilityHandover) {
     this.#responsibilities = responsibilities;
     this.#onReturnGivenUp = onReturnGivenUp;
     this.#onTransferred = onTransferred;
@@ -177,8 +195,10 @@ export class HandoffService {
     this.#runner = runner; this.#pauses = pauses; this.#stops = stops; this.#assignments = assignments; this.#sources = sources;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"] }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined>; /** Told once when a temporary reassignment could not be returned (the asker lost the right, the task moved on, the hand-off back failed): best effort, so the task's activity can say why it stayed. */ onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>; /** Moves the sender's chosen responsibilities to the recipient with the task (card L03i); without it a hand-off that asks for this is refused. */ responsibilities?: ResponsibilityHandover }, options: RunnerOptions = {}): HandoffService {
-    return new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker, deps.onReturnGivenUp, deps.responsibilities);
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: { pauses: PauseService; stops: Pick<StopService, "request" | "advance" | "force" | "get">; assignments: Pick<AssignmentService, "getAssignment" | "transferTask">; sources: HandoffSources; /** Told once a task has moved, so the move can be put in the task's activity record (best effort: a failure here never undoes or holds back the hand-off). */ onTransferred?: (by: Principal, event: { handoffId: string; taskId: string; from: Owner; to: Owner; reassigned?: TaskHandoffBody["reassigned"]; leases?: TaskHandoffBody["leasesSettled"] }) => Promise<void>; /** The principal that asked for a hand-off, with the rights it holds now (undefined when it is gone or not active): a hand-off carried on after a restart is dropped when the asker no longer holds the right to control the task. */ asker?: (principalId: string) => Promise<Principal | undefined>; /** Told once when a temporary reassignment could not be returned (the asker lost the right, the task moved on, the hand-off back failed): best effort, so the task's activity can say why it stayed. */ onReturnGivenUp?: (by: Principal, event: { handoffId: string; taskId: string; reason: string }) => Promise<void>; /** Moves the sender's chosen responsibilities to the recipient with the task (card L03i); without it a hand-off that asks for this is refused. */ responsibilities?: ResponsibilityHandover; /** The sender's integrator leases for the task, released or (owner's choice) moved when the task moves (card L03j). Without it a hand-off that asks to move them is refused. */ leases?: LeaseHandover }, options: RunnerOptions = {}): HandoffService {
+    const service = new HandoffService(new CommandRunner(storage, epoch, options), deps.pauses, deps.stops, deps.assignments, deps.sources, deps.onTransferred, deps.asker, deps.onReturnGivenUp, deps.responsibilities);
+    service.#leases = deps.leases;
+    return service;
   }
 
   // ---- requests ------------------------------------------------------------------------------------------------------------
@@ -229,14 +249,17 @@ export class HandoffService {
   }
 
   /** The caller accepts the package as it is and the task moves. Refused unless ready; an incomplete package needs `acceptGaps`, which is recorded. */
-  async complete(by: Principal, command: NoActor & { handoffId: string; acceptGaps?: boolean; reassignResponsibilities?: unknown }): Promise<View<TaskHandoffBody>> {
-    onlyKnown(command, ["commandId", "handoffId", "acceptGaps", "reassignResponsibilities"]);
+  async complete(by: Principal, command: NoActor & { handoffId: string; acceptGaps?: boolean; reassignResponsibilities?: unknown; moveIntegratorLease?: unknown }): Promise<View<TaskHandoffBody>> {
+    onlyKnown(command, ["commandId", "handoffId", "acceptGaps", "reassignResponsibilities", "moveIntegratorLease"]);
+    if (command.moveIntegratorLease !== undefined && typeof command.moveIntegratorLease !== "boolean") invalid("moveIntegratorLease", "must be true or false");
+    const moveLease = command.moveIntegratorLease === true;
     const ids = command.reassignResponsibilities === undefined ? [] : this.#responsibilityIds(command.reassignResponsibilities);
     const found = await this.#get(command.handoffId);
     const b = found.body as unknown as TaskHandoffBody;
     await this.#mayControl(by, b.taskId);
     // A repeat that names other responsibilities than the ones recorded would silently drop them: refused, not ignored.
     if (ids.length > 0 && (b.phase === "transferring" || b.phase === "transferred") && (b.reassign === undefined ? true : b.reassign.ids.length !== ids.length || !ids.every((x) => b.reassign!.ids.includes(x)))) invalid("reassignResponsibilities", "this hand-off was already completed with another list of responsibilities (or none); the recorded one stands");
+    if (command.moveIntegratorLease !== undefined && (b.phase === "transferring" || b.phase === "transferred") && moveLease !== (b.leaseMove !== undefined)) invalid("moveIntegratorLease", "this hand-off was already completed with the other choice for the integrator lease; the recorded one stands");
     if (b.phase === "transferring" || b.phase === "transferred") return this.advance(by, { handoffId: command.handoffId });
     if (b.phase !== "ready") throw new DomainError("invalid_command", `the hand-off is ${b.phase}; it can be completed when it is ready`, { field: "handoffId" });
     if (ids.length > 0) {
@@ -245,10 +268,19 @@ export class HandoffService {
       // Refused now, before anything moves, when an entry is not the sender's or the asker may not assign it; the right is checked again when the move is made.
       await this.#responsibilities!.check(by, { taskId: b.taskId, ids, from: b.from, to: b.to });
     }
+    if (moveLease) {
+      // Only the owner hands an integrator's lease to another agent (card L03j): anyone else who completes the hand-off lets it go, and the recipient takes a lease like any other integrator.
+      if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner may move the integrator lease with a hand-off; complete it without moveIntegratorLease and the lease is released when the task moves");
+      if (this.#leases === undefined) invalid("moveIntegratorLease", "cannot be used here: this service does not keep integrator leases");
+      if (b.returnAt !== undefined || b.autoComplete === true) invalid("moveIntegratorLease", "cannot be used with a temporary reassignment or its return: a lease is not handed back with the task");
+      if (b.to.kind !== "agent") invalid("moveIntegratorLease", "a lease can only be held by an agent");
+    }
     const missing = b.package?.missing ?? [...REQUIRED_SECTIONS];
     if (missing.length > 0 && command.acceptGaps !== true) throw new DomainError("invalid_command", `the package is missing ${missing.join(", ")}; complete it with acceptGaps to hand it over anyway`, { field: "acceptGaps" });
     const at = this.#runner.now();
-    await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(ids.length === 0 ? {} : { reassign: { ids, by: by.id, at } }), ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
+    const applied = await this.#update(command.handoffId, (x) => ({ ...x, phase: "transferring", ...(ids.length === 0 ? {} : { reassign: { ids, by: by.id, at } }), ...(moveLease ? { leaseMove: { by: by.id, at } } : {}), ...(missing.length === 0 ? {} : { acceptedGaps: { by: by.id, missing, at } }), history: this.#push(x, "transferring", by.id, missing.length === 0 ? "package accepted" : `package accepted with gaps: ${missing.join(", ")}`) }), ["ready"]);
+    // Another completion (or a cancel) got there first: answered as a repeat would be, so a choice that lost (the lease or the responsibilities) is refused rather than answered as if it were made (card L03j review).
+    if (!applied) return this.complete(by, command);
     return this.advance(by, { handoffId: command.handoffId });
   }
 
@@ -353,9 +385,12 @@ export class HandoffService {
         continue;
       }
       if (b.phase === "transferring") {
+        // The sender's lease holds are read and written down before the task moves (card L03j), so a crash after the move settles exactly these and a hold taken later by someone else is never touched.
+        if (this.#leases !== undefined && b.leasePlan === undefined) { await this.#planLeases(id, b); continue; }
         const { assignment } = await this.#currentOwner(b.taskId).catch(() => ({ assignment: undefined, from: undefined }));
         if (assignment !== undefined && assignment.state === "assigned" && sameOwner(assignment.owner, b.to) && assignment.generation > b.generation) {
           await this.#moveResponsibilities(by, id, b);
+          await this.#settleLeases(by, id, b);
           await this.#finish(by, id, b);
           continue;
         }
@@ -366,7 +401,8 @@ export class HandoffService {
         try {
           await this.#assignments.transferTask({ commandId: `${id}-transfer`, actor: by.id, taskId: b.taskId, expectedRevision: assignment.revision, to: b.to, reason: b.mode === "forced" ? `takeover: ${b.reason}`.slice(0, 500) : `hand-off: ${b.reason}`.slice(0, 500) });
         } catch (error) {
-          if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "fenced")) throw error;
+          // A command conflict is the same transfer sent at that moment by another caller under this hand-off's command ID (card L03j review).
+          if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "fenced" && error.code !== "command_conflict")) throw error;
           continue; // someone else moved it: the next pass reads where it stands
         }
         continue;
@@ -809,12 +845,44 @@ export class HandoffService {
     await this.#update(id, (x) => ({ ...x, reassigned: { at, moved: [...result.moved], failed: result.failed.map((f) => ({ id: f.id, reason: redactText(f.reason).slice(0, 200) })) }, history: this.#push(x, "transferring", by.id, `responsibilities moved with the task: ${result.moved.length} moved, ${result.failed.length} left with ${b.from.id}`) }), ["transferring"]);
   }
 
+  /** Reads the sender's live lease holds for the task and records what is to be done with each (moved only when the owner chose it at completion; a takeover or a temporary reassignment always releases). */
+  async #planLeases(id: string, b: TaskHandoffBody): Promise<void> {
+    const held = await this.#leases!.held({ taskId: b.taskId, from: b.from });
+    const action = b.leaseMove !== undefined && b.mode === "prepared" ? "move" as const : "release" as const;
+    const entries = held.slice(0, 20).map((l) => ({ leaseId: l.leaseId, branch: l.branch, fence: l.fence, action }));
+    await this.#update(id, (x) => (x.leasePlan !== undefined ? x : { ...x, leasePlan: { at: this.#runner.now(), entries } }), ["transferring"]);
+  }
+
+  /**
+   * Carries the plan out once the task has moved and before the hand-off is marked done. Each entry is one fenced command under an ID made of this hand-off, the lease and its fence: a repeat after a crash answers what it did, and a
+   * hold that changed since (expired and taken, released) is skipped, not touched. The results are written in one step after all of them; a failure that is not an answer is thrown and the next pass or sweep repeats it.
+   */
+  async #settleLeases(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
+    const current = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
+    const plan = current?.leasePlan;
+    if (this.#leases === undefined || plan === undefined || current?.leasesSettled !== undefined) return;
+    const entries: NonNullable<TaskHandoffBody["leasesSettled"]>["entries"][number][] = [];
+    for (const e of plan.entries) {
+      const commandId = `${id}-lz-${e.leaseId.slice(4)}-${e.fence}`;
+      if (e.action === "move") {
+        const r = await this.#leases.moveTo({ commandId, leaseId: e.leaseId, fence: e.fence, to: b.to, taskId: b.taskId, note: `moved with hand-off ${id} by the owner` });
+        entries.push(r.outcome === "moved" ? { leaseId: e.leaseId, branch: e.branch, outcome: "moved", fence: r.fence } : { leaseId: e.leaseId, branch: e.branch, outcome: "skipped", reason: redactText(r.reason).slice(0, 200) });
+      } else {
+        const r = await this.#leases.release({ commandId, leaseId: e.leaseId, fence: e.fence, note: `released by hand-off ${id}: the task moved to ${b.to.kind}:${b.to.id}` });
+        entries.push(r.outcome === "released" ? { leaseId: e.leaseId, branch: e.branch, outcome: "released" } : { leaseId: e.leaseId, branch: e.branch, outcome: "skipped", reason: redactText(r.reason).slice(0, 200) });
+      }
+    }
+    const count = (o: string) => entries.filter((x) => x.outcome === o).length;
+    await this.#update(id, (x) => (x.leasesSettled !== undefined ? x : { ...x, leasesSettled: { at: this.#runner.now(), entries }, ...(entries.length === 0 ? {} : { history: this.#push(x, "transferring", by.id, `integrator leases: ${count("released")} released, ${count("moved")} moved to ${b.to.id}, ${count("skipped")} no longer the sender's`) }) }), ["transferring"]);
+  }
+
   /** The task moved: the new owner may run, so a hold this hand-off added is lifted. */
   async #finish(by: Principal, id: string, b: TaskHandoffBody): Promise<void> {
     // Another caller finished it first (a sweep or an advance that raced this one): that caller told the move and lifted the hold; this one does neither (see `#letGo`).
     if (!(await this.#update(id, (x) => ({ ...x, phase: "transferred", transferredAt: this.#runner.now(), history: this.#push(x, "transferred", by.id, `now owned by ${b.to.kind}:${b.to.id}`) }), ["transferring"]))) return;
-    const reassigned = ((await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined)?.reassigned;
-    try { await this.#onTransferred?.(by, { handoffId: id, taskId: b.taskId, from: b.from, to: b.to, ...(reassigned === undefined ? {} : { reassigned }) }); } catch { /* the record of the move is best effort */ }
+    const ended = (await this.#runner.get(KIND, id))?.body as unknown as TaskHandoffBody | undefined;
+    const reassigned = ended?.reassigned, leases = ended?.leasesSettled;
+    try { await this.#onTransferred?.(by, { handoffId: id, taskId: b.taskId, from: b.from, to: b.to, ...(reassigned === undefined ? {} : { reassigned }), ...(leases === undefined || leases.entries.length === 0 ? {} : { leases }) }); } catch { /* the record of the move is best effort */ }
     await this.#letGo(by, id);
   }
 

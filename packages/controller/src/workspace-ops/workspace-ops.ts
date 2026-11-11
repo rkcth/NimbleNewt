@@ -167,6 +167,18 @@ export class WorkspaceOpService {
     return { requestId: open, operation: rec.body.operation, requestedBy: rec.body.requestedBy, at: rec.body.at };
   }
 
+  /**
+   * A request that ended but whose freeze could not be lifted (card L03j): the attempts it still holds frozen until the recovery loop lifts them. Only the request itself may lift them (each freeze names it), so a hand-off
+   * names this hold and never lifts it. Like `openFor`, it takes no caller.
+   */
+  async heldFor(taskId: string): Promise<{ readonly requestId: string; readonly operation: WorkspaceOperation; readonly requestedBy: string; readonly held: readonly string[]; readonly finishedAt?: string } | undefined> {
+    const open = ((await this.#runner.get(OPEN, checkTaskId(taskId)))?.body as unknown as { requestId?: string } | undefined)?.requestId;
+    if (open === undefined) return undefined;
+    const rec = await this.#get(open);
+    if (rec === undefined || rec.body.state === "started" || rec.body.state === "uncertain" || (rec.body.held ?? []).length === 0) return undefined;
+    return { requestId: open, operation: rec.body.operation, requestedBy: rec.body.requestedBy, held: rec.body.held!, ...(rec.body.finishedAt === undefined ? {} : { finishedAt: rec.body.finishedAt }) };
+  }
+
   /** One recorded request. Readable by the caller who could have asked for it. */
   async get(by: Principal, requestId: string): Promise<WorkspaceAnswer | undefined> {
     if (typeof requestId !== "string" || !WORKSPACE_ID.test(requestId)) return undefined;
