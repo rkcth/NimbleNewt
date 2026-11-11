@@ -246,3 +246,60 @@ test("no write path: the files that answer task.recall hold no call that writes 
     for (const bad of [/\.command\(/, /applyOperation/, /\.record\(/, /\.write\(/, /\.create\(/, /\.set\(\s*REF/, /writeFile/, /appendFile/]) assert.doesNotMatch(text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, ""), bad, `${file} must not write: ${bad}`);
   }
 });
+
+test("W13 review: an answer stays within maxChars in UTF-16 units however its text is made (emoji, escapes, a long description in the head of a whole note) and a cut line keeps its quote closed", async () => {
+  const emoji = "\u{1F600}".repeat(400), escapes = '"\\'.repeat(300), what = "w".repeat(200);
+  const ids = { att: "att-cccccccccccccccccccc" };
+  for (const text of [emoji, escapes, "e\u0301".repeat(300)]) {
+    const src = source({
+      attempts: [{ id: ids.att, state: "running", claimedAt: "t", current: true, notes: [{ kind: "did", text, at: "2026-01-02T00:10:00.000Z" }], calls: 1, stoppedEarly: 0, nudges: 0, verifications: { passed: 0, failed: 0, unknown: 0 }, anchors: 0 }],
+      handoffs: [{ id: "hof-aaaaaaaaaaaaaaaaaaaa", attemptId: ids.att, source: "controller", endedBecause: what, text: text.repeat(5) }],
+      archive: async (d) => (d === DIG("a") ? { digest: d, attemptId: ids.att, what, text: text.repeat(5) } : undefined),
+    });
+    for (const maxChars of [600, 601, 650, 700, 1000]) {
+      for (const args of [{ part: "decisions" }, { part: "decisions", id: "hof-aaaaaaaaaaaaaaaaaaaa" }, { part: "archives", id: DIG("a") }]) {
+        let cursor: string | undefined, whole = "", pages = 0;
+        do {
+          const a = await ask(src, { ...args, maxChars, ...(cursor === undefined ? {} : { cursor }) });
+          assert.ok(a.text.length <= maxChars, `${JSON.stringify(args)} ${maxChars}: ${a.text.length}`);
+          assert.equal(a.chars, a.text.length);
+          for (const l of bodyLines(a).slice(1)) {
+            // Every quote is closed: the line read as JSON strings between the quotes parses.
+            const quoted = l.match(/"(?:[^"\\]|\\.)*"/g) ?? [];
+            assert.equal(l.replace(/"(?:[^"\\]|\\.)*"/g, "").includes('"'), false, `an unclosed quote: ${l.slice(-80)}`);
+            for (const x of quoted) JSON.parse(x);
+          }
+          if (args.id !== undefined) whole += JSON.parse(bodyLines(a).at(-1)!) as string;
+          cursor = a.next; pages++;
+        } while (args.id !== undefined && cursor !== undefined && pages < 2000);
+        if (args.id !== undefined) assert.equal(whole, text.repeat(5), "the pages make the whole text");
+      }
+    }
+  }
+});
+
+test("W13 review: a credential with an invisible character inside it is redacted once the character is removed", async () => {
+  const split = (s: string, ch: string) => `${s.slice(0, 6)}${ch}${s.slice(6)}`;
+  for (const ch of ["\u200b", "\u{E0041}", "\ud800", "\u2066"]) {
+    const src = source({ attempts: [{ id: "att-1", state: "ended", claimedAt: "t", current: false, notes: [{ kind: "did", text: `token ${split(SECRET, ch)} here`, at: "t" }], calls: 1, stoppedEarly: 0, nudges: 0, verifications: { passed: 0, failed: 0, unknown: 0 }, anchors: 0 }], handoffs: [] });
+    const a = await ask(src, { part: "decisions" });
+    assert.ok(!a.text.includes(SECRET), `${JSON.stringify(ch)}: ${a.text}`);
+    assert.match(a.text, /token \[redacted\] here/);
+    assert.ok(!composeAnchor({ ...anchor, title: split(SECRET, ch) }, 2400)!.text.includes(SECRET), "the anchor block too");
+  }
+});
+
+test("W13 review: the call count forgets the attempt that used the tool longest ago, not the one that keeps using it", async () => {
+  const svc = new RecallService({ read: async () => source(), settings: async () => ({ recallCalls: 2 }) });
+  const by = { id: "agent:ann", kind: "agent", name: "ann", grants: [] } as never;
+  assert.equal((await svc.recall({ attemptId: "att-long", callId: "c1", by }, {})).ok, true);
+  assert.equal((await svc.recall({ attemptId: "att-long", callId: "c2", by }, {})).ok, true);
+  for (let i = 0; i < 600; i++) {
+    await svc.recall({ attemptId: `att-${i}`, callId: "c1", by }, {});
+    // The long attempt keeps asking (and is refused): it stays known.
+    if (i % 100 === 0) assert.equal((await svc.recall({ attemptId: "att-long", callId: `x${i}`, by }, {})).ok, false);
+  }
+  assert.equal(svc.used("att-long"), 2);
+  assert.equal((await svc.recall({ attemptId: "att-long", callId: "c3", by }, {})).ok, false, "still at its cap");
+});
+

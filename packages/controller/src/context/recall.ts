@@ -130,12 +130,26 @@ function fit(lines: readonly string[], from: number, budget: number): { taken: s
   for (; i < lines.length; i++) {
     const line = lines[i]!;
     if (used + line.length + 1 > budget) {
-      if (taken.length === 0 && budget > 20) { taken.push(`${Array.from(line).slice(0, Math.max(0, budget - 6)).join("")}...`); cut = true; i++; }
+      if (taken.length === 0 && budget > 20) { taken.push(cutLine(line, budget - 2)); cut = true; i++; }
       break;
     }
     taken.push(line); used += line.length + 1;
   }
   return { taken, ...(i < lines.length ? { next: i } : {}), cut };
+}
+
+/**
+ * Cuts one listed line to at most `units` UTF-16 units (the unit `maxChars` and `chars` count, W13 review: a cut by code points let a line of emoji pass the limit), on whole characters, ending in `...`. A cut inside a quoted datum
+ * drops a half escape and closes the quote, so the other party's words still end where the quotes say.
+ */
+function cutLine(line: string, units: number): string {
+  let out = "";
+  for (const ch of line) { if (out.length + ch.length > Math.max(0, units - 4)) break; out += ch; }
+  // A half escape at the end (`\`, `\u00`) is not a character of the text.
+  out = out.replace(/\\u[0-9a-fA-F]{0,3}$/, "").replace(/(?<!\\)((?:\\\\)*)\\$/, "$1");
+  let quotes = 0;
+  for (let k = 0; k < out.length; k++) { if (out[k] === "\\") k++; else if (out[k] === '"') quotes++; }
+  return `${out}...${quotes % 2 === 1 ? '"' : ""}`;
 }
 
 /** Pages a cleaned text by whole characters: the page is the characters from `from` that fit `size` once quoted (escapes count), never ending between a letter and its marks. */
@@ -146,6 +160,17 @@ function pageOf(clean: string, from: number, size: number): { page: string; next
   while (end > from + 1 && JSON.stringify(chars.slice(from, end).join("")).length > size) end = from + Math.max(1, Math.floor((end - from) * 0.9));
   while (end > from + 1 && end < chars.length && /^\p{M}$/u.test(chars[end]!)) end -= 1;
   return { page: chars.slice(from, end).join(""), ...(end < chars.length ? { next: end } : {}) };
+}
+
+/**
+ * The head line of a whole text read by id, with its free words (another party's) cut so that the head leaves at least `PAGE_MIN` characters of the page within `budget` (W13 review: a 200-character description in the head
+ * of a cut note pushed the answer past the smallest `maxChars`). The fixed part of the head is IDs of at most about 100 characters, so it always fits the smallest budget.
+ */
+const PAGE_MIN = 40;
+function headed(budget: number, most: number, make: (n: number) => string): string {
+  let n = most, head = make(n);
+  while (head.length > budget - 1 - PAGE_MIN && n > 0) { n = Math.max(0, n - Math.max(1, head.length - (budget - 1 - PAGE_MIN))); head = make(n); }
+  return head;
 }
 
 const when = (iso: string | undefined): string => (iso === undefined ? "" : ` at ${datum(iso, 40).slice(1, -1)}`);
@@ -171,8 +196,8 @@ export async function composeRecall(src: RecallSource, q: RecallQuery): Promise<
     if (q.id !== undefined) {
       const h = HOF.test(q.id) ? src.handoffs.find((x) => x.id === q.id) : undefined;
       if (h === undefined) return answer("decisions", false, [NOT_FOUND], false, undefined);
-      const head = `Hand-off note ${h.id} of attempt ${h.attemptId} (${datum(h.source, 20)}; ended because ${datum(h.endedBecause, 120)}):`;
-      const p = pageOf(cleanText(h.text), q.cursor ?? 0, Math.max(40, budget - head.length - 40));
+      const head = headed(budget, 120, (n) => `Hand-off note ${h.id} of attempt ${h.attemptId} (${datum(h.source, 20)}; ended because ${datum(h.endedBecause, n)}):`);
+      const p = pageOf(cleanText(h.text), q.cursor ?? 0, budget - head.length - 1);
       return answer("decisions", true, [head, JSON.stringify(p.page)], p.next !== undefined, p.next);
     }
     // The agent's own notes and the hand-off notes, newest first: one line each.
@@ -189,8 +214,8 @@ export async function composeRecall(src: RecallSource, q: RecallQuery): Promise<
       // The same read for a digest this task names and one it does not: the controller's answer is by (task, digest), so another task's digest is simply not there.
       const got = await src.archive(DIGEST.test(q.id) ? q.id : `sha256:${"0".repeat(64)}`);
       if (wanted === undefined || got === undefined) return answer("archives", false, [NOT_FOUND], false, undefined);
-      const head = `Cut note ${got.digest} (${datum(got.what, 200)}), whole text:`;
-      const p = pageOf(cleanText(got.text), q.cursor ?? 0, Math.max(40, budget - head.length - 40));
+      const head = headed(budget, 200, (n) => `Cut note ${got.digest} (${datum(got.what, n)}), whole text:`);
+      const p = pageOf(cleanText(got.text), q.cursor ?? 0, budget - head.length - 1);
       return answer("archives", true, [head, JSON.stringify(p.page)], p.next !== undefined, p.next);
     }
     const items: (() => string)[] = [];

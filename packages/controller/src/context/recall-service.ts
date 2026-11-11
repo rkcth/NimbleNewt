@@ -41,6 +41,8 @@ export class RecallService {
     const settings = await this.settings();
     if (!settings.recall) return { ok: false, code: "recall_off", message: "task.recall is switched off by the owner; work from your notes and the task's own text" };
     let seen = this.#calls.get(ctx.attemptId);
+    // The attempt that used the tool last is kept longest (W13 review): a long attempt that keeps using it is not the first forgotten (and so given a fresh count) when many others call it.
+    if (seen !== undefined) { this.#calls.delete(ctx.attemptId); this.#calls.set(ctx.attemptId, seen); }
     if (seen === undefined || !seen.has(ctx.callId)) {
       if ((seen?.size ?? 0) >= settings.recallCalls) return { ok: false, code: "recall_limit", message: `this attempt has used its ${settings.recallCalls} calls of task.recall (the owner's limit); work from what you have already read, and keep notes with work.note` };
       if (seen === undefined) {
