@@ -51,9 +51,13 @@ export class WorkspaceResponder {
     // Waiting behind a long request is where a request goes stale: the controller may have stopped waiting and freed the agent meanwhile. The host checks the deadline again before it starts.
     if (this.#withdrawn.has(ask.requestId)) { this.#running.delete(ask.requestId); return; }
     if (ask.expiresAt !== undefined && this.#now() >= Date.parse(ask.expiresAt)) { this.#running.delete(ask.requestId); return; }
-    let busy: readonly string[] | undefined;
-    try { busy = await this.#busy(); } catch { busy = undefined; }
-    const inFlight = busy === undefined ? undefined : ask.quietAttempts.filter((id) => busy!.includes(id));
+    // Fail closed: a check that throws, or answers anything but a list of attempt IDs, refuses the request (and the request is still answered, so it is not left in hand here forever).
+    let inFlight: readonly string[] | undefined;
+    try {
+      const busy: unknown = await this.#busy();
+      const quiet: unknown = ask.quietAttempts;
+      inFlight = Array.isArray(busy) && Array.isArray(quiet) ? (quiet as string[]).filter((id) => (busy as unknown[]).includes(id)) : undefined;
+    } catch { inFlight = undefined; }
     if (inFlight === undefined || inFlight.length > 0) {
       await this.#send(ask.requestId, { ok: false, reason: inFlight === undefined ? "this host could not say which attempts have a call in flight, so the request was not carried out" : `an attempt of the task still has a call in flight on this host (${inFlight.slice(0, 3).join(", ")}), so the request was not carried out; ask again when it is quiet` });
       this.#running.delete(ask.requestId);

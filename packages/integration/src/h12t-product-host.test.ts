@@ -155,8 +155,17 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.match(JSON.stringify(unnamed), /no landing branch set/, JSON.stringify(unnamed));
     assert.ok(!existsSync(join(garden, "src", "b.ts")));
 
-    // The owner names the installation's landing branch (and, for this test's operator commit, lets a landing go without the commit permit).
-    const staged = await s.configuration.stage(owner, { commandId: "st-1", layer: "installation", set: { "workspace.landing.branch": "main", "workspace.landing.requirePermit": false } } as never);
+    // The owner names the installation's landing branch. The commit permit is left at its default (required): the operator's commit above carries no permit, so the product host refuses the landing.
+    const branchOnly = await s.configuration.stage(owner, { commandId: "st-0", layer: "installation", set: { "workspace.landing.branch": "main" } } as never);
+    const applied0 = await s.configuration.apply(owner, { commandId: "ap-0", layer: "installation", expectedRevision: branchOnly.revision } as never);
+    assert.equal(applied0.applied, true);
+    const unpermitted = await ask("landing", ta.taskId, "land-a-permit");
+    assert.notEqual(unpermitted.state, "done", JSON.stringify(unpermitted));
+    assert.match(JSON.stringify(unpermitted), /do not carry the commit permit/, JSON.stringify(unpermitted));
+    assert.ok(!existsSync(join(garden, "src", "b.ts")), "nothing landed without the permit");
+
+    // For this test's operator commit, the owner lets a landing go without the commit permit.
+    const staged = await s.configuration.stage(owner, { commandId: "st-1", layer: "installation", expectedRevision: applied0.revision, set: { "workspace.landing.requirePermit": false } } as never);
     assert.equal((await s.configuration.apply(owner, { commandId: "ap-1", layer: "installation", expectedRevision: staged.revision } as never)).applied, true);
 
     // A refresh with nothing new on the shared branch is answered by the port.

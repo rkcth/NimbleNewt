@@ -204,6 +204,11 @@ for (const backend of backends) {
     const unknown = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
     assert.deepEqual(await ask(unknown), { ok: false, reason: "this host could not say which attempts have a call in flight, so the request was not carried out" });
     assert.deepEqual(ran, [], "neither reached the port");
+    // A check that answers something other than a list (here a Set) refuses too, and the request is still answered (not left in hand forever).
+    busy = new Set(["att-cccccccccccccccccccc"]) as unknown as readonly string[];
+    const odd = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
+    assert.deepEqual(await ask(odd), { ok: false, reason: "this host could not say which attempts have a call in flight, so the request was not carried out" });
+    assert.deepEqual(ran, [], "nor did this one");
     busy = ["att-bbbbbbbbbbbbbbbbbbbb"];
     const quiet = call({ quietAttempts: ["att-aaaaaaaaaaaaaaaaaaaa"] });
     assert.deepEqual(await ask(quiet), { ok: true, summary: "ran" }, "a busy attempt of another request does not hold this one");
