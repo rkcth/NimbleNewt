@@ -36,6 +36,11 @@ export interface DispatchContract {
   /** The owner's limits for this launch (absent: none were set). A worker that cannot hold them in full refuses, unless `bestEffort`. */
   readonly limits?: ContractLimits;
   readonly bestEffort: boolean;
+  /**
+   * Card W12: the digest of the goal anchor at the top of the order's `content` (absent: no anchor was put there). The worker that must re-insert the anchor after a cut finds the block in the content by this digest and no
+   * other, so a task text that holds a block of its own is never taken for the controller's. It is covered by the contract's digest.
+   */
+  readonly anchorDigest?: string;
   /** What the worker must enforce itself (`limits`, `wall-time`); a worker that does not know a name in it refuses the order. */
   readonly requires: readonly string[];
   /** SHA-256 over the contract and the order's identity, recipe and expiry (`contractDigest`). */
