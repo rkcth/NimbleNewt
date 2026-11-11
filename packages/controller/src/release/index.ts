@@ -2,4 +2,5 @@ export * from "./release.js";
 export * from "./activation.js";
 export * from "./launcher.js";
 export * from "./start-notices.js";
+export * from "./heartbeat.js";
 export * from "./supervisor.js";

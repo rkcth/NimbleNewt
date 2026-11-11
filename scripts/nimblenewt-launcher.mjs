@@ -27,6 +27,11 @@ const HELP = `NimbleNewt release launcher
   --poll-ms N          How often the startup watchdog looks (default 1000).
   --backoff-initial-ms N, --backoff-max-ms N, --stable-seconds N, --give-up-after N
                        Restart rate limit: waits initial * 2^(n-1) (up to max) after the n-th short run in a row; a run of --stable-seconds (default 60) resets it; after --give-up-after (default 20) it exits 4.
+  --heartbeat on|off   The controller liveness heartbeat (default on): a controller whose event loop stops turning is stopped and started again (never quarantined; counts as a short run).
+  --heartbeat-stale-seconds N        How long the counter may stand still before the controller counts as hung (default 120, at least 30, at most 3600; never below 6 heartbeat intervals).
+  --heartbeat-interval-seconds N     How often the controller beats (default 5, 1 to 60).
+  --heartbeat-first-beat-seconds N   Off by default (a controller that never beats is an older release and is left alone). When set, a confirmed start that has not beaten within N seconds
+                                     counts as hung; at least 300 and never below the stale limit, so a long first migration is not taken for a hang.
   Arguments after -- are passed to the controller.
 `;
 
@@ -61,7 +66,16 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
       // At least a second: with 0 every run would count as stable and a crash loop would never slow down.
       stable: intFlag(args.flags, "stable-seconds", 60_000, { min: 1, max: 86_400, scale: 1000 }),
       giveUp: intFlag(args.flags, "give-up-after", 20, { min: 1, max: 1_000_000 }),
+      // Safe minimums are refused, not quietly raised: a threshold that would restart a healthy controller (a long garbage collection, a slow disk) is a mistake the operator should see.
+      stale: intFlag(args.flags, "heartbeat-stale-seconds", undefined, { min: 30, max: 3600, scale: 1000 }),
+      interval: intFlag(args.flags, "heartbeat-interval-seconds", undefined, { min: 1, max: 60, scale: 1000 }),
+      firstBeat: intFlag(args.flags, "heartbeat-first-beat-seconds", undefined, { min: 300, max: 86_400, scale: 1000 }),
     };
+    const hbFlag = args.flags.heartbeat ?? "on";
+    if (hbFlag !== "on" && hbFlag !== "off") throw new Error("--heartbeat must be on or off");
+    opts.heartbeatOn = hbFlag === "on";
+    if (opts.firstBeat !== undefined && opts.firstBeat < (opts.stale ?? 120_000)) throw new Error("--heartbeat-first-beat-seconds must be at least the stale limit (--heartbeat-stale-seconds, default 120)");
+    if (!opts.heartbeatOn && (opts.stale ?? opts.interval ?? opts.firstBeat) !== undefined) throw new Error("--heartbeat off takes no other --heartbeat-* option");
   } catch (error) { err(error.message); return 1; }
   const { Launcher } = await lib("release/launcher.js");
   const { PointerSwitcher, SymlinkSwitcher } = await lib("release/activation.js");
@@ -90,6 +104,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     pollMs: opts.poll,
     graceMs: opts.grace,
     backoff: { initialMs: opts.initial, maxMs: opts.max, stableMs: opts.stable, giveUpAfter: opts.giveUp },
+    heartbeat: opts.heartbeatOn ? { ...(opts.stale === undefined ? {} : { staleAfterMs: opts.stale }), ...(opts.interval === undefined ? {} : { intervalMs: opts.interval }), ...(opts.firstBeat === undefined ? {} : { firstBeatMs: opts.firstBeat }) } : false,
     signal: abort.signal,
     log: (line) => err(`${new Date().toISOString()} launcher: ${line}`),
   });

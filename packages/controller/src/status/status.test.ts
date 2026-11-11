@@ -25,6 +25,8 @@ import { needsOwnerFrom } from "../standups/standups.js";
 import { McpService, type CatalogItem } from "../mcp/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
+import { ApprovalLoadService, PolicyService, ProfileSuggestionService } from "../policy/index.js";
+import { ReviewService } from "../review/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { CriticalPathService } from "../critical/index.js";
 import { STATUS_KINDS, StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
@@ -54,7 +56,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -94,7 +96,7 @@ for (const backend of backends) {
         const other = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
-          ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
+          ...(deps.approvals === undefined ? {} : { approvals: deps.approvals }), ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
           ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
@@ -1542,6 +1544,73 @@ for (const backend of backends) {
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     assert.equal(await status.ask(reader, { kind: "handoff", taskId: t.id }), undefined);
     assert.equal(await c.rebuild().ask(c.owner, { kind: "handoff", taskId: t.id }), undefined);
+  });
+
+  suite("the approval load is told to the owner only, from the records: decisions, waits, who decided, every waiting ask, the standing-rule proposals and the profile question (card U08)", async (c) => {
+    const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    const suggestion = ProfileSuggestionService.withEpoch(c.storage, c.epoch, PolicyService.withEpoch(c.storage, c.epoch, grants, options), options);
+    const load = ApprovalLoadService.withEpoch(c.storage, c.epoch, grants, { ...options, profile: suggestion });
+    const approvals = { load, suggestion };
+    const status = c.rebuild({}, { approvals });
+    const text = async (request: StatusRequest = { kind: "approval_load" }): Promise<string> => said((await status.ask(c.owner, request))!.lines);
+    // Nothing yet.
+    const empty = await text();
+    assert.match(empty, /In the last 7 days you decided 0 asks; agents decided 0\./);
+    assert.match(empty, /No ask is waiting\./);
+    assert.match(empty, /No standing-rule proposal waits for your answer\./);
+    assert.match(empty, /The derived-profile question is not due\./);
+    // Three approvals of the same class by the same agent; one more ask still waits.
+    const ann = await c.agent("ann", [{ action: "review.request", project: c.project }, { action: "attempt.work", project: c.project }]);
+    const task = await c.ready("approve me");
+    const review = ReviewService.withEpoch(c.storage, c.epoch, options);
+    const ask = async (tool: string) => review.request(ann, { commandId: cid("rq"), taskId: task, operation: { name: tool, args: { n: n++ } as never, target: { kind: "repository", id: "main" } }, context: { toolVersion: "1.0", authoritySource: "task grant", expectedEffects: ["does the thing"] } });
+    for (let i = 0; i < 3; i++) {
+      const r = await ask("git-commit");
+      now += 5 * MIN;
+      await review.decide(c.owner, { commandId: cid("dc"), requestId: r.id, expectedRevision: (await review.get(c.owner, r.id))!.revision, verdict: "allow", reason: "fine" });
+    }
+    const waiting = await ask("git-push");
+    now += 30 * MIN;
+    await load.propose(c.owner, { commandId: cid("pr") });
+    const lines = (await status.ask(c.owner, { kind: "approval_load" }))!.lines;
+    cited(lines);
+    const full = said(lines);
+    assert.match(full, /you decided 3 asks, each after waiting 5 minutes on average; agents decided 0\./);
+    assert.match(full, /1 ask is waiting \(longest first\):/);
+    assert.match(full, /git-push for agent:ann in project .* waiting on an agent review for 30 minutes\./);
+    assert.match(full, /No policy decision is recorded in this window/);
+    assert.ok(lines.some((l) => l.cites.some((x) => x.kind === "review" && x.id === waiting.id)), "a waiting ask cites its review");
+    assert.match(full, /Proposal spr-[a-z2-7]{20} \(revision 1\): you approved commit for agent:ann in project .* \(development\) 3 times, and could instead let it stand as an approval grant for \d+ days/);
+    assert.match(full, /nothing is applied until you answer\./);
+    const proposal = (await load.proposals(c.owner, "open"))[0]!;
+    assert.ok(lines.some((l) => l.cites.some((x) => x.kind === "standing-proposal" && x.id === proposal.id)), "a proposal cites its record");
+    // A window is bounded and the view makes no change.
+    assert.match(await text({ kind: "approval_load", days: 1 }), /In the last 1 day you decided/);
+    for (const bad of [0, 91, 1.5, -1]) await assert.rejects(status.ask(c.owner, { kind: "approval_load", days: bad }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command", String(bad));
+    await assert.rejects(status.ask(c.owner, { kind: "approval_load", extra: 1 } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    assert.equal((await load.proposals(c.owner, "open")).length, 1, "reading opened or changed nothing");
+    // An answered proposal is no longer shown as waiting.
+    await load.dismiss(c.owner, { commandId: cid("dm"), proposalId: proposal.id, expectedRevision: proposal.revision, reason: "not now" });
+    assert.match(await text(), /No standing-rule proposal waits for your answer\./);
+    // Owner only, and not offered without the services.
+    assert.equal(await status.ask(ann, { kind: "approval_load" }), undefined, "only the owner is told");
+    const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
+    assert.equal(await status.ask(reader, { kind: "approval_load" }), undefined);
+    assert.equal(await c.rebuild().ask(c.owner, { kind: "approval_load" }), undefined, "not offered when the approval services are not running");
+    // A due profile question is said with its answers (the first is the default) and the revision it cites; many waiting asks are cut to ten.
+    const many = c.rebuild({}, { approvals: {
+      load: { ...load, load: async () => ({ days: 7, perDay: [{ day: "2026-10-22", ownerDecisions: 1, agentDecisions: 0 }], ownerDecisions: 1, agentDecisions: 0, averageOwnerWaitMinutes: 200, decidedBy: { rule: 4, grant: 1, agentReview: 2, owner: 1, denied: 0 }, pending: Array.from({ length: 12 }, (_, i) => ({ reviewId: `rev-${i}`, requester: "agent:x", tool: "t", projectId: "p", waitingOn: "agent-review" as const, waitingMinutes: 3000 - i })) }), proposals: async () => Array.from({ length: 12 }, (_, i) => ({ id: `spr-${String(i).padStart(20, "a")}`, revision: 1, requester: "agent:x", projectId: "p", cls: "commit", environment: "development", count: 3, suggestion: { days: 7 }, defaultLength: { days: 7, why: "w" }, state: "open" })) } as never,
+      suggestion: { check: async () => ({ due: true, kind: "switch" as const, answers: ["switch", "trial", "not-now"] as const, approvalsSince: 3, every: 3, revision: 2, preview: { changes: [], loosened: [], tightened: [], notes: ["Reviews would run by rule."] } }), answer: async () => ({ switched: false, reverted: false }) },
+    } });
+    const big = said((await many.ask(c.owner, { kind: "approval_load" }))!.lines);
+    assert.match(big, /each after waiting 3 hours on average/);
+    assert.match(big, /4 ran by a rule, 1 by a standing grant, 2 went to an agent review, 1 to you and 0 were denied\./);
+    assert.match(big, /12 asks are waiting \(longest first, 10 shown\):/);
+    assert.match(big, /12 standing-rule proposals wait for your answer \(10 shown\)\./, "a cut list of proposals says so (review)");
+    assert.equal(big.split("\n").filter((l) => l.startsWith("Proposal spr-")).length, 10);
+    assert.match(big, /waiting on an agent review for 2 days\./);
+    assert.equal(big.split("\n").filter((l) => l.startsWith("t for agent:x")).length, 10);
+    assert.match(big, /You are due to be asked about the derived profile \(you have approved 3 asks since the last answer\): switch, trial, not-now \(the first is the default\)\. Switching would change this: Reviews would run by rule\./);
   });
 
   suite("the standing answer for calls running when a tool version is revoked is told to the owner only: the one in force, where it comes from and the owner's own setting (card T02c)", async (c) => {

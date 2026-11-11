@@ -34,15 +34,17 @@ test("the launcher program runs the pointer's controller with the release id and
   const root = mkdtempSync(join(tmpdir(), "nn-k02a-cli-"));
   try {
     const out = join(root, "seen.json");
-    const id = await install(root, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(out)}, JSON.stringify({ id: process.env.NIMBLENEWT_RUNNING_RELEASE, args: process.argv.slice(2), cwd: process.cwd() })); setInterval(() => {}, 1000);`);
+    const id = await install(root, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(out)}, JSON.stringify({ id: process.env.NIMBLENEWT_RUNNING_RELEASE, args: process.argv.slice(2), cwd: process.cwd(), hb: process.env.NIMBLENEWT_HEARTBEAT_FILE, every: process.env.NIMBLENEWT_HEARTBEAT_INTERVAL_MS })); setInterval(() => {}, 1000);`);
     const c = capture();
     const ac = new AbortController();
-    const done = main(["--root", root, "--poll-ms", "20", "--grace-seconds", "1", "--", "--serve", "x"], { stderr: c.stderr, env: process.env, signal: ac.signal });
+    const done = main(["--root", root, "--poll-ms", "20", "--grace-seconds", "1", "--heartbeat-interval-seconds", "2", "--heartbeat-stale-seconds", "60", "--", "--serve", "x"], { stderr: c.stderr, env: process.env, signal: ac.signal });
     for (let i = 0; i < 400; i++) { try { readFileSync(out); break; } catch { await new Promise((r) => setTimeout(r, 25)); } }
     const seen = JSON.parse(readFileSync(out, "utf8"));
     assert.equal(seen.id, id);
     assert.deepEqual(seen.args, ["--serve", "x"]);
     assert.equal(seen.cwd.endsWith(join("releases", id)), true);
+    assert.ok(seen.hb.startsWith(join(root, "run", "heartbeat-")), "the controller is given a heartbeat file under the root");
+    assert.equal(seen.every, "2000");
     ac.abort();
     assert.equal(await done, 0, c.text);
     assert.match(c.text, new RegExp(`started ${id}`));
@@ -58,6 +60,13 @@ test("usage errors exit 1, no active release exits 3, a pointer nobody announced
     assert.equal(await main(["--root", root, "--give-up-after", "0"], { stderr: capture().stderr, env: {} }), 1);
     assert.equal(await main(["--root", root, "--stable-seconds", "0"], { stderr: capture().stderr, env: {} }), 1, "a zero stable time would never slow a crash loop");
     assert.equal(await main(["--root", root, "--grace-seconds", "99999999"], { stderr: capture().stderr, env: {} }), 1, "beyond what a timer can wait");
+    // heartbeat thresholds below the safe minimums are refused, not quietly raised
+    for (const bad of [["--heartbeat-stale-seconds", "29"], ["--heartbeat-interval-seconds", "0"], ["--heartbeat-interval-seconds", "61"], ["--heartbeat-first-beat-seconds", "299"],
+      ["--heartbeat-stale-seconds", "600", "--heartbeat-first-beat-seconds", "300"], ["--heartbeat", "maybe"], ["--heartbeat", "off", "--heartbeat-stale-seconds", "60"]]) {
+      const c = capture();
+      assert.equal(await main(["--root", root, ...bad], { stderr: c.stderr, env: {} }), 1, bad.join(" "));
+      assert.match(c.text, /heartbeat/);
+    }
     assert.equal(await main(["--root", root], { stderr: capture().stderr, env: {}, signal: new AbortController().signal }), 3);
     writeFileSync(join(root, "current.json"), JSON.stringify({ release: "rcn-aaaaaaaaaaaaaaaaaaaaaaaa" }));
     const c = capture();

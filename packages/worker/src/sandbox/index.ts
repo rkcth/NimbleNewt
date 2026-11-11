@@ -15,3 +15,4 @@ export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type J
 export { linuxProcessTree, linuxStillRunning, splitRunTree, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
 export { hostScriptRunner, hostScriptBase, ownNodeInstall, type HostInterpreter, type HostScriptFacts, type HostScriptRunner, type HostScriptRunnerOptions } from "./host-runner.js";
 export { CONTAINMENT_SCHEMA, MAX_REPORT_AGE_MS, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, REQUIRED_PLATFORMS, assessRelease, parseReport, produceReport, reportDigest, runContainmentSuite, type CaseResult, type ContainmentReport, type GateOptions, type GateResult, type PlatformName, type SuiteOptions, type TrustedHostException, type Verdict, type WindowsEvidence } from "./containment.js";
+export { CPU_BURST_SECONDS, ResourceWatch, judge, measureDirs, parseCpuTime, parsePsUsage, psSampler, type LimitExceeded, type UsageSample, type UsageSampler, type WatchLimits } from "./resource-watch.js";

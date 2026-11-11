@@ -4,7 +4,7 @@ import type { JsonObject } from "../storage/types.js";
 import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import type { WorkerAbilities } from "./contract.js";
-import type { Offer, SequencedControl } from "./protocol.js";
+import type { Offer, SequencedControl, ToolBridgeAnswer, ToolBridgeRequest } from "./protocol.js";
 
 export interface RemoteOfferRunnerOptions {
   /** The worker's session with the controller (connected by the host's poller). */
@@ -37,7 +37,7 @@ export type OfferOutcome = "completed" | "refused" | "fenced" | "failed";
  */
 export class RemoteOfferRunner {
   readonly #o: RemoteOfferRunnerOptions;
-  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap }>();
+  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle }>();
 
   constructor(options: RemoteOfferRunnerOptions) { this.#o = options; }
 
@@ -59,6 +59,35 @@ export class RemoteOfferRunner {
     };
   }
 
+  /**
+   * The machine's tool bridge for an attempt this runner is running (card L05e): what the agent process's tool request is answered with. The request goes to the controller's own bridge through the attempt (`RemoteAttempt.toolBridge`), so a
+   * write is admitted on the controller's generation check and effect ledger, a call ID asked again is the same call, and a stale placement or session is fenced. An attempt this runner does not run (or no longer runs) is refused as an answer,
+   * not sent: the process of an ended attempt reaches nothing. A controller that cannot be reached is an answer too (`unavailable`): the extension may ask again with the same call ID.
+   */
+  async bridge(attemptId: string, token: string, request: ToolBridgeRequest): Promise<ToolBridgeAnswer> {
+    const live = this.#live.get(attemptId);
+    if (live === undefined) return { ok: false, code: "fenced", message: `attempt ${attemptId} is not running on this worker; the request is not sent` };
+    try { return await live.attempt.toolBridge(token, request); } catch (error) {
+      if (error instanceof WorkerRequestError) {
+        if (error.fenced) return { ok: false, code: "fenced", message: "the controller no longer accepts this attempt; its requests are refused" };
+        if (error.status === 0 || error.status >= 500) return { ok: false, code: "unavailable", message: "the controller could not be reached; ask again" };
+        return { ok: false, code: error.code === "error" ? "invalid_command" : error.code, message: error.message.slice(0, 300) };
+      }
+      return { ok: false, code: "unavailable", message: "the controller could not be reached; ask again" };
+    }
+  }
+
+  /**
+   * Acts on the controller's verdict for an attempt this worker holds after a reconnect (card H09b, the recovery handshake): `stop` ends the sandbox (the controller moved or ended the attempt), `reaccept` takes the attempt up again in the
+   * new session. Any other verdict (`hold`, `pending`, `unknown`) changes nothing here: the attempt goes on or waits. An attempt this runner does not run is ignored. Never throws for a connection trouble: the poller asks again.
+   */
+  async verdict(attemptId: string, verdict: "stop" | "hold" | "reaccept" | "pending" | "unknown"): Promise<void> {
+    const live = this.#live.get(attemptId);
+    if (live === undefined) return;
+    if (verdict === "stop") await live.handle?.stop().catch((error) => this.#o.onTrouble?.(attemptId, "stop", error));
+    else if (verdict === "reaccept") await live.attempt.accept().catch((error) => this.#o.onTrouble?.(attemptId, "reaccept", error));
+  }
+
   /** Runs one offer to its end. Never throws for the attempt's own failures: they are reported to the controller as the result; a fenced attempt is dropped. */
   async run(offer: Offer): Promise<OfferOutcome> {
     const order = offer.order;
@@ -75,6 +104,7 @@ export class RemoteOfferRunner {
         return "failed";
       }
       const running = handle;
+      const entry = this.#live.get(order.attemptId); if (entry !== undefined) entry.handle = running;
       let over = false;
       const control = this.#follow(attempt, order, running, () => over, trouble);
       let result: WorkerTurnResult;

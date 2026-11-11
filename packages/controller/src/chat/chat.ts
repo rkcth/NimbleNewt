@@ -1489,6 +1489,16 @@ export class ChatService {
       if (typeof agent?.["friendlyName"] === "string") labels[args["agentId"]] = agent["friendlyName"];
     }
 
+    // A standing-rule proposal is named by what accepting it would let stand (card U08 review): the ID alone would not tell the owner which agent, class of action, project and environment a grant covers,
+    // and the ID is not checked against their words, so the line they confirm must say it.
+    if ((intent.op === "approval.proposal.accept" || intent.op === "approval.proposal.dismiss") && typeof args["proposalId"] === "string") {
+      const r = await this.#deps.api.handle(token, { v: API_VERSION, op: "approval.proposals", args: {} });
+      const p = r.ok ? (r.result["items"] as Record<string, unknown>[] | undefined)?.find((x) => x["id"] === args["proposalId"]) : undefined;
+      if (p === undefined) return refuse("not_found", "no such standing-rule proposal");
+      const suggested = (p["defaultLength"] as { days?: unknown } | undefined)?.days ?? (p["suggestion"] as { days?: unknown } | undefined)?.days;
+      labels[args["proposalId"]] = `${String(p["cls"])} for ${String(p["requester"])} in project ${String(p["projectId"])} (${String(p["environment"])}), approved ${String(p["count"])} times, ${String(p["state"])}${typeof suggested === "number" ? `, suggested ${suggested} days` : ""}`;
+    }
+
     // The revision the owner does not have to quote.
     if (spec.revision !== undefined) {
       const filled = await this.#revisionFor(token, spec.revision, args, task, pending);
@@ -1682,6 +1692,17 @@ export class ChatService {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "retention.settings.get", {});
         return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("retention") };
+      }
+      case "standing-proposal": {
+        // The proposal's revision now (cards A07b, U08); a proposal that is not the owner's to see, or does not exist, is not found.
+        const r = typeof args["proposalId"] === "string" ? await this.#deps.api.handle(token, { v: API_VERSION, op: "approval.proposals", args: {} }) : undefined;
+        const found = r !== undefined && r.ok ? (r.result["items"] as { id: string; revision: number }[] | undefined)?.find((x) => x.id === args["proposalId"]) : undefined;
+        return found === undefined ? refuse("not_found", "no such standing-rule proposal") : { ok: true, name: "expectedRevision", value: found.revision };
+      }
+      case "profile-suggestion": {
+        // The suggestion's revision now; 0 before the first answer.
+        const item = await this.#get(token, "approval.suggestion", {});
+        return item === undefined || typeof item["revision"] !== "number" ? refuse("not_found", "the derived-profile question is not available") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
       case "catalog-policy": {
         // Never set: the operation takes 0.
