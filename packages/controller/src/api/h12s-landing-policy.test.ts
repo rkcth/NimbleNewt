@@ -10,7 +10,7 @@ import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
-const CALL = { taskId: "task-abcdefghijklmnopqrst", projectId: "prj-one" };
+const CALL = { taskId: "task-abcdefghijklmnopqrst", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" };
 
 test("landingPolicyFrom: task value over installation, permit required unless explicitly false, nothing guessed (card H12s)", async () => {
   const values: Record<string, unknown> = {};

@@ -151,3 +151,23 @@ test("a host that cannot confine agents does not start, and says why without a v
   await assert.rejects(startRemoteWorker({ root: "/r", load: noSandbox }, config()), /the sandbox is not usable here \(no bubblewrap\)/);
   await assert.rejects(startRemoteWorker({ root: "/r", load }, config({ token: undefined })), (e) => /token:/.test(e.message) && !e.message.includes("host-credential"));
 });
+
+test("the landing policy is the branch this host's configuration names for the project, with the permit required; a project not named is not landed; the responder is given the worker's busy check (card H12t)", { skip: LINUX_ONLY }, async () => {
+  const shared = mkdtempSync(join(tmpdir(), "nn-h12t-shared-"));
+  const A = "proj-aaaaaaaaaaaaaaaaaaaa", B = "proj-bbbbbbbbbbbbbbbbbbbb";
+  try {
+    // The configuration is checked: a landing branch must be a branch name and name a project with a shared repository here.
+    assert.deepEqual(checkRemoteConfig({ root: "/r", ...config({ projects: { [A]: shared }, landing: { [A]: "trunk" } }) }), []);
+    const bad = checkRemoteConfig({ root: "/r", ...config({ projects: { [A]: shared }, landing: { [A]: "../x", [B]: "main" } }) });
+    assert.deepEqual(bad, [`landing.${A}: must be a branch name`, `landing.${B}: names a project with no shared repository in projects`]);
+    assert.deepEqual(checkRemoteConfig({ root: "/r", ...config({ landing: ["main"] }) }), ["landing: must map project IDs to the branch their work is landed on"]);
+    const { seen, load } = packages();
+    const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ projects: { [A]: shared }, landing: { [A]: "trunk" } }));
+    try {
+      assert.deepEqual(await seen.workspaceOptions.landing({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: A }), { branch: "trunk", requirePermit: true, protectDefaults: true });
+      assert.equal(await seen.workspaceOptions.landing({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: B }), undefined, "no branch named: the landing is refused, not sent to main");
+      assert.equal(typeof seen.responderOptions.busy, "function", "the responder is given the busy check (it refuses to start without one)");
+      assert.deepEqual(await seen.responderOptions.busy(), []);
+    } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
+  } finally { rmSync(shared, { recursive: true, force: true }); }
+});
