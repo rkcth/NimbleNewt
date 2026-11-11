@@ -21,6 +21,18 @@ export const ATTEMPT_RESOURCES = { cpus: 1, memoryMb: 2048 };
 /** The context window assumed for a route the routing table gives none. */
 const FALLBACK_WINDOW = 32_768;
 
+/**
+ * Whether the worker host may change agents' environments (the A09 runtime). OFF unless asked: a command-line switch (`--local-host-environments`) or `NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1`.
+ * Accepts 1/true/on and 0/false/off (or unset/empty); anything else is refused so a typo cannot silently leave it off or on.
+ */
+export function environmentsRequested(flag, envValue) {
+  if (flag === true) return true;
+  const v = typeof envValue === "string" ? envValue.trim().toLowerCase() : "";
+  if (v === "" || v === "0" || v === "false" || v === "off") return false;
+  if (v === "1" || v === "true" || v === "on") return true;
+  throw new Error("NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS must be 1, true, on, 0, false or off");
+}
+
 /** The folder beside the data directory where the host keeps checkouts, attempt homes and script runs (the data directory itself is a protected path no sandbox mount may reach). */
 export const hostBaseOf = (dataDir) => join(dirname(resolve(dataDir)), `${basename(resolve(dataDir))}.host`);
 
@@ -49,6 +61,13 @@ export function localHostBuilder(setup) {
     try { scripts = await worker.hostScriptRunner({ launcher, base: worker.hostScriptBase(dataDir), protectedPaths: [dataDir], requireEnforced: true }); } catch (error) {
       await launcher.stop().catch(() => undefined);
       return { problem: `the tool runner could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
+    }
+    // The runner's own word on whether any tool can run here (no sandbox, no interpreter to offer): said before the host claims it can run agents' tools (card T02d follow-up).
+    const toolProblem = scripts.problem();
+    if (toolProblem !== undefined) {
+      await scripts.stop().catch(() => undefined);
+      await launcher.stop().catch(() => undefined);
+      return { problem: `no tool could run on this host (${String(toolProblem).slice(0, 200)})` };
     }
     // Changing an agent's environment (card A09 follow-up) is off unless the setup asks for it: the local host has no worker process to restore between attempts (each attempt starts its own), so the session probe below can only
     // confirm that nothing of the agent's session was touched, not read it back. With it on, approved package requests are installed into <data>.environments by the worker package's runtime; without it approved changes wait, as before.

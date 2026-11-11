@@ -34,7 +34,7 @@ export interface LauncherProvider {
 }
 
 export interface LauncherConfig {
-  readonly installation: { readonly name: string; readonly dataDir: string };
+  readonly installation: { readonly name: string; readonly dataDir: string; /** Where agents' checkouts live (the configuration's `installation.workspaces`): each path's file system is checked at start like the data directory's. A relative path is taken from the data directory. */ readonly workspaces?: Readonly<Record<string, { readonly path: string }>> };
   readonly controller: { readonly storage: { readonly kind: "sqlite"; readonly path: string } | { readonly kind: "postgres"; readonly url: { readonly secret: string }; readonly maxConnections: number; readonly schema?: string }; readonly databaseTransfer?: { readonly targets: readonly unknown[] } };
   readonly models: { readonly providers: Readonly<Record<string, LauncherProvider>> };
   /** The approval profile the configuration names (card U14b). Used once, for an installation that has no approval policy record yet; the owner changes it by chat afterwards. The grants and the limits of the document are not read (see the notes). */
@@ -168,6 +168,8 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
 
   const baseStart: StartOptions = {
     ...(options.start ?? {}),
+    // The configuration's workspace folders reach the start-up file system check (card F04h/F04k); an explicit option from the host wins. A relative path means the data directory's, not whatever the process was started in (the release launcher starts it in the release directory).
+    ...(options.start?.workspaceRoots !== undefined || Object.keys(config.installation.workspaces ?? {}).length === 0 ? {} : { workspaceRoots: Object.values(config.installation.workspaces!).map((w) => resolve(dataDir, w.path)) }),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => secrets.resolve(name) } }),
     chat: { interpreter },

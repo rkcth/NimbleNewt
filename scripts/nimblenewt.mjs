@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { localHostBuilder } from "./local-host.mjs";
+import { environmentsRequested, localHostBuilder } from "./local-host.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = async (pkg) => import(pathToFileURL(join(root, "packages", pkg, "dist", "index.js")).href);
@@ -20,7 +20,8 @@ const HELP = `NimbleNewt launcher
   init    [--data DIR] [--model-endpoint URL --model NAME [--model-key-secret NAME] [--model-paid]]
           [--backup-endpoint URL --backup-model NAME [--backup-key-secret NAME] [--backup-paid]] [--postgres-secret NAME]
           Writes DIR/nimblenewt.config.json (default DIR: ~/.nimblenewt, or NIMBLENEWT_DATA). Keeps nothing secret in it.
-  start   [--data DIR | --config FILE] [--serve] [--allow-unsupported-environment]
+  start   [--data DIR | --config FILE] [--serve] [--allow-unsupported-environment] [--local-host-environments]
+          --local-host-environments (or NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1; off by default) lets the worker host on this computer install approved package changes into agents' environments.
           Starts the controller, makes you the owner the first time and opens the chat. Without a configuration file it writes a starter one.
   status  [--data DIR | --config FILE]   Starts, prints what is set up and what is missing, and stops.
   secret set NAME [--data DIR]           Puts a secret (a model key, a database address) into the secret store. The value is read from the terminal without echo, or from standard input.
@@ -34,7 +35,7 @@ export function parseArgs(argv) {
       const k = a.slice(2);
       const eq = k.indexOf("=");
       if (eq >= 0) out.flags[k.slice(0, eq)] = k.slice(eq + 1);
-      else if (["serve", "model-paid", "backup-paid", "allow-unsupported-environment", "help"].includes(k)) out.flags[k] = true;
+      else if (["serve", "model-paid", "backup-paid", "allow-unsupported-environment", "local-host-environments", "help"].includes(k)) out.flags[k] = true;
       else { out.flags[k] = argv[i + 1]; i++; }
     } else out._.push(a);
   }
@@ -156,7 +157,7 @@ export async function main(argv, io = { stdin: process.stdin, stdout: process.st
     const { store, reason } = await secretStoreFor(config);
     const { launch, runTerminalChat, setupGreeting } = await load("controller");
     const passthrough = [...(args.flags["allow-unsupported-environment"] === true ? ["--allow-unsupported-environment"] : [])];
-    const launched = await launch({ config, secrets: store, argv: passthrough, env: io.env, print: (l) => io.stderr.write(`${l}\n`), localHost: localHostBuilder({ root, load }), ...(args.flags.serve === true ? { serve: {} } : {}) });
+    const launched = await launch({ config, secrets: store, argv: passthrough, env: io.env, print: (l) => io.stderr.write(`${l}\n`), localHost: localHostBuilder({ root, load, environments: environmentsRequested(args.flags["local-host-environments"], io.env.NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS) }), ...(args.flags.serve === true ? { serve: {} } : {}) });
     try {
       out(`Secrets are kept in: ${reason}.`);
       for (const n of launched.notes) out(n);
