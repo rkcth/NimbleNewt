@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "database-transfer";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -139,7 +139,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "database.transfer.rollback": { verb: "Roll back a database transfer", mode: "propose" },
   // Removing the copy an unfinished move left at a destination is a deletion: shown first in every profile, with what is there. The settings turn moves on or off and the host's automatic restart after one (card F04m).
   "database.transfer.wipe": { verb: "Remove the copy a database move that did not finish left at a destination", mode: "propose" },
-  "database.transfer.set": { verb: "Change whether the database may be moved (enabled) and whether the host restarts the controller by itself after a move (restart)", mode: "propose" },
+  "database.transfer.set": { verb: "Change whether the database may be moved (enabled) and whether the host restarts the controller by itself after a move or rollback (restart)", mode: "propose", revision: "database-transfer" },
   "backup.restore.cancel": { verb: "Withdraw a prepared restore", mode: "apply" },
   // Release staging and activation (card K02). Staging copies verified files and changes nothing running, so it applies at once. Activating and rolling back change what runs: always shown first, the owner's word is the confirmation.
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).

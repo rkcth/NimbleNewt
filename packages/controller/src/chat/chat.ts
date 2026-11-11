@@ -1712,6 +1712,11 @@ export class ChatService {
         const item = await this.#get(token, "approval.suggestion", {});
         return item === undefined || typeof item["revision"] !== "number" ? refuse("not_found", "the derived-profile question is not available") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "database-transfer": {
+        // The installation settings layer the two switches live in, as it is when the message is planned (0 before anything was set); a change to it before the owner confirms makes the proposal stale (card F04m).
+        const item = await this.#get(token, "database.transfer.settings", {});
+        return item === undefined || typeof item["revision"] !== "number" ? refuse("forbidden", "only the owner reads and changes the database transfer settings") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
+      }
       case "catalog-policy": {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "catalog.policy.get", {});

@@ -141,10 +141,15 @@ export interface TransferOptions {
 }
 
 export interface RestartEvent { readonly reason: "switched" | "rolled-back"; readonly transferId: string; readonly to: string }
-export interface TransferSettings { readonly enabled: boolean; readonly restart: boolean; /** Whether the host offered a restart at all. */ readonly restartOffered: boolean }
+export interface TransferSettings {
+  readonly enabled: boolean; readonly restart: boolean; /** Whether the host offered a restart at all. */ readonly restartOffered: boolean;
+  /** The revision of the record these switches live in (the installation settings layer; 0 before anything was set there), to quote as `expectedRevision` when changing them. Given when read by a caller. */
+  readonly revision?: number;
+}
 export interface TransferSettingsPort {
-  get(): Promise<{ readonly enabled: boolean; readonly restart: boolean }>;
-  set(by: unknown, patch: { readonly commandId: string; readonly enabled?: boolean; readonly restart?: boolean }): Promise<unknown>;
+  get(by?: unknown): Promise<{ readonly enabled: boolean; readonly restart: boolean; readonly revision?: number }>;
+  /** `expectedRevision`: the change is made only while the record is still at that revision (card F04m, third slice); absent, at whatever revision it is now. */
+  set(by: unknown, patch: { readonly commandId: string; readonly enabled?: boolean; readonly restart?: boolean; readonly expectedRevision?: number }): Promise<unknown>;
 }
 
 /** Room needed relative to the rows' text: indexes, the write-ahead log and slack. Provisional. */
@@ -482,16 +487,17 @@ export class DatabaseTransferService {
   /** Stops a restart that is waiting to be made (the controller is closing). */
   dispose(): void { if (this.#restartTimer !== undefined) clearTimeout(this.#restartTimer); this.#restartTimer = undefined; }
 
-  async settings(): Promise<TransferSettings> {
-    const s = await (this.#o.settings?.get() ?? Promise.resolve({ enabled: true, restart: true }));
+  async settings(by?: unknown): Promise<TransferSettings> {
+    const s = await (this.#o.settings?.get(by) ?? Promise.resolve({ enabled: true, restart: true }));
     return { ...s, restartOffered: this.#o.restart !== undefined };
   }
-  async setSettings(by: unknown, patch: { commandId: string; enabled?: unknown; restart?: unknown }): Promise<TransferSettings> {
+  async setSettings(by: unknown, patch: { commandId: string; enabled?: unknown; restart?: unknown; expectedRevision?: unknown }): Promise<TransferSettings> {
     if (this.#o.settings === undefined) throw new DomainError("unavailable", "the database transfer settings are not available on this installation");
     for (const key of ["enabled", "restart"] as const) if (patch[key] !== undefined && typeof patch[key] !== "boolean") bad(`${key} must be true or false`);
+    if (patch.expectedRevision !== undefined && (typeof patch.expectedRevision !== "number" || !Number.isSafeInteger(patch.expectedRevision) || patch.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number (0 before anything was set)", { field: "expectedRevision" });
     if (patch.enabled === undefined && patch.restart === undefined) bad("say what to change: enabled (whether the database may be moved at all) or restart (whether the host restarts the controller by itself after a move)");
-    await this.#o.settings.set(by, { commandId: patch.commandId, ...(patch.enabled === undefined ? {} : { enabled: patch.enabled as boolean }), ...(patch.restart === undefined ? {} : { restart: patch.restart as boolean }) });
-    return this.settings();
+    await this.#o.settings.set(by, { commandId: patch.commandId, ...(patch.enabled === undefined ? {} : { enabled: patch.enabled as boolean }), ...(patch.restart === undefined ? {} : { restart: patch.restart as boolean }), ...(patch.expectedRevision === undefined ? {} : { expectedRevision: patch.expectedRevision as number }) });
+    return this.settings(by);
   }
 
   #now(): string { return (this.#o.now ?? (() => new Date()))().toISOString(); }

@@ -125,3 +125,18 @@ test("U09b: the model is told it can show the owner what an agent was thinking (
   assert.match(system, /thinking\.collection\.set\([^)]*enabled[^)]*\) - Turn collecting the model's thinking off or on/);
   assert.ok(acceptedArgs("thinking.collection.set")?.includes("enabled"), "the chat accepts the switch");
 });
+
+test("the model is told, in plain words, how the owner turns the host's automatic restart after a database move off and on, and moves off and on, with the argument names; the revision is left to the system (card F04m)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  const listed = acceptedArgs("database.transfer.set")!.filter((k) => k !== "projectName");
+  for (const k of ["enabled", "restart", "expectedRevision"]) assert.ok(listed.includes(k), k);
+  assert.ok(system.includes(`database.transfer.set(${listed.join(", ")}) - `), "the operation is listed with its argument names");
+  assert.match(system, /the host restarts the controller onto the new database by itself after a move or rollback/);
+  assert.match(system, /use database\.transfer\.set with restart and\/or enabled \(true or false\), only the ones the owner spoke of; leave expectedRevision out, the system fills it/);
+  assert.match(system, /don't restart yourself after you move the database/);
+  assert.match(system, /status kind database_transfer/);
+  assert.equal(CHAT_OPS["database.transfer.set"]!.revision, "database-transfer", "the chat pins the revision");
+  assert.equal(CHAT_OPS["database.transfer.set"]!.mode, "propose");
+});
