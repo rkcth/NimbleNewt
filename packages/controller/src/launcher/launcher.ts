@@ -27,6 +27,8 @@ export interface LauncherSecrets {
 export interface LauncherProvider {
   readonly adapter: string;
   readonly endpoint?: string;
+  /** What the model server is (a known backend kind such as `vllm` or `radiance`); the controller refuses an unknown one. */
+  readonly kind?: string;
   readonly credential?: { readonly secret: string };
   readonly enabled: boolean;
   readonly paid: boolean;
@@ -137,12 +139,9 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
 
   // The chat reaches the providers through the addresses the owner recorded (guided setup keeps them in the controller's records); the credential is read from the secret store at each call.
   let live: Controller | undefined;
-  const endpoints = new Map<string, { endpoint: string; credentialName?: string }>();
-  const refresh = async (): Promise<void> => {
-    if (live === undefined) return;
-    endpoints.clear();
-    for (const e of await live.services.setupProviders.endpoints()) endpoints.set(e.provider, { endpoint: e.endpoint, ...(e.credentialName === undefined ? {} : { credentialName: e.credentialName }) });
-  };
+  const book = providerAddressBook(async () => (live === undefined ? undefined : live.services.setupProviders.endpoints()));
+  const endpoints = book.endpoints;
+  const refresh = book.refresh;
   const model = new HttpModelCall({
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     endpoint: (route): ModelEndpoint | undefined => {
@@ -160,7 +159,9 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const record = (await live.services.setupProviders.endpoints()).find((e) => e.provider === provider);
     if (record === undefined) return undefined;
     const name = record.credentialName;
-    return { url: record.endpoint, ...(record.kind === undefined ? {} : { kind: record.kind }), ...(name === undefined ? {} : { headers: async () => { const key = await named(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+    // No `kind` here: the relay takes an endpoint's own kind before the controller's, so the provider's recorded kind named here would go ahead of the operator's cache endpoint configuration, which the status view and
+    // the controller's composition put first. The controller reads the provider's kind itself at each call when the cache configuration names none.
+    return { url: record.endpoint, ...(name === undefined ? {} : { headers: async () => { const key = await named(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
   };
   const routes = async (): Promise<readonly string[]> => {
     if (live === undefined) return [];
@@ -171,6 +172,12 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     return local.length > 0 ? local : chatRoutes(routing, { role: "coordinator", data: "cloud-allowed" })();
   };
   const interpreter = new ModelInterpreter(model, routes);
+  // The second agent that questions a done (card W10 wiring; the resume reviewer of L04d is not given it): the same HTTP client over the recorded provider addresses, which are re-read before each call (a restart has read none yet). It is asked
+  // only on the route the owner set (`report.reviewerRoute`); with none set the controller records that no second agent questioned the report.
+  const reviewerModel: NonNullable<StartOptions["reviewerModel"]> = {
+    complete: async (route, request) => { await refresh(); return model.complete(route, request); },
+    completeDetailed: async (route, request) => { await refresh(); return model.completeDetailed(route, request); },
+  };
 
   // The configuration's workspace folders reach the start-up file system check (card F04h: "the worker-side start-up and U01 must pass workspaceRoots"); an explicit option from the host wins. A relative path
   // means the data directory's, not whatever the process was started in (the release launcher starts it in the release directory). `~` is not expanded (as for the data directory), so it is said.
@@ -182,6 +189,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
     chat: { interpreter },
+    ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),
     ...(options.serve === undefined ? {} : { conversationTransport: options.serve }),
   };
   let controller: Controller;
@@ -234,7 +242,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const wanted = Object.entries(config.models.providers).filter(([, p]) => p.enabled && p.endpoint !== undefined && p.models.length > 0);
     if (have === undefined && wanted.length > 0) {
       try {
-        const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
+        const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.kind === undefined ? {} : { kind: p.kind }), ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
         notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused).`);
       } catch (error) {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);
@@ -273,3 +281,20 @@ export async function ensureOwner(controller: Controller, secrets: LauncherSecre
 const OWNER_NAME = "owner";
 
 export const launcherDir = (file: string): string => dirname(resolve(file));
+
+/**
+ * The provider addresses the launcher's own model client (the chat and the second agent) looks routes up in, refreshed from the owner's records before calls. Each refresh reads first and swaps the whole map in one step:
+ * the chat and the second agent refresh concurrently, and a map cleared before the read would leave a call that looks its route up meanwhile with no endpoint. `read` gives undefined while there is no controller yet.
+ */
+export function providerAddressBook(read: () => Promise<readonly { readonly provider: string; readonly endpoint: string; readonly credentialName?: string }[] | undefined>): { readonly endpoints: ReadonlyMap<string, { readonly endpoint: string; readonly credentialName?: string }>; refresh(): Promise<void> } {
+  const endpoints = new Map<string, { endpoint: string; credentialName?: string }>();
+  return {
+    endpoints,
+    refresh: async () => {
+      const found = await read();
+      if (found === undefined) return;
+      endpoints.clear();
+      for (const e of found) endpoints.set(e.provider, { endpoint: e.endpoint, ...(e.credentialName === undefined ? {} : { credentialName: e.credentialName }) });
+    },
+  };
+}

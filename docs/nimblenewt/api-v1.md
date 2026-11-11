@@ -3267,11 +3267,11 @@ Result: `{ ok }`.
 
 #### `routing.provider.add`
 
-Owner only (guided setup): adds or replaces model providers in one step: each with its name, where it runs (`local` or `cloud`), whether it costs money, its model server's address, the NAME of the secret that holds its key (never the key itself; the owner puts the key in the secret store on the machine), its model names and their context window. The routes `provider/model` are added to the routing table, and the `default` profile (free and local routes first) is rebuilt and given to the coordinator, the safety supervisor and the author unless the table already gives them something else. The team needs at least two routes on two different servers so that losing one does not stop it; fewer is refused in plain words and nothing is changed. Providers and routes not named stay as they are.
+Owner only (guided setup): adds or replaces model providers in one step: each with its name, where it runs (`local` or `cloud`), whether it costs money, its model server's address, the NAME of the secret that holds its key (never the key itself; the owner puts the key in the secret store on the machine), what kind of server it is (`kind`: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic; an unknown kind is refused; left out, the routes' reply limit and reasoning cap are not sent on `chat/completions` and the task's activity says so), its model names and their context window. The routes `provider/model` are added to the routing table, and the `default` profile (free and local routes first) is rebuilt and given to the coordinator, the safety supervisor and the author unless the table already gives them something else. The team needs at least two routes on two different servers so that losing one does not stop it; fewer is refused in plain words and nothing is changed. Providers and routes not named stay as they are.
 
 Arguments:
 
-- `providers`: list of `{ name, location, endpoint, models, contextTokens, paid?, enabled?, credentialName? }`
+- `providers`: list of `{ name, location, endpoint, models, contextTokens, paid?, enabled?, credentialName?, kind? }`
 - `expectedRevision` (optional): the routing revision you read, when the table already exists
 - `commandId`: required
 

@@ -1,3 +1,5 @@
+import { ROUTE_PATTERN } from "../routing/policy.js";
+
 /** The layers a value can live in, least specific first. A later layer overrides an earlier one, within the limits each setting sets. */
 export type LayerKind = "installation" | "team" | "agent" | "task";
 export const LAYER_ORDER: readonly LayerKind[] = ["installation", "team", "agent", "task"];
@@ -37,6 +39,7 @@ const names = (pattern: RegExp, max: number) => (v: unknown): string[] => {
   const out = v.map((x) => (typeof x === "string" && pattern.test(x) ? x : refuse(`${JSON.stringify(x)} is not an acceptable name`)));
   return [...new Set(out)].sort();
 };
+const route = (v: unknown): string => (typeof v === "string" && ROUTE_PATTERN.test(v) ? v : refuse("must be a model route written provider/model, one of the routes in the routing table"));
 const TOOL = /^[a-z][a-z0-9._-]{0,79}$/;
 const PROFILE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/;
@@ -56,6 +59,7 @@ export const DEFAULT_SETTINGS: readonly SettingDefinition[] = [
   { key: "provider.*.enabled", kind: "restriction", check: bool, ...flag, fallback: true, effect: "next-request", description: "Whether a model provider may be used at all. A disabled provider stays disabled for every layer below." },
   { key: "budget.paidAllowed", kind: "restriction", check: bool, ...flag, fallback: true, effect: "next-request", description: "Whether paid routes may be chosen." },
   { key: "conversation.mcp.enabled", kind: "default", check: bool, fallback: true, installationOnly: true, effect: "next-request", description: "Whether the MCP door (POST /mcp on the conversation listener) answers. False: it answers 404 from the next request on; the REST door is not affected. Only the owner sets it." },
+  { key: "report.reviewerRoute", kind: "default", check: route, installationOnly: true, effect: "next-request", description: "The model route (provider/model, from the routing table) that questions an agent's report when it says its work is done, a second agent with no tools and none of the agent's conversation (card W10). Unset (the default): no report is questioned and each done's report says that no second agent questioned it. When set, the route must be usable (its provider enabled and not excluded); the owner naming it also allows the task's title, contract, report and notes to go to that route even if it is a cloud or paid route, within the daily cap on the controller's own model calls. Only the owner sets it." },
   { key: "grants.maxDays", kind: "default", check: whole(1, 36500), effect: "next-request", description: "The longest a standing grant made from chat may go unused before it lapses (or last, when it has an end date), in days. Unset means no maximum; a grant with no end is only possible while it is unset." },
   { key: "grants.defaultDays", kind: "default", check: whole(1, 36500), effect: "next-request", description: "How long a standing grant made from chat may go unused before it lapses when the owner does not say; each use renews it. Unset means 30 days." },
   { key: "time.maxMinutes", kind: "restriction", check: whole(1, 10080), ...ceiling, effect: "after-current-operation", description: "The longest an attempt may run, in minutes." },

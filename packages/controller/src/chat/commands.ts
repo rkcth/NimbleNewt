@@ -97,7 +97,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
   // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
-  "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
+  "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, kind = what the model server is: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic, which decides how a route's reply limit and reasoning cap are sent; credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
   "workers.limits.besteffort": { verb: "Allow or forbid local agents to start when a limit cannot be fully enforced on this system (enable or disable best effort)", mode: "propose" },
   // Whether each model call is recorded against its generation and a late reply held back (card L05b): neither is a limit; both are on unless the owner turns them off.
@@ -582,11 +582,11 @@ export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation
 export const EVENT_SOURCE_EXEMPT: ReadonlySet<string> = new Set(["type", "sourceId", "at"]);
 
 /**
- * Fixed choices of the guided setup that the owner need not spell out in these words: where a provider runs (`local` or `cloud`, routing.provider.add) and which forge hosts a repository
+ * Fixed choices of the guided setup that the owner need not spell out in these words: where a provider runs (`local` or `cloud`) and what kind of server it is (`kind`, one of the known backends), both of routing.provider.add and which forge hosts a repository
  * (`github`, `gitlab`, `self-hosted`, `none`, project.create and project.update). Every other text (names, addresses, models) must be the owner's own. The exemption goes by key name at any
  * depth, so each operation exempts only its own choice: `location` on a project is a repository's folder or address, which must be the owner's words.
  */
-export const SETUP_EXEMPT: Readonly<Record<string, ReadonlySet<string>>> = { "routing.provider.add": new Set(["location"]), "project.create": new Set(["host"]), "project.update": new Set(["host"]) };
+export const SETUP_EXEMPT: Readonly<Record<string, ReadonlySet<string>>> = { "routing.provider.add": new Set(["location", "kind"]), "project.create": new Set(["host"]), "project.update": new Set(["host"]) };
 
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();

@@ -178,3 +178,30 @@ test("a vLLM server without a reasoning parser refuses thinking_token_budget: th
   const r = await refusing.forAttempt({ route: "localp/small", budget: () => ({ reasoningTokens: 100 }) }).relay(call("chat/completions", PI_BODY));
   assert.deepEqual([r.status, other.length], [400, 1]);
 });
+
+test("the attempt's kind may be a function asked at each call: a change applies from the next call, an endpoint's own kind wins, and one that throws or returns a non-text counts as no kind, said and not fatal (card W07 wiring)", async () => {
+  const { bodies } = relaying();
+  let kind: string | undefined | (() => never) = "vllm";
+  const told: { notSent: readonly string[] }[] = [];
+  const errors: string[] = [];
+  const failing = new ModelRelay({ endpoint: () => ({ url: "http://vllm.internal/v1" }), fetch: async (_i, init) => { bodies.push(Buffer.from(init!.body as Buffer).toString("utf8")); return new Response("{}", { status: 200 }); }, onError: (_route, text) => { errors.push(text); } });
+  const attempt = failing.forAttempt({ route: "localp/small", kind: async () => (typeof kind === "function" ? kind() : kind), budget: () => ({ maxTokens: 4000, reasoningTokens: 100 }), onBudget: (a) => told.push(a) });
+  await attempt.relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(JSON.parse(bodies[0]!), { ...PI_BODY, max_tokens: 4000, thinking_token_budget: 100 });
+  kind = "llama-cpp";
+  await attempt.relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(JSON.parse(bodies[1]!), { ...PI_BODY, max_tokens: 4000, thinking_budget_tokens: 100 }, "the changed kind applies from the next call");
+  kind = () => { throw new Error("storage down sk-abcdefghijklmnopqrstuvwxyz0123456789"); };
+  await attempt.relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(JSON.parse(bodies[2]!), PI_BODY, "an unreadable kind sends nothing");
+  assert.match(told.at(-1)!.notSent[0]!, /the endpoint's kind is not set/);
+  assert.match(errors[0] ?? "", /storage down/);
+  assert.doesNotMatch(errors.join(), /sk-abcdefgh/);
+  kind = 7 as never;
+  await attempt.relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(JSON.parse(bodies[3]!), PI_BODY, "a kind that is not text sends nothing");
+  // The endpoint's own kind wins over the attempt's.
+  const own = new ModelRelay({ endpoint: () => ({ url: "http://vllm.internal/v1", kind: "radiance" }), fetch: async (_i, init) => { bodies.push(Buffer.from(init!.body as Buffer).toString("utf8")); return new Response("{}", { status: 200 }); } });
+  await own.forAttempt({ route: "localp/small", kind: async () => "llama-cpp", budget: () => ({ maxTokens: 4000, reasoningTokens: 100 }) }).relay(call("chat/completions", PI_BODY));
+  assert.deepEqual(JSON.parse(bodies[4]!), { ...PI_BODY, max_tokens: 4000, thinking_token_budget: 100 });
+});

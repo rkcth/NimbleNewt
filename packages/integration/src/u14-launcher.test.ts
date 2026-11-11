@@ -247,3 +247,42 @@ test("the starter configuration the launcher writes loads and holds no secret va
   const loaded = loadConfig(doc);
   assert.ok(loaded.ok, JSON.stringify(loaded));
 });
+
+test("a provider's kind named in the configuration is recorded on the provider with the other fields; an unknown kind keeps the providers from being registered, with the reason told (card W07 wiring)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-u14k-"));
+  try {
+    const good = await launch({ config: configFor(dir, providers({ primary: { ...providers()["primary"]!, kind: "radiance" } })), secrets: memorySecrets(), argv: [], env: {}, print: () => undefined, start });
+    try {
+      const ends = await good.controller.services.setupProviders.endpoints();
+      assert.deepEqual(ends.map((e) => [e.provider, e.kind]).sort(), [["backup", undefined], ["primary", "radiance"]]);
+    } finally { await good.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  const dir2 = mkdtempSync(join(tmpdir(), "nn-u14k-"));
+  try {
+    const bad = await launch({ config: configFor(dir2, providers({ primary: { ...providers()["primary"]!, kind: "vlmm" } })), secrets: memorySecrets(), argv: [], env: {}, print: () => undefined, start });
+    try {
+      assert.match(bad.notes.join("\n"), /model providers in the configuration were not registered yet: .*kind: must be one of/);
+      assert.equal((await bad.controller.services.setupProviders.endpoints()).length, 0);
+    } finally { await bad.close(); }
+  } finally { rmSync(dir2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+
+test("the worker host's endpoint names no kind of its own, so the operator's cache endpoint kind and then the provider's recorded kind decide, as the status view says (review of the W07 wiring)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-u14e-"));
+  try {
+    const config = configFor(dir, providers({ primary: { ...providers()["primary"]!, kind: "radiance" } }));
+    const secrets = memorySecrets();
+    const first = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start });
+    const owner = await first.controller.services.principals.authenticate(first.ownerToken);
+    await first.controller.services.localHost.set(owner, { commandId: "host-on", enabled: true });
+    assert.equal((await first.controller.services.setupProviders.endpoints()).find((e) => e.provider === "primary")?.kind, "radiance", "the kind is recorded");
+    await first.close();
+    let seen: unknown;
+    const second = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, localHost: async (ctx) => { seen = await ctx.endpoint("primary/local-x"); return { problem: "not built in this test" }; } });
+    try {
+      assert.equal((seen as { url?: string } | undefined)?.url, "http://127.0.0.1:8002/v1");
+      assert.equal(Object.hasOwn(seen as object, "kind"), false, "an endpoint's own kind would go ahead of the cache configuration in the relay");
+    } finally { await second.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

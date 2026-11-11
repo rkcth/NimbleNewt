@@ -4,3 +4,4 @@ export { CleanupSettingsService, SCRATCH_DEFAULT, SCRATCH_MODES, type ScratchMod
 export { SCRATCH_LIMITS, ScratchCleanupService, scratchRecordId, type Leftover, type ScratchLimits, type ScratchAttempt, type ScratchOrder, type ScratchPorts, type ScratchRecord, type ScratchReport, type ScratchRun } from "./scratch-cleanup.js";
 export { LEFTOVER_NOTICES, ownerNotices, supervisorNotice } from "./leftovers-report.js";
 export { INTERROGATOR_LIMITS, ReportInterrogator, parseAnswer, promptOf, type ReportInterrogatorOptions } from "./interrogator.js";
+export { BoundedReviewerModel, REVIEWER_LIMITS, REVIEWER_ROUTE_SETTING, TOO_LONG, reviewerRoute } from "./reviewer-model.js";

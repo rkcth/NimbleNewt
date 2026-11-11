@@ -60,3 +60,37 @@ test("a route without a budget is sent what Pi built, and an endpoint whose kind
     assert.match(steps[0]!, /the reply limit \(900 tokens\) was not sent: the endpoint's kind is not set/);
   } finally { await unknown.close(); }
 });
+
+// The wiring audit's finding: nothing set an endpoint's kind in a real controller. Here the kind is the owner's setting on the provider (routing.provider.add, the same operation the chat uses), and the relay of a real startController reads it
+// from the provider's record: the embedder's endpoint names no kind, and the cache configuration names none.
+const PROVIDERS = (kind: string | undefined) => [
+  { name: "localp", location: "local", endpoint: "http://127.0.0.1:8002/v1", models: ["small"], contextTokens: 32768, ...(kind === undefined ? {} : { kind }) },
+  { name: "spare", location: "cloud", paid: false, endpoint: "https://free.example.invalid/v1", credentialName: "spare-key", models: ["free-model"], contextTokens: 32768 },
+];
+
+test("a provider's kind the owner recorded reaches a real controller's relay: the route's figures arrive in that kind's field names; with no kind recorded they are not sent and the task says why (card W07 wiring)", async (t) => {
+  const launcher = await sandbox(t);
+  if (launcher === undefined) return;
+  const withKind = await rig(launcher, [{ call: WORK_END }, { text: "Ended." }]);
+  try {
+    await withKind.c.services.setupProviders.add(withKind.owner, { commandId: "pk1", providers: PROVIDERS("vllm"), expectedRevision: (await withKind.c.services.routing.get())!.revision });
+    assert.equal((await withKind.c.services.setupProviders.endpoints()).find((e) => e.provider === "localp")?.kind, "vllm");
+    await withKind.c.services.routing.setRouteBudget(withKind.owner, { commandId: "b1", route: "localp/small", maxTokens: 900, reasoningTokens: 300 });
+    await withKind.run();
+    const d = await withKind.get();
+    assert.equal(d.outcome?.status, "succeeded", d.outcome?.summary);
+    assert.ok(withKind.answer.bodies.length >= 1);
+    for (const body of withKind.answer.bodies) assert.deepEqual([body["max_tokens"], body["thinking_token_budget"], body["max_completion_tokens"]], [900, 300, undefined], "vllm field names, Pi's own limit field removed");
+  } finally { await withKind.close(); }
+  const none = await rig(launcher, [{ call: WORK_END }, { text: "Ended." }]);
+  try {
+    await none.c.services.setupProviders.add(none.owner, { commandId: "pk1", providers: PROVIDERS(undefined), expectedRevision: (await none.c.services.routing.get())!.revision });
+    await none.c.services.routing.setRouteBudget(none.owner, { commandId: "b1", route: "localp/small", maxTokens: 900 });
+    await none.run();
+    assert.equal((await none.get()).outcome?.status, "succeeded");
+    for (const body of none.answer.bodies) assert.deepEqual([body["max_completion_tokens"], "max_tokens" in body], [1024, false], "no kind recorded: Pi's figure stands");
+    const steps = (await none.c.services.activity.steps(none.owner, none.taskId)).steps.map((s) => ("summary" in s ? s.summary : "")).filter((s) => /^Route localp\/small:/.test(s));
+    assert.equal(steps.length, 1);
+    assert.match(steps[0]!, /the endpoint's kind is not set/);
+  } finally { await none.close(); }
+});
