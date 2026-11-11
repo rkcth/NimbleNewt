@@ -8213,7 +8213,7 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 **Not done / limits**
 - The block is a snapshot taken when the worker process starts. Notes and rules can be newer at a later cut; the block says where the current ones are read (IDs of records), it does not rewrite itself mid-attempt.
 - It travels in the extractive summary. A route configured to let the model write its own summary (no extractive fallback) does not get the block back after a cut. Pi's own summariser is not instructed to keep it.
-- A remote worker's first prompt carries the block and the contract names its digest; the remote channel does not yet hand the process the copy for re-insertion (needs the remote wire to carry `context.compaction.anchor`). Local workers only.
+- ~~A remote worker's first prompt carries the block and the contract names its digest; the remote channel does not yet hand the process the copy for re-insertion.~~ Done in the "W12 follow-up: remote workers" section below (the host takes the block from the offered order; no new wire field).
 - Not rerun in full after the last edits: see the suite line above.
 - Plan: the W12 card was added to `scripts/generate_task_plan.py` (the plan tests pass, 361 cards); "needs plan owner" only for its status and AII issue ID, which the generator gives like the other new cards.
 - W13 is built in the next section.
@@ -8233,6 +8233,39 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 - Cost of default on: at most 2,400 characters (about 800 tokens at the budget's three characters a token, less on windows under 20,000 tokens where 4 percent of the window caps it) at the top of every attempt's first prompt and of every extractive summary. Kept on as the owner approved the card; the owner sees each block's size on the attempt's record (`anchors[].chars`) and can lower the cap or turn it off in chat.
 - Mutations (each made alone on the built files, each failed a test, then restored): summary ignores the kept tail; a used request ID resubmitted with the block whatever was first sent; the mark back-off in the cut; no `anchorLeftOut` for no room.
 - Left as noted: a start whose records changed (a new note) carries a newer block while the view still shows the older one, so two different blocks are visible until the next cut replaces both.
+
+## W12 follow-up: remote workers put the goal anchor back after a cut (2026-11-11)
+
+Not a numbered card: the W12 "Not done" item about remote workers. Card status is NOT changed.
+
+**What was wrong**
+- A remote worker's process was never handed the anchor to put back, so after its first cut the agent lost the block.
+- Found while testing, and fixed: on a real controller with remote hosts the contract did not name the anchor at all. `RemoteWorkerHost.#carry` (`remote/host.ts`) seals the contract again with the owner's limits and best-effort setting, and it dropped `anchorDigest`. Every remote offer therefore went out without it (the remote test world has no owner policy, so the W12 tests missed this). It now keeps the digest.
+
+**Built: the smallest protocol addition is none**
+- The offer already holds the whole order: its content opens with the block, and its sealed contract names the block's digest (covered by the contract digest). The worker checks that contract before it starts (`honorContract`), and the check refuses a digest whose block is not in the content. So the worker machine already has everything, and no new field goes over the wire.
+- `@nimblenewt/worker` `orderAnchor(order)` takes from the order's content exactly the block whose digest the contract names. It is the same rule as the controller's local path (`dispatch-compose.ts` `contextFor`). That block must check out on its own and fit the channel bound (8,000 characters). Any other block is ignored, including one the task's own text carries even if it checks out.
+- `withOrderAnchor(context, order)` runs at every process start of the host (`localWorkerParts`, the one place `options.context` is read). If the context the host was given already has an anchor (the controller's local path), it is kept. Otherwise the order's anchor is added, together with `fallback: "extractive"`, which the channel requires for it. An order without an anchor leaves the context exactly as given. A remote machine passes no context of its own and now gets the block. A machine that does pass one (for example C07q `keep`) keeps it, and the anchor joins it.
+- What stays the same: cleaning, bounds and redaction (the controller wrote the block; the process's channel parser checks it again: digest, size, extractive fallback). The worker process's strip, re-insert and no-stacking logic is the same code W12 tested. The block is a part of the content the worker already holds, so nothing secret is newly exposed.
+- **Per placement:** each offer carries its own order and contract. A move to another host is a new placement whose offer carries the block again, and the new host confirms that contract. A restart control message (same placement) starts the process again with the same order, so the same block.
+- **The owner's switch:** off means the dispatcher writes no block and the contract names none, so the worker starts its process as before.
+- **Version skew:** an older controller names no anchor, so a new worker changes nothing. An older worker ignores `anchorDigest` and runs as before W12 follow-up (the first prompt still opens with the block). An older process in the sandbox reads only the compaction keys it knows (`fallback` exists since C07b).
+
+**Tests**
+- `worker/src/host/local.test.ts` (3 new): only the named block is taken (another valid block, no digest, no contract, a digest naming nothing, a malformed digest, no content, an edited block, a block over the bound); merging into a given context (kept when it has one; joined to `keep` and tool limits; unchanged without one); a host with no context and a host with its own both start the process with the anchor, the start passes the process's own channel parser, and an order without an anchor starts with no context.
+- `controller/src/remote/anchor.test.ts` (2 x 4 storage backends, over the real worker protocol): the offer's order opens with exactly one block, the contract that came over the wire names it, the worker confirms that contract, the placement holds that contract digest and the attempt records the anchor. After a move to another host, the new placement's offer carries the same block and the new host confirms it. With the owner's switch off there is no block and no digest. `remote/testing/world.ts` takes an `anchor` option for this.
+- `controller/src/remote/launch-limits.test.ts` (1 new): sealed again with the owner's limits, the contract still names the anchor and its digest checks; without an anchor none is added.
+- `integration/src/w12-remote-anchor.test.ts` (new): the composed controller offers the attempt over HTTP to the real `RemoteOfferRunner`, whose host is the real sandboxed Pi process. The machine passes no context. After at least 3 real cuts, every model call holds exactly one anchor, at the top of the first prompt or of each summary, equal to the block the records give when composed again.
+- Mutations (each made alone on the built file, each failed a test, then restored): (1) the host does not add the order's anchor: the host test fails, and the remote integration attempt fails (Pi's own summariser runs instead and the run fails); (2) any block taken instead of the named one: the unit test fails; (3) no extractive fallback added: 2 host tests fail; (4) the re-seal drops `anchorDigest` again: the launch-limits test and the remote integration test fail.
+
+**Not done / left**
+- The W12 limits still hold on remote workers: the block is a snapshot taken when the process starts (a newer note shows only after the next start or placement), and it travels only in the extractive summary.
+- The machine cannot switch this off by itself. That is deliberate: the owner's switch on the controller decides, through the contract.
+- The remote test world still has no owner policy, so its other tests do not go through `#carry`. The new launch-limits test and the integration test cover it.
+- The MCP door for outside agents is unchanged (W13's note).
+
+ASSUMPTION: no new wire field. The card allowed "offer/channel/control"; the offer already carries the block and its sealed digest, so reusing them is the smallest change that is safe with older versions on either side.
+ASSUMPTION: when a machine's own context has compaction settings but no fallback, adding the anchor also sets `fallback: "extractive"`. Without it the channel refuses the anchor, and the controller's local path always sends both.
 
 ## W13: task.recall, an agent reads back its own task's records (2026-11-11)
 

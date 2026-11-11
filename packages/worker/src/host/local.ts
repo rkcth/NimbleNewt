@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { endKindOf, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
+import { ANCHOR_CHANNEL_MAX, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -30,7 +30,32 @@ export interface HostOrder {
   readonly expiresAt?: string;
   readonly resumeFrom?: JsonObj;
   /** The dispatch contract (card H12a) as far as the host reads it: the limits the dispatcher worked out for this launch (card A08d: the agent's environment cut by the installation's), applied on top of the host's own and the owner's, never instead of them. */
-  readonly contract?: { readonly limits?: ResourceLimits };
+  readonly contract?: { readonly limits?: ResourceLimits; /** Card W12: the digest of the goal anchor block the controller put at the top of `content` (the contract's digest covers it). */ readonly anchorDigest?: string };
+  /** The order's first prompt (the dispatcher's `WorkOrder.content`); read here only to find the goal anchor the contract names. */
+  readonly content?: string;
+}
+
+/**
+ * The goal anchor this order's process re-inserts after every context cut (W12 follow-up, remote workers): the block in the order's own content whose digest the dispatch contract names, exactly as the controller's local path
+ * (`dispatch-compose.ts` `contextFor`) picks it. Nothing new travels: a remote worker already receives the content and the sealed contract in its offer, and `honorContract` has refused an order whose named block is not there.
+ * Only the named block is taken (a task text may carry a block of its own that checks out; it is not the controller's), it must check out on its own and fit the channel's bound. `undefined` otherwise: the process then starts as before.
+ */
+export function orderAnchor(order: Pick<HostOrder, "content" | "contract">): string | undefined {
+  const named = (order.contract as { readonly anchorDigest?: unknown } | undefined)?.anchorDigest;
+  if (typeof named !== "string" || !/^[0-9a-f]{64}$/.test(named) || typeof order.content !== "string") return undefined;
+  const found = findAnchors(order.content).find((a) => a.digest === named);
+  return found === undefined || found.text.length > ANCHOR_CHANNEL_MAX || verifyAnchor(found.text) !== named ? undefined : found.text;
+}
+
+/**
+ * The channel context with the order's goal anchor (W12 follow-up): a context that already carries an anchor (the controller's local path hands it in) is kept as it is; otherwise the anchor the order's contract names is added with
+ * the extractive fallback the channel requires for it (only that summary puts the block back). An order without an anchor leaves the context exactly as given.
+ */
+export function withOrderAnchor(context: ChannelContext | undefined, order: Pick<HostOrder, "content" | "contract">): ChannelContext | undefined {
+  if (context?.compaction?.anchor !== undefined) return context;
+  const text = orderAnchor(order);
+  if (text === undefined) return context;
+  return { ...(context ?? {}), compaction: { ...(context?.compaction ?? {}), fallback: "extractive", anchor: { text } } };
 }
 
 /**
@@ -473,7 +498,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       }
       entry.process = process;
       try {
-        const channelContext = await options.context?.(order);
+        const channelContext = withOrderAnchor(await options.context?.(order), order);
         await process.start({
           attemptId: order.attemptId, agentId: order.agentId, namespaceId: options.namespaceId(order), credential: order.credential,
           storeDir: hostPaths ? join(entry.workspace.home, "pi") : `${GUEST.home}/pi`, model, ...(recovery === undefined ? {} : { recover: recovery }), relayBase: options.relayBase ?? RELAY_BASE,

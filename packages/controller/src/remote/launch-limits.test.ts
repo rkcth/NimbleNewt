@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type { WorkOrder } from "../dispatch/ports.js";
 import { LaunchLimitError } from "../environments/index.js";
@@ -50,4 +51,20 @@ test("a figure that is not valid, on either side, offers nothing", async () => {
   const owner = host({ limits: { memoryMb: 0 } });
   await assert.rejects(() => owner.h.start(sealed({ cpus: 2 })), LaunchLimitError);
   assert.equal(bad.placed.length + owner.placed.length, 0);
+});
+
+test("sealed again with the owner's limits, the contract still names the goal anchor the dispatcher put at the top of the order, and the digest matches (W12 follow-up: without it a remote worker never re-inserts the anchor)", async () => {
+  const body = "Goal: \"Order seeds\"";
+  const digest = createHash("sha256").update(body, "utf8").digest("hex");
+  const block = `[NN-ANCHOR v1 sha256:${digest}]\n${body}\n[/NN-ANCHOR sha256:${digest}]`;
+  const order = sealContract({ ...base(), content: `${block}\n\nOrder seeds.` }, { taskContractVersion: 1, permissions: [], bestEffort: false, anchorDigest: digest });
+  const { h, placed } = host({ limits: { memoryMb: 256 }, bestEffort: true });
+  await h.start(order);
+  assert.equal(placed[0]!.contract!.anchorDigest, digest);
+  assert.deepEqual(placed[0]!.contract!.limits, { memoryMb: 256 }, "the owner's figure is carried as well");
+  assert.doesNotThrow(() => checkContract(placed[0]!));
+  // An order without an anchor is sealed again without one.
+  const plain = host({ limits: { memoryMb: 256 } });
+  await plain.h.start(sealed());
+  assert.equal("anchorDigest" in plain.placed[0]!.contract!, false);
 });
