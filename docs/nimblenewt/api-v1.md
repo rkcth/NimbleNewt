@@ -4220,13 +4220,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `security.report`
 
-A host or a service tells the controller of a security event it detected (a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check). The controller tells the owner at once as an Urgent item; the same event (same kind and key) is told once. Agents and tasks cannot report.
+A host or a service tells the controller of a security event it detected (a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check). The controller tells the owner at once as an Urgent item; the same event (same kind, key and project) is told once, also after the owner closed it. Agents and tasks cannot report.
 
 Arguments:
 
 - `kind`: sandbox-escape-attempt, credential-misused, protected-path-touched or integrity-check-failed
-- `key`: your own identifier of the event (up to 200 characters, never a secret); the same key is the same event
-- `projectId` (optional): the project concerned
+- `key`: your own identifier of the event (up to 200 characters, never a secret, never sent outside); the same key is the same event
+- `projectId` (optional): the project concerned (a project ID)
 
 Result: `{ itemId, held }`: the owner's item; `held` is true when your hourly allowance of separate reports was used and the report went into the collected item.
 

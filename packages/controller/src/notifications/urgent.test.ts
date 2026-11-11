@@ -359,4 +359,33 @@ for (const backend of backends) {
     now += 61 * MIN; await c.set({ securityReportsPerHour: 2 });
     assert.equal((await c.watch.reportSecurityFrom(w, { kind: "protected-path-touched", key: "later" })).held, false, "the hour has passed");
   });
+
+  suite("a security report takes a key of the full 200 characters, refuses a kind that is not its own (toString), a project that is not a project ID, and a closed event reported again is told once, not refused (card U11c review)", async (c) => {
+    const w = as(c.owner, "service", "a-service-name-of-forty-characters-long1");
+    const long = "k".repeat(200);
+    const first = await c.watch.reportSecurityFrom(w, { kind: "sandbox-escape-attempt", key: long, projectId: "proj-abcdefghijklmnopqrst" });
+    assert.equal(first.held, false);
+    for (const kind of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+      await assert.rejects(() => c.watch.reportSecurityFrom(w, { kind, key: "k" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command", kind);
+    }
+    await assert.rejects(() => c.watch.reportSecurityFrom(w, { kind: "integrity-check-failed", key: "k", projectId: "see https://evil.example/" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await drain(c, 1);
+    assert.equal(c.sent.length, 1);
+    assert.ok(!c.sent[0]!.text.includes("kkkk") && !c.sent[0]!.text.includes("proj-"), "neither the key nor the project leaves");
+    // The owner closes it; the reporter sends the same event again (a retry): the first item, not an error and not a new page.
+    const item = (await c.open()).find((i) => i.id === first.itemId)!;
+    await c.svc.answerItem(c.owner, { commandId: cid("ai"), itemId: first.itemId, answer: "ok", revision: (item as unknown as { revision: number }).revision });
+    const again = await c.watch.reportSecurityFrom(w, { kind: "sandbox-escape-attempt", key: long, projectId: "proj-abcdefghijklmnopqrst" });
+    assert.deepEqual(again, { itemId: first.itemId, held: false });
+    assert.equal((await c.open()).filter((i) => i.ref.kind === "security").length, 0, "not raised again");
+    await drain(c, 2);
+    assert.equal(c.sent.length, 1, "not paged again");
+    // The same key under another project is another event.
+    const other = await c.watch.reportSecurityFrom(w, { kind: "sandbox-escape-attempt", key: long, projectId: "proj-bbbbbbbbbbbbbbbbbbbb" });
+    assert.notEqual(other.itemId, first.itemId);
+    // The controller's own event with a key that spells a reporter's identity is not that reporter's event.
+    const own = await c.watch.reportSecurity({ kind: "integrity-check-failed", key: `${w.id}|-|x` });
+    const theirs = await c.watch.reportSecurityFrom(w, { kind: "integrity-check-failed", key: "x" });
+    assert.notEqual(own.itemId, theirs.itemId);
+  });
 }
