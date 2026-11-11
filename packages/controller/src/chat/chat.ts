@@ -1663,6 +1663,17 @@ export class ChatService {
         const item = await this.#get(token, "retention.settings.get", {});
         return { ok: true, name: "expectedRevision", value: (typeof item?.["revision"] === "number" ? (item["revision"] as number) : 0) + ahead("retention") };
       }
+      case "standing-proposal": {
+        // The proposal's revision now (cards A07b, U08); a proposal that is not the owner's to see, or does not exist, is not found.
+        const r = typeof args["proposalId"] === "string" ? await this.#deps.api.handle(token, { v: API_VERSION, op: "approval.proposals", args: {} }) : undefined;
+        const found = r !== undefined && r.ok ? (r.result["items"] as { id: string; revision: number }[] | undefined)?.find((x) => x.id === args["proposalId"]) : undefined;
+        return found === undefined ? refuse("not_found", "no such standing-rule proposal") : { ok: true, name: "expectedRevision", value: found.revision };
+      }
+      case "profile-suggestion": {
+        // The suggestion's revision now; 0 before the first answer.
+        const item = await this.#get(token, "approval.suggestion", {});
+        return item === undefined || typeof item["revision"] !== "number" ? refuse("not_found", "the derived-profile question is not available") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
+      }
       case "catalog-policy": {
         // Never set: the operation takes 0.
         const item = await this.#get(token, "catalog.policy.get", {});

@@ -241,6 +241,8 @@ export class ToolPath {
       ...(branchProtected === undefined ? {} : { branchProtected }), ...(branch === undefined ? {} : { branch }), ...(c.audience === undefined ? {} : { audience: c.audience }), ...(c.irreversible === undefined ? {} : { irreversible: c.irreversible }),
       ...(spent === undefined ? {} : { spentSoFar: spent }),
     });
+    // What the policy decided is counted for the approval-load figures; a failure to count never changes the call.
+    if (this.#deps.decided !== undefined) { try { await this.#deps.decided(decision, ready.opId); } catch { /* best effort */ } }
     const info = { mode: decision.mode, via: decision.via, reasons: decision.reasons.slice(0, 5).map((r) => clip(redactText(r), DISPATCH_LIMITS.diagnostic)) };
     if (decision.mode === "deny") return { kind: "refused", reason: `denied by policy: ${info.reasons.join("; ")}`, denied: true };
     // An exact-operation review (A05: a call that runs a script, or installs something that runs) inside an approved ceiling still goes to the owner; a policy-level agent review stays with any reviewer.

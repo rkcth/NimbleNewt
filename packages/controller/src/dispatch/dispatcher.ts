@@ -26,7 +26,7 @@ import { cutNote, type HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
-import { describePolicyContext, type PolicyService } from "../policy/index.js";
+import { describePolicyContext, type Decision, type PolicyService } from "../policy/index.js";
 import { ActionCatalog } from "../policy/catalog.js";
 import { handoffBrief } from "./handoff-brief.js";
 import type { ReviewService } from "../review/index.js";
@@ -128,6 +128,8 @@ export interface DispatcherDeps {
    */
   /** Told when the approval policy denies a tool call outright (card U11c: repeated denials of one agent can become Urgent). Best effort: a failure never changes the refusal. */
   readonly denied?: (denial: { readonly attemptId?: string; readonly callId?: string; readonly agentId: string; readonly projectId: string }) => Promise<unknown>;
+  /** Told what the approval policy decided for a tool call, with the call's operation ID (card U08: the approval-load figures count how much ran by rule, grant, agent review or the owner). Best effort: a failure never changes the call; the ID names the record, so a judgement made twice counts once. */
+  readonly decided?: (decision: Decision, actionId: string) => Promise<unknown>;
   readonly protectedBranch?: (projectId: string, branch: string | undefined) => Promise<boolean>;
   readonly effects: Pick<EffectService, "intend" | "run" | "get">;
   readonly blockers: Pick<BlockerService, "openBlocker" | "openFor">;
