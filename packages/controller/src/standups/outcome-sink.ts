@@ -1,6 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import { cut, type OutcomeSink } from "./shared.js";
 import type { OwnerQuestionSink } from "./standups.js";
+import { MEETING_LIMITS } from "../meetings/meetings.js";
 
 /**
  * Tells a proposer what the stand-up decided about its improvement (card M03d, owner decision 2026-10-29): a controller notice against the task the outcome is about. An outcome with no task of its own is not filed here
@@ -56,7 +57,7 @@ export function ownerQuestionSink(deps: {
 }): OwnerQuestionSink {
   return {
     raise: async (n) => {
-      const text = `The stand-up asks you, about "${cut(n.topic, 80)}": ${cut(n.question, 300)} Answer in the chat in your own words, for example "the answer to the stand-up's question is ...".`;
+      const text = `The stand-up asks you, about "${cut(n.topic, 80)}": ${cut(n.question, MEETING_LIMITS.ownerQuestion)} Answer in the chat in your own words, for example "the answer to the stand-up's question is ...".`;
       // The notification's detail is short (the inbox keeps 200 characters); the whole question is on the record and in the chat.
       const short = `${cut(`Stand-up asks, on "${cut(n.topic, 40)}":`, 80)} ${cut(n.question, 100)} Answer in chat.`;
       try { await deps.notify({ commandId: `oqn:${n.key}`, questionId: n.questionId, projectId: n.projectId, detail: cut(short, 200) }); } catch { return false; }

@@ -980,6 +980,11 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: queued.id, expectedRevision: 1, to: "queued", ownerQuestion: "Why?" } as never));
     await refuses("invalid_command", () => settle("Secrets", "Use key sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD"));
     await refuses("invalid_command", () => settle("Long", "x".repeat(501)));
+    // An agent may raise and settle its own topic, but not make the meeting ask the owner (that is an inquiry, with its task); an agent that manages meetings may not either.
+    const own = await c.meetings.addAgendaItem(c.dev, { ...item({ topic: "Agent's own" }), projectId: c.a });
+    await refuses("forbidden", () => c.meetings.setAgendaState(c.dev, { commandId: cid("st"), itemId: own.id, expectedRevision: 1, to: "resolved", ownerQuestion: "Can I have more budget?" }), (e) => assert.match(e.message, /ask the owner/));
+    await refuses("forbidden", () => c.meetings.setAgendaState(c.mgr, { commandId: cid("st"), itemId: own.id, expectedRevision: 1, to: "resolved", ownerQuestion: "Can it have more budget?" }));
+    await c.meetings.setAgendaState(c.dev, { commandId: cid("st"), itemId: own.id, expectedRevision: 1, to: "resolved", outcomeNote: "Done." });
     assert.equal((await c.standups.ownerQuestions(c.owner, c.a)).open.length, 0);
 
     const first = await settle("Backups", "Keep seven nightly backups or thirty?", "deferred");
@@ -1061,6 +1066,27 @@ for (const backend of backends) {
     assert.equal(agenda.ownerQuestions!.answered[0]!.cites[0]!.kind, "owner-question");
     const asAgent = await s.agenda(c.asA, occ);
     assert.equal(asAgent?.ownerQuestions, undefined, "a roster member without the records' grants does not read them");
+  });
+
+  suite("an answer that lands while the question is being announced still closes the announcement (card M03h review)", async (c) => {
+    at("2026-10-20T09:00:00.000Z");
+    const closed: string[] = [];
+    const s = c.make({
+      // The owner answers (straight through the meeting service, as a racing request would) while the notification is being filed.
+      ownerQuestions: { raise: async (n: { questionId: string }) => { const q = (await c.meetings.ownerQuestion(c.owner, n.questionId))!; await c.meetings.answerOwnerQuestion(c.owner, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision, answer: "Release 3" }); return true; } },
+      onOwnerAnswered: async (q: { questionId: string }) => { closed.push(q.questionId); },
+    } as never);
+    const m = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: "Racing" }), projectId: c.a });
+    await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: m.id, expectedRevision: 1, to: "resolved", ownerQuestion: "Which release?" });
+    const id = (await c.meetings.agendaItem(c.owner, m.id))!.ownerQuestionId!;
+    assert.deepEqual((await s.deliverOutcomes(c.owner, c.a)).questions?.told, [id]);
+    assert.deepEqual(closed, [id], "the notification filed after the answer is closed");
+    // An ordinary announcement, with no answer yet, closes nothing.
+    const quiet = c.make({ ownerQuestions: { raise: async () => true }, onOwnerAnswered: async (q: { questionId: string }) => { closed.push(q.questionId); } } as never);
+    const m2 = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: "Calm" }), projectId: c.a });
+    await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: m2.id, expectedRevision: 1, to: "resolved", ownerQuestion: "Which level?" });
+    assert.equal((await quiet.deliverOutcomes(c.owner, c.a)).questions?.told.length, 1);
+    assert.deepEqual(closed, [id]);
   });
 
 }

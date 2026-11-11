@@ -508,4 +508,45 @@ for (const backend of backends) {
     const empty = only((await say(w, chat, "Is there anything else the stand-up wants?")).outcomes);
     assert.equal(empty.status, "refused", JSON.stringify(empty));
   });
+
+  suite("words that fit two stand-up questions ask which, and the owner's pick answers the one picked, shown first; an ID the model supplies is not taken (card M03h review)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const settle = async (topic: string, question: string): Promise<void> => {
+      const made = await w.meetings.addAgendaItem(w.owner, { commandId: cid("cap"), projectId: a, topic, urgency: "normal", intent: "discussion" } as never);
+      const item = (await w.meetings.agendaItem(w.owner, made.id))!;
+      await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item.id, expectedRevision: item.revision, to: "resolved", outcomeNote: "Talked it over.", ownerQuestion: question });
+    };
+    await settle("Release train", "Should the release wait for the audit?");
+    await settle("Release notes", "Who writes the release notes?");
+    type Q = { id: string; topic: string; answer?: string };
+    const read = async () => ((await w.api.handle(w.ownerToken, { v: 1, op: "standup.owner-questions", args: { projectId: a } } as never)) as unknown as { result: { item: { open: Q[]; answered: Q[] } } }).result.item;
+    const [train, notes] = (await read()).open;
+
+    // A question ID the owner never said is the model's own: it is not taken.
+    script["About the release: Maya does."] = [cmd("standup.answer-question", { questionId: notes!.id, answer: "Maya does" }, "About the release: Maya does")];
+    const forged = only((await say(w, chat, "About the release: Maya does.")).outcomes);
+    assert.equal(forged.status, "refused", JSON.stringify(forged));
+    assert.equal((await read()).open.length, 2);
+
+    // Words that fit both ask which; nothing is answered meanwhile.
+    script["About the release question: Maya does."] = [cmd("standup.answer-question", { questionTopic: "release", answer: "Maya does" }, "About the release question: Maya does")];
+    const asked = await say(w, chat, "About the release question: Maya does.", "m-ask");
+    assert.deepEqual(asked.outcomes.map((o) => o.status), ["asked"], JSON.stringify(asked));
+    assert.deepEqual([...(await chat.context(w.ownerToken)).awaiting!.choices].sort(), [train!.id, notes!.id].sort());
+    assert.equal((await read()).open.length, 2);
+
+    // The owner picks the notes question: it is shown first with the question it answers, and applied when the owner agrees.
+    script["the notes one"] = [{ kind: "answer", turnId: asked.turnId, choice: notes!.id, evidence: "the notes one", basis: "owner" }];
+    const picked = only((await say(w, chat, "the notes one", "m-pick")).outcomes);
+    assert.equal(picked.status, "proposed", JSON.stringify(picked));
+    assert.match(JSON.stringify(picked), /Who writes the release notes/);
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: picked.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    const after = await read();
+    assert.deepEqual(after.open.map((q) => q.topic), ["Release train"]);
+    assert.deepEqual(after.answered.map((q) => [q.topic, q.answer]), [["Release notes", "Maya does"]]);
+  });
 }

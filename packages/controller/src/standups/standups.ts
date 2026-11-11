@@ -681,6 +681,12 @@ export class StandupService {
       if (sent === false) { out.waiting.push(q.id); continue; }
       await this.#meetings.markOwnerQuestionTold(by, q.id);
       out.told.push(q.id);
+      // The owner may have answered while the notification was being filed: the answer's own close then found nothing open, so it is closed here (closing is by the question, and closing twice does nothing).
+      const hook = this.#options.onOwnerAnswered;
+      if (hook !== undefined) {
+        const now = await this.#meetings.ownerQuestion(by, q.id).catch(() => undefined);
+        if (now?.state === "answered") await Promise.resolve(hook({ questionId: q.id, projectId })).catch(() => undefined);
+      }
     }
     return out;
   }

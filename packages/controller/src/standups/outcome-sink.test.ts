@@ -40,6 +40,12 @@ test("a question a stand-up asked the owner is told by a short notification keye
   assert.equal(turns.length, 1);
   assert.equal(turns[0]!.key, "oqn:sqn-a");
   assert.match(turns[0]!.text, /the old API, given that the mobile app/, "the turn carries more of the question than the notification");
+  // The turn carries the whole question, up to the longest a meeting may ask (card M03h review: it was cut at 300).
+  const longest = `${"Which way? ".repeat(44)}End of question.`;
+  assert.equal(longest.length, 500);
+  assert.equal(await sink.raise({ ...n, key: "sqn-l", questionId: "sqn-l", question: longest }), true);
+  assert.ok(turns.at(-1)!.text.includes("End of question."), turns.at(-1)!.text);
+  turns.pop(); notes.pop();
   // A topic that came from an inquiry or from nowhere has no turn to write on; the notification alone tells the owner.
   assert.equal(await sink.raise({ ...n, key: "sqn-b", questionId: "sqn-b", source: { kind: "inquiry" as const, id: "inq-1" } }), true);
   assert.equal(await sink.raise({ key: "sqn-c", questionId: "sqn-c", projectId: "proj-1", topic: "Logging", question: "Which level?" }), true);

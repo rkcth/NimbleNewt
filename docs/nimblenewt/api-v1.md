@@ -5906,7 +5906,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `agenda.settle`
 
-Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it.
+Moves an agenda item along after the meeting: `discussed`, `resolved` (with the meeting's words as `outcomeNote`), `deferred` (with a `reason` and a `nextStep`) or `queued` again. A meeting that needs something from the owner sets `ownerQuestion`: it becomes a question of its own that the owner is told about and answers in chat, and the answer is shown on the next agenda. The item's owner or someone with `meeting.manage` does it; only the owner, or a host or service with `meeting.manage`, may set `ownerQuestion` (never an agent or a task credential: an agent asks the owner through an inquiry).
 
 Arguments:
 
@@ -5917,7 +5917,7 @@ Arguments:
 - `nextStep` (optional): what happens next, for a deferral
 - `outcomeRef` (optional): a link to the decision, for a discussed or resolved item
 - `outcomeNote` (optional): what the meeting made of it, in words
-- `ownerQuestion` (optional): a new question for the owner (not for a queued item)
+- `ownerQuestion` (optional): a new question for the owner (not for a queued item; not from an agent)
 
 Result: `{ ok }`.
 

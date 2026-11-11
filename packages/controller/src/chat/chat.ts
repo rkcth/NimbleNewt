@@ -674,8 +674,8 @@ export class ChatService {
     }
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
-    // A motion or meeting picked from the question of a meeting control (card M02h) is likewise the owner's own choice.
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
+    // A motion or meeting picked from the question of a meeting control (card M02h) is likewise the owner's own choice, and so is the stand-up question picked for an answer (card M03h).
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "questionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 

@@ -823,6 +823,9 @@ export class MeetingService {
         const body = found?.body as unknown as AgendaBody | undefined;
         const allowed = body !== undefined && (allows(by, "meeting.manage", body.projectId) || (by.id === body.owner && allows(by, "meeting.agenda", body.projectId)));
         if (found === undefined || body === undefined || !allowed) throw new DomainError("forbidden", `${by.id} may not change that agenda item`);
+        // Asking the owner something new puts a needs-you item in the owner's inbox. Every agent may raise and settle its own topics (`meeting.agenda`), so owning the item is not enough: only the meeting's side (the owner, or
+        // a host or service that manages meetings; never an agent, an outside app or a task credential) asks. An agent's question to the owner is an inquiry, with its task.
+        if (ownerQuestion !== undefined && (by.kind === "agent" || by.kind === "client" || by.taskScope !== undefined || !allows(by, "meeting.manage", body.projectId))) throw new DomainError("forbidden", `${by.id} may not ask the owner a question for a meeting`);
         if (found.revision !== expected) throw new DomainError("stale_revision", `agenda item ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
         const legal: Readonly<Record<AgendaState, readonly AgendaState[]>> = {
           queued: ["deferred", "resolved"], scheduled: ["discussed", "deferred", "resolved", "queued"], discussed: ["resolved", "deferred"], deferred: ["queued", "resolved"], resolved: [],
