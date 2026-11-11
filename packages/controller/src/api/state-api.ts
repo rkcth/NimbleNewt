@@ -38,6 +38,7 @@ import type { SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
 import type { StartSizeService } from "../context/start-size.js";
+import type { EnvironmentService } from "../environments/index.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
@@ -162,6 +163,7 @@ export interface StateApiDeps {
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
+  readonly environments?: Pick<EnvironmentService, "get">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
   /** The host and global admission quotas (card H10). */
   readonly capacityQuotas?: Pick<AdmissionService, "quotas" | "changeQuotas">;
@@ -326,6 +328,7 @@ export class StateApi {
         ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.maintenance === undefined ? {} : { maintenance: this.#deps.maintenance }),
+        ...(this.#deps.environments === undefined ? {} : { environments: this.#deps.environments }),
         ...(this.#deps.capacityLimits === undefined ? {} : { capacityLimits: this.#deps.capacityLimits }),
         ...(this.#deps.capacityQuotas === undefined ? {} : { capacityQuotas: this.#deps.capacityQuotas }),
         ...(this.#deps.swarmLimits === undefined ? {} : { swarmLimits: this.#deps.swarmLimits }),
