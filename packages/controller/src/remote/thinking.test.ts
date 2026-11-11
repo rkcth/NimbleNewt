@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { after, test } from "node:test";
-import { THINKING_REPORT } from "@nimblenewt/contracts";
+// The worker channel's bounds (`THINKING_REPORT` in the contracts package, which the controller's package rules do not let a test import): the process cuts to these, the route refuses more.
+const THINKING_REPORT = { blocks: 50, chars: 8000 } as const;
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PROTOCOL_HEADER, REMOTE_LIMITS, SESSION_HEADER, type ThinkingWire } from "./protocol.js";
 import { RemoteOfferRunner } from "./runner.js";
@@ -17,7 +18,7 @@ after(stopServer);
 const MARK = "SECRET-THINKING-MARKER-4711";
 const block = (entryId: number, text = `thought ${entryId}`, extra: Partial<ThinkingWire> = {}): ThinkingWire => ({ entryId, block: 0, provider: "llama", model: "local-m", text, opaque: false, ...extra });
 
-test("the route's bounds are the worker channel's own", () => {
+test("the route's bounds are the worker channel's figures (50 blocks of 8000 characters)", () => {
   assert.equal(REMOTE_LIMITS.thinkingBlocks, THINKING_REPORT.blocks);
   assert.equal(REMOTE_LIMITS.thinkingChars, THINKING_REPORT.chars);
 });

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { THINKING_REPORT } from "@nimblenewt/contracts";
+const THINKING_REPORT = { chars: 8000 } as const;
 import { FULL_ABILITIES, wireRefuses } from "../remote/testing/suite.js";
 import { world } from "./testing/remote-world.js";
 
