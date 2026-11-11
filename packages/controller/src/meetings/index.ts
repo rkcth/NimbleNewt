@@ -1,4 +1,4 @@
-export { AGENDA_CATEGORIES, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, authorityOf, categoryOf, ownerTimeZoneFrom, type AgendaBody, type AgendaCategory, type AgendaIntent, type AgendaState, type AgendaUrgency, type Invitation, type InvitationSink, type MeetingOptions, type OccurrenceBody, type OccurrenceKind, type OccurrenceMode, type OccurrenceState, type ParticipantRecord, type ParticipantStatus, type ScheduleBody, type ScheduleState } from "./meetings.js";
+export { AGENDA_CATEGORIES, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, authorityOf, categoryOf, ownerTimeZoneFrom, type AgendaBody, type OwnerQuestionBody, type AgendaCategory, type AgendaIntent, type AgendaState, type AgendaUrgency, type Invitation, type InvitationSink, type MeetingOptions, type OccurrenceBody, type OccurrenceKind, type OccurrenceMode, type OccurrenceState, type ParticipantRecord, type ParticipantStatus, type ScheduleBody, type ScheduleState } from "./meetings.js";
 export { knownZone, instantOf, nextSlot, dueSlots, type Recurrence, type Slot, type SlotRule } from "./zones.js";
 export {
   ATTENDANCE_LIMITS, AttendanceService,

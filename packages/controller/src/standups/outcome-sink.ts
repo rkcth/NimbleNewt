@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
-import type { OutcomeSink } from "./shared.js";
+import { cut, type OutcomeSink } from "./shared.js";
+import type { OwnerQuestionSink } from "./standups.js";
 
 /**
  * Tells a proposer what the stand-up decided about its improvement (card M03d, owner decision 2026-10-29): a controller notice against the task the outcome is about. An outcome with no task of its own is not filed here
@@ -41,6 +42,26 @@ export function agendaOutcomeSink(deps: {
         return error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command") && n.to.kind === "inquiry";
       }
       return false;
+    },
+  };
+}
+
+/**
+ * Tells the owner a stand-up asked a question (card M03h): a needs-you notification (the question is the notification's detail, so the owner sees it in the inbox) and, when the topic came from a chat turn, a note on that turn,
+ * which the chat shows. Both are keyed by the question, so a repeat files them once. The notification is the part that must succeed; a turn that is gone or full is not a reason to keep the owner from being told.
+ */
+export function ownerQuestionSink(deps: {
+  notify(command: { commandId: string; questionId: string; projectId: string; detail: string }): Promise<unknown>;
+  followUp(turnId: string, followUp: { key: string; text: string }): Promise<boolean>;
+}): OwnerQuestionSink {
+  return {
+    raise: async (n) => {
+      const text = `The stand-up asks you, about "${cut(n.topic, 80)}": ${cut(n.question, 300)} Answer in the chat in your own words, for example "the answer to the stand-up's question is ...".`;
+      // The notification's detail is short (the inbox keeps 200 characters); the whole question is on the record and in the chat.
+      const short = `${cut(`Stand-up asks, on "${cut(n.topic, 40)}":`, 80)} ${cut(n.question, 100)} Answer in chat.`;
+      try { await deps.notify({ commandId: `oqn:${n.key}`, questionId: n.questionId, projectId: n.projectId, detail: cut(short, 200) }); } catch { return false; }
+      if (n.source?.kind === "chat-turn") { try { await deps.followUp(n.source.id, { key: `oqn:${n.key}`, text }); } catch { /* the notification is filed; the turn note is a convenience */ } }
+      return true;
     },
   };
 }

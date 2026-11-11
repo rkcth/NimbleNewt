@@ -247,6 +247,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
+  standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner" },
@@ -267,6 +268,7 @@ export interface StandupSummaryView {
 }
 
 /** The parts of a stand-up brief the status answer reads (a brief is a record kept by the stand-up service; this is only the view of it). */
+export interface OwnerQuestionView { readonly id: string; readonly revision: number; readonly topic: string; readonly question: string; readonly askedAt: string; readonly answer?: string; readonly answeredAt?: string }
 export interface StandupBriefView {
   readonly id: string; readonly revision: number; readonly occurrenceId: string; readonly agent: string;
   readonly accomplishments: readonly { readonly text: string; readonly cites: readonly Cite[] }[];
@@ -312,6 +314,7 @@ export type StatusRequest =
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
+  | { readonly kind: "standup_questions"; readonly projectId: string }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
@@ -386,6 +389,7 @@ export interface StatusDeps {
   readonly standups?: {
     recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>;
     briefs?(viewer: Principal, occurrenceId: string): Promise<readonly StandupBriefView[]>;
+    ownerQuestions?(viewer: Principal, projectId: string): Promise<{ open: readonly OwnerQuestionView[]; answered: readonly OwnerQuestionView[] }>;
     overview?(viewer: Principal, projectId: string, page?: { limit?: number; includeEnded?: boolean }): Promise<{ items: readonly StandupSummaryView[]; more?: boolean; ended?: number } | undefined>;
   };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
@@ -610,6 +614,7 @@ export class StatusService {
       case "replay": { onlyKnown(request, ["kind", "taskId", "seq", "from", "limit", "lane", "agent", "stepKind", "since", "until"]); return this.replayLines(by, request); }
       case "activity": { onlyKnown(request, ["kind", "taskId", "latest", "after", "limit"]); return this.activityLines(by, request); }
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
+      case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
@@ -1315,6 +1320,18 @@ export class StatusService {
    * The briefs prepared for one stand-up, or one agent's, in plain lines (card M03h): what the agent did, what is unfinished, what blocks it, the advice it needs, its priorities, and the notes added to it, each marked as the agent's or the owner's.
    * What the reader may not see reads as missing. Entries come from the records the brief was made from and cite them; the statements are words, not records.
    */
+  async standupQuestionLines(by: Principal, request: { projectId: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.standups?.ownerQuestions === undefined) return undefined;
+    const projectId = checkProjectId(request.projectId);
+    if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
+    const { open, answered } = await this.#deps.standups.ownerQuestions(by, projectId);
+    const lines: Line[] = [];
+    for (const q of open) lines.push(line(`Waiting for your answer, from the stand-up topic ${quoted(q.topic)}: ${quoted(q.question)} (asked ${q.askedAt}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
+    for (const q of answered) lines.push(line(`Answered, about ${quoted(q.topic)}: ${quoted(q.question)} Your answer: ${quoted(q.answer ?? "")} (${q.answeredAt ?? "no time recorded"}).`, cite("owner-question", q.id, q.revision), cite("project", projectId)));
+    if (lines.length === 0) lines.push(line("No stand-up has asked the owner anything in this project.", cite("project", projectId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async standupBriefLines(by: Principal, request: { occurrenceId: string; agent?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const briefs = this.#deps.standups?.briefs;
     if (briefs === undefined) return undefined;

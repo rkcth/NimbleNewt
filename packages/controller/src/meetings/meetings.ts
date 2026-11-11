@@ -49,6 +49,27 @@ export const authorityOf = (intent: AgendaIntent): { readonly executes: boolean;
   }
 };
 
+/**
+ * A question a meeting asks the owner when it settles an agenda topic (kind `owner-question`, card M03h). It belongs to the topic and the project, not to a task (a stand-up topic raised from a chat turn has none), so it is not
+ * an inquiry. The owner is told through the owner notifications and, when the topic came from a chat turn, on that turn; the owner answers in chat or through the API, and the answer is shown on the next agenda.
+ */
+export interface OwnerQuestionBody {
+  readonly projectId: string;
+  readonly agendaItemId: string;
+  readonly topic: string;
+  readonly occurrenceId?: string;
+  readonly source?: { readonly kind: "inquiry" | "chat-turn"; readonly id: string };
+  readonly question: string;
+  readonly state: "open" | "answered";
+  readonly askedBy: string;
+  readonly askedAt: string;
+  /** Set once the owner was told (notification filed, chat turn marked). Until then the delivery loop tries again. */
+  readonly toldAt?: string;
+  readonly answer?: string;
+  readonly answeredAt?: string;
+}
+interface OwnerQuestionIndex { readonly open: readonly string[]; readonly answered: readonly string[] }
+
 export interface ScheduleBody {
   readonly projectId: string;
   readonly title: string;
@@ -165,6 +186,8 @@ export interface AgendaBody {
   readonly outcomeRef?: string;
   /** What the meeting made of it, in words, for the conversation the topic came from (set with the state change; handed back by `outcomesToReturn`). */
   readonly outcomeNote?: string;
+  /** The question the meeting asked the owner when it settled the topic (card M03h): the record is `OwnerQuestionBody`, named here so the topic shows it. The newest one; an earlier one stays on its own record. */
+  readonly ownerQuestionId?: string;
   /** The outcome could not go on the list of outcomes waiting to be returned (it was full): it waits on the overflow list or, past that, nowhere; `requeueReturns` lists it when there is room. */
   readonly returnUnlisted?: true;
   /** Present once the outcome was handed back to the conversation the item came from. */
@@ -206,7 +229,7 @@ export interface MeetingOptions extends RunnerOptions {
 
 export const MEETING_LIMITS = {
   title: 200, reason: 1000, topic: 200, question: 2000, context: 4000, outcome: 1000, deferral: 500, ref: 200, roster: 50, participants: 50, durationMax: 480, prepareMax: 720, leadMax: 60, leadDefault: 5,
-  openAgendaPerProject: 200, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
+  openAgendaPerProject: 200, ownerQuestion: 500, ownerAnswer: 1000, ownerQuestionsOpen: 10, ownerQuestionsAnswered: 10, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
 } as const;
 
 /** The setting that holds the owner's time zone for meetings. Pass these as `settings` to the configuration service. */
@@ -222,6 +245,7 @@ export const MEETING_SETTINGS: readonly SettingDefinition[] = [
 const SCHEDULE_ID = /^msc-[a-z2-7]{20}$/;
 const OCCURRENCE_ID = /^mto-[a-z2-7]{20}$/;
 const AGENDA_ID = /^mag-[a-z2-7]{20}$/;
+const OWNER_QUESTION_ID = /^sqn-[a-z2-7]{20}$/;
 const IMPROVEMENT_ID = /^imp-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 const GLOBAL_OPEN = "all";
@@ -779,8 +803,8 @@ export class MeetingService {
    * Moves an item along: `discussed`, `resolved` (with an optional link to the outcome), `deferred` (with a reason and a next step; it stays open and comes back on the next agenda) or `queued` again. The item's owner or
    * someone with `meeting.manage` does it. A resolved item is final.
    */
-  async setAgendaState(by: Principal, command: NoActor & { itemId: string; expectedRevision: number; to: "discussed" | "resolved" | "deferred" | "queued"; reason?: string; nextStep?: string; outcomeRef?: string; outcomeNote?: string }): Promise<void> {
-    onlyKnown(command, ["commandId", "itemId", "expectedRevision", "to", "reason", "nextStep", "outcomeRef", "outcomeNote"]);
+  async setAgendaState(by: Principal, command: NoActor & { itemId: string; expectedRevision: number; to: "discussed" | "resolved" | "deferred" | "queued"; reason?: string; nextStep?: string; outcomeRef?: string; outcomeNote?: string; ownerQuestion?: string }): Promise<void> {
+    onlyKnown(command, ["commandId", "itemId", "expectedRevision", "to", "reason", "nextStep", "outcomeRef", "outcomeNote", "ownerQuestion"]);
     const id = typeof command.itemId === "string" && AGENDA_ID.test(command.itemId) ? command.itemId : invalid("itemId", "is not an agenda item ID");
     const expected = checkRevision(command.expectedRevision);
     if (!["discussed", "resolved", "deferred", "queued"].includes(command.to as string)) invalid("to", "must be discussed, resolved, deferred or queued");
@@ -790,8 +814,10 @@ export class MeetingService {
     if (to !== "deferred" && (command.reason !== undefined || command.nextStep !== undefined)) invalid("reason", "only a deferral carries a reason and a next step");
     const outcomeRef = command.outcomeRef === undefined ? undefined : (to === "resolved" || to === "discussed" ? plain(command.outcomeRef, "outcomeRef", MEETING_LIMITS.ref) : invalid("outcomeRef", "only a discussed or resolved item links an outcome"));
     const outcomeNote = command.outcomeNote === undefined ? undefined : (to === "queued" ? invalid("outcomeNote", "a queued item has no outcome yet") : plain(command.outcomeNote, "outcomeNote", MEETING_LIMITS.outcome));
+    // A meeting that settles, discusses or defers a topic may ask the owner something new (card M03h): kept as a question of its own, in the same commit as the state change.
+    const ownerQuestion = command.ownerQuestion === undefined ? undefined : (to === "queued" ? invalid("ownerQuestion", "a queued item has no outcome yet, so it asks nothing") : plain(command.ownerQuestion, "ownerQuestion", MEETING_LIMITS.ownerQuestion));
     await this.#retrying(() => this.#runner.command("meeting.agenda.state", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: clean({ itemId: id, expectedRevision: expected, to, reason, nextStep, outcomeRef, outcomeNote }),
+      payload: clean({ itemId: id, expectedRevision: expected, to, reason, nextStep, outcomeRef, outcomeNote, ownerQuestion }),
       build: async () => {
         const found = await this.#runner.get("agenda-item", id);
         const body = found?.body as unknown as AgendaBody | undefined;
@@ -815,11 +841,15 @@ export class MeetingService {
         if (!returning) { const a = returnIds.indexOf(id); if (a >= 0) returnIds.splice(a, 1); const b = returnMore.indexOf(id); if (b >= 0) returnMore.splice(b, 1); }
         const nowIso = this.#runner.now();
         const stays = to === "discussed" ? keepOccurrence : undefined;
+        const questionId = ownerQuestion === undefined ? undefined : derivedId("sqn", `${id}|${found.revision}`);
+        const asked = ownerQuestion === undefined ? undefined : await this.#ownerQuestionIndex(body.projectId);
+        if (asked !== undefined && asked.index.open.length >= MEETING_LIMITS.ownerQuestionsOpen) throw new DomainError("unavailable", `${MEETING_LIMITS.ownerQuestionsOpen} questions to the owner are already open in this project; they need an answer first`);
         const next: AgendaBody = {
           ...rest, state: to, updatedAt: nowIso, ...(stays === undefined ? {} : { occurrenceId: stays }),
           ...(to === "deferred" ? { deferral: { reason: reason as string, nextStep: nextStep as string } } : {}),
           ...(outcomeRef === undefined ? (body.outcomeRef === undefined || to === "queued" ? {} : { outcomeRef: body.outcomeRef }) : { outcomeRef }),
           ...(outcomeNote === undefined ? {} : { outcomeNote }),
+          ...(questionId === undefined ? {} : { ownerQuestionId: questionId }),
           ...(placed === undefined || placed === "listed" ? {} : { returnUnlisted: true as const }),
         };
         // Open means queued or deferred: those are in the project's index; the rest are not.
@@ -831,6 +861,10 @@ export class MeetingService {
         const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean(next) }];
         if (ids.length !== index.ids.length) changes.push(this.#agendaChange(body.projectId, index, ids));
         if (returnIds.length !== returns.ids.length || returnMore.length !== returns.more.length) changes.push(this.#returnsChange(body.projectId, returns, returnIds, returnMore));
+        if (asked !== undefined && questionId !== undefined && ownerQuestion !== undefined) {
+          const question: OwnerQuestionBody = { projectId: body.projectId, agendaItemId: id, topic: body.topic, ...(keepOccurrence === undefined ? {} : { occurrenceId: keepOccurrence }), ...(body.source === undefined ? {} : { source: body.source }), question: ownerQuestion, state: "open", askedBy: by.id, askedAt: nowIso };
+          changes.push({ type: "create", ref: { kind: "owner-question", id: questionId }, body: clean(question) }, this.#ownerQuestionChange(body.projectId, asked, { open: [...asked.index.open, questionId], answered: asked.index.answered }));
+        }
         return { ref, creates: false, changes, detail: { projectId: body.projectId, to } };
       },
     })));
@@ -932,6 +966,91 @@ export class MeetingService {
         },
       }));
       return true;
+    });
+  }
+
+  // ---- questions the meeting asks the owner (card M03h) -----------------------------------------------------------------------
+
+  async #ownerQuestionIndex(projectId: string): Promise<{ index: OwnerQuestionIndex; revision: number }> {
+    const found = await this.#runner.get("owner-question-index", projectId);
+    const body = found?.body as unknown as Partial<OwnerQuestionIndex> | undefined;
+    return { index: { open: body?.open ?? [], answered: body?.answered ?? [] }, revision: found?.revision ?? 0 };
+  }
+
+  #ownerQuestionChange(projectId: string, from: { revision: number }, to: OwnerQuestionIndex): Change {
+    const ref: AggregateRef = { kind: "owner-question-index", id: projectId };
+    const body = { open: [...to.open], answered: [...to.answered] } as unknown as JsonObject;
+    return from.revision === 0 ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: from.revision, body };
+  }
+
+  /**
+   * The questions meetings asked the owner in a project: the open ones (oldest first) and the latest answered ones (newest first, ten at most). The owner, the controller and those who may read the project's meetings.
+   * Question and answer are the owner's and the meeting's own words, shown as untrusted text by whoever displays them.
+   */
+  async ownerQuestions(by: Principal, projectId: string): Promise<{ open: View<OwnerQuestionBody>[]; answered: View<OwnerQuestionBody>[] }> {
+    const project = checkProjectId(projectId);
+    if (!isService(by) || by.taskScope !== undefined) { if (!allows(by, "meeting.read", project)) throw new DomainError("forbidden", `${by.id} may not read the questions meetings asked the owner`); }
+    const { index } = await this.#ownerQuestionIndex(project);
+    const read = async (ids: readonly string[]): Promise<View<OwnerQuestionBody>[]> => {
+      const out: View<OwnerQuestionBody>[] = [];
+      for (const id of ids) { const found = await this.#runner.get("owner-question", id); if (found !== undefined) out.push(view<OwnerQuestionBody>(found)); }
+      return out;
+    };
+    return { open: await read(index.open), answered: await read([...index.answered].reverse()) };
+  }
+
+  /** One question, for whoever may read its project's meetings. */
+  async ownerQuestion(by: Principal, questionId: string): Promise<View<OwnerQuestionBody> | undefined> {
+    const id = typeof questionId === "string" && OWNER_QUESTION_ID.test(questionId) ? questionId : invalid("questionId", "is not an owner question ID");
+    const found = await this.#runner.get("owner-question", id);
+    if (found === undefined) return undefined;
+    const body = found.body as unknown as OwnerQuestionBody;
+    if ((!isService(by) || by.taskScope !== undefined) && !allows(by, "meeting.read", body.projectId)) return undefined;
+    return view<OwnerQuestionBody>(found);
+  }
+
+  /** The owner answers a question a meeting asked (the revision read must still be current). Owner only. The answer moves the question from the open list to the answered one, where the next agenda finds it. */
+  async answerOwnerQuestion(owner: Principal, command: NoActor & { questionId: string; expectedRevision: number; answer: string }): Promise<void> {
+    onlyKnown(command, ["commandId", "questionId", "expectedRevision", "answer"]);
+    if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", `${owner.id} is not the owner`);
+    const id = typeof command.questionId === "string" && OWNER_QUESTION_ID.test(command.questionId) ? command.questionId : invalid("questionId", "is not an owner question ID");
+    const expected = checkRevision(command.expectedRevision);
+    const answer = plain(command.answer, "answer", MEETING_LIMITS.ownerAnswer);
+    await this.#retrying(() => this.#runner.command("meeting.owner-question.answer", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+      payload: { questionId: id, expectedRevision: expected, answer },
+      build: async () => {
+        const found = await this.#runner.get("owner-question", id);
+        const body = found?.body as unknown as OwnerQuestionBody | undefined;
+        if (found === undefined || body === undefined) throw new DomainError("not_found", `question ${id} does not exist`);
+        if (found.revision !== expected) throw new DomainError("stale_revision", `question ${id} is at revision ${found.revision}, not ${expected}`, { currentRevision: found.revision });
+        if (body.state !== "open") throw new DomainError("invalid_command", `question ${id} was already answered`, { field: "questionId" });
+        const at = this.#runner.now();
+        const idx = await this.#ownerQuestionIndex(body.projectId);
+        const answered = [...idx.index.answered.filter((x) => x !== id), id].slice(-MEETING_LIMITS.ownerQuestionsAnswered);
+        const ref: AggregateRef = { kind: "owner-question", id };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, state: "answered", answer, answeredAt: at }) }, this.#ownerQuestionChange(body.projectId, idx, { open: idx.index.open.filter((x) => x !== id), answered })], detail: { projectId: body.projectId } };
+      },
+    })));
+  }
+
+  /** Records that the owner was told of a question (the notification was filed). Owner, host or service. Repeating it changes nothing. */
+  async markOwnerQuestionTold(by: Principal, questionId: string): Promise<void> {
+    if (!isService(by) || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not record that the owner was told`);
+    const id = typeof questionId === "string" && OWNER_QUESTION_ID.test(questionId) ? questionId : invalid("questionId", "is not an owner question ID");
+    await this.#retrying(async () => {
+      const found = await this.#runner.get("owner-question", id);
+      const body = found?.body as unknown as OwnerQuestionBody | undefined;
+      if (found === undefined || body === undefined || body.toldAt !== undefined) return;
+      await this.#runner.command("meeting.owner-question.told", { commandId: `oqt:${id}`, actor: by.id }, async () => ({
+        payload: { questionId: id },
+        build: async () => {
+          const cur = await this.#runner.get("owner-question", id);
+          const cb = cur?.body as unknown as OwnerQuestionBody | undefined;
+          if (cur === undefined || cb === undefined) throw new DomainError("not_found", `question ${id} does not exist`);
+          const ref: AggregateRef = { kind: "owner-question", id };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: cur.revision, body: clean({ ...cb, toldAt: this.#runner.now() }) }], detail: { projectId: cb.projectId } };
+        },
+      }));
     });
   }
 

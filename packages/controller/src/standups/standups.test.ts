@@ -966,5 +966,101 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.standups.overview(c.owner, c.a, { limit: 51 }));
   });
 
-}
+  // ---- questions the meeting asks the owner (card M03h) ---------------------------------------------------------------------
 
+  suite("a topic settled with a question for the owner keeps it as a record of its own: bounded, readable by those who read the meetings, answered by the owner alone and once, announced once through the sink (card M03h)", async (c) => {
+    at("2026-10-20T09:00:00.000Z");
+    const settle = async (topic: string, question: string | undefined, to: "resolved" | "deferred" | "queued" = "resolved", agendaState?: { itemId: string; revision: number }): Promise<string> => {
+      const made = agendaState ?? await (async () => { const m = await c.meetings.addAgendaItem(c.owner, { ...item({ topic }), projectId: c.a }); return { itemId: m.id, revision: (await c.meetings.agendaItem(c.owner, m.id))!.revision }; })();
+      await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: made.itemId, expectedRevision: made.revision, to, ...(to === "deferred" ? { reason: "later", nextStep: "ask" } : {}), ...(question === undefined ? {} : { ownerQuestion: question }) });
+      return made.itemId;
+    };
+    // A queued item has no outcome yet; a credential-shaped or over-long question is not recorded; nothing is created by the refusals.
+    const queued = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: "Too early" }), projectId: c.a });
+    await refuses("invalid_command", () => c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: queued.id, expectedRevision: 1, to: "queued", ownerQuestion: "Why?" } as never));
+    await refuses("invalid_command", () => settle("Secrets", "Use key sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD"));
+    await refuses("invalid_command", () => settle("Long", "x".repeat(501)));
+    assert.equal((await c.standups.ownerQuestions(c.owner, c.a)).open.length, 0);
+
+    const first = await settle("Backups", "Keep seven nightly backups or thirty?", "deferred");
+    const listed = await c.standups.ownerQuestions(c.owner, c.a);
+    assert.equal(listed.open.length, 1);
+    const q = listed.open[0]!;
+    assert.deepEqual([q.topic, q.question, q.state, q.agendaItemId, q.askedBy], ["Backups", "Keep seven nightly backups or thirty?", "open", first, c.owner.id]);
+    assert.equal((await c.meetings.agendaItem(c.owner, first))!.ownerQuestionId, q.id, "the topic points at its question");
+    // Readers of the project's meetings see it; others do not.
+    assert.equal((await c.standups.ownerQuestions(c.reader, c.a)).open.length, 1);
+    await refuses("forbidden", () => c.standups.ownerQuestions(c.eve, c.a));
+
+    // Only the owner answers, on the current revision, once.
+    await refuses("forbidden", () => c.standups.answerQuestion(c.host, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision, answer: "thirty" }));
+    await refuses("forbidden", () => c.standups.answerQuestion(c.mgr, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision, answer: "thirty" }));
+    await refuses("stale_revision", () => c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision + 1, answer: "thirty" }));
+    await refuses("invalid_command", () => c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision, answer: "token sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD" }));
+    await refuses("invalid_command", () => c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: "not-an-id", expectedRevision: 1, answer: "x" }));
+    const answerId = cid("an");
+    await c.standups.answerQuestion(c.owner, { commandId: answerId, questionId: q.id, expectedRevision: q.revision, answer: "thirty" });
+    await c.standups.answerQuestion(c.owner, { commandId: answerId, questionId: q.id, expectedRevision: q.revision, answer: "thirty" });
+    await refuses("invalid_command", () => c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: q.id, expectedRevision: q.revision + 1, answer: "again" }), (e) => assert.match(e.message, /already answered/));
+    const done = await c.standups.ownerQuestions(c.owner, c.a);
+    assert.equal(done.open.length, 0);
+    assert.deepEqual(done.answered.map((x) => [x.state, x.answer]), [["answered", "thirty"]]);
+
+    // At most ten are open at a time; the eleventh waits until one is answered. The answered list keeps the newest ten.
+    for (let i = 0; i < 10; i++) await settle(`Topic ${i}`, `Question ${i}?`);
+    await refuses("unavailable", () => settle("One too many", "Question 10?"), (e) => assert.match(e.message, /already open/));
+    const full = await c.standups.ownerQuestions(c.owner, c.a);
+    assert.equal(full.open.length, 10);
+    for (const open of full.open.slice(0, 3)) await c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: open.id, expectedRevision: open.revision, answer: `A ${open.topic}` });
+    await settle("Now it fits", "Question 11?");
+    for (let i = 0; i < 8; i++) { const now = (await c.standups.ownerQuestions(c.owner, c.a)).open[0]!; await c.standups.answerQuestion(c.owner, { commandId: cid("an"), questionId: now.id, expectedRevision: now.revision, answer: `B ${i}` }); }
+    const end = await c.standups.ownerQuestions(c.owner, c.a);
+    assert.equal(end.answered.length, 10, "the newest ten answers are kept");
+    assert.equal(end.answered[0]!.answer, "B 7", "newest first");
+    assert.equal(end.answered.some((x) => x.answer === "thirty"), false, "the oldest fell off the list (its record stays)");
+    assert.equal((await c.meetings.ownerQuestion(c.owner, q.id))!.answer, "thirty");
+  });
+
+  suite("the owner is told of a question once through the sink, retried while the sink says no, and the agenda shows what was asked and answered (card M03h)", async (c) => {
+    at("2026-10-20T09:00:00.000Z");
+    const told: { key: string; topic: string; question: string; source?: { kind: string; id: string } }[] = [];
+    let accept = false;
+    let throws = false;
+    const s = c.make({ ownerQuestions: { raise: async (n: { key: string; topic: string; question: string; source?: { kind: string; id: string } }) => { if (throws) throw new Error("inbox down"); if (!accept) return false; told.push(n); } } } as never);
+    await c.put("chat-turn", "turn-9", { projectId: c.a });
+    const m = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: "Old API" }), projectId: c.a, source: { kind: "chat-turn", id: "turn-9" } } as never);
+    await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: m.id, expectedRevision: 1, to: "resolved", outcomeNote: "Agreed.", ownerQuestion: "Which release is the last?" });
+    // Only the controller delivers.
+    await refuses("forbidden", () => s.deliverOutcomes(c.mgr, c.a));
+    // The sink says no, or breaks: the question stays unannounced and is reported as waiting; the outcome delivery is not affected.
+    const waiting = await s.deliverOutcomes(c.owner, c.a);
+    assert.equal(waiting.questions?.waiting.length, 1);
+    throws = true;
+    assert.equal((await s.deliverOutcomes(c.owner, c.a)).questions?.waiting.length, 1);
+    throws = false; accept = true;
+    const sent = await s.deliverOutcomes(c.owner, c.a);
+    assert.equal(sent.questions?.told.length, 1);
+    assert.deepEqual(told.map((t) => [t.topic, t.question, t.source]), [["Old API", "Which release is the last?", { kind: "chat-turn", id: "turn-9" }]]);
+    assert.equal((await s.deliverOutcomes(c.owner, c.a)).questions, undefined, "told once");
+    assert.equal(told.length, 1);
+    // Without a sink nothing is announced and the question is reported as waiting.
+    const bare = c.make({} as never);
+    const m2 = await c.meetings.addAgendaItem(c.owner, { ...item({ topic: "Logging" }), projectId: c.a });
+    await c.meetings.setAgendaState(c.owner, { commandId: cid("st"), itemId: m2.id, expectedRevision: 1, to: "resolved", ownerQuestion: "Which level?" });
+    assert.equal((await bare.deliverOutcomes(c.owner, c.a)).questions?.waiting.length, 1);
+
+    // The next agenda lists what is open and what was answered, with the records; an agent on the roster does not read the owner's answers.
+    const open = (await s.ownerQuestions(c.owner, c.a)).open;
+    const old = open.find((x) => x.topic === "Old API")!;
+    await s.answerQuestion(c.owner, { commandId: cid("an"), questionId: old.id, expectedRevision: old.revision, answer: "Release 2.0" });
+    const occ = await c.occurrenceAt("2026-10-21T08:00:00.000Z");
+    const agenda = (await s.agenda(c.owner, occ))!;
+    assert.equal(agenda.ownerQuestions?.open.length, 1);
+    assert.match(agenda.ownerQuestions!.open[0]!.text, /Which level\?" No answer yet/);
+    assert.match(agenda.ownerQuestions!.answered[0]!.text, /The owner answered: "Release 2\.0"/);
+    assert.equal(agenda.ownerQuestions!.answered[0]!.cites[0]!.kind, "owner-question");
+    const asAgent = await s.agenda(c.asA, occ);
+    assert.equal(asAgent?.ownerQuestions, undefined, "a roster member without the records' grants does not read them");
+  });
+
+}

@@ -434,7 +434,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "timeline"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
@@ -662,7 +662,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", questionId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -1021,6 +1021,29 @@ export class ChatService {
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["inquiryId"])) };
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
       }
+    }
+    // A question a stand-up asked the owner (card M03h), named by any part of the topic or the words asked, or the only one waiting. The answer is the owner's own words (the text guard below holds them to the message); an unclear name asks.
+    if (intent.op === "standup.answer-question") {
+      const named = args["questionTopic"];
+      delete args["questionTopic"];
+      if (named !== undefined && args["questionId"] !== undefined) return refuse("invalid_command", "the question is named twice over, as questionId and as questionTopic; which one is meant has to be settled.");
+      if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "questionTopic must be text");
+      const asked = await this.#get(token, "standup.owner-questions", { projectId });
+      const open = ((asked?.["open"] as Record<string, unknown>[] | undefined) ?? []);
+      if (args["questionId"] !== undefined && !open.some((q) => q["id"] === args["questionId"])) return refuse("not_found", "that question is not waiting for your answer");
+      if (args["questionId"] !== undefined) showFirst = "the question it answers is shown to you first";
+      if (args["questionId"] === undefined) {
+        const words = typeof named === "string" ? named.trim().toLowerCase() : "";
+        // An answer that names nothing could land on a question the owner never saw: with several waiting it asks, and a lone one is shown first with the answer.
+        if (words.length < 4) showFirst = "no question was clearly named, so you are shown the one it would answer first";
+        const matches = open.filter((q) => words === "" || [String(q["topic"]), String(q["question"])].some((t) => t.toLowerCase().includes(words)));
+        if (matches.length === 0) return refuse("not_found", words === "" ? "no stand-up is waiting for your answer in this project" : `no question a stand-up asked is about ${quotedText(words, 80)}`);
+        if (matches.length > 1) return { ok: false, kind: "ask", question: "Which of the stand-up's questions are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["question"]).slice(0, 60)})`), field: "questionId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["id"])) };
+        args["questionId"] = String(matches[0]!["id"]);
+      }
+      const chosen = open.find((q) => q["id"] === args["questionId"]);
+      args["expectedRevision"] = chosen?.["revision"];
+      labels[String(args["questionId"])] = `the stand-up's question ${quotedText(String(chosen?.["question"] ?? ""), 80)}`;
     }
     // The owner's answer to a meeting decision that waits for them (card M02h). The model gives the owner's words for the decision (`decisionTopic`: any part of what was decided or its topic) and the answer; the decision is found among those
     // waiting, and anything unclear is asked, never guessed (a `decisionId` the owner did not say or choose is asked about too when several wait). An alternative is the owner's own wording (`alternativeStatement`, optionally

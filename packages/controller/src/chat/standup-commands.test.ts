@@ -448,4 +448,64 @@ for (const backend of backends) {
     // ... and its proposal shows the title it has now, not the one its meeting was made with.
     assert.deepEqual(day.preview, [`Prepare a stand-up now: occurrenceId="Daybreak check (${ofOld.startsAt})"`]);
   });
+
+  suite("the owner reads what the stand-ups asked and answers in their own words: the question is found by part of its topic, an unclear name asks, a lone question is shown first (card M03h)", async (w, script, ctl) => {
+    const a = await w.project("A");
+    w.profile.value = "autonomous";
+    const chat = w.chat({ status: ctl.status() });
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const settle = async (topic: string, question: string): Promise<void> => {
+      const made = await w.meetings.addAgendaItem(w.owner, { commandId: cid("cap"), projectId: a, topic, urgency: "normal", intent: "discussion" } as never);
+      const item = (await w.meetings.agendaItem(w.owner, made.id))!;
+      await w.meetings.setAgendaState(w.owner, { commandId: cid("st"), itemId: item.id, expectedRevision: item.revision, to: "resolved", outcomeNote: "Talked it over.", ownerQuestion: question });
+    };
+    await settle("Nightly backups", "Keep seven nightly backups or thirty?");
+    await settle("Old API", "Which release is the last to carry the old API?");
+    type Q = { topic: string; answer?: string };
+    const read = async () => ((await w.api.handle(w.ownerToken, { v: 1, op: "standup.owner-questions", args: { projectId: a } } as never)) as unknown as { result: { item: { open: Q[]; answered: Q[] } } }).result.item;
+    const open = async () => (await read()).open;
+    const answered = async () => (await read()).answered;
+
+    // Asking what the stand-ups want lists both, with the words they asked.
+    script["What is the stand-up asking me?"] = [{ kind: "status", request: { kind: "standup_questions" }, evidence: "What is the stand-up asking me", basis: "owner" }];
+    const listed = only((await say(w, chat, "What is the stand-up asking me?")).outcomes);
+    assert.equal(listed.status, "answered", JSON.stringify(listed));
+    assert.match(JSON.stringify(listed), /seven nightly backups or thirty/);
+    assert.match(JSON.stringify(listed), /last to carry the old API/);
+
+    // An answer that names a question by part of its topic is applied at once to that one, with the owner's own words; the other stays open.
+    script["About the backups question: keep thirty."] = [cmd("standup.answer-question", { questionTopic: "backups", answer: "keep thirty" }, "About the backups question: keep thirty")];
+    const first = only((await say(w, chat, "About the backups question: keep thirty.")).outcomes);
+    assert.equal(first.status, "applied", JSON.stringify(first));
+    assert.deepEqual((await answered()).map((q) => [q.topic, q.answer]), [["Nightly backups", "keep thirty"]]);
+    assert.deepEqual((await open()).map((q) => q.topic), ["Old API"]);
+
+    // Words that fit nothing refuse and say what was looked for.
+    script["About the printer question: yes."] = [cmd("standup.answer-question", { questionTopic: "printer", answer: "yes" }, "About the printer question: yes")];
+    const none = only((await say(w, chat, "About the printer question: yes.")).outcomes);
+    assert.equal(none.status, "refused", JSON.stringify(none));
+    assert.match(String(none.message), /printer/);
+
+    // An answer the owner did not say is refused; nothing is invented for them.
+    script["About the old API question: whatever you think."] = [cmd("standup.answer-question", { questionTopic: "old API", answer: "release 9.1" }, "About the old API question: whatever you think")];
+    const invented = only((await say(w, chat, "About the old API question: whatever you think.")).outcomes);
+    assert.equal(invented.status, "refused", JSON.stringify(invented));
+    assert.equal((await open()).length, 1);
+
+    // An answer that names no question while one waits is shown first, with the question it would answer.
+    script["Tell the stand-up: version 2.0."] = [cmd("standup.answer-question", { answer: "version 2.0" }, "Tell the stand-up: version 2.0")];
+    const lone = only((await say(w, chat, "Tell the stand-up: version 2.0.")).outcomes);
+    assert.equal(lone.status, "proposed", JSON.stringify(lone));
+    assert.match(JSON.stringify(lone), /last to carry the old API/);
+    assert.equal((await open()).length, 1, "nothing is answered before the owner agrees");
+    const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: lone.proposalId! });
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal((await open()).length, 0);
+    assert.deepEqual((await answered()).map((q) => q.answer).sort(), ["keep thirty", "version 2.0"]);
+
+    // Nothing waits any more.
+    script["Is there anything else the stand-up wants?"] = [cmd("standup.answer-question", { answer: "no" }, "Is there anything else the stand-up wants")];
+    const empty = only((await say(w, chat, "Is there anything else the stand-up wants?")).outcomes);
+    assert.equal(empty.status, "refused", JSON.stringify(empty));
+  });
 }
