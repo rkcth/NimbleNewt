@@ -92,14 +92,14 @@ export class SetupReadinessService {
     let hosts = 0; let announced = 0;
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });
     await this.#each("host-record", () => { announced++; });
-    items.push({ id: "host", label: "A host to run agents on", required: true, state: hosts > 0 && announced > 0 ? "done" : "missing", detail: hosts === 0 ? "no host enrolled" : announced === 0 ? `${plural(hosts, "host", "hosts", !completeH)} enrolled, none has announced itself` : `${plural(hosts, "host", "hosts", !completeH)} enrolled, ${announced} announced`, how: "PrincipalService.enroll kind host, then the worker announces itself; the local host is built in code (dispatch.local)" });
+    items.push({ id: "host", label: "A host to run agents on", required: true, state: hosts > 0 && announced > 0 ? "done" : "missing", detail: hosts === 0 ? "no host enrolled" : announced === 0 ? `${plural(hosts, "host", "hosts", !completeH)} enrolled, none has announced itself` : `${plural(hosts, "host", "hosts", !completeH)} enrolled, ${announced} announced`, how: "host.local.set enabled true to run agents on this computer (it counts from the next start), or credential.issue kind host for a host on another machine, which then announces itself" });
 
     const notices = (await s.getAggregate({ kind: "notification-settings", id: "installation" }))?.body as { channel?: unknown; channelName?: unknown } | undefined;
     items.push({ id: "notifications", label: "How you are notified", required: false, state: notices === undefined ? "default" : "done", detail: notices === undefined ? "the inbox (nothing leaves the installation)" : notices.channel === "external" ? `external channel ${String(notices.channelName ?? "")}` : "the inbox", how: "notifications.configure" });
 
     let agents = 0;
     const completeA = await this.#each("agent", (_id, body) => { if (body["state"] === "active") agents++; });
-    items.push({ id: "agent", label: "A first agent", required: true, state: agents > 0 ? "done" : "missing", detail: agents === 0 ? "no active agent" : plural(agents, "active agent", "active agents", !completeA), how: "agent.create, then a credential and rights for it (PrincipalService.issueCredential, grant.create)" });
+    items.push({ id: "agent", label: "A first agent", required: true, state: agents > 0 ? "done" : "missing", detail: agents === 0 ? "no active agent" : plural(agents, "active agent", "active agents", !completeA), how: "agent.create, grant.create for its rights, then credential.issue kind agent for its credential" });
 
     let tasks = 0;
     const completeT = await this.#each("task", () => { tasks++; });
