@@ -5,7 +5,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant } from "../security/index.js";
-import { ResumeCheckService, type ResumePorts } from "./index.js";
+import { ResumeCheckService, ReviewNotRun, type ResumePorts } from "./index.js";
 
 after(stopServer);
 
@@ -132,6 +132,32 @@ for (const backend of backends) {
     const ok = await svc.retry(owner, { checkId: m.id });
     assert.equal(ok.phase, "ready");
     await refuses("invalid_command", () => svc.retry(owner, { checkId: m.id }));
+  });
+
+  suite("a review that could not run is recorded as not run, never as reviewed or blocked: every change waits for the owner, and a later real review says it ran (card L04d wiring)", async ({ f, svc, task, owner }) => {
+    const real = f.ports.review;
+    f.ports.review = async (q) => { f.reviewCalls.push(q.changes.map((c) => c.id)); throw new ReviewNotRun("no resume reviewer route is set"); };
+    const s = await svc.start(owner, { commandId: cid("s"), taskId: task, model, after: "restart" });
+    assert.deepEqual([s.phase, s.blocked], ["ready", undefined], "not a review_failed hold: the resume follows the rule from before a reviewer existed");
+    assert.deepEqual(s.review === undefined ? undefined : [s.review.state, s.review.reason], ["not-run", "no resume reviewer route is set"]);
+    assert.equal(s.verdicts["dep-2"]?.relevant, true, "the change is the owner's to accept");
+    assert.match(s.verdicts["dep-2"]?.rationale ?? "", /^not reviewed: no resume reviewer route is set; so the owner decides/);
+    assert.deepEqual(f.blockers, [], "no blocker is opened");
+    const held = await svc.held(owner, 10);
+    assert.deepEqual(held.items.map((h) => [h.taskId, h.notReviewed, h.changes.map((c) => c.id)]), [[task, "no resume reviewer route is set", ["dep-2"]]]);
+    assert.match(s.history.at(-1)?.note ?? "", /not reviewed \(no resume reviewer route is set\); the owner decides/);
+    // Only the owner lets it go on.
+    assert.equal((await svc.approve(owner, { commandId: cid("a"), taskId: task })).phase, "done");
+    assert.equal(f.resumes.length, 1);
+    // Another failure of the port is still a failed review (an explicit reviewer that throws holds the check, as before).
+    f.ports.review = async () => { throw new Error("reviewer offline"); };
+    const b = await svc.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue" });
+    assert.deepEqual([b.phase, b.blocked?.type, b.review], ["blocked", "review_failed", undefined]);
+    // A reviewer that answers: recorded as run.
+    f.ports.review = real;
+    const ok = await svc.retry(owner, { checkId: b.id });
+    assert.deepEqual([ok.phase, ok.review?.state, ok.review?.reason], ["ready", "ran", undefined]);
+    assert.equal((await svc.held(owner, 10)).items[0]?.notReviewed, undefined, "a real verdict is not said to be unreviewed");
   });
 
   suite("with nothing recorded nothing is called unchanged; a crash while executing is finished once", async ({ f, svc, reopen, task, owner }) => {

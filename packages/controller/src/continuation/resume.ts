@@ -33,6 +33,15 @@ export interface ResumePorts {
   review(request: { taskId: string; changes: readonly DeltaItem[] }): Promise<Readonly<Record<string, { relevant: boolean; rationale: string }>>>;
 }
 
+/**
+ * What a review port throws when no reviewer could be asked at all (card L04d wiring): no route is set, the route cannot be used, the daily cap on the controller's own model calls is reached, or every route failed.
+ * Unlike any other failure (which blocks the check `review_failed`), this is not a verdict and not a block: the check records that the review did NOT run, and why, and every change it held is treated as
+ * relevant, so the resume follows the rule it had before a reviewer existed (every changed resume waits for the owner). It is never passed off as reviewed.
+ */
+export class ReviewNotRun extends Error {
+  constructor(readonly reason: string) { super(reason); this.name = "ReviewNotRun"; }
+}
+
 export interface ResumeCheckBody {
   readonly taskId: string;
   readonly projectId: string;
@@ -56,6 +65,11 @@ export interface ResumeCheckBody {
   /** What changed, permission-filtered by the checker's own rights; nothing of the content itself. */
   readonly delta?: { readonly changed: readonly DeltaItem[]; readonly unchanged: number };
   readonly verdicts: Readonly<Record<string, ResumeVerdict>>;
+  /**
+   * Whether the last review of the check's changes was made by a reviewer (`ran`) or could not be (`not-run`, with why: every change it held was then treated as relevant, the owner's to accept). Absent: no
+   * review has been asked for yet (or the check predates card L04d wiring).
+   */
+  readonly review?: { readonly state: "ran" | "not-run"; readonly reason?: string; readonly at: string };
   readonly blocked?: { readonly type: "missing_context" | "resume_churn" | "effects_uncertain" | "review_failed"; readonly reason: string; readonly blockerId?: string } | undefined;
   /** How the earlier context was brought back, and what that cannot promise. */
   readonly restore?: { readonly method: RestoreMethod; readonly limits: readonly string[] };
@@ -370,6 +384,14 @@ export class ResumeCheckService {
         const open = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id] === undefined);
         let got: Awaited<ReturnType<ResumePorts["review"]>>;
         try { got = await this.#ports.review({ taskId: b.taskId, changes: open }); } catch (error) {
+          if (error instanceof ReviewNotRun) {
+            // No reviewer could be asked: recorded as not run, never as reviewed, and every open change is the owner's to accept (the rule from before a reviewer existed).
+            const reason = short(error.reason.trim() === "" ? "no reviewer could be asked" : error.reason);
+            const held: Record<string, ResumeVerdict> = { ...b.verdicts };
+            for (const item of open) held[item.id] = { relevant: true, rationale: short(`not reviewed: ${reason}; so the owner decides whether it matters`), digest: digestOf(item) };
+            await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts: held, review: { state: "not-run", reason, at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) not reviewed (${reason}); the owner decides`) }), ["reviewing"]);
+            continue;
+          }
           await this.#block(by, id, b, "review_failed", `the reviewer could not give a verdict: ${short(error instanceof Error ? error.message : String(error))}`);
           continue;
         }
@@ -381,7 +403,7 @@ export class ResumeCheckService {
         }
         const done = (b.delta?.changed ?? []).every((i) => verdicts[i.id] !== undefined);
         if (!done) { await this.#block(by, id, b, "review_failed", "the reviewer gave no reasoned verdict for every change"); continue; }
-        await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts, history: this.#push(x, "ready", by.id, `${open.length} change(s) reviewed`) }), ["reviewing"]);
+        await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts, review: { state: "ran", at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) reviewed`) }), ["reviewing"]);
         continue;
       }
       if (b.phase === "executing") {
@@ -434,9 +456,9 @@ export class ResumeCheckService {
    * The checks that wait for the owner (card L04c), with the task's title: each task's current check when it is ready, holds changes judged to matter and (for a dispatcher's check) its attempt is still the task's active one. Owner only (anyone else: none). Read through the tasks' check pointers,
    * at most `limit` found and 2000 pointers looked at; `truncated` says there may be more.
    */
-  async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[] }[]; truncated: boolean }> {
+  async held(by: Principal, limit: number): Promise<{ items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string }[]; truncated: boolean }> {
     if (by.kind !== "owner") return { items: [], truncated: false };
-    const items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[] }[] = [];
+    const items: { checkId: string; taskId: string; title: string; projectId: string; since: string; changes: DeltaItem[]; notReviewed?: string }[] = [];
     let seen = 0;
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list(ACTIVE, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
@@ -449,7 +471,7 @@ export class ResumeCheckService {
         if (found === undefined || b === undefined || b.phase !== "ready") continue;
         const changes = relevantChanges(b);
         // The owner is shown the task's title, never only its ID (an unreadable task reads as its ID).
-        if (changes.length > 0 && await this.#forCurrentAttempt(b)) items.push({ checkId: found.id, taskId: b.taskId, title: ((await this.#runner.get("task", b.taskId))?.body as unknown as TaskBody | undefined)?.title ?? b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes });
+        if (changes.length > 0 && await this.#forCurrentAttempt(b)) items.push({ checkId: found.id, taskId: b.taskId, title: ((await this.#runner.get("task", b.taskId))?.body as unknown as TaskBody | undefined)?.title ?? b.taskId, projectId: b.projectId, since: b.history.at(-1)?.at ?? b.requestedAt, changes, ...(b.review?.state === "not-run" ? { notReviewed: b.review.reason ?? "no reviewer could be asked" } : {}) });
       }
       if (page.length < 200) return { items, truncated: false };
     }
