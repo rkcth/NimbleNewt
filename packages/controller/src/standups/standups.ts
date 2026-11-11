@@ -10,7 +10,7 @@ import type { Availability } from "../conversations/index.js";
 import type { InquiryBody } from "../inquiries/inquiries.js";
 import type { ItemBody } from "../notifications/notifications.js";
 import type { ArtifactBody } from "../artifacts/service.js";
-import { categoryOf, authorityOf, MEETING_LIMITS, type AgendaBody, type MeetingService, type OccurrenceBody, type ScheduleBody } from "../meetings/meetings.js";
+import { categoryOf, authorityOf, MEETING_LIMITS, type OwnerQuestionBody, type AgendaBody, type MeetingService, type OccurrenceBody, type ScheduleBody } from "../meetings/meetings.js";
 import { isLocalTime } from "../meetings/zones.js";
 import type { Recurrence } from "../meetings/zones.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -119,7 +119,25 @@ export interface PreparationSink { notify(notice: PrepNotice): Promise<void> }
 
 export interface Allocation { readonly floor?: number; readonly target?: number; readonly ceiling?: number }
 
+/** A question a meeting asked the owner, as the sink is handed it (card M03h). */
+export interface OwnerQuestionNotice {
+  /** Names the question for ever: a sink that sees the key twice does it once. */
+  readonly key: string;
+  readonly questionId: string;
+  readonly projectId: string;
+  readonly topic: string;
+  readonly question: string;
+  /** The chat turn or inquiry the topic came from, when it has one. */
+  readonly source?: { readonly kind: "inquiry" | "chat-turn"; readonly id: string };
+}
+/** Tells the owner a meeting asked something (a notification, and a note on the chat turn the topic came from). `false` means it could not be told yet: the delivery loop tries again. Must be idempotent by `key`. */
+export interface OwnerQuestionSink { raise(notice: OwnerQuestionNotice): Promise<void | boolean> }
+
 export interface StandupOptions extends RunnerOptions {
+  /** Where a question the meeting asked the owner is raised (see `OwnerQuestionSink`). Absent: such questions stay open and unannounced, and the owner finds them by asking the chat. */
+  readonly ownerQuestions?: OwnerQuestionSink;
+  /** Told after the owner answered a question, so the notification that announced it can be closed. Best effort: a failure never undoes the answer. */
+  readonly onOwnerAnswered?: (question: { readonly questionId: string; readonly projectId: string }) => Promise<unknown>;
   /** Whether an agent may be reached (the pause service's `availability`). Required; failing closed: a missing or throwing hook withholds the notice. It is only asked, never acted on. */
   readonly availability: (principalId: string) => Promise<Availability>;
   readonly notices?: PreparationSink;
@@ -143,7 +161,7 @@ export interface StandupOptions extends RunnerOptions {
   readonly scanPages?: number;
 }
 
-export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25 } as const;
+export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5 } as const;
 
 /**
  * One stand-up of a project, as the stand-ups status answer tells it (card M03h): the schedule as it stands, and the two meetings the owner asks about — the one coming up next and the last one this stand-up made. Everything on these lines
@@ -597,7 +615,7 @@ export class StandupService {
    */
   async agenda(viewer: Principal, occurrenceId: string): Promise<{
     occurrenceId: string; startsAt: string; items: AgendaLine[]; sections: Readonly<Record<"conflicts" | "questions" | "decisions" | "topics" | "improvements", readonly AgendaLine[]>>;
-    needsOwner?: readonly ReviewLine[]; noticeLine?: string; planning?: PlanningReview; briefs?: { agent: string; briefId: string; agentState: Availability; blockers: number; advice: number }[]; withheld: string[]; notes?: string[]; routine: string;
+    needsOwner?: readonly ReviewLine[]; ownerQuestions?: { open: readonly ReviewLine[]; answered: readonly ReviewLine[] }; noticeLine?: string; planning?: PlanningReview; briefs?: { agent: string; briefId: string; agentState: Availability; blockers: number; advice: number }[]; withheld: string[]; notes?: string[]; routine: string;
   } | undefined> {
     const shown = await this.#meetings.occurrence(viewer, occurrenceId);
     if (shown === undefined) return undefined;
@@ -619,13 +637,58 @@ export class StandupService {
     const notices = prep?.needsOwner !== undefined && this.#options.ownerNotices !== undefined ? await this.#options.ownerNotices(occ.projectId).catch(() => 0) : 0;
     const waiting = await this.#meetings.returnsWaiting(viewer, occ.projectId);
     const notes = waiting === undefined || waiting === 0 ? [] : [`${waiting} outcome${waiting === 1 ? "" : "s"} of earlier topics ${waiting === 1 ? "has" : "have"} not yet been told to the conversation${waiting === 1 ? "" : "s"} they came from.`];
+    // What earlier meetings asked the owner, and what the owner answered, is on the next agenda (card M03h).
+    const asked = this.#mayReadRecords(viewer, occ.projectId) ? await this.#meetings.ownerQuestions(viewer, occ.projectId).catch(() => undefined) : undefined;
+    const askedLines = asked === undefined || (asked.open.length === 0 && asked.answered.length === 0) ? undefined : {
+      open: asked.open.map((q) => ownerQuestionLine(q, false)),
+      answered: asked.answered.slice(0, STANDUP_LIMITS.ownerAnswers).map((q) => ownerQuestionLine(q, true)),
+    };
     return {
       // Needs-you and Urgent items open the report (owner only), then the progress, and the notice count ends it.
-      ...(prep?.needsOwner === undefined ? {} : { needsOwner: prep.needsOwner }), occurrenceId, startsAt: occ.startsAt, items, sections, ...(prep?.review === undefined ? {} : { planning: prep.review }),
+      ...(prep?.needsOwner === undefined ? {} : { needsOwner: prep.needsOwner }), ...(askedLines === undefined ? {} : { ownerQuestions: askedLines }), occurrenceId, startsAt: occ.startsAt, items, sections, ...(prep?.review === undefined ? {} : { planning: prep.review }),
       ...(notices > 0 ? { noticeLine: `${notices} notice${notices === 1 ? "" : "s"} in your inbox, no action needed` } : {}),
       ...(briefs.length === 0 ? {} : { briefs: briefs.map((b) => ({ agent: b.agent, briefId: b.id, agentState: b.agentState, blockers: b.blockers.length, advice: b.advice.length })) }), withheld, ...(notes.length === 0 ? {} : { notes }),
       routine: "Routine progress is in the written briefs; the agenda holds what needs the meeting.",
     };
+  }
+
+  // ---- questions the meeting asks the owner (card M03h) -----------------------------------------------------------------------------
+
+  /** The questions meetings asked the owner in a project (open, and the latest answered). */
+  async ownerQuestions(viewer: Principal, projectId: string): Promise<{ open: View<OwnerQuestionBody>[]; answered: View<OwnerQuestionBody>[] }> {
+    return this.#meetings.ownerQuestions(viewer, checkProjectId(projectId));
+  }
+
+  /** The owner answers a question a meeting asked. The answer is kept with the question and shown on the next agenda; the topic is not reopened by it. Owner only. */
+  async answerQuestion(owner: Principal, command: NoActor & { questionId: string; expectedRevision: number; answer: string }): Promise<void> {
+    await this.#meetings.answerOwnerQuestion(owner, command);
+    const hook = this.#options.onOwnerAnswered;
+    if (hook === undefined) return;
+    const found = await this.#meetings.ownerQuestion(owner, command.questionId).catch(() => undefined);
+    if (found !== undefined) await Promise.resolve(hook({ questionId: found.id, projectId: found.projectId })).catch(() => undefined);
+  }
+
+  /** Tells the owner of each question not yet announced, once each (the sink is idempotent by key; the question is marked told only after it returned). Without a sink nothing is announced. */
+  async #raiseOwnerQuestions(by: Principal, projectId: string): Promise<{ told: string[]; waiting: string[] }> {
+    const out = { told: [] as string[], waiting: [] as string[] };
+    const sink = this.#options.ownerQuestions;
+    const { open } = await this.#meetings.ownerQuestions(by, projectId);
+    for (const q of open) {
+      if (q.toldAt !== undefined) continue;
+      if (sink === undefined) { out.waiting.push(q.id); continue; }
+      let sent: void | boolean = false;
+      try { sent = await sink.raise({ key: q.id, questionId: q.id, projectId, topic: q.topic, question: q.question, ...(q.source === undefined ? {} : { source: q.source }) }); } catch { sent = false; }
+      if (sent === false) { out.waiting.push(q.id); continue; }
+      await this.#meetings.markOwnerQuestionTold(by, q.id);
+      out.told.push(q.id);
+      // The owner may have answered while the notification was being filed: the answer's own close then found nothing open, so it is closed here (closing is by the question, and closing twice does nothing).
+      const hook = this.#options.onOwnerAnswered;
+      if (hook !== undefined) {
+        const now = await this.#meetings.ownerQuestion(by, q.id).catch(() => undefined);
+        if (now?.state === "answered") await Promise.resolve(hook({ questionId: q.id, projectId })).catch(() => undefined);
+      }
+    }
+    return out;
   }
 
   // ---- outcomes back to the conversation ---------------------------------------------------------------------------------------------
@@ -634,9 +697,17 @@ export class StandupService {
    * Hands outcomes of agenda topics to the conversation they came from (the owner's chat turn, or the inquiry), once each: resolved, discussed or deferred, with the meeting's words, the deferral's reason and next step, and what the topic's
    * authority was ("a discussion: nothing was done because of it"). The notice has a stable key; the item is marked returned only after the sink returned. Without a sink, outcomes stay waiting (listed in `waiting`). Owner, host or service only.
    */
-  async deliverOutcomes(by: Principal, projectId: string): Promise<{ delivered: string[]; waiting: string[] }> {
+  async deliverOutcomes(by: Principal, projectId: string): Promise<{ delivered: string[]; waiting: string[]; questions?: { told: string[]; waiting: string[] } }> {
     if (!isService(by)) throw new DomainError("forbidden", `${by.id} may not deliver agenda outcomes`);
     const project = checkProjectId(projectId);
+    const result = await this.#deliverOutcomesOnly(by, project);
+    // Questions the meeting asked the owner are announced after the outcomes; a failure here never undoes what was delivered.
+    let questions: { told: string[]; waiting: string[] } | undefined;
+    try { questions = await this.#raiseOwnerQuestions(by, project); } catch { questions = undefined; }
+    return questions === undefined || (questions.told.length === 0 && questions.waiting.length === 0) ? result : { ...result, questions };
+  }
+
+  async #deliverOutcomesOnly(by: Principal, project: string): Promise<{ delivered: string[]; waiting: string[] }> {
     const delivered: string[] = [];
     const waiting: string[] = [];
     // Outcomes that did not fit on the waiting list are listed first, now that there may be room.
@@ -962,6 +1033,12 @@ export function shownLines(item: View<AgendaBody>): string[] {
 }
 
 /** What the originating conversation is told about a topic, from the typed record. A discussion or recommendation request says plainly that nothing was done because of it. */
+/** One line of the agenda for a question a meeting asked the owner, with its record. The words are the meeting's and the owner's own, cut and quoted; they are not instructions. */
+function ownerQuestionLine(q: View<OwnerQuestionBody>, answered: boolean): ReviewLine {
+  const head = `On "${cut(q.topic, 80)}" the meeting asked the owner: "${cut(q.question, 200)}"`;
+  return { text: answered ? `${head} The owner answered: "${cut(q.answer ?? "", 300)}"` : `${head} No answer yet.`, cites: [{ kind: "owner-question", id: q.id, revision: q.revision }] };
+}
+
 export function outcomeLine(item: Pick<AgendaBody, "topic" | "state" | "intent" | "deferral" | "outcomeNote" | "outcomeRef">): string {
   const head = `Your topic "${cut(item.topic, 120)}"`;
   const authority = authorityOf(item.intent);
