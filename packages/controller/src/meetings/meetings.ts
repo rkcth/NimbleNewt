@@ -11,6 +11,8 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { SettingDefinition } from "../configuration/settings.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { OwnerAnswerNote, RecordBody } from "./record-types.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import { knownZone, dueSlots, isLocalDate, isLocalTime, nextSlot, wallClock, type Recurrence, type Slot, type SlotRule } from "./zones.js";
 
 export type ScheduleState = "active" | "paused" | "ended";
@@ -229,7 +231,7 @@ export interface MeetingOptions extends RunnerOptions {
 
 export const MEETING_LIMITS = {
   title: 200, reason: 1000, topic: 200, question: 2000, context: 4000, outcome: 1000, deferral: 500, ref: 200, roster: 50, participants: 50, durationMax: 480, prepareMax: 720, leadMax: 60, leadDefault: 5,
-  openAgendaPerProject: 200, ownerQuestion: 500, ownerAnswer: 1000, ownerQuestionsOpen: 10, ownerQuestionsAnswered: 10, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
+  openAgendaPerProject: 200, ownerQuestion: 500, ownerAnswer: 1000, recordOwnerAnswers: 10, ownerQuestionsOpen: 10, ownerQuestionsAnswered: 10, returnsPending: 200, returnsMore: 1000, timeboxMax: 120, corrections: 10, agendaPerMeeting: 25, openOccurrencesPerProject: 200, openOccurrences: 1000, scheduleScanDays: 400, retries: 8, page: 100, skippedListed: 10, graceMinutes: 60, tickSchedules: 50, tickMax: 200, budgetTokens: 1_000_000_000,
 } as const;
 
 /** The setting that holds the owner's time zone for meetings. Pass these as `settings` to the configuration service. */
@@ -1032,7 +1034,15 @@ export class MeetingService {
         const idx = await this.#ownerQuestionIndex(body.projectId);
         const answered = [...idx.index.answered.filter((x) => x !== id), id].slice(-MEETING_LIMITS.ownerQuestionsAnswered);
         const ref: AggregateRef = { kind: "owner-question", id };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, state: "answered", answer, answeredAt: at }) }, this.#ownerQuestionChange(body.projectId, idx, { open: idx.index.open.filter((x) => x !== id), answered })], detail: { projectId: body.projectId } };
+        const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, state: "answered", answer, answeredAt: at }) }, this.#ownerQuestionChange(body.projectId, idx, { open: idx.index.open.filter((x) => x !== id), answered })];
+        // The answer goes back onto the record of the meeting that asked (card M05), in the same commit: a record that moved meanwhile makes this retry, and a meeting that kept no record has nowhere to write it.
+        const recFound = body.occurrenceId === undefined ? undefined : await this.#runner.get("meeting-record", derivedId("mrc", body.occurrenceId));
+        if (recFound !== undefined) {
+          const recBody = recFound.body as unknown as RecordBody;
+          const note: OwnerAnswerNote = { questionId: id, topic: safeSlice(body.topic, 120), question: safeSlice(body.question, 300), answer: safeSlice(answer, 1000), answeredAt: at };
+          changes.push({ type: "update", ref: { kind: "meeting-record", id: recFound.id }, expectedRevision: recFound.revision, body: clean({ ...recBody, ownerAnswers: [...(recBody.ownerAnswers ?? []).filter((x) => x.questionId !== id), note].slice(-MEETING_LIMITS.recordOwnerAnswers) }) });
+        }
+        return { ref, creates: false, changes, detail: { projectId: body.projectId } };
       },
     })));
   }

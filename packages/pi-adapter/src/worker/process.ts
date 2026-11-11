@@ -5,6 +5,7 @@ import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/n
 import type { Storage } from "@earendil-works/pi-durable";
 import { CHECKPOINT_DURABILITY_ERROR, ChannelError, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
+import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
 import { DEFAULT_MAX_CONTINUATIONS, type ContinuationPolicy } from "../continuation.js";
@@ -214,6 +215,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   };
 
   const begin = async (start: ChannelStart): Promise<void> => {
+    assertWorkableWindow(start.model.contextWindow);
     started = start;
     if (start.lease !== undefined) {
       // The lease counts from now on this process's own monotonic clock: the controller sent a duration, so a wrong wall clock here changes nothing.
@@ -277,8 +279,9 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       // Card W06: every agent this process runs has the fixed completion rules as its system text, the same bytes for every task, role, readmit, wake and restart (so the cached prefix is kept).
       promptLayout: PI_AGENT_LAYOUT,
       tools, ...(cache === undefined ? {} : { cache }), ...(contextPolicy === undefined ? {} : { contextPolicy }),
+      // Card CMP: reserve and background thresholds scale with the window (Pi's defaults make the background threshold zero or below under 49,152 tokens); a window under 8,192 is refused.
       // Pi keeps the newest part of a conversation verbatim when it compacts; its default would be larger than a small model's whole startup share, so nothing would ever be cut. A tenth of the window is kept (provisional, card H12f).
-      settings: { compaction: { keepRecentTokens: Math.max(500, Math.floor(start.model.contextWindow * KEEP_RECENT_SHARE)) } },
+      settings: { compaction: { keepRecentTokens: Math.max(500, Math.floor(start.model.contextWindow * KEEP_RECENT_SHARE)), ...compactionThresholds(start.model.contextWindow, start.model.maxTokens) } },
     });
     // Work an earlier process of this attempt left unfinished stays held (Pi refuses to make progress) until the controller has reviewed it; the host says so in the start when it has (a recipe restart, a resume after loss). Interrupted tool calls are not run again:
     // the bridge answers a repeated call from the controller's ledger, and the model sees what happened to them.

@@ -68,10 +68,10 @@ test("stall evidence and speeds, and the history and incident counters of retire
     assert.equal(off.candidates.length, 0, "off by default: nothing is a candidate");
     const status = (await call("retention.status", {})).result.item;
     assert.ok(status.growth["stall-evidence"] >= 5 && status.growth["stall-speed"] === 3 && status.growth["responsibility-event"] === 6 && status.growth["responsibility-incident-slot"] === 5);
-    for (const [field, value] of [["stallEvidenceDays", 6], ["stallSpeedDays", 3651], ["responsibilityHistoryDays", 6], ["responsibilityHistoryDays", "30"]] as const) assert.equal((await call("retention.settings.set", { [field]: value }, `bad-${field}-${value}`)).ok, false, `${field} ${value} is refused`);
-    const set = await call("retention.settings.set", { stallEvidenceDays: 30, stallSpeedDays: 30, responsibilityHistoryDays: 30 }, "set1");
-    assert.ok(set.ok); assert.match(JSON.stringify(set.result), /responsibilityHistoryDays none -> 30/);
-    assert.equal((await call("retention.settings.set", { stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null }, "set2")).ok, true, "and off again");
+    for (const [field, value] of [["stallEvidenceDays", 6], ["stallSpeedDays", 3651], ["responsibilityHistoryDays", 6], ["responsibilityHistoryDays", "30"], ["noteArchiveDays", 6], ["noteArchiveDays", 3651], ["noteArchiveDays", "30"]] as const) assert.equal((await call("retention.settings.set", { [field]: value }, `bad-${field}-${value}`)).ok, false, `${field} ${value} is refused`);
+    const set = await call("retention.settings.set", { stallEvidenceDays: 30, stallSpeedDays: 30, responsibilityHistoryDays: 30, noteArchiveDays: 30 }, "set1");
+    assert.ok(set.ok); assert.match(JSON.stringify(set.result), /responsibilityHistoryDays none -> 30/); assert.match(JSON.stringify(set.result), /noteArchiveDays none -> 30/);
+    assert.equal((await call("retention.settings.set", { stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, noteArchiveDays: null }, "set2")).ok, true, "and off again");
 
     // Five days on, nothing retired or finished is old enough by its own last change: the retired responsibilities and finished tasks were changed "just now".
     const soon = await later(5).run(rob, {});

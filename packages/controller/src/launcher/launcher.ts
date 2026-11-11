@@ -70,9 +70,9 @@ export interface LocalHostContext {
   readonly fetch?: typeof globalThis.fetch;
 }
 
-/** What the builder made: the start options to add (`dispatch.local`, harnesses, tools), what to do once the controller is up, and how to free what it made. */
+/** What the builder made: the start options to add (`dispatch.local`, harnesses, tools, and the environment runtime when the host can change environments), what to do once the controller is up, and how to free what it made. */
 export interface LocalHostPlan {
-  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools">;
+  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools" | "maintenance">;
   /** Enrolls the host with the owner's authority, announces it and sets its capacity. Returns notes for the owner. */
   readonly attach: (controller: Controller, owner: Principal) => Promise<readonly string[]>;
   /** Frees what was made before the controller took it over (safe to call more than once). */
@@ -219,7 +219,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     if (have === undefined && wanted.length > 0) {
       try {
         const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
-        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens; tell the chat the real one to change it).`);
+        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused).`);
       } catch (error) {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);
       }
