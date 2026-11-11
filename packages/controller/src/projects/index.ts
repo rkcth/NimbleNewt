@@ -4,4 +4,4 @@ export { ProjectPlanService, type Schedule, type SetProjectPlan } from "./plan.j
 export { OBSERVATION_KINDS, OUTCOMES, RESPONSIBILITY_STATES, ResponsibilityService, type Escalation, type MaintenanceWindow, type ObservationBody, type ObservationKind, type ResponsibilityBody, type ResponsibilityState, type ResponsibilityStatus } from "./responsibilities.js";
 export { ResponsibilityChecks, type CheckBody } from "./checks.js";
 export { COVERAGE_PERIOD, CoverageService, CoverageSettingsService, type CoverageGap, type CoverageNotice, type CoverageReport, type CoverageSettings } from "./coverage.js";
-export { IncidentService, type IncidentBody, type ResponsibilityObservedState } from "./incidents.js";
+export { IncidentService, incidentSlotId, type IncidentBody, type ResponsibilityObservedState } from "./incidents.js";
