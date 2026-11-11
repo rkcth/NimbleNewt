@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -379,7 +379,7 @@ test("the producer: runScenarios records real counts, refuses a missing test fil
     const tap = (t, p, extra = {}) => { const o = { fail: 0, cancelled: 0, skipped: 0, todo: 0, ...extra }; return `# tests ${t}\n# suites 0\n# pass ${p}\n# fail ${o.fail}\n# cancelled ${o.cancelled}\n# skipped ${o.skipped}\n# todo ${o.todo}\n# duration_ms 1\n`; };
     const calls = [];
     const run = (exec, extra = {}) => runScenarios({ root, map: parsed.map, mapDigest: parsed.digest, platform: "linux", now: NOW.getTime(), exec, getHead: () => COMMIT, getStatus: () => "", ...extra });
-    const good = run((cwd, files) => { calls.push([cwd.split("/").pop(), files]); return { status: 0, output: tap(files.length, files.length) }; });
+    const good = run((cwd, files) => { calls.push([basename(cwd), files]); return { status: 0, output: tap(files.length, files.length) }; });
     assert.deepEqual(calls, [["pkga", ["dist/x.test.js"]], ["pkgb", ["dist/y.test.js"]], ["pkga", ["dist/z.test.js"]]]);
     assert.deepEqual(good.scenarios.map((s) => [s.id, s.status, s.tests]), [["one", "pass", 2], ["two", "pass", 1]]);
     assert.equal(good.commit, COMMIT);

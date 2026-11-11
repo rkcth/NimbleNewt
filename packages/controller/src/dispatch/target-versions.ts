@@ -91,6 +91,13 @@ function relativeParts(path: string): string[] {
 
 const fold = (name: string): string => name.normalize("NFC").toLowerCase();
 
+/**
+ * macOS (11 and later) `O_NOFOLLOW_ANY`: the open fails if ANY name of the path is a symbolic link, decided by the kernel in the same lookup that opens the file. Node does not name it in `fs.constants`;
+ * the value is the one in macOS's <sys/fcntl.h>. Elsewhere 0: Linux asks the kernel where the open file is instead (/proc/self/fd), other systems ask the real path again.
+ */
+const O_NOFOLLOW_ANY_DARWIN = 0x20000000;
+const noLinkAnywhere = (platform: NodeJS.Platform): number => (platform === "darwin" ? O_NOFOLLOW_ANY_DARWIN : 0);
+
 export function createTargetVersions(deps: TargetVersionDeps): (target: { readonly kind: string; readonly id: string }, taskId: string) => Promise<string | undefined> {
   const fileCap = deps.options?.fileBytes ?? TARGET_VERSION_LIMITS.fileBytes;
   const gitMs = deps.options?.gitMs ?? TARGET_VERSION_LIMITS.gitMs;
@@ -138,14 +145,16 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
     const release = await turn(signal);
     try {
       return await new Promise<{ code: number; stdout: string }>((done, fail) => {
-        const child = execFile(git, ["--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "-c", "protocol.allow=never", "-c", "safe.directory=*", ...args], { env, cwd: root, timeout: gitMs, killSignal: "SIGKILL", maxBuffer: TARGET_VERSION_LIMITS.gitOutput, windowsHide: true, encoding: "utf8", signal }, (error, stdout) => {
+        let child: ReturnType<typeof execFile>;
+        // A program that cannot be started at all (on Windows, a file that is not an executable: EFTYPE) throws here rather than calling back; it is an unreadable repository like any other failure.
+        try { child = execFile(git, ["--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "-c", "protocol.allow=never", "-c", "safe.directory=*", ...args], { env, cwd: root, timeout: gitMs, killSignal: "SIGKILL", maxBuffer: TARGET_VERSION_LIMITS.gitOutput, windowsHide: true, encoding: "utf8", signal }, (error, stdout) => {
           if (error === null) return done({ code: 0, stdout });
           const e = error as NodeJS.ErrnoException & { killed?: boolean };
           if (e.code === "ENOENT") return fail(new TargetVersionError("unreadable", "git is not installed"));
           if (e.killed === true || e.name === "AbortError") return fail(new TargetVersionError("timeout", "git did not answer in time"));
           if (typeof (e.code as unknown) === "number") return done({ code: e.code as unknown as number, stdout });
           fail(new TargetVersionError("unreadable", "git could not read the repository"));
-        });
+        }); } catch { return fail(new TargetVersionError("unreadable", "git could not be started")); }
         child.stdin?.on("error", () => undefined);
         child.stdin?.end();
       });
@@ -212,8 +221,10 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
       if (info.isDirectory()) refuse("that is a directory");
       if (!info.isFile()) refuse("that is not a plain file");
       if (info.size > fileCap) throw new TargetVersionError("too_large", `the file is larger than ${fileCap} bytes, so its version is not read`);
-      // Opened without following a link and without blocking (a file swapped for a pipe after the check must not hold the reading), then compared with what was looked at.
-      const handle = await open(next, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => unreadable("the file could not be opened without following a link"));
+      // Opened without following a link and without blocking (a file swapped for a pipe after the check must not hold the reading), then compared with what was looked at. On macOS no name of the whole
+      // path may be a link at the moment of the open (O_NOFOLLOW_ANY): a directory on the way swapped for a link after it was looked at then fails the open itself, which the real path asked afterwards
+      // cannot see (the swap may be undone by then).
+      const handle = await open(next, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | noLinkAnywhere(process.platform)).catch(() => unreadable("the file could not be opened without following a link"));
       try {
         const opened = await handle.stat();
         if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) refuse("the file changed while it was being opened");

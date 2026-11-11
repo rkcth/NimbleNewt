@@ -59,10 +59,11 @@ test("a configuration file holds no credential: the host credential comes from t
     writeFileSync(file, JSON.stringify({ url: "https://c", base: "/b", routes: {}, tokenFile: join(dir, "t") }));
     writeFileSync(join(dir, "t"), "from-the-token-file\n", { mode: 0o644 });
     chmodSync(join(dir, "t"), 0o644);
-    // A token file other users can read is refused (as ssh refuses such a key), and the refusal holds no part of it.
-    const open = assert.throws(() => readRemoteConfig(file, {}), /tokenFile: other users can read or change it/);
-    void open;
-    assert.equal(String((() => { try { readRemoteConfig(file, {}); } catch (e) { return e.message; } })()).includes("from-the-token-file"), false);
+    // A token file other users can read is refused (as ssh refuses such a key), and the refusal holds no part of it. Windows has no POSIX permission bits (remote-host.mjs does not judge them there).
+    if (process.platform !== "win32") {
+      assert.throws(() => readRemoteConfig(file, {}), /tokenFile: other users can read or change it/);
+      assert.equal(String((() => { try { readRemoteConfig(file, {}); } catch (e) { return e.message; } })()).includes("from-the-token-file"), false);
+    }
     chmodSync(join(dir, "t"), 0o600);
     assert.equal(readRemoteConfig(file, {}).token, "from-the-token-file");
     assert.equal(readRemoteConfig(file, { NIMBLENEWT_WORKER_TOKEN: "from-the-environment" }).token, "from-the-environment");
@@ -70,7 +71,16 @@ test("a configuration file holds no credential: the host credential comes from t
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("the workspace host's security hook is the client's reportSecurity; the process's bridge requests go through the runner's route; its model calls take the runner's tap; verdicts reach the runner", async () => {
+// The remote worker host runs agents in bubblewrap and refuses to start anywhere but Linux (remote-host.mjs); the tests that start one run on Linux only, and elsewhere the refusal itself is tested.
+const LINUX_ONLY = process.platform !== "linux" && "the remote worker host is Linux only (bubblewrap); remote-host.mjs refuses to start elsewhere";
+
+test("off Linux the remote worker host refuses to start, saying it is Linux only, before it loads anything", { skip: process.platform === "linux" && "this host is Linux" }, async () => {
+  const loaded = [];
+  await assert.rejects(startRemoteWorker({ root: "/r", load: async (name) => { loaded.push(name); return {}; } }, config()), /bubblewrap, which is Linux only so far/);
+  assert.deepEqual(loaded, []);
+});
+
+test("the workspace host's security hook is the client's reportSecurity; the process's bridge requests go through the runner's route; its model calls take the runner's tap; verdicts reach the runner", { skip: LINUX_ONLY }, async () => {
   const lines = [];
   const { seen, load } = packages();
   const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ log: (l) => lines.push(l) }));
@@ -115,7 +125,7 @@ test("the workspace host's security hook is the client's reportSecurity; the pro
   assert.equal(seen.launcherStopped, true, "stopping the host stops the sandbox launcher");
 });
 
-test("an offer whose attempt ID is not an attempt ID (a path, `..`) is not run and makes no folder of this host", async () => {
+test("an offer whose attempt ID is not an attempt ID (a path, `..`) is not run and makes no folder of this host", { skip: LINUX_ONLY }, async () => {
   const lines = [];
   const { seen, load } = packages();
   const base = mkdtempSync(join(tmpdir(), "nn-l05e-ids-"));
@@ -135,7 +145,7 @@ test("an offer whose attempt ID is not an attempt ID (a path, `..`) is not run a
   } finally { seen.stopPoller(); await host.stop(); rmSync(base, { recursive: true, force: true }); rmSync(join(base, "..", name), { recursive: true, force: true }); }
 });
 
-test("a host that cannot confine agents does not start, and says why without a value that could be a secret", async () => {
+test("a host that cannot confine agents does not start, and says why without a value that could be a secret", { skip: LINUX_ONLY }, async () => {
   const { load } = packages();
   const noSandbox = async (name) => { const m = await load(name); return name === "worker" ? { ...m, SandboxLauncher: { create: async () => ({ capacity: { available: false, reason: "no bubblewrap" }, stop: async () => undefined }) } } : m; };
   await assert.rejects(startRemoteWorker({ root: "/r", load: noSandbox }, config()), /the sandbox is not usable here \(no bubblewrap\)/);

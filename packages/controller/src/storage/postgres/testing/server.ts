@@ -31,6 +31,8 @@ export interface TestServer {
   stop(): Promise<void>;
   /** Embedded servers only: stop the server with an immediate shutdown (no clean checkpoint, like a crash), then start it again on the same data and port. */
   crashAndRestart?(): Promise<void>;
+  /** Embedded servers started by the library only: kill the server outright (SIGKILL), as an outside cause would; `stop()` must still return. For the harness's own tests. */
+  kill?(): void;
 }
 
 const PASSWORD = "nn-test-password";
@@ -117,7 +119,7 @@ function diagnoseStartFailure(embeddedPackageDir: string, dataDirectory: string,
 }
 
 /** Starts a real PostgreSQL server on a free loopback port in a temporary directory. `flags` are extra `postgres` options. */
-export async function startEmbeddedServer(flags: readonly string[] = [], baseDirectory: string = tmpdir()): Promise<TestServer> {
+export async function startEmbeddedServer(flags: readonly string[] = [], baseDirectory: string = tmpdir(), testing: { readonly firstPort?: number } = {}): Promise<TestServer> {
   // NIMBLENEWT_TEST_POSTGRES_DIR names a directory with its own node_modules holding a different `embedded-postgres` (another PostgreSQL
   // major version); scripts/postgres-versions.mjs sets it for the version verification (card F04g). Unset, the repository's own is used.
   const alternate = process.env["NIMBLENEWT_TEST_POSTGRES_DIR"];
@@ -128,7 +130,9 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   type Embedded = { initialise(): Promise<void>; start(): Promise<void>; stop(): Promise<void>; createDatabase(name: string): Promise<void> };
   const { default: EmbeddedPostgres } = (await import(pathToFileURL(entry).href)) as { default: new (options: Record<string, unknown>) => Embedded };
   const directory = mkdtempSync(join(baseDirectory, "nn-test-pg-"));
-  const port = await freePort();
+  // A free port is only free when it was probed: another test process's server, or any outgoing connection on this machine, can take it before this
+  // server binds it (initdb takes seconds on a loaded machine). A server that cannot bind is started again on a new port (card 19).
+  let port = testing.firstPort ?? await freePort();
   // Keep what the server and initdb say: when startup stalls, this is the only evidence there is.
   const log: string[] = [];
   // Also echoed as it happens, prefixed so a CI annotation can show the server's last words even when the process running the tests
@@ -142,7 +146,9 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   };
   // The cluster is UTF8 with the C locale on every platform: initdb on Windows would otherwise pick the legacy code page WIN1252, which
   // cannot store the JSON text the controller keeps. Bind to the IPv4 loopback only: nothing outside this machine can reach the test server, and no name resolution is involved.
-  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], postgresFlags: ["-c", "listen_addresses=127.0.0.1", ...flags], onLog: keep, onError: keep };
+  // No Unix-domain socket (the tests connect by TCP only): otherwise every test server puts its socket and lock file in /tmp under its port number, where a
+  // lock file left by a killed server whose process number was reused blocks that port for any later server (card 19).
+  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], postgresFlags: ["-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=", ...flags], onLog: keep, onError: keep };
   let server = new EmbeddedPostgres(settings);
   const url = (database = "nimblenewt_test") => `postgres://${USER}:${PASSWORD}@127.0.0.1:${port}/${database}`;
   // The library's own steps have no timeouts and reject with nothing when the server exits early; give each a deadline and the log.
@@ -196,20 +202,58 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
       try { for (const line of readFileSync(serverLog, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "").slice(-12)) keep(line); } catch { /* the log is only for evidence */ }
     },
     stop: async (mode: "fast" | "immediate" = "fast"): Promise<void> => {
-      if (!viaPgCtl) return mode === "fast" ? server.stop() : undefined;
+      if (!viaPgCtl) return mode === "fast" ? stopChild() : undefined;
       pgCtl(["stop", "-D", dataDirectory, "-m", mode, "-w", "-t", "60"]);
     },
+  };
+  /**
+   * The library's stop() listens for the server's exit only after signalling it, so for a server that has already ended (crashed, killed) it waits for an event
+   * that never comes, with nothing left to keep the event loop alive: node:test then reports "Promise resolution is still pending but the event loop has
+   * already resolved" and cancels whatever was still pending (card 19). An ended server is not stopped again, and a stop is bounded: a fast shutdown
+   * (it waits for a checkpoint, slow on a loaded machine) becomes an immediate one after 60 s, and a kill 30 s after that.
+   */
+  const stopChild = async (): Promise<void> => {
+    const proc = (server as unknown as { process?: ChildProcess }).process;
+    if (proc === undefined || proc.exitCode !== null || proc.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => { proc.once("exit", () => resolve()); });
+    const within = async (ms: number): Promise<boolean> => {
+      let timer: NodeJS.Timeout | undefined;
+      try { return await Promise.race([exited.then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); })]); } finally { clearTimeout(timer); }
+    };
+    void server.stop().catch(() => undefined);
+    if (await within(60_000)) return;
+    keep("fast shutdown did not finish within 60 s: immediate shutdown");
+    proc.kill("SIGQUIT");
+    if (await within(30_000)) return;
+    keep("immediate shutdown did not finish within 30 s: killed");
+    proc.kill("SIGKILL");
+    await within(10_000);
   };
   if (viaPgCtl) process.once("exit", () => { spawnSync(pgCtlPath, ["stop", "-D", dataDirectory, "-m", "immediate"], { stdio: "ignore", timeout: 30_000 }); });
   try {
     await step("initdb", 120_000, () => server.initialise());
     try {
-      await step("starting the server", 60_000, () => {
-        echo = true;
-        const starting = launcher.start();
-        if (!viaPgCtl) watchProcess(() => (server as unknown as { process?: ChildProcess }).process, keep);
-        return starting;
-      });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await step("starting the server", 60_000, () => {
+            echo = true;
+            const starting = launcher.start();
+            if (!viaPgCtl) watchProcess(() => (server as unknown as { process?: ChildProcess }).process, keep);
+            return starting;
+          });
+          break;
+        } catch (error) {
+          // Only a port someone else took is retried, on a new port; any other failure is reported as it is.
+          const said = `${error instanceof Error ? error.message : String(error)}\n${log.join("\n")}`;
+          if (attempt >= 5 || !/could not bind|Address already in use|could not create any TCP\/IP sockets/i.test(said)) throw error;
+          await launcher.stop().catch(() => undefined);
+          const taken = port;
+          port = await freePort();
+          settings.port = port;
+          server = new EmbeddedPostgres(settings);
+          mark(`port ${taken} was taken before the server could bind it; starting again on port ${port}`);
+        }
+      }
     } catch (error) {
       const facts = diagnoseStartFailure(join(embeddedDir, ".."), join(directory, "data"), port);
       for (const line of facts) keep(line);
@@ -229,6 +273,7 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
     stop: async () => {
       try { await launcher.stop(); } finally { removeTree(directory); }
     },
+    ...(viaPgCtl ? {} : { kill: () => { (server as unknown as { process?: ChildProcess }).process?.kill("SIGKILL"); } }),
     crashAndRestart: async () => {
       pgCtl(["stop", "-D", dataDirectory, "-m", "immediate", "-w", "-t", "60"]);
       server = new EmbeddedPostgres(settings);

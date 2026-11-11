@@ -186,7 +186,11 @@ async function replaceKeyringFile(path: string, keyring: Keyring): Promise<void>
   try { await syncFile(temp); await rename(temp, path); } catch (error) { await rm(temp, { force: true }).catch(() => undefined); throw error; }
   await syncDir(dirname(resolve(path)));
 }
-async function syncFile(path: string): Promise<void> { const h = await open(path, "r"); try { await h.sync(); } finally { await h.close(); } }
+/**
+ * Flushes a file this command wrote to the disk. On Windows a flush (FlushFileBuffers) needs a handle with write access, and one opened read-only fails with EPERM, so there the file is opened for
+ * reading and writing (nothing is written through it); elsewhere read-only is enough and is kept.
+ */
+async function syncFile(path: string): Promise<void> { const h = await open(path, process.platform === "win32" ? "r+" : "r"); try { await h.sync(); } finally { await h.close(); } }
 async function syncDir(path: string): Promise<void> { const h = await open(path, "r").catch(() => undefined); if (h === undefined) return; try { await h.sync().catch(() => undefined); } finally { await h.close(); } }
 /** Keeps the old generation's keyring beside the new one, never overwriting a file there. The same content left by an earlier run that stopped part way is taken as already kept, so the rotation can be run again. */
 async function archiveKeyring(from: string, to: string): Promise<boolean> {
