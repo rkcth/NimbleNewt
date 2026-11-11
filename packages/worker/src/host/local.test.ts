@@ -428,3 +428,45 @@ test("U09b: ownerPolicyOptions connects the controller's thinking record to the 
   assert.deepEqual(seen, [[order, blocks]]);
   assert.equal(ownerPolicyOptions(base).onThinking, undefined);
 });
+
+test("A08d: the limits of the dispatch contract tighten a launch (the smaller of each figure with the workspace's and the owner's), never loosen it; a figure that cannot be read refuses the launch and is recorded", async () => {
+  const launched: { limits: unknown; timeoutMs: number; requireEnforced: unknown }[] = [];
+  const records: { outcome: string; requested: unknown; reason?: string }[] = [];
+  const capture = { launch: async (request: { limits?: unknown; timeoutMs: number; requireEnforced?: unknown }) => { launched.push({ limits: request.limits, timeoutMs: request.timeoutMs, requireEnforced: request.requireEnforced }); throw new Error("captured"); } };
+  const make = (owner?: { cpus?: number; memoryMb?: number; wallTimeMs?: number }, bestEffort = false) => localWorkerParts<unknown>({
+    launcher: capture as never, app, protectedPaths: [], workspace: () => ({ ...work, limits: { memoryMb: 512, diskMb: 1000 } }),
+    model: () => ({ alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 8192, maxTokens: 256, reasoning: false, input: ["text"] }), namespaceId: () => "abcdef0123456789",
+    bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },
+    limits: () => owner, bestEffort: () => bestEffort, onLaunch: async (r) => { records.push(r); },
+  });
+  const launch = async (p: ReturnType<typeof make>, contract: unknown): Promise<void> => {
+    const o = { ...order([]), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), ...(contract === undefined ? {} : { contract }) } as HostOrder;
+    const session = await p.sandbox.open(o.recipe, o);
+    await assert.rejects(p.runtimes.open(o, {}, undefined), /captured|dispatch contract/);
+    await session.close();
+  };
+  // Tighter than the workspace and the owner: the contract's figures apply; a figure it does not state keeps the other sides'. Wall time is the launcher's time limit.
+  await launch(make({ cpus: 4 }), { limits: { memoryMb: 128, cpus: 2, processes: 20, wallTimeMs: 90_000 } });
+  assert.deepEqual(launched.at(-1)!.limits, { cpus: 2, memoryMb: 128, diskMb: 1000, processes: 20 });
+  assert.equal(launched.at(-1)!.timeoutMs, 90_000);
+  assert.equal(launched.at(-1)!.requireEnforced, true, "strict unless the owner allowed best effort");
+  assert.deepEqual(records.at(-1)!.requested, { cpus: 2, memoryMb: 128, diskMb: 1000, processes: 20, wallTimeMs: 90_000 });
+  // Looser than the others: the smaller figure stays (a contract cannot raise a limit).
+  await launch(make({ cpus: 1, wallTimeMs: 30_000 }), { limits: { memoryMb: 4096, cpus: 8, wallTimeMs: 600_000 } });
+  assert.deepEqual(launched.at(-1)!.limits, { cpus: 1, memoryMb: 512, diskMb: 1000 });
+  assert.equal(launched.at(-1)!.timeoutMs, 30_000);
+  // No contract limits: as before.
+  await launch(make(), undefined);
+  assert.deepEqual(launched.at(-1)!.limits, { memoryMb: 512, diskMb: 1000 });
+  await launch(make(undefined, true), { limits: {} });
+  assert.equal(launched.at(-1)!.requireEnforced, false);
+  // A figure that is not a whole number in range, an unknown limit or a limits value that is not an object: nothing is launched, and the refusal is recorded with the reason.
+  const before = launched.length;
+  for (const bad of [{ memoryMb: Number.NaN }, { cpus: 0 }, { cpus: 1.5 }, { processes: -3 }, { memoryMb: "128" }, { diskMb: Infinity }, { wallTimeMs: 10 }, { wallTimeMs: 1e15 }, { gpus: 2 }, "x", [], null]) {
+    const n = records.length;
+    await launch(make(), { limits: bad });
+    assert.equal(launched.length, before, `${JSON.stringify(bad)}: nothing was launched`);
+    assert.equal(records[n]!.outcome, "refused", JSON.stringify(bad));
+    assert.match(records[n]!.reason ?? "", /dispatch contract/, JSON.stringify(bad));
+  }
+});
