@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
-import { LAUNCHER_FILE, Launcher, Supervisor, SUPERVISOR_EXIT, type SupervisorEvent, type SupervisorOptions } from "./index.js";
+import { CONTROLLER_EXIT, LAUNCHER_FILE, Launcher, lockRoot, Supervisor, SUPERVISOR_EXIT, type SupervisorEvent, type SupervisorOptions } from "./index.js";
 import { Clock, pointerSwitcher, sha256 } from "./start-fixture.js";
 
 /**
@@ -29,7 +29,24 @@ const confirm = async () => { try { await launcher.confirm(id); } catch {} };
 const keep = () => setInterval(() => {}, 1000);
 if (behavior === "exit0") process.exit(0);
 if (behavior === "secret") console.log(process.env.NN_SECRET);
-if (behavior === "stubborn") {
+if (behavior === "orphan-crash") {
+  await confirm();
+  const g = spawn("sleep", ["300"], { stdio: "ignore" });
+  appendFileSync(process.env.NN_PIDS + "/" + id + ".gpids", g.pid + "\\n");
+  setTimeout(() => process.exit(1), 150);
+  keep();
+} else if (behavior === "stubborn-kid") {
+  // The leader obeys SIGTERM; its child ignores it and records itself only once its handler is in place.
+  spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});require('node:fs').appendFileSync(process.argv[1],process.pid+String.fromCharCode(10));setInterval(()=>{},1000)", process.env.NN_PIDS + "/" + id + ".gpids"], { stdio: "ignore" });
+  keep();
+} else if (behavior === "stop-on-purpose") { await confirm(); setTimeout(() => process.exit(0), 100); keep(); }
+else if (behavior === "restart-once") {
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const mark = process.env.NN_PIDS + "/" + id + ".restarted";
+  await confirm();
+  if (!existsSync(mark)) { writeFileSync(mark, "1"); setTimeout(() => process.exit(${CONTROLLER_EXIT.restart}), 100); }
+  keep();
+} else if (behavior === "stubborn") {
   process.on("SIGTERM", () => {});
   const g = spawn("sleep", ["300"], { stdio: "ignore" });
   appendFileSync(process.env.NN_PIDS + "/" + id + ".gpids", g.pid + "\\n");
@@ -239,6 +256,10 @@ test("a last known good that crashes at every start is restarted with a doubling
     assert.equal(w.events.filter((e) => e.kind === "started").length, 6);
     const s = w.state();
     assert.deepEqual(s.failed, [], "the last known good is never quarantined");
+    const told = (s.notices ?? []).filter((n: any) => n.kind === "failed_start" && n.release === g.id);
+    assert.equal(told.length, 1, "the owner's notice of the crash loop is written");
+    assert.equal(told[0].fallback, false, "nothing else is running: Urgent");
+    assert.match(told[0].reason, /gave up/);
     assert.equal(s.known.id, g.id);
     assert.equal(await pointerSwitcher(w.root).read(), g.id);
   });
@@ -309,5 +330,128 @@ test("stopping the launcher during the startup window stops the child and does n
     await w.waitFor("the child gone", () => !alive(pid!));
     assert.equal(w.pidsOf(b).length, 1);
     assert.equal(w.state().failed.length, 0, "a shutdown is not a failed start");
+    assert.equal(w.state().attempt, undefined, "the interrupted start is closed, not left open for the next launch to count as failed");
+    // The next launch (after a reboot, say) runs it again with a full window. With the start left open it would be quarantined and, with nothing to fall back to, the installation blocked for good.
+    const again = w.start();
+    await w.waitFor("the second start", () => w.pidsOf(b).length === 2);
+    assert.equal(w.events.filter((e) => e.kind === "ended" && e.code === SUPERVISOR_EXIT.blocked).length, 0);
+    again.stop();
+    assert.equal((await again.done).code, 0);
   });
+});
+
+test("a controller that exits 0 after its start was confirmed stopped on purpose: the launcher ends 0 and starts nothing; exit 75 is a restart request (K02a)", async () => {
+  await world(async (w) => {
+    const a = await w.release("purpose", "stop-on-purpose");
+    await w.good(a);
+    const result = await w.start().done;
+    assert.equal(result.code, SUPERVISOR_EXIT.stopped);
+    assert.match(result.reason, /on purpose/);
+    assert.equal(w.events.filter((e) => e.kind === "started").length, 1, "not started again");
+    assert.deepEqual(w.delays, []);
+  });
+  await world(async (w) => {
+    const a = await w.release("restart", "restart-once");
+    await w.good(a);
+    const run = w.start();
+    await w.waitFor("the restart", () => w.events.filter((e) => e.kind === "started").length === 2);
+    assert.ok(w.lines.some((l) => l.includes("asked to be restarted")));
+    assert.equal(w.state().failed.length, 0);
+    run.stop();
+    assert.equal((await run.done).code, 0);
+  });
+});
+
+test("what a controller that crashed left running in its process group is stopped before the next start (K02a)", async () => {
+  await world(async (w) => {
+    const g = await w.release("orphans", "orphan-crash");
+    await w.good(g);
+    let grandchildAliveAtRestart: boolean | undefined;
+    const run = w.start({ graceMs: 1000, onEvent: (e) => {
+      w.events.push(e);
+      if (e.kind === "started" && w.events.filter((x) => x.kind === "started").length === 2) { const [gc] = w.pidsOf(g, "gpids"); grandchildAliveAtRestart = gc !== undefined && alive(gc); }
+    } });
+    await w.waitFor("the restart", () => w.events.filter((e) => e.kind === "started").length >= 2);
+    assert.equal(grandchildAliveAtRestart, false, "the crashed controller's child was gone before the next start");
+    assert.ok(w.events.some((e) => e.kind === "leftovers"));
+    run.stop();
+    await run.done;
+  });
+});
+
+test("members of the group that ignore SIGTERM after the leader obeyed it are killed after the grace; a group that has emptied is never signalled again (K02a)", async () => {
+  await world(async (w) => {
+    const g = await w.release("good", "confirm");
+    await w.good(g);
+    await w.launcher.setWindow(10);
+    const b = await w.release("kid", "stubborn-kid");
+    await w.point(b);
+    const run = w.start({ graceMs: 400 });
+    await w.waitFor("the stubborn child", () => w.pidsOf(b, "gpids").length === 1);
+    const [kid] = w.pidsOf(b, "gpids");
+    w.clock.advance(11);
+    await w.waitFor("the fall-back", () => w.events.some((e) => e.kind === "started" && e.releaseId === g.id));
+    assert.equal(alive(kid!), false, "the child that ignored SIGTERM was killed with the group");
+    assert.ok(w.events.some((e) => e.kind === "killed"));
+    run.stop();
+    await run.done;
+  });
+  await world(async (w) => {
+    const g = await w.release("good", "confirm");
+    await w.good(g);
+    await w.launcher.setWindow(10);
+    const b = await w.release("hang", "hang");
+    await w.point(b);
+    const real = process.kill;
+    const calls: [number, string | number | undefined][] = [];
+    process.kill = ((pid: number, sig?: string | number) => { calls.push([pid, sig]); return real.call(process, pid, sig); }) as typeof process.kill;
+    try {
+      const run = w.start({ graceMs: 2000 });
+      await w.waitFor("the hung start", () => w.pidsOf(b).length === 1);
+      const [hung] = w.pidsOf(b);
+      w.clock.advance(11);
+      await w.waitFor("the fall-back", () => w.events.some((e) => e.kind === "started" && e.releaseId === g.id));
+      const sent = calls.filter(([p, sig]) => p === -hung! && sig !== 0).map(([, sig]) => sig);
+      assert.deepEqual(sent, ["SIGTERM"], "the leader obeyed and left no members: no SIGKILL to a group number that may since belong to someone else");
+      assert.ok(!calls.some(([p]) => p >= -1 && p <= 1), "never pid 0, 1 or -1");
+      run.stop();
+      await run.done;
+    } finally { process.kill = real; }
+  });
+});
+
+test("one launcher per release root: a second one exits 5 and starts nothing while the first runs; the lock is free again when the first ends; a stale socket file is replaced (K02a)", { timeout: 60_000 }, async () => {
+  await world(async (w) => {
+    const a = await w.release("a", "confirm");
+    await w.good(a);
+    const first = w.start({ root: w.root });
+    await w.waitFor("the first controller", () => w.pidsOf(a).length === 1);
+    const second = await w.start({ root: w.root }).done;
+    assert.equal(second.code, SUPERVISOR_EXIT.locked);
+    assert.equal(w.pidsOf(a).length, 1, "the second launcher started nothing");
+    first.stop();
+    assert.equal((await first.done).code, 0);
+    const third = w.start({ root: w.root });
+    await w.waitFor("the third launcher's controller", () => w.pidsOf(a).length === 2);
+    third.stop();
+    assert.equal((await third.done).code, 0);
+  });
+  // The socket-file lock (macOS and other systems without abstract sockets), exercised on this system.
+  const root = mkdtempSync(join(tmpdir(), "nn-k02a-lock-"));
+  try {
+    const one = await lockRoot(root, { abstract: false });
+    assert.ok(one !== undefined);
+    assert.equal(await lockRoot(root, { abstract: false }), undefined, "held while the first listens");
+    await one.close();
+    // A holder that was killed leaves its socket file behind; nobody answers on it, so it is replaced.
+    const holder = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${JSON.stringify(join(root, ".launcher.sock"))}, () => console.log("up"))`], { stdio: ["ignore", "pipe", "ignore"] });
+    await new Promise<void>((r) => holder.stdout!.once("data", () => r()));
+    assert.equal(await lockRoot(root, { abstract: false }), undefined, "a live holder in another process");
+    holder.kill("SIGKILL");
+    await new Promise((r) => holder.once("exit", r));
+    assert.ok(existsSync(join(root, ".launcher.sock")), "the killed holder left its file");
+    const two = await lockRoot(root, { abstract: false });
+    assert.ok(two !== undefined, "a stale file is replaced");
+    await two.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -5,8 +5,10 @@
 //
 //   node scripts/nimblenewt-launcher.mjs --root RELEASE_ROOT [--entry controller.js] [--switcher pointer|symlink] [-- extra controller arguments]
 //
-// Exit codes: 0 stopped by SIGTERM/SIGINT, 1 usage or unexpected error, 2 blocked (nothing safe to run; see the log and release.status, the owner decides), 3 no release is active,
-// 4 gave up after a crash loop. A service manager should not restart the launcher on 2 (nothing changes until the owner acts) and may restart it on 1 and 4 after its own delay.
+// Exit codes: 0 stopped (SIGTERM, SIGINT or SIGHUP to the launcher, or the controller exited 0 after its start was confirmed: a stop on purpose), 1 usage or unexpected error, 2 blocked (nothing safe to run;
+// see the log and release.status, the owner decides), 3 no release is active, 4 gave up after a crash loop (the owner's notice is written), 5 another launcher, or a controller a killed launcher left running, holds
+// this release root. A service manager should not restart the launcher on 0 or 2 (nothing changes until the owner acts) and may restart it on 1, 4 and 5 after its own delay.
+// The controller's side: exit 0 = stop on purpose (only after its start was confirmed; before, it is a failed start), exit 75 = restart me, anything else = a crash.
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "./nimblenewt.mjs";
@@ -19,7 +21,7 @@ const HELP = `NimbleNewt release launcher
   --root DIR           The release root (holds releases/, the pointer and launcher-state.json). Or NIMBLENEWT_RELEASE_ROOT.
   --entry FILE         The controller's entry file inside a release (default controller.js). Run with Node.js from the release directory.
   --switcher KIND      pointer (current.json, default) or symlink (the 'current' link).
-  --node PATH          The Node.js to run it with (default: the one running this launcher).
+  --node PATH          The Node.js to run it with (default: the one running this launcher). A relative path is taken from the current directory.
   --workers-min N --workers-max N   The worker protocol range a fall-back must speak (default: this build's).
   --grace-seconds N    SIGTERM to SIGKILL grace when a hung start is stopped (default 10).
   --poll-ms N          How often the startup watchdog looks (default 1000).
@@ -28,10 +30,10 @@ const HELP = `NimbleNewt release launcher
   Arguments after -- are passed to the controller.
 `;
 
-const intFlag = (flags, name, fallback, { min = 0, scale = 1 } = {}) => {
+const intFlag = (flags, name, fallback, { min = 0, max = 86_400_000, scale = 1 } = {}) => {
   if (flags[name] === undefined) return fallback;
   const v = Number(flags[name]);
-  if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}`);
+  if (!Number.isSafeInteger(v) || v < min || v > max) throw new Error(`--${name} must be a whole number from ${min} to ${max}`);
   return v * scale;
 };
 
@@ -52,12 +54,13 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
   let opts;
   try {
     opts = {
-      grace: intFlag(args.flags, "grace-seconds", 10_000, { scale: 1000 }),
-      poll: intFlag(args.flags, "poll-ms", 1000, { min: 5 }),
+      grace: intFlag(args.flags, "grace-seconds", 10_000, { max: 3600, scale: 1000 }),
+      poll: intFlag(args.flags, "poll-ms", 1000, { min: 5, max: 60_000 }),
       initial: intFlag(args.flags, "backoff-initial-ms", 1000),
       max: intFlag(args.flags, "backoff-max-ms", 60_000),
-      stable: intFlag(args.flags, "stable-seconds", 60_000, { scale: 1000 }),
-      giveUp: intFlag(args.flags, "give-up-after", 20, { min: 1 }),
+      // At least a second: with 0 every run would count as stable and a crash loop would never slow down.
+      stable: intFlag(args.flags, "stable-seconds", 60_000, { min: 1, max: 86_400, scale: 1000 }),
+      giveUp: intFlag(args.flags, "give-up-after", 20, { min: 1, max: 1_000_000 }),
     };
   } catch (error) { err(error.message); return 1; }
   const { Launcher } = await lib("release/launcher.js");
@@ -70,14 +73,18 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
   }
   const switcher = kind === "symlink" ? new SymlinkSwitcher(root) : new PointerSwitcher(root);
   const launcher = new Launcher({ root, switcher, workers });
-  const node = typeof args.flags.node === "string" ? args.flags.node : process.execPath;
+  // The child is started from the release directory, so a relative --node would otherwise be looked up there (a file the release brought): it is taken from where the launcher was started instead.
+  const node = typeof args.flags.node === "string" && args.flags.node !== "" ? (/[\\/]/.test(args.flags.node) ? resolve(args.flags.node) : args.flags.node) : process.execPath;
   const abort = new AbortController();
-  const onSignal = () => abort.abort();
+  // A repeated signal (a second Ctrl-C, a service manager's second SIGTERM) must not fall through to Node's default, which would end the launcher in the middle of the stop and leave the controller running alone.
+  const onSignal = () => { if (abort.signal.aborted) err(`${new Date().toISOString()} launcher: already stopping`); else abort.abort(); };
   const outer = io.signal;
+  const SIGNALS = process.platform === "win32" ? ["SIGTERM", "SIGINT"] : ["SIGTERM", "SIGINT", "SIGHUP"];
   if (outer?.aborted) abort.abort(); else outer?.addEventListener("abort", onSignal, { once: true });
-  if (outer === undefined) { process.once("SIGTERM", onSignal); process.once("SIGINT", onSignal); }
+  if (outer === undefined) for (const s of SIGNALS) process.on(s, onSignal);
   const supervisor = new Supervisor({
     launcher,
+    root,
     // The child's environment is this process's, unchanged: secrets reach it the way the service manager gave them. This launcher logs none of it.
     child: (release) => ({ command: node, args: [join(release.dir, entry), ...passed], cwd: release.dir, env: io.env }),
     pollMs: opts.poll,
@@ -91,7 +98,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     return result.code;
   } finally {
     outer?.removeEventListener("abort", onSignal);
-    if (outer === undefined) { process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal); }
+    if (outer === undefined) for (const s of SIGNALS) process.removeListener(s, onSignal);
   }
 }
 
