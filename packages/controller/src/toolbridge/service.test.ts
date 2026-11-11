@@ -8,6 +8,7 @@ import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from ".
 import type { Grant } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
+import { RecallService } from "../context/recall-service.js";
 import { launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 
@@ -1094,6 +1095,65 @@ for (const backend of backends) {
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
+  });
+
+  suite("task.recall (card W13): the attempt and so the task come from the credential, a named task is refused, a call is a read that a pause does not stop, the cap refuses with a clear text, an answered call is answered again for free, and the owner sees a counts-only step", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const reads: string[] = [];
+    const steps: { commandId: string; taskId: string; summary: string }[] = [];
+    let cap = 3, on = true;
+    const anchor = { taskId, projectId: c.project, attemptId: "x", title: "Recall me" };
+    const recall = new RecallService({
+      settings: async () => ({ recall: on, recallCalls: cap }),
+      read: async (attemptId) => { reads.push(attemptId); return { taskId, attemptId, anchor: { ...anchor, attemptId }, attempts: [], handoffs: [], archives: [], archive: async () => undefined }; },
+    });
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      recall, isLocalHost: () => true, activity: async (step) => { steps.push(step); },
+    });
+    const bare = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, isLocalHost: () => true });
+    const out: Record<string, BridgeResponse> = {};
+    let attemptId = "";
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.gateway.attemptId;
+      const send = (args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op: "task.recall", callId, args });
+      out["first"] = await send({ part: "anchor" }, "rc1");
+      out["again"] = await send({ part: "anchor" }, "rc1");
+      for (const k of ["taskId", "projectId", "agentId", "attemptId"]) out[`named-${k}`] = await send({ part: "anchor", [k]: "tsk-zzzzzzzzzzzzzzzzzzzz" }, `rn-${k}`);
+      out["forged"] = await svc.handle("nn_forged_credential", s.gateway, { op: "task.recall", callId: "rf", args: {} });
+      out["bare"] = await bare.handle(s.token, s.gateway, { op: "task.recall", callId: "rb", args: {} });
+      out["second"] = await send({ part: "activity" }, "rc2");
+      // A pause refuses writes, not this read.
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      out["paused"] = await send({ part: "decisions" }, "rc3");
+      out["limit"] = await send({ part: "anchor" }, "rc4");
+      out["answered-after-cap"] = await send({ part: "decisions" }, "rc3");
+      await c.pauses.resume(c.owner, { commandId: uid("rs"), scope: { kind: "task", id: taskId }, reason: "go" });
+      on = false;
+      out["off"] = await send({ part: "anchor" }, "rc5");
+    });
+    await c.tick();
+    const first = good(out["first"]!);
+    assert.equal(first["part"], "anchor");
+    assert.match(first["text"] as string, /Goal: "Recall me"/);
+    assert.deepEqual(good(out["again"]!), first, "the same call again gives the same answer");
+    for (const k of ["taskId", "projectId", "agentId", "attemptId"]) assert.equal(bad(out[`named-${k}`]!).code, "invalid_command", k);
+    assert.equal(bad(out["forged"]!).code, "unauthenticated");
+    assert.equal(bad(out["bare"]!).code, "unavailable", "a controller without the tool says so");
+    good(out["second"]!); good(out["paused"]!);
+    const refused = bad(out["limit"]!);
+    assert.equal(refused.code, "recall_limit");
+    assert.match(refused.message, /used its 3 calls/);
+    good(out["answered-after-cap"]!);
+    assert.equal(bad(out["off"]!).code, "recall_off");
+    assert.ok(reads.length > 0 && reads.every((r) => r === attemptId), "the attempt read is the one the credential is bound to");
+    // The owner sees that it was used, by counts only: one step per answered call (not per repeat), none for a refusal, and no content.
+    const recalls = steps.filter((x) => /task\.recall/.test(x.summary));
+    // A repeat of a call has the same command ID, which the activity record keeps once.
+    assert.equal(new Set(recalls.map((x) => x.commandId)).size, 3, JSON.stringify(recalls));
+    assert.ok(recalls.every((x) => x.taskId === taskId && !/Recall me/.test(x.summary) && /\d+ characters/.test(x.summary)), JSON.stringify(recalls));
+    svc.dispose(); bare.dispose();
   });
 
   suite("job-start under a used call ID answers the same job only for the same request, also after a restart that forgot the call IDs; job output, status and labels carry no control or invisible format characters (card T07b review)", async (c) => {

@@ -121,7 +121,7 @@ test("W12: the first prompt opens with the anchor the dispatcher wrote; after th
     await until(() => answer.seen.length >= 19, 60_000, `the scripted model was called ${answer.seen.length} times`);
 
     // What the records give: the block the controller wrote, composed again.
-    const again = composeAnchor({ taskId, projectId: project, attemptId, title: "Order seeds", handoffIds: [], archiveDigests: [] }, 2400)!;
+    const again = composeAnchor({ taskId, projectId: project, attemptId, title: "Order seeds", handoffIds: [], archiveDigests: [], recall: true }, 2400)!;
     const rec = (await c.dispatch!.dispatcher.get(c.dispatch!.principal, attemptId))!;
     assert.deepEqual(rec.anchors?.map((x) => x.digest), [again.digest], "the attempt records what the agent was shown, by digest");
 

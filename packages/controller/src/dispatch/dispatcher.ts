@@ -23,7 +23,7 @@ import type { PauseGuard } from "../lifecycle/index.js";
 import type { HandoffPhase } from "../lifecycle/index.js";
 import type { McpService } from "../mcp/index.js";
 import type { ContextEnforcementService } from "../context/index.js";
-import { composeAnchor, type AnchorBlock } from "../context/anchor.js";
+import { composeAnchor, type AnchorBlock, type AnchorFacts } from "../context/anchor.js";
 import { cutNote, type HandoffFacts } from "../context/budget.js";
 import type { AttendanceService } from "../meetings/index.js";
 import type { NotificationService } from "../notifications/index.js";
@@ -208,7 +208,7 @@ export interface DispatcherDeps {
    * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
    */
   readonly anchor?: {
-    readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
+    readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number; /** Card W13: the owner has the memory tool on, so the block says it exists. */ readonly recall?: boolean } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
     readonly rules?: (c: { readonly taskId: string; readonly projectId: string }) => Promise<{ readonly version: number; readonly total: number; readonly items: readonly { readonly id: string; readonly text: string }[] } | undefined>;
   };
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
@@ -2527,21 +2527,52 @@ export class DispatcherService {
       if (plan === undefined) return undefined;
       // The owner has it on but this start goes without it: said on the attempt's record (W12 review), never silently.
       if (!("maxChars" in plan)) { await this.#anchorLeftOut(b.attemptId, plan.leftOut); return undefined; }
-      const task = await this.#deps.projects.getTask(b.taskId);
-      if (task === undefined) return undefined;
-      const contract = await this.#doneContract(b).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
-      const rules = dep.rules === undefined ? undefined : await dep.rules({ taskId: b.taskId, projectId: b.projectId }).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
-      const notes = (await this.#load(b.attemptId))?.body.notes ?? b.notes ?? [];
-      const block = composeAnchor({
-        taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, title: task.title, ...(task.description === "" ? {} : { description: task.description }),
-        ...(contract?.expectedResult === undefined ? {} : { expectedResult: contract.expectedResult }), ...(contract?.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: contract.acceptanceCriteria }),
-        ...(contract === undefined ? {} : { contract: { version: contract.version, requiredEvidence: contract.requiredEvidence, checks: contract.checks.map((x) => x.name) } }),
-        notes: notes.map((n) => ({ kind: n.kind, text: n.text })), ...(rules === undefined ? {} : { rules }),
-        handoffIds: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])], archiveDigests: [...new Set(handed.match(/sha256:[0-9a-f]{64}/g) ?? [])],
-      }, plan.maxChars);
+      const facts = await this.#anchorFacts(b, handed);
+      if (facts === undefined) return undefined;
+      const block = composeAnchor({ ...facts, ...(plan.recall === true ? { recall: true } : {}) }, plan.maxChars);
       if (block === undefined) { await this.#anchorLeftOut(b.attemptId, "no-room", plan.maxChars); return undefined; }
       return { block, maxChars: plan.maxChars };
     } catch (error) { this.#options.onError?.(error); return undefined; }
+  }
+
+  /** The records the anchor is made of, as of now (card W12; card W13's `task.recall` recomputes the same facts). A record that cannot be read is left out and reported. `undefined` when the task or the anchor's wiring is missing. */
+  async #anchorFacts(b: DispatchBody, handed: string): Promise<AnchorFacts | undefined> {
+    const dep = this.#deps.anchor;
+    if (dep === undefined) return undefined;
+    const task = await this.#deps.projects.getTask(b.taskId);
+    if (task === undefined) return undefined;
+    const contract = await this.#doneContract(b).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
+    const rules = dep.rules === undefined ? undefined : await dep.rules({ taskId: b.taskId, projectId: b.projectId }).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
+    const notes = (await this.#load(b.attemptId))?.body.notes ?? b.notes ?? [];
+    return {
+      taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, title: task.title, ...(task.description === "" ? {} : { description: task.description }),
+      ...(contract?.expectedResult === undefined ? {} : { expectedResult: contract.expectedResult }), ...(contract?.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: contract.acceptanceCriteria }),
+      ...(contract === undefined ? {} : { contract: { version: contract.version, requiredEvidence: contract.requiredEvidence, checks: contract.checks.map((x) => x.name) } }),
+      notes: notes.map((n) => ({ kind: n.kind, text: n.text })), ...(rules === undefined ? {} : { rules }),
+      handoffIds: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])], archiveDigests: [...new Set(handed.match(/sha256:[0-9a-f]{64}/g) ?? [])],
+    };
+  }
+
+  /**
+   * Card W13: the anchor's facts for a RUNNING attempt, for `task.recall`. The task is the attempt's own; the hand-off IDs and cut-note digests are left to the recall reader, which reads them from the task's records. `undefined` when the
+   * attempt is unknown or the anchor is not wired.
+   */
+  async recallAnchorFacts(attemptId: string): Promise<AnchorFacts | undefined> {
+    const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
+    if (d === undefined) return undefined;
+    try { return await this.#anchorFacts(d.body, ""); } catch (error) { this.#options.onError?.(error); return undefined; }
+  }
+
+  /** The attempts the dispatcher claimed for a task, oldest first (card W08's per-task record), at most `TASK_ATTEMPTS_LIMIT`. */
+  async attemptIdsOf(taskId: string): Promise<string[]> {
+    const found = await this.#runner.get(TASK_ATTEMPTS_KIND, taskId);
+    const list = (found?.body as unknown as TaskAttemptsBody | undefined)?.attempts;
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string") : [];
+  }
+
+  /** The attempt's own record, for the dispatcher's own principal and the recall reader (no right is checked here: the caller has bound the attempt to a credential). */
+  async attemptBody(attemptId: string): Promise<DispatchBody | undefined> {
+    return typeof attemptId === "string" && ATTEMPT.test(attemptId) ? (await this.#load(attemptId))?.body : undefined;
   }
 
   /** Keeps what the agent was shown on the attempt's record (card W12): the digest, size and sources. The same block again (a restart of the same attempt over unchanged records) adds nothing. */

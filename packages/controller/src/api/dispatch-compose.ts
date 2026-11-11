@@ -15,6 +15,8 @@ import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, compactionKeep, ownerRuleItems, startupItems, type DecisionDeps } from "../decisions/index.js";
 import { ANCHOR_DEFAULT_CHARS, anchorBudget, findAnchors } from "../context/anchor.js";
+import { RecallReader } from "../context/recall-source.js";
+import { RecallService } from "../context/recall-service.js";
 import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, ThinkingStore, type ReportedThinking, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
@@ -190,6 +192,8 @@ export interface DispatchHandle {
   readonly quiesce: QuiesceCoordinator;
   /** Shuts down the local worker host the operator built, if it gave a way to. */
   readonly closeWorkers: () => Promise<void>;
+  /** Card W13: the read-only memory tool the tool bridge answers `task.recall` with (the records of the attempt's own task; the owner's switch and call cap). */
+  readonly recall: RecallService;
   /** The remote-worker service when `remote` was given: the owner's moves of attempts and stores, and the placement records (card H02c proves them through the composed controller). */
   readonly remote?: RemoteWorkerService;
   /** The owner's "move the work off this host" and the quiet-host pass, when remote hosts and `quietHosts` were given. */
@@ -741,7 +745,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           const window = await windowOfRoute({ route: c.route } as WorkOrder);
           if (window === undefined) return { leftOut: "no-window" as const };
           const maxChars = anchorBudget(window, settings?.anchorChars ?? ANCHOR_DEFAULT_CHARS);
-          return maxChars === undefined ? { leftOut: "no-room" as const } : { maxChars };
+          return maxChars === undefined ? { leftOut: "no-room" as const } : { maxChars, ...(settings?.recall === false ? {} : { recall: true }) };
         },
         rules: async (c) => {
           const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });
@@ -765,6 +769,12 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       ...(capture === undefined ? {} : { checkpoints: capture }),
     }, { ...ro, holder: "dispatcher", ...(i.onError === undefined ? {} : { onError: i.onError }), ...(i.options.dispatcher ?? {}), ...((i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning) === undefined ? {} : { safeLongRunning: (i.options.dispatcher?.safeLongRunning ?? i.safeLongRunning)! }), ...(i.dispatchLimits === undefined ? {} : { limits: i.dispatchLimits }), ...(i.taskMinutes === undefined ? {} : { configuredMinutes: i.taskMinutes }) });
     holder.dispatcher = dispatcher;
+    // Card W13: `task.recall` reads the attempt's own task through the dispatcher's records and the context service's hand-off notes and cut notes, as the controller.
+    const recallReader = new RecallReader({
+      attemptsOf: (taskId) => dispatcher.attemptIdsOf(taskId), attempt: (attemptId) => dispatcher.attemptBody(attemptId), anchorFacts: (attemptId) => dispatcher.recallAnchorFacts(attemptId),
+      handoff: (by, noteId) => context.readHandoff(by, noteId), archive: (by, taskId, digest) => context.noteArchive(by, { taskId, digest }),
+    });
+    const recall = new RecallService({ read: (attemptId, by) => recallReader.read(attemptId, by), settings: async () => (i.contextRouteSettings === undefined ? {} : await i.contextRouteSettings.effective()) });
     live.dispatcher = dispatcher;
     // A cutover cancels the running generation and runtime of the attempts it cut (card R04c).
     i.routes?.cutover.bind(i.routes.fallback, cutoverListener({ dispatcher: () => live.dispatcher, generation, principal, elevated: recovering(principal) }));
@@ -800,7 +810,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     await i.beforeLoops?.();
     if (i.options.manual !== true) driver.start();
     return {
-      dispatcher, driver, generation, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
+      dispatcher, driver, generation, recall, closeWorkers: async () => { remote?.close(); await transport?.close().catch(() => undefined); await i.options.local?.close?.(); },
       ...(transport === undefined ? {} : { workerUrl: transport.url }), ...(remote === undefined ? {} : { remote }), ...(quiet.service === undefined ? {} : { quietHosts: quiet.service }),
       attemptControl: { live: (taskId) => dispatcher.liveAttemptsOf(principal, { taskId }), frozenReason: async (id) => (await dispatcher.get(principal, id))?.frozen?.reason, release: (id) => dispatcher.release(principal, id), tell: (id, text) => dispatcher.tell(principal, id, text), stop: (id, reason) => dispatcher.stop(principal, id, { reason }) },
       attendance, standups, watches,

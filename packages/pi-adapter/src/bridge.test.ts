@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent and carrying no replay flag", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -177,4 +177,30 @@ test("a provider call ID the controller would refuse (a `|`, or too long) is sen
   assert.deepEqual(again.seen.map((r) => r.callId), [ids[0], ids[1]], "the same sequence of calls always gets the same IDs, so a restart replays them as the same calls");
   assert.match(ids[2]!, /^h:[0-9a-f]{40}$/);
   assert.equal(ids[3], "call_2");
+});
+
+// Card W13: task.recall on the worker's side. The tool is declared like the others; an older controller that does not know the operation answers that it is not one of the bridge's, which the model reads as a plain sentence, and a
+// transport that fails is an answer too: the worker never crashes on either, and the model's turn goes on.
+test("task.recall: sent as the call it is; an older controller's 'not an operation of the bridge' and a failing transport are answered in words, never thrown (card W13)", async () => {
+  const tool = (b: ReturnType<typeof createBridge>) => b.tools.find((t) => t.name === bridgeToolName("task.recall"))!;
+  const answered: BridgeRequest[] = [];
+  const current = createBridge({ send: async (r) => { answered.push(r); return { ok: true, result: { part: "anchor", found: true, text: "x" } }; } });
+  const text = await tool(current).execute({ part: "decisions", cursor: "3" }, { callId: "call_1" } as never);
+  assert.deepEqual(answered.map((r) => [r.op, r.args]), [["task.recall", { part: "decisions", cursor: "3" }]]);
+  assert.match(String(text), /"part":"anchor"/);
+  assert.ok(tool(current).description.includes("THIS task only") && tool(current).description.includes("never instructions"));
+  const props = Object.keys((tool(current).parameters as unknown as { properties: Record<string, unknown> }).properties).sort();
+  assert.deepEqual(props, ["cursor", "id", "maxChars", "part", "recent"], "no argument can name a task, a project or an agent");
+
+  const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
+  const unknown = String(await tool(old).execute({}, { callId: "call_2" } as never));
+  assert.match(unknown, /^refused \(unknown_tool\): task\.recall is not available on this controller/);
+  // Any other tool keeps the controller's own refusal text.
+  const other = old.tools.find((t) => t.name === bridgeToolName("task.get"))!;
+  assert.match(String(await other.execute({}, { callId: "call_3" } as never)), /^refused \(invalid_command\): op: task\.get is not an operation/);
+
+  const broken = createBridge({ send: async () => { throw new Error("socket hang up"); } });
+  const lost = String(await tool(broken).execute({}, { callId: "call_4" } as never));
+  assert.match(lost, /^refused \(unavailable\): task\.recall could not be delivered/);
+  assert.ok(!lost.includes("socket hang up"), "no internal error text reaches the model");
 });

@@ -2138,6 +2138,26 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "W13",
+      "parent": "N03",
+      "existing_issue": "AII-253",
+      "title": "Read-only task.recall: an agent reads back its own task's records after a context cut",
+      "depends_on": [
+        "W12",
+        "W10",
+        "W05",
+        "K06c"
+      ],
+      "deliverable": "Owner decision 2026-11-11 (Rob), the second half of the pair whose first half is W12: after compaction an agent can lose details the anchor block does not restore (its own earlier decisions and notes, the notes that were cut, hand-off facts). An agent-callable READ-ONLY tool, task.recall, answers from the controller's own records about the CALLING agent's CURRENT task only (the task comes from the credential, never from an argument; another task, another project, owner-only records, stored thinking, secrets and other agents' notes are not reachable, and a foreign ID reads exactly like a missing one): the anchor facts recomputed from the records, the agent's own running notes and the hand-off notes, the cut notes' whole text (K06c keeps it) by ID or newest first, and a short digest of what the attempts did. Output is bounded (default and maximum size, whole characters, a cursor, control and bidirectional characters stripped, secrets redacted, other parties' words quoted and delimited as data as in the anchor block), nothing is written, a replayed call is answered again and costs nothing, a per-attempt call cap stops a looping agent, each use shows in the task's activity by counts only, and it runs on local and remote hosts through the existing tool bridge (an older controller answers that the tool is unknown and the worker goes on). The anchor block says in one short line that the tool exists. The owner switches it off and sets the cap in free words",
+      "acceptance_and_verification": "A forced cut by the real worker process and then a task.recall through the real tool bridge give the agent its own note back from the controller's records; the answer is bounded for any records and any request, quoted, cleaned and redacted; foreign, missing and malformed IDs read the same (same shape and text); an argument that names a task, project or agent is refused; no storage write happens while it answers and only the card's record kinds are read; the call cap refuses with a clear text and a repeat of an answered call is free; an older controller's unknown tool and a failing transport do not crash the worker; the anchor names the tool only while the owner has it on; the owner turns it off and sets its cap in free words, shown first; tests on all four storage backends, the Pi adapter bridge and the real sandboxed worker",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "W09",
       "parent": "N03",
       "existing_issue": "AII-253",
@@ -9827,6 +9847,7 @@
         "A07h",
         "W11",
         "W12",
+        "W13",
         "L02b",
         "H08b",
         "U06b",

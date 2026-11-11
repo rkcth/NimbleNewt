@@ -45,7 +45,12 @@ export interface AnchorFacts {
   /** Hand-off package and cut-note archive references the first prompt names (IDs and digests only). */
   readonly handoffIds?: readonly string[];
   readonly archiveDigests?: readonly string[];
+  /** Card W13: the owner has the read-only tool `task.recall` on, so the block says in one line that it exists. Absent or false: nothing is said. */
+  readonly recall?: boolean;
 }
+
+/** Card W13: the one line the block carries about the memory tool. The wire name is the one the model sees. */
+export const RECALL_LINE = "After a cut, read your goal, notes, hand-off facts and cut notes back with the tool nimblenewt__task-recall (task.recall).";
 
 export interface AnchorBlock {
   /** The whole block: begin line, body, end line. */
@@ -73,21 +78,29 @@ export function anchorBudget(window: number, ownerChars: number = ANCHOR_DEFAULT
  * delimiter is made unreadable as one. The result has no line break and no quote that is not escaped, and is returned inside JSON quotes: the quotes mark where the other party's words begin and end.
  */
 export function datum(value: string | undefined, max: number): string {
-  const folded = redactText(value ?? "")
+  return JSON.stringify(cutWhole(cleanText(value), max));
+}
+
+/** Cleans words someone else wrote exactly as `datum` does, but does not cut them (card W13 pages long texts by whole characters over the cleaned text). */
+export function cleanText(value: string | undefined): string {
+  return redactText(value ?? "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, " ")
     .replace(/\p{Cf}/gu, "")
     .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "")
-    .replace(/NN-ANCHOR/gi, "NN_ANCHOR")
+    .replace(/NN-(ANCHOR|RECALL)/gi, (_m, w: string) => `NN_${w}`)
     .trim()
     // A mark with nothing to attach to (the text began with it) would combine with the opening quote.
     .replace(/^\p{M}+/u, "");
+}
+
+/** Cuts cleaned text to `max` whole characters (code points) with `...`. */
+function cutWhole(folded: string, max: number): string {
   const chars = Array.from(folded);
   // The cut never leaves a letter without the marks that follow it (W12 review): it goes back to before the letter they combine with.
   let n = Math.max(0, max - 3);
   if (chars.length > max) while (n > 0 && /^\p{M}$/u.test(chars[n]!)) n -= 1;
-  const cut = chars.length <= max ? folded : `${chars.slice(0, n).join("").trimEnd()}...`;
-  return JSON.stringify(cut);
+  return chars.length <= max ? folded : `${chars.slice(0, n).join("").trimEnd()}...`;
 }
 
 const ID = /^[A-Za-z0-9:._-]{1,100}$/;
@@ -168,6 +181,7 @@ function render(f: AnchorFacts, c: Caps, narrow: number): { body: string; trunca
   for (const a of archives) sources.push({ kind: "note-archive", id: a });
   const refs = [...(f.contract === undefined ? [] : [`contract v${f.contract.version}`]), ...(rules === undefined || rules.total === 0 ? [] : [`decisions v${rules.version}`]), ...handoffs.map((h) => `hand-off ${h}`), ...archives.map((a) => `cut note ${a}`)];
   if (refs.length > 0) lines.push(`Records, by ID: ${refs.join("; ")}.${handoffs.length + archives.length > 0 ? " Read what was handed to you or cut with handoff.get and context.note-archive.read." : ""}`);
+  if (f.recall === true) lines.push(RECALL_LINE);
   return { body: lines.join("\n"), truncated, sources };
 }
 const xs0 = (xs: readonly string[], c: Caps): boolean => xs.length > c.items || xs.some((x) => Array.from(x).length > c.item);

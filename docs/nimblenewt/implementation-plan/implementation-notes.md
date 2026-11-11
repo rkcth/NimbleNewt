@@ -8102,7 +8102,7 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 - A remote worker's first prompt carries the block and the contract names its digest; the remote channel does not yet hand the process the copy for re-insertion (needs the remote wire to carry `context.compaction.anchor`). Local workers only.
 - Not rerun in full after the last edits: see the suite line above.
 - Plan: the W12 card was added to `scripts/generate_task_plan.py` (the plan tests pass, 361 cards); "needs plan owner" only for its status and AII issue ID, which the generator gives like the other new cards.
-- W13 is not built.
+- W13 is built in the next section.
 
 **ASSUMPTION**: default on, cap 2400 characters and 4 percent of the window, because the card says a small fixed fraction and the owner can change both in chat.
 **ASSUMPTION**: the done contract in the block lists check names and required evidence only, never commands or paths of secrets.
@@ -8119,3 +8119,23 @@ Owner decision 2026-11-11 (Rob). After Pi cuts a conversation the agent could lo
 - Cost of default on: at most 2,400 characters (about 800 tokens at the budget's three characters a token, less on windows under 20,000 tokens where 4 percent of the window caps it) at the top of every attempt's first prompt and of every extractive summary. Kept on as the owner approved the card; the owner sees each block's size on the attempt's record (`anchors[].chars`) and can lower the cap or turn it off in chat.
 - Mutations (each made alone on the built files, each failed a test, then restored): summary ignores the kept tail; a used request ID resubmitted with the block whatever was first sent; the mark back-off in the cut; no `anchorLeftOut` for no room.
 - Left as noted: a start whose records changed (a new note) carries a newer block while the view still shows the older one, so two different blocks are visible until the next cut replaces both.
+
+## W13: task.recall, an agent reads back its own task's records (2026-11-11)
+
+Done:
+- Tool `task.recall` (wire `nimblenewt__task-recall`) through the existing bridge, local and remote. Parts: `anchor`, `decisions` (own notes and hand-off notes, newest first), `archives` (K06c cut notes, list or whole by digest, paged), `activity`. Composer `context/recall.ts`, reader `context/recall-source.ts`, service `context/recall-service.ts`.
+- Task identity only from the credential; any argument naming a task, project, agent or attempt is refused (`invalid_command`). Foreign, missing and malformed IDs give the same shape and the same fixed text. The reader drops any record whose task differs from the attempt's.
+- Bounded (3,000 default, 600 to 8,000, whole characters, cursor), redacted, control, bidi and tag characters stripped, quoted in an `[NN-RECALL v1 ...]` frame; `datum` and the delimiter rewrite now also cover `NN-RECALL`. No writes (a storage proxy test counts zero writes and only allowed record kinds read). Replays answer again at no cost; per-attempt cap (default 20) refuses with a clear text. Activity shows counts only.
+- Version skew: an older controller's "not an operation of the bridge" and a transport failure become words to the model in the Pi adapter, never a crash.
+- Anchor carries one line naming the tool (only while the switch is on); anchor digest tests updated.
+- Owner control in chat: `context.route.change` settings `recall` (switch) and `recallCalls` (1 to 100), interpreter prompt and op-table tests.
+- Tests: composer, 4-backend record test, bridge suite, remote protocol test (4 backends), pi-adapter test, chat and settings tests on 4 backends, composed-controller test (`api/start-recall.test.ts`), real sandboxed worker after real cuts (`integration/src/w13-recall.test.ts`). Mutation checks (each killed, then restored): task from argument, foreign-id membership, reader task guard, size clamp, redaction, extra fields shown, write path.
+- Docs: `context-window-stalls.md` item 10, `api-v1.md` regenerated, plan card W13 (generator, `g07` 362, README roadmap).
+
+Not done:
+- The MCP door for outside agents does not carry the tool.
+- The call count is in controller memory (a restart resets it).
+- The full exhaustive shards were not all run here; targeted suites for everything touched were (2286 tests, 0 failures).
+
+ASSUMPTION: the default cap of 20 calls per attempt and the 3,000 character default page are the smallest safe values that still cover a typical recovery; the owner can change the cap in chat.
+ASSUMPTION: the activity part lists the task's attempts only (no other tasks), newest first, at most 20 attempts.

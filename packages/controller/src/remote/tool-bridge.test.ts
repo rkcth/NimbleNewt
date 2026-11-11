@@ -32,6 +32,16 @@ for (const backend of backends) {
     assert.deepEqual(await attempt.toolBridge(TOKEN, { op: "desk.read", callId: "call_3" }), { ok: true, result: { args: true } });
   });
 
+  suite("task.recall (card W13) crosses the worker protocol like any bridge request, and an older controller's 'not an operation of the bridge' comes back as an answer, not a failure of the wire", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1, "Order seeds");
+    const recall = (callId: string, args: JsonObject = { part: "decisions" }) => ({ op: "task.recall", callId, args });
+    c.toolBridge.handle = async (_t, a, request) => ({ ok: true, result: { part: "decisions", found: true, seenAttempt: a, seenOp: request.op } });
+    assert.deepEqual(await attempt.toolBridge(TOKEN, recall("rc_1")), { ok: true, result: { part: "decisions", found: true, seenAttempt: attemptId, seenOp: "task.recall" } });
+    c.toolBridge.handle = async (_t, _a, request) => ({ ok: false, code: "invalid_command", message: `op: ${request.op} is not an operation of the bridge` });
+    assert.deepEqual(await attempt.toolBridge(TOKEN, recall("rc_2")), { ok: false, code: "invalid_command", message: "op: task.recall is not an operation of the bridge" });
+  });
+
   suite("copies of one request that overlap (a retry after a timeout) share one answer and reach the bridge once; the same call ID with other content is not the same request", async (c) => {
     const r1 = await c.host("r1");
     const { attempt } = await c.started(r1, "Order seeds");

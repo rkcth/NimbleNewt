@@ -28,7 +28,7 @@ const cleanReason = (value: unknown, field: string): string => redactText(text(v
 const sameSource = (a: SourceRef, b: SourceRef): boolean => JSON.stringify(a) === JSON.stringify(b);
 /** Part of an admission's identity that tells one start of the worker apart from another (the same attempt resumed after a restart, a host loss or a move is judged afresh, not given the answer of an earlier, smaller conversation). */
 const launchPart = (launch: unknown): string => (launch === undefined ? "" : `\0launch\0${key("launch", launch)}`);
-const handoffId = (taskId: string, attemptId: string, source: string): string => derivedId("hof", `${taskId}\0${attemptId}\0${source}`);
+export const handoffId = (taskId: string, attemptId: string, source: string): string => derivedId("hof", `${taskId}\0${attemptId}\0${source}`);
 /** A hand-off note's ID, as the next attempt's first call names it. */
 const HANDOFF_ID = /^hof-[a-z2-7]{20}$/;
 const label = (s: SourceRef): string => (s.kind === "desk-record" || s.kind === "owner-decision" ? s.id : `${s.scopeId}#${s.seq}`);
