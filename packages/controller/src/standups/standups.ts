@@ -1086,8 +1086,9 @@ export function needsOwnerFrom(notifications: { inbox(owner: Principal): Promise
     // Notice-level items never enter this list (owner decision: Needs-you and Urgent first, notices only as a count, see `noticesFrom`).
     const open = (await notifications.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled" && i.projectId === projectId && i.level !== "notice");
     const rank = (i: { urgent: boolean; level?: string }): number => (i.urgent || i.level === "urgent" ? 1 : 0);
+    // An item the critical-path watch raised (card U11d, "U11f") is Urgent, so it opens the agenda; it says why.
     open.sort((a, b) => rank(b) - rank(a) || (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : a.id < b.id ? -1 : 1));
-    return open.map((i) => ({ text: `${rank(i) === 1 ? "Urgent: " : ""}${cut(i.label, 200)}${i.count > 1 ? ` (reported ${i.count} times)` : ""}, waiting since ${i.firstAt}.`, cites: [{ kind: "notification-item", id: i.id, revision: i.revision }] }));
+    return open.map((i) => ({ text: `${rank(i) === 1 ? (i.criticalAt !== undefined ? "Urgent, holds up the critical path: " : "Urgent: ") : ""}${cut(i.label, 200)}${i.count > 1 ? ` (reported ${i.count} times)` : ""}, waiting since ${i.firstAt}.`, cites: [{ kind: "notification-item", id: i.id, revision: i.revision }] }));
   };
 }
 
