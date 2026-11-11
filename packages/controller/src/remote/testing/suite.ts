@@ -24,7 +24,7 @@ export const local = (text: string) => ({ kind: "local" as const, run: async () 
 export interface Started { readonly taskId: string; readonly attemptId: string; readonly placement: number; readonly order: WorkOrder; readonly attempt: RemoteAttempt }
 export interface Ctx extends RemoteWorld {
   /** A new task for agent ann, ticked until the dispatcher starts it on `host` (it is the only host that can), and the worker accepts the offer. */
-  started(host: RemoteHost, title?: string, extra?: { agent?: string; /** Leave the dispatch contract unconfirmed (the worker has not yet answered it). */ unconfirmed?: boolean }): Promise<Started>;
+  started(host: RemoteHost, title?: string, extra?: { agent?: string; /** Tools the agent is granted (default read-file and write-file). */ tools?: readonly string[]; /** Leave the dispatch contract unconfirmed (the worker has not yet answered it). */ unconfirmed?: boolean }): Promise<Started>;
   ops(attemptId: string): Promise<ToolOperationBody[]>;
 }
 
@@ -39,9 +39,9 @@ export function remoteSuite(backend: Backend) {
         const w = world;
         const agents = new Map<string, { id: string; aid: string }>();
         const c: Ctx = Object.assign(w, {
-          started: async (host: RemoteHost, title = "Order seeds", extra: { agent?: string; unconfirmed?: boolean } = {}) => {
+          started: async (host: RemoteHost, title = "Order seeds", extra: { agent?: string; tools?: readonly string[]; unconfirmed?: boolean } = {}) => {
             const name = extra.agent ?? "ann";
-            if (!agents.has(name)) agents.set(name, await w.agent(name, workGrants(w.project, ["read-file", "write-file"])));
+            if (!agents.has(name)) agents.set(name, await w.agent(name, workGrants(w.project, extra.tools ?? ["read-file", "write-file"])));
             w.prefer(host);
             const { taskId, attemptId } = await w.task(title, agents.get(name)!);
             const report = await w.tick();
