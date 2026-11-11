@@ -1345,7 +1345,13 @@ for (const backend of backends) {
     const whole = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: false }) }).needsYou(c.owner))!;
     assert.ok(whole.lines.some((l) => l.text === "\"Tidy the garden\" is held before it resumes: 1 change since it stopped was judged to matter to it: file /src/a.ts (changed) (approve the resume to let it go on, or decline it, which releases the task); since 2000-01-01T00:00:00.000Z."), JSON.stringify(whole.lines.map((l) => l.text)));
     assert.ok(!whole.truncated.includes("held resumes"));
-    const cut = (await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: true }) }).needsYou(c.owner))!;
+    // Card L04d wiring review: some changes judged, some not reviewed by any second agent; each is said as it is, never all "judged".
+    const two = { ...one, checkId: "rck-mixed", taskId: "task-mixed", changes: [...one.changes, { kind: "file", key: "/src/b.ts", status: "deleted" }], notReviewed: "the model was down", notReviewedCount: 1 };
+    const mixed = (await c.rebuild({}, { heldResumes: async () => ({ items: [two], truncated: false }) }).needsYou(c.owner))!.lines.map((l) => l.text);
+    assert.ok(mixed.includes("\"Tidy the garden\" is held before it resumes: 2 changes since it stopped need you: 1 was judged to matter to it and 1 was not reviewed by a second agent (the model was down): file /src/a.ts (changed), file /src/b.ts (deleted) (approve the resume to let it go on, or decline it, which releases the task); since 2000-01-01T00:00:00.000Z."), JSON.stringify(mixed));
+    const none = (await c.rebuild({}, { heldResumes: async () => ({ items: [{ ...two, notReviewedCount: 2 }], truncated: false }) }).needsYou(c.owner))!.lines.map((l) => l.text);
+    assert.ok(none.some((t) => t.includes("2 changes since it stopped were not reviewed by a second agent (the model was down), so they are yours to judge: ")), JSON.stringify(none));
+    const cut =(await c.rebuild({}, { heldResumes: async () => ({ items: [one], truncated: true }) }).needsYou(c.owner))!;
     assert.ok(cut.truncated.includes("held resumes"), "a source that had more than was read is named");
     const many = Array.from({ length: 51 }, (_, i) => ({ ...one, checkId: `rck-${i}`, taskId: `task-${i}` }));
     const over = (await c.rebuild({}, { heldResumes: async () => ({ items: many, truncated: false }) }).needsYou(c.owner, 50))!;

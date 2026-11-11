@@ -190,3 +190,15 @@ test("review: what could not be checked is never put to the model and always wai
   assert.equal(only[unknown.id]!.relevant, true);
   assert.equal(none.asked.length, 0);
 });
+
+test("review: quoting never makes a prompt longer than the shared bounded client keeps, so no change line or closing list of ids is cut off; the piece is made smaller instead (card L04d wiring review)", async () => {
+  // 40 changes whose keys are 200 backslashes and invisible marks: quoted, each line is several times its text, and 40 of them were far past the 24,000 characters W10's client keeps.
+  const big = Array.from({ length: 40 }, (_, i) => item(`${"\\".repeat(100)}${"\u200b".repeat(99)}${i}`, { detail: "\u202e".repeat(200) }));
+  const lengths: number[] = [];
+  const m = scripted({ "m/r": (request) => { lengths.push(request.user.length); const ids = (request.user.match(/these ids: ([^\n]*)$/)?.[1] ?? "").split(", "); return json(Object.fromEntries(ids.map((id) => [id, { relevant: false, rationale: "beside the point" }]))); } });
+  const verdicts = await new ResumeReviewer(m.model, { routes: ["m/r"] }).review({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", changes: big });
+  assert.equal(Object.keys(verdicts).length, 40, "every change answered");
+  assert.ok(lengths.length > 1, "asked in more than one piece");
+  assert.ok(lengths.every((l) => l <= 24_000), `every prompt fits: ${lengths.join(", ")}`);
+  for (const a of m.asked) for (const id of [...a.user.matchAll(/"id":"([^"]+)"/g)].map((x) => x[1]!)) assert.match(a.user, new RegExp(`these ids: .*${id}`), "each id shown is in the closing list");
+});

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { ContinuationService, ResumeCheckService, type ResumePorts } from "../continuation/index.js";
+import { ContinuationService, ResumeCheckService, ReviewNotRun, type ResumePorts } from "../continuation/index.js";
 import { DomainError } from "../domain/errors.js";
 import { NotificationService } from "../notifications/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -117,6 +117,17 @@ for (const backend of backends) {
     assert.ok(!t1.skipped[0]!.reason.includes("AAAAAAAA"), t1.skipped[0]!.reason);
     assert.ok(t1.skipped[0]!.reason.includes("[redacted]"), t1.skipped[0]!.reason);
     void real; void a;
+  });
+
+  suite("a change no second agent reviewed is told to the owner as not reviewed, never as one that matters (card L04d wiring review)", async (c, f, real, a, go) => {
+    f.ports.review = async () => { throw new ReviewNotRun("no resume reviewer route is set"); };
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch);
+    const t = await go({ notifications }).tick();
+    assert.deepEqual(t.started, []);
+    assert.match(t.skipped[0]!.reason, /ready but holds 1 change\(s\) no second agent reviewed \(file \/src\/a\.ts \(changed\)\); attempt \S+ waits until the owner approves/);
+    const told = (await notifications.inbox(c.owner)).items.filter((i) => i.ref.kind === "resume-check");
+    assert.equal(told[0]?.detail, '"long job" is held before it resumes: 1 change(s) since it stopped had no second-agent review: file /src/a.ts (changed). Approve to let it go on, or decline to release it.');
+    assert.equal((await real.forTask(c.dispatcherPrincipal, a.taskId))!.review?.state, "not-run");
   });
 
   suite("a crash after the commit and before the start does not record a second resume", async (c, f, real, a, go) => {

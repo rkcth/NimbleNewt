@@ -29,7 +29,7 @@ import { reportLines } from "../dispatch/report.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import type { HoldsUp } from "../critical/critical-path.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
-import { ACTIVITY_KINDS, type ActivityService, type ExplanationBody } from "../activity/activity.js";
+import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -516,7 +516,7 @@ export interface StatusDeps {
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
   /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
   readonly critical?: { readonly holdsUp: () => Promise<HoldsUp | undefined>; readonly list: (by: Principal) => Promise<{ readonly revision: number; readonly marks: readonly { readonly kind: string; readonly id: string; readonly markedAt: string }[] }> };
-  readonly heldResumes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { checkId: string; taskId: string; title: string; since: string; changes: readonly { kind: string; key: string; status: string }[] }[]; truncated: boolean }>;
+  readonly heldResumes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { checkId: string; taskId: string; title: string; since: string; changes: readonly { kind: string; key: string; status: string }[]; /** Set when no second agent judged some of the changes (card L04d wiring): why, and how many of them. */ readonly notReviewed?: string; readonly notReviewedCount?: number }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
   readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
@@ -1923,7 +1923,7 @@ export class StatusService {
       if (held.truncated || held.items.length > 50) truncated.push("held resumes");
       for (const h of held.items.slice(0, 50)) {
         const names = h.changes.slice(0, 3).map((c) => `${c.kind} ${shown(c.key)} (${c.status})`).join(", ");
-        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${h.changes.length === 1 ? "was" : "were"} judged to matter to it: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3 });
+        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${heldWhy(h.changes.length, h.notReviewed === undefined ? 0 : (h.notReviewedCount ?? h.changes.length), h.notReviewed)}: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3 });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
@@ -2899,4 +2899,13 @@ export class StatusService {
     }
     return out;
   }
+}
+
+/** Why a held resume's changes wait for the owner (card L04d wiring): judged to matter, not reviewed by a second agent (with why), or some of each; never "judged" for a change no reviewer saw. */
+function heldWhy(total: number, unreviewed: number, why: string | undefined): string {
+  const were = (n: number): string => (n === 1 ? "was" : "were");
+  const reason = why === undefined ? "" : ` (${clipText(why, 160)})`;
+  if (unreviewed <= 0) return `${were(total)} judged to matter to it`;
+  if (unreviewed >= total) return `${were(total)} not reviewed by a second agent${reason}, so ${total === 1 ? "it is" : "they are"} yours to judge`;
+  return `need you: ${total - unreviewed} ${were(total - unreviewed)} judged to matter to it and ${unreviewed} ${were(unreviewed)} not reviewed by a second agent${reason}`;
 }
