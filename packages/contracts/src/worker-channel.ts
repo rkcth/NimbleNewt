@@ -221,6 +221,8 @@ function parseContext(o: Obj): ChannelContext {
   const anchorObj = compaction?.["anchor"] === undefined ? undefined : obj(compaction, "anchor");
   const anchorText = anchorObj === undefined ? undefined : str(anchorObj, "text", ANCHOR_CHANNEL_MAX);
   if (anchorText !== undefined && verifyAnchor(anchorText) === undefined) fail("compaction.anchor.text: must be exactly one goal anchor block whose digest checks out");
+  // Only the extractive summary puts the block back; with Pi's own summariser (the model writing the summary) it would be lost after the first cut without anyone knowing (W12 review).
+  if (anchorText !== undefined && fallback !== "extractive") fail("compaction.anchor: needs compaction.fallback extractive (only that summary puts the block back after a cut)");
   return {
     ...Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)),
     ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }), ...(keep === undefined ? {} : { keep }), ...(anchorText === undefined ? {} : { anchor: { text: anchorText } }) } }),

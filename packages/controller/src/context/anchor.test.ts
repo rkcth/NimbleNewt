@@ -180,3 +180,17 @@ test("find and strip: only a block whose digest checks out is a block; strip tak
   // A begin line with no end takes nothing with it.
   assert.equal(stripAnchors(`[NN-ANCHOR v1 sha256:${"a".repeat(64)}]\nkeep me`), `[NN-ANCHOR v1 sha256:${"a".repeat(64)}]\nkeep me`);
 });
+
+test("W12 review: a cut never leaves a letter without the marks that combine with it, and a text that opens with a mark does not attach it to the quote", () => {
+  const e = "e\u0301"; // e and a combining acute accent
+  const out = JSON.parse(datum(`abc${e}${e}${e}xyz`, 8)) as string;
+  assert.equal(Array.from(out).length <= 8, true);
+  assert.equal(/\p{M}/u.test(out), out.includes(e), "a mark is kept only with its letter");
+  assert.equal(out, `abc${e}...`);
+  // At 7 the cut would fall between the second e and its accent: it goes back to before that e.
+  assert.equal(JSON.parse(datum(`abc${e}${e}${e}xyz`, 7)), "abc...");
+  assert.equal(JSON.parse(datum(`\u0301\u0301abc`, 20)), "abc");
+  // Surrogate pairs are whole code points: a cut never splits one.
+  const pairs = JSON.parse(datum("\u{1F600}".repeat(50), 10)) as string;
+  assert.equal(pairs, `${"\u{1F600}".repeat(7)}...`);
+});

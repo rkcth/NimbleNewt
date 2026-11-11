@@ -45,7 +45,7 @@ function read(body: unknown, revision?: number): RouteSettingsBody {
 
 /**
  * Settings of the route-change check (card C07f) and of the goal anchor (card W12), all chat-settable and ON by default: `anchor` (whether each attempt's first prompt and every summary that replaces a cut conversation open with the controller's block of the task's goal,
- * criteria and plan) and `anchorChars` (the most characters that block may take, 700 to 6,000, default 2,400; the route's window caps it further). The route-change check's two: `check` (whether the dispatcher rebuilds the context of a task that moves to another route before the attempt starts; off: it starts as before)
+ * criteria and plan) and `anchorChars` (the most characters that block may take, 900 to 6,000, default 2,400; the route's window caps it further). The route-change check's two: `check` (whether the dispatcher rebuilds the context of a task that moves to another route before the attempt starts; off: it starts as before)
  * and `floorChars` (the characters counted as the fixed part of a route nobody has measured yet; off: nothing is counted). `set` gives a figure, `enable` and `disable` switch a setting (the figure is kept), `unset` returns to the default.
  */
 export class ContextRouteSettingsService {

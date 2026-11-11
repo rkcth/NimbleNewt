@@ -189,3 +189,31 @@ for (const backend of backends) {
     }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: a start the owner wanted an anchor for but that went without one says so on the attempt's record (no window stated, or no room), and still starts as before (W12 review)`, async () => {
+    for (const [name, anchor, expected] of [
+      ["no-window", { plan: async () => ({ leftOut: "no-window" as const }) }, { reason: "no-window" }],
+      ["no-room", plan(500), { reason: "no-room", maxChars: 500 }],
+    ] as const) {
+      const store = await backend.open();
+      try {
+        const w = await buildWorld(store.storage);
+        const ann = await w.agent("ann", workGrants(w.project, []));
+        const { taskId } = await w.task("Fix the parser", ann);
+        await withContract(w, taskId);
+        w.worker.script = async () => ({ status: "completed", text: "turn over", endKind: "normal" });
+        const d = w.restart({ anchor });
+        await runOnce(d, w);
+        const o = w.worker.starts[0]!;
+        assert.ok(o.content.startsWith("Fix the parser"), name);
+        assert.equal(o.contract?.anchorDigest, undefined, name);
+        const rec = (await d.get(w.owner, o.attemptId))!;
+        assert.equal(rec.anchors, undefined, name);
+        const { at, ...left } = rec.anchorLeftOut!;
+        assert.deepEqual(left, expected, name);
+        assert.equal(typeof at, "string", name);
+      } finally { await store.close(); }
+    }
+  });
+}

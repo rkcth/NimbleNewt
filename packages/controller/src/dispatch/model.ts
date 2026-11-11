@@ -138,6 +138,11 @@ export interface DispatchBody {
    */
   readonly anchors?: readonly AnchorRecord[];
   /**
+   * Card W12 review: the last start of the attempt went without the goal anchor although the owner had it on: `no-window` (the route does not state its window, so no share of it can be given) or `no-room` (the block did not fit
+   * the characters allowed, `maxChars`). Taken away again when a later start of the attempt carries a block. Never set when the owner turned the anchor off.
+   */
+  readonly anchorLeftOut?: { readonly at: string; readonly reason: "no-window" | "no-room"; readonly maxChars?: number };
+  /**
    * Card W11: the attempt ended its turn while jobs of its task ran, and parked to wait for them (its place given back, its hold, credential, checkpoint and host kept, as for a parked call) instead of being readmitted at once as a
    * stop before the work was done. The first of those jobs to reach a final state wakes it (the dispatcher's job wakes). The job IDs, at most `JOB_WAKE_LIMITS.waitsOn`.
    */

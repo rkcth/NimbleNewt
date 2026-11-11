@@ -202,7 +202,7 @@ export interface DispatcherDeps {
    * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
    */
   readonly anchor?: {
-    readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number } | undefined>;
+    readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
     readonly rules?: (c: { readonly taskId: string; readonly projectId: string }) => Promise<{ readonly version: number; readonly total: number; readonly items: readonly { readonly id: string; readonly text: string }[] } | undefined>;
   };
   /** The context window of a route, in tokens, or `undefined` when the route does not say (card C07d): an MCP result is cut to that window's share of tool output and the rest is kept to be read in pages. */
@@ -2497,7 +2497,7 @@ export class DispatcherService {
   /** How many characters the anchor may take on this route (card W12), 0 when it is off or does not fit; asked when the room for a route change is judged. Never throws. */
   async #anchorReserve(c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }): Promise<number> {
     if (this.#deps.anchor === undefined) return 0;
-    try { return (await this.#deps.anchor.plan(c))?.maxChars ?? 0; } catch (error) { this.#options.onError?.(error); return 0; }
+    try { const p = await this.#deps.anchor.plan(c); return p !== undefined && "maxChars" in p ? p.maxChars : 0; } catch (error) { this.#options.onError?.(error); return 0; }
   }
 
   /**
@@ -2511,6 +2511,8 @@ export class DispatcherService {
     try {
       const plan = await dep.plan({ taskId: b.taskId, projectId: b.projectId, route: b.route, ...(b.harness === undefined ? {} : { harness: b.harness }) });
       if (plan === undefined) return undefined;
+      // The owner has it on but this start goes without it: said on the attempt's record (W12 review), never silently.
+      if (!("maxChars" in plan)) { await this.#anchorLeftOut(b.attemptId, plan.leftOut); return undefined; }
       const task = await this.#deps.projects.getTask(b.taskId);
       if (task === undefined) return undefined;
       const contract = await this.#doneContract(b).catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
@@ -2523,7 +2525,8 @@ export class DispatcherService {
         notes: notes.map((n) => ({ kind: n.kind, text: n.text })), ...(rules === undefined ? {} : { rules }),
         handoffIds: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])], archiveDigests: [...new Set(handed.match(/sha256:[0-9a-f]{64}/g) ?? [])],
       }, plan.maxChars);
-      return block === undefined ? undefined : { block, maxChars: plan.maxChars };
+      if (block === undefined) { await this.#anchorLeftOut(b.attemptId, "no-room", plan.maxChars); return undefined; }
+      return { block, maxChars: plan.maxChars };
     } catch (error) { this.#options.onError?.(error); return undefined; }
   }
 
@@ -2532,10 +2535,21 @@ export class DispatcherService {
     const at = this.#runner.now();
     const { block } = anchor;
     await this.#update(attemptId, (x) => {
-      if (x.anchors?.at(-1)?.digest === block.digest) return x;
+      const { anchorLeftOut: _gone, ...rest } = x;
+      if (x.anchors?.at(-1)?.digest === block.digest) return x.anchorLeftOut === undefined ? x : rest;
       const entry: AnchorRecord = { at, digest: block.digest, chars: block.chars, maxChars: anchor.maxChars, truncated: block.truncated, sources: block.sources.slice(0, 12).map((s) => ({ kind: s.kind, id: s.id, ...(s.version === undefined ? {} : { version: s.version }) })) };
-      return { ...x, anchors: [...(x.anchors ?? []).slice(-(ANCHOR_RECORD_KEEP - 1)), entry] };
+      return { ...rest, anchors: [...(rest.anchors ?? []).slice(-(ANCHOR_RECORD_KEEP - 1)), entry] };
     });
+  }
+
+  /** Says on the attempt's record that this start went without the anchor and why (W12 review). The same reason again writes nothing. Never throws. */
+  async #anchorLeftOut(attemptId: string, reason: "no-window" | "no-room", maxChars?: number): Promise<void> {
+    try {
+      const same = (x: DispatchBody | undefined): boolean => x?.anchorLeftOut?.reason === reason && x.anchorLeftOut.maxChars === maxChars;
+      if (same((await this.#load(attemptId))?.body)) return;
+      const at = this.#runner.now();
+      await this.#update(attemptId, (x) => (same(x) ? x : { ...x, anchorLeftOut: { at, reason, ...(maxChars === undefined ? {} : { maxChars }) } }));
+    } catch (error) { this.#options.onError?.(error); }
   }
 
   /** The rules that bind the agent in the project, read now (card U04d): an owner's edit is in the next attempt's context. Not being able to read them never stops the attempt. */

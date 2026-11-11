@@ -728,9 +728,9 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
           const settings = i.contextRouteSettings === undefined ? undefined : await i.contextRouteSettings.effective();
           if (settings?.anchor === false) return undefined;
           const window = await windowOfRoute({ route: c.route } as WorkOrder);
-          if (window === undefined) return undefined;
+          if (window === undefined) return { leftOut: "no-window" as const };
           const maxChars = anchorBudget(window, settings?.anchorChars ?? ANCHOR_DEFAULT_CHARS);
-          return maxChars === undefined ? undefined : { maxChars };
+          return maxChars === undefined ? { leftOut: "no-room" as const } : { maxChars };
         },
         rules: async (c) => {
           const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });

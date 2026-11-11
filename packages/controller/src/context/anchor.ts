@@ -79,9 +79,14 @@ export function datum(value: string | undefined, max: number): string {
     .replace(/\p{Cf}/gu, "")
     .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "")
     .replace(/NN-ANCHOR/gi, "NN_ANCHOR")
-    .trim();
+    .trim()
+    // A mark with nothing to attach to (the text began with it) would combine with the opening quote.
+    .replace(/^\p{M}+/u, "");
   const chars = Array.from(folded);
-  const cut = chars.length <= max ? folded : `${chars.slice(0, Math.max(0, max - 3)).join("").trimEnd()}...`;
+  // The cut never leaves a letter without the marks that follow it (W12 review): it goes back to before the letter they combine with.
+  let n = Math.max(0, max - 3);
+  if (chars.length > max) while (n > 0 && /^\p{M}$/u.test(chars[n]!)) n -= 1;
+  const cut = chars.length <= max ? folded : `${chars.slice(0, n).join("").trimEnd()}...`;
   return JSON.stringify(cut);
 }
 

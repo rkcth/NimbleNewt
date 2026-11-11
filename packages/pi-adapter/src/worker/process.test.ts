@@ -945,6 +945,8 @@ test("W12: the channel takes exactly one block that checks out as the anchor; an
   const ok = parseToChild(JSON.parse(line({ text: GOAL }))) as { start: { context?: { compaction?: { anchor?: { text: string } } } } };
   assert.equal(ok.start.context?.compaction?.anchor?.text, GOAL);
   for (const bad of [{ text: "Goal: just text" }, { text: `${GOAL}\n${GOAL}` }, { text: GOAL.replace("Water", "Burn") }, { text: `x${GOAL}` }, { text: GOAL + "x".repeat(8000) }, {}, "text"]) assert.throws(() => parseToChild(JSON.parse(line(bad))), JSON.stringify(bad).slice(0, 60));
+  // W12 review: an anchor without the extractive summary would be lost at the first cut (Pi's own summariser does not put it back): refused, not silently ignored.
+  assert.throws(() => parseToChild({ t: "start", v: 1, start: { ...start, context: { compaction: { anchor: { text: GOAL } } } } }), /needs compaction.fallback extractive/);
 });
 
 test("W12: a process that goes on with a conversation already showing the same anchor does not add a second copy; a different one stays until the next cut replaces it", async () => {
