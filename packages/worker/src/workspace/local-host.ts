@@ -92,11 +92,12 @@ export class LocalWorkspaces {
    * stat of the checkout against the task's base. `PLAN.md` is read only when it is a plain file (not a link) of at most `PROGRESS_LIMITS.planBytes`; steps past `PROGRESS_LIMITS.steps` are left out and each step is cut to
    * `PROGRESS_LIMITS.stepChars`. A part that cannot be read is left out (the controller says it is not known); no checkout at all is `undefined`.
    */
-  async progress(call: { readonly taskId: string; readonly projectId: string }): Promise<{ plan?: { done: string[]; open: string[] }; diffStat?: string } | undefined> {
+  async progress(call: { readonly taskId: string; readonly projectId: string; readonly planOnly?: boolean }): Promise<{ plan?: { done: string[]; open: string[] }; diffStat?: string } | undefined> {
     const where = this.locate(call);
     if (where === undefined) return undefined;
     const plan = await readPlan(join(where.checkout, PLAN_FILE));
-    const diffStat = await this.#options.git.diffStat({ gitDir: where.gitDir, checkout: where.checkout }).catch(() => undefined);
+    // Card W08: asked at every completed turn for the plan alone; the diff stat (which hashes every file of the checkout into the task's git directory) is made only when it is wanted.
+    const diffStat = call.planOnly === true ? undefined : await this.#options.git.diffStat({ gitDir: where.gitDir, checkout: where.checkout }).catch(() => undefined);
     return { ...(plan === undefined ? {} : { plan }), ...(diffStat === undefined ? {} : { diffStat }) };
   }
 

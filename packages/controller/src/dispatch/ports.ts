@@ -220,7 +220,7 @@ export interface WorkerHost {
   /** Force Stop (card L02d): kill whatever this host still holds for these attempts, without asking first. A host that cannot leaves it out; one that fails throws (the stop looks again afterwards and names what is left). */
   endLocalWork?(attemptIds: readonly string[]): Promise<void>;
   /** What the attempt's checkout holds (card W03): its plan progress and diff stat. A host that cannot look leaves it out; one that fails throws (the blocker then says the host could not tell). */
-  progress?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }): Promise<WorkProgress | undefined>;
+  progress?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string; /** Card W08: only the plan is wanted (asked at every completed turn, where a diff stat would hash the whole checkout each time); a host may leave the diff stat out. */ readonly planOnly?: boolean }): Promise<WorkProgress | undefined>;
   /**
    * Checks the attempt's work when its agent says it is done (card W05): the checkout's state against its last commit and the task's base, the evidence files, and the contract's check commands run in the attempt's sandbox. A host
    * that cannot leaves it out, and a done of a task with a contract is then not taken as verified. One that fails throws.

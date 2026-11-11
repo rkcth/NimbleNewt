@@ -168,6 +168,8 @@ test("progress reads the plan's checkbox steps and the diff stat of the checkout
     const got = await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one" });
     assert.deepEqual(got?.plan, { done: ["read the code", "nested and done"], open: ["fix the parser", "run the tests"] });
     assert.equal(got?.diffStat, "2 files changed, 9 insertions(+) against the task's base; 0 commit(s) ahead of the base");
+    // Card W08: asked for the plan alone (at every completed turn), it makes no diff stat.
+    assert.deepEqual(await w.ws.progress({ taskId: "tsk-one", projectId: "prj-one", planOnly: true }), { plan: got?.plan });
     assert.equal(execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "status", "--porcelain"], { encoding: "utf8" }), before, "reading changes nothing in the checkout's index");
     // A commit in the checkout counts as ahead.
     execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/nonexistent-hooks", "-c", "commit.gpgsign=false", "add", "-A"]);

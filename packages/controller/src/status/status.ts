@@ -22,7 +22,8 @@ import type { CallBody } from "../mcp/mcp.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { startSizeAlertText, type StartSizeService } from "../context/start-size.js";
 import type { JobService } from "../jobs/jobs.js";
-import { DISPATCH_KIND, WORK_REPORT_KIND, type DispatchBody, type WorkReportTaskBody } from "../dispatch/model.js";
+import { DISPATCH_KIND, STOPPED_EARLY_KIND, TASK_ATTEMPTS_KIND, WORK_REPORT_KIND, type DispatchBody, type WorkReportTaskBody } from "../dispatch/model.js";
+import { ATTEMPT_ENDINGS_LIMITS, ENDING_BLOCKER_WORDS, attemptEndingLines, type EndingBlocker } from "../dispatch/endings.js";
 import { reportLines } from "../dispatch/report.js";
 import type { ContractBody, ContractService, DependencyBody, Difficulty } from "../planning/contracts.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
@@ -227,6 +228,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
+  attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
   handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
@@ -290,6 +292,7 @@ export type StatusRequest =
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
+  | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
@@ -598,6 +601,7 @@ export class StatusService {
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
+      case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
@@ -1181,6 +1185,51 @@ export class StatusService {
       if (i === 0) { for (const text of reportLines(d)) lines.push(line(text, c, cite("task", taskId))); continue; }
       const r = d.report;
       lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at}${r.result === "done" && d.outcome !== undefined && d.outcome.status !== "succeeded" ? ` (the attempt itself finished ${d.outcome.status})` : ""} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
+    }
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * How each attempt of a task ended (card W08), newest first, at most `ATTEMPT_ENDINGS_LIMITS.attempts`: two lines each from its dispatch record (see `attemptEndingLines`), then the blockers of cards W03, W05 and W10 open on the task,
+   * each with its summary (the controller's text, which quotes the agent's last words once). The attempts are found through the task's attempt record (written with each claim) and, for attempts claimed before it existed, the
+   * W10 report record and the W03 count. Who may read it: as for the work report, whoever may see who works on the task. The report's text itself is in the `work_report` view, not repeated here.
+   */
+  async attemptEndingLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId) || !this.#mayReadAssignment(by, body.projectId, taskId, await this.#deps.assignments.getAssignment(taskId))) return undefined;
+    const at = this.#runner.now();
+    const listed = async (kind: string): Promise<readonly string[]> => { const a = ((await this.#runner.get(kind, taskId))?.body as unknown as { attempts?: unknown } | undefined)?.attempts; return Array.isArray(a) ? a.filter((x): x is string => typeof x === "string").slice(-50) : []; };
+    // In claim order: the task's attempt record (written with each claim) last, the attempts only the older records name before it (they were claimed before that record existed). Sorted by claim time after, ties kept in this order.
+    const claimed = await listed(TASK_ATTEMPTS_KIND);
+    const ids = new Set<string>();
+    for (const id of [...await listed(STOPPED_EARLY_KIND), ...await listed(WORK_REPORT_KIND)]) if (!claimed.includes(id)) ids.add(id);
+    for (const id of claimed) ids.add(id);
+    const found: { d: DispatchBody; revision: number }[] = [];
+    for (const id of ids) {
+      const got = await this.#runner.get(DISPATCH_KIND, derivedId("dpa", id));
+      const d = got?.body as unknown as DispatchBody | undefined;
+      if (got !== undefined && d !== undefined && d.taskId === taskId) found.push({ d, revision: got.revision });
+    }
+    found.sort((a, b) => (a.d.claimedAt < b.d.claimedAt ? -1 : a.d.claimedAt > b.d.claimedAt ? 1 : 0));
+    const lines: Line[] = [];
+    if (found.length === 0) return { observedAt: at, lines: [line(`No attempt of ${shown(body.title)} is on record yet.`, cite("task", taskId))] };
+    const shownCount = Math.min(found.length, ATTEMPT_ENDINGS_LIMITS.attempts);
+    lines.push(line(`${found.length} attempt(s) of ${shown(body.title)} on record${found.length > shownCount ? `; the newest ${shownCount} are shown` : ""}, newest first.`, cite("task", taskId)));
+    for (let i = found.length - 1; i >= found.length - shownCount; i--) {
+      const { d, revision } = found[i]!;
+      const c = cite("dispatch", d.attemptId, revision);
+      for (const text of attemptEndingLines(d, i + 1)) lines.push(line(text, c, cite("task", taskId)));
+    }
+    // The blockers these endings leave, open on the task now, with what each says (the agent's words in it are quoted once by whoever opened it).
+    const viewerIsOwner = by.kind === "owner";
+    for (const type of Object.keys(ENDING_BLOCKER_WORDS) as EndingBlocker[]) {
+      const b = await this.#deps.blockers.openFor(type, { kind: "task", id: taskId }).catch(() => undefined);
+      if (b === undefined) continue;
+      // The summary is bounded where it is written (1,000 characters); it is shown whole, as one line, so the agent's last words in it are not cut off.
+      lines.push(line(`Open blocker ${type} since ${b.openedAt}: ${shown(b.summary, 1000)} The way out: ${routeFor(b.type, b.basis ?? defaultBasis(b.type), b.resolver, viewerIsOwner)}.`, cite("blocker", b.id, b.revision), cite("task", taskId)));
     }
     return { observedAt: at, lines };
   }

@@ -31,7 +31,7 @@ for (const backend of backends) {
       const ann = await w.agent("ann", workGrants(w.project, []));
       w.worker.script = stopper("no-work-end", "Next I will update the parser.‮ and \"quote\"");
       const progressAsked: string[] = [];
-      w.worker.progress = async (attemptId, scope) => { progressAsked.push(`${attemptId}:${scope.taskId}`); return { plan: { done: ["read the code"], open: ["fix the parser", "run the tests"] }, diffStat: "2 files changed, 10 insertions(+), 1 deletion(-); 1 commit ahead of the base" }; };
+      w.worker.progress = async (attemptId, scope) => { progressAsked.push(`${attemptId}:${scope.taskId}${scope.planOnly === true ? ":plan" : ""}`); return { plan: { done: ["read the code"], open: ["fix the parser", "run the tests"] }, diffStat: "2 files changed, 10 insertions(+), 1 deletion(-); 1 commit ahead of the base" }; };
       const { taskId, attemptId } = await w.task("parser", ann);
 
       await runOnce(w);
@@ -71,7 +71,10 @@ for (const backend of backends) {
       assert.match(blocker.summary, /1 of 3 step\(s\) checked; not checked: "fix the parser", "run the tests"/);
       assert.match(blocker.summary, /2 files changed, 10 insertions\(\+\), 1 deletion\(-\); 1 commit ahead of the base/);
       assert.ok(blocker.summary.length <= 1000);
-      assert.deepEqual(progressAsked, [`${attemptId}:${taskId}`]);
+      // Card W08: the host is asked for the plan alone at each completed turn (each run records how far the plan got), and in full once, for the blocker (the diff stat is made only then).
+      assert.deepEqual(progressAsked, [`${attemptId}:${taskId}:plan`, `${attemptId}:${taskId}:plan`, `${attemptId}:${taskId}:plan`, `${attemptId}:${taskId}`]);
+      assert.deepEqual(d.stoppedEarly?.map((r) => r.plan), [{ done: 1, total: 3 }, { done: 1, total: 3 }, { done: 1, total: 3 }]);
+      assert.deepEqual(d.turnEnd?.plan, { done: 1, total: 3 });
 
       // Nothing starts again by itself.
       await runOnce(w);

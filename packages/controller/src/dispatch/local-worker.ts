@@ -119,7 +119,7 @@ export interface LocalWorkerOptions {
   /** This host's side of integration, checkout refresh and quarantine for the checkouts it holds (card H12m): the worker package's `WorkspaceHost.run` fits it. Absent: those requests are refused for this host. */
   readonly workspace?: WorkspacePort;
   /** What a task's checkout on this host holds (card W03): the worker package's `LocalWorkspaces.progress` fits it. Absent: this host does not report it. */
-  readonly progress?: (scope: { readonly taskId: string; readonly projectId: string }) => Promise<WorkProgress | undefined>;
+  readonly progress?: (scope: { readonly taskId: string; readonly projectId: string; readonly planOnly?: boolean }) => Promise<WorkProgress | undefined>;
   /** Checks an attempt's work when its agent says it is done (card W05): the worker package's `doneVerifier` fits it. Absent: this host cannot check work, and a done of a task with a contract is not taken as verified. */
   readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>;
   /** Told when a guard fails (the attempt goes on; a guard never silently stops working). */
@@ -173,7 +173,7 @@ export class LocalWorker implements WorkerHost {
   readonly ownerPolicy: boolean;
   readonly #options: LocalWorkerOptions;
   readonly workspace?: WorkspacePort;
-  readonly progress?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }) => Promise<WorkProgress | undefined>;
+  readonly progress?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string; readonly planOnly?: boolean }) => Promise<WorkProgress | undefined>;
   readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>;
   #sequence = 0;
   #beat = 0;
@@ -183,7 +183,7 @@ export class LocalWorker implements WorkerHost {
   constructor(options: LocalWorkerOptions) {
     if (options.workspace !== undefined) this.workspace = options.workspace;
     const progress = options.progress;
-    if (progress !== undefined) this.progress = async (_attemptId, scope) => progress({ taskId: scope.taskId, projectId: scope.projectId });
+    if (progress !== undefined) this.progress = async (_attemptId, scope) => progress({ taskId: scope.taskId, projectId: scope.projectId, ...(scope.planOnly === true ? { planOnly: true } : {}) });
     if (options.verify !== undefined) this.verify = options.verify;
     this.hostId = options.hostId;
     this.resources = options.resources;

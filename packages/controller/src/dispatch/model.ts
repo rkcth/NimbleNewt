@@ -116,7 +116,7 @@ export interface DispatchBody {
    * How the attempt's last turn ended (card W02): the worker's classification of its last reply (`unknown` when the worker did not say), the length of that reply's visible text when it said, and when the dispatcher recorded it.
    * A completed turn whose kind is not `normal` (and whose agent did not end the attempt with work.end) is a stop before the work was said to be done (card W03, `stoppedEarly`).
    */
-  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; /** Card W04: how many times the worker continued that turn after it yielded without a tool call or work.end (absent: none said). */ readonly nudges?: number };
+  readonly turnEnd?: { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; /** Card W04: how many times the worker continued that turn after it yielded without a tool call or work.end (absent: none said). */ readonly nudges?: number; /** Card W08: the plan steps checked in the checkout when the turn ended, as the host reported them (absent: not known). */ readonly plan?: PlanCount };
   /** Card W04: the continuations (nudges) of all this attempt's turns, summed; absent while there were none. Each turn's own count is on `turnEnd` and on its `stoppedEarly` run. */
   readonly nudgesUsed?: number;
   /**
@@ -124,7 +124,7 @@ export interface DispatchBody {
    * readmitted from the checkpoint on the same conversation and host (`readmitted: true`), and the one after them ended the attempt (its outcome is `stopped-early`). `round` numbers the readmits, and names the turn's request
    * (`cmd:adm:<attempt>:se<round>`), so the conversation takes a new input instead of answering with the one it already holds.
    */
-  readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean; /** Card W04: the nudges that run's turn was given before it stopped. */ readonly nudges?: number }[];
+  readonly stoppedEarly?: readonly { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly at: string; readonly readmitted: boolean; /** Card W04: the nudges that run's turn was given before it stopped. */ readonly nudges?: number; /** Card W08: the plan steps checked when that run stopped (absent: not known). */ readonly plan?: PlanCount }[];
   readonly turnRound?: number;
   /**
    * The checks of the agent's work.end done (card W05), newest last (at most `DONE_VERIFY_LIMITS.kept`). Each is the controller's verdict, never the agent's: `passed`, `failed` (what failed is listed, bounded and redacted),
@@ -299,6 +299,17 @@ export const DONE_VERIFY_LIMITS = { kept: 6, failures: 12, failure: 900, message
 
 /** How many times a task's attempt is readmitted after it stopped early (card W03); the stop after them ends it with a blocker. Counted per task and assignment generation, in storage. */
 export const STOPPED_EARLY_READMITS = 2;
+/** Card W08: how many of the checkout's PLAN.md checkbox steps were checked, of how many, as the host reported them when a turn ended. */
+export interface PlanCount { readonly done: number; readonly total: number }
+
+/**
+ * Card W08: one record per task naming the attempts the dispatcher claimed for it (newest last, at most `TASK_ATTEMPTS_LIMIT`), written in the same commit as each claim, so the owner's view of how each attempt ended finds
+ * them without a scan. Attempts claimed before this record existed are found through the W10 report record and the W03 count instead.
+ */
+export const TASK_ATTEMPTS_KIND = "dispatch-task-attempts";
+export const TASK_ATTEMPTS_LIMIT = 20;
+export interface TaskAttemptsBody { readonly taskId: string; readonly attempts: readonly string[] }
+
 /** The per-task count of those readmits (one record per task). Card W11 counts the job wakes of the task in the same record (`wakes`, `wakeTimes`, `noticeTimes`), so the two together are bounded. */
 export const STOPPED_EARLY_KIND = "dispatch-stopped-early";
 

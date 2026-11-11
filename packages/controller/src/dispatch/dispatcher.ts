@@ -39,7 +39,7 @@ import { quoted } from "../status/explain.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type DoneVerification, type Interrogation, type InterrogationRound, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
+import { DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
@@ -343,7 +343,9 @@ interface Live { readonly handle: WorkerHandle; readonly host: WorkerHost; reado
 interface PendingResumeCommit { readonly checkId: string; readonly commandId: string }
 
 /** A completed turn that did not end normally (card W03): how it ended, what it last said and the checkpoint it left. */
-interface EarlyStop { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number; readonly text?: string; readonly checkpoint?: JsonObject }
+interface EarlyStop { readonly endKind: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number; /** Card W08: what the host said of the plan when the turn ended (asked for the plan alone at each completed turn). */ readonly progress?: Progress; readonly text?: string; readonly checkpoint?: JsonObject }
+/** What the host says of an attempt's checkout (card W03): the plan and the diff stat as short lines for the blocker, and (card W08) the steps checked and in all, when the host named a plan. */
+interface Progress { readonly plan: string; readonly diff: string; readonly count?: PlanCount }
 /** The most continuations of one turn the dispatcher records (card W04): a figure above it from a worker is not a count and is left out. */
 const MAX_RECORDED_NUDGES = 100;
 /** The attempt's running total of nudges with one turn's added (card W04), as fields to spread into the write that records the turn. */
@@ -1210,6 +1212,16 @@ export class DispatcherService {
     };
   }
 
+  /** Names the attempt in its task's attempt record (card W08), in the same commit as its claim, so the owner's view of how each attempt ended finds it. */
+  async #taskAttemptsChange(taskId: string, attemptId: string): Promise<Change[]> {
+    const ref: AggregateRef = { kind: TASK_ATTEMPTS_KIND, id: taskId };
+    const found = await this.#runner.get(TASK_ATTEMPTS_KIND, taskId);
+    const cur = found?.body as unknown as TaskAttemptsBody | undefined;
+    if (cur?.attempts.includes(attemptId) === true) return [];
+    const body = { taskId, attempts: [...(cur?.attempts ?? []), attemptId].slice(-TASK_ATTEMPTS_LIMIT) } as unknown as JsonObject;
+    return found === undefined ? [{ type: "create", ref, body }] : [{ type: "update", ref, expectedRevision: found.revision, body }];
+  }
+
   /** Names the attempt in its task's report record (card W10), in the same commit as its first note or its report. */
   async #reportPointerChange(b: DispatchBody): Promise<Change[]> {
     const ref: AggregateRef = { kind: WORK_REPORT_KIND, id: b.taskId };
@@ -1598,7 +1610,7 @@ export class DispatcherService {
     try {
       await this.#runner.command("dispatch.claim", { commandId: `dpa-claim:${attemptId}`, actor: DISPATCHER_ACTOR }, async () => ({
         payload: { attemptId, taskId },
-        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...await this.#liveChange(attemptId, true)], detail: { attemptId, taskId, ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, host: pre.host.hostId } }),
+        build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...await this.#liveChange(attemptId, true), ...await this.#taskAttemptsChange(taskId, attemptId)], detail: { attemptId, taskId, ...(pre.harness === undefined ? {} : { harness: pre.harness }), route: pre.route.route, host: pre.host.hostId } }),
       }));
     } catch (error) {
       // Another tick (or a restart racing this one) claimed it first: that claim stands.
@@ -2525,7 +2537,13 @@ export class DispatcherService {
         const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;
         // Card W04: the nudges the worker gave the turn go on the same record (a figure that is not a small whole number is left out).
         const nudges = Number.isSafeInteger(result.nudges) && result.nudges! >= 0 && result.nudges! <= MAX_RECORDED_NUDGES ? result.nudges : undefined;
-        this.#turnEnds.set(attemptId, { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) });
+        // Card W08: how far the plan got when a completed turn ended (the steps checked, of how many), as the host reports it; what it cannot say is left out, never guessed.
+        // The turn's ending is held before the host is asked (up to 10 s): a stop that ends the attempt meanwhile records it; the plan joins it only while it is still held.
+        const held: NonNullable<DispatchBody["turnEnd"]> = { endKind: turnEndKindOf(result.endKind), ...(visibleChars === undefined ? {} : { visibleChars }), at: this.#runner.now(), ...(nudges === undefined ? {} : { nudges }) };
+        this.#turnEnds.set(attemptId, held);
+        const progress = result.status === "completed" ? await this.#progressOf(d.body, true) : undefined;
+        const plan = progress?.count;
+        if (plan !== undefined && this.#turnEnds.get(attemptId) === held) this.#turnEnds.set(attemptId, { ...held, plan });
         // The turn ended with calls still waiting for an approval: the attempt gives its place back instead of holding it while nobody works.
         if (result.status === "completed" && d.body.parked.length > 0) {
           // A call that was decided, the attempt resumed for it, and that the agent did not make again is closed; the attempt yields again only for calls still undecided.
@@ -2535,7 +2553,7 @@ export class DispatcherService {
         // Card W03: a completed turn is success only when it ended normally (the agent's work.end was accepted). Any other kind, an unknown one included, is a stop before the work was said to be done: unless the agent's own
         // ending is found when the attempt ends (the end hook), the run ends stopped-early and is readmitted from its checkpoint, or the task gets a blocker once the readmits are used up.
         const kind = this.#turnEnds.get(attemptId)?.endKind ?? "unknown";
-        const early: EarlyStop | undefined = result.status === "completed" && kind !== "normal" ? { endKind: kind, ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }), ...(result.text === undefined ? {} : { text: result.text }), ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }) } : undefined;
+        const early: EarlyStop | undefined = result.status === "completed" && kind !== "normal" ? { endKind: kind, ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }), ...(progress === undefined ? {} : { progress }), ...(result.text === undefined ? {} : { text: result.text }), ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }) } : undefined;
         await this.#end(attemptId, result.status === "completed" ? "succeeded" : result.status === "cancelled" ? "abandoned" : "failed", result.status === "completed" ? "the turn completed" : (result.error ?? `the turn ${result.status}`), { readmit: false, ...(early === undefined ? {} : { early }) });
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
@@ -2749,7 +2767,7 @@ export class DispatcherService {
         if (x.state !== "running" || x.turnRound === round) { readmitted = x.turnRound === round; return x; }
         readmitted = true;
         const { requestId: _r, lease: _l, ...rest } = x; void _r; void _l;
-        return { ...rest, ...turnEnd, ...nudgeTotal(x, turnEnd), state: "waiting", pinnedHost: x.hostId, resumeFrom: checkpoint!, resumeNote: note, turnRound: round, stoppedEarly: [...(x.stoppedEarly ?? []).slice(-STOPPED_EARLY_READMITS), { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: true, ...(early.nudges === undefined ? {} : { nudges: early.nudges }) }] };
+        return { ...rest, ...turnEnd, ...nudgeTotal(x, turnEnd), state: "waiting", pinnedHost: x.hostId, resumeFrom: checkpoint!, resumeNote: note, turnRound: round, stoppedEarly: [...(x.stoppedEarly ?? []).slice(-STOPPED_EARLY_READMITS), { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: true, ...(early.nudges === undefined ? {} : { nudges: early.nudges }), ...(early.progress?.count === undefined ? {} : { plan: early.progress.count }) }] };
       }, async (x) => (x.state !== "running" || x.turnRound === round ? [] : this.#stoppedEarlyChange(b)));
       // A stop asked while the readmit was being written still wins: the stop's own end finds the attempt waiting and finishes it.
       if (readmitted) return {};
@@ -2761,6 +2779,7 @@ export class DispatcherService {
       if (stop !== undefined) return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", stop.reason), { readmit: false });
       if (now.body.state !== "running") return {};
     }
+    // Asked again in full here (the turn's ask was for the plan alone): the blocker names the steps not checked and the diff stat.
     const progress = await this.#progressOf(b);
     const lines = [
       `The agent stopped before it said its work was done, ${used + 1} time(s) in a row (the last turn ended: ${how}); ${used >= STOPPED_EARLY_READMITS ? `it was let go on from its checkpoint ${used} time(s) and no further attempt starts by itself` : "there was no checkpoint to go on from, so no further attempt starts by itself"}.`,
@@ -2768,7 +2787,8 @@ export class DispatcherService {
       `Plan: ${progress.plan}.`,
       `Changes: ${progress.diff}.`,
     ];
-    const run = { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: false, ...(early.nudges === undefined ? {} : { nudges: early.nudges }) };
+    const plan = progress.count;
+    const run = { endKind: early.endKind, ...(early.visibleChars === undefined ? {} : { visibleChars: early.visibleChars }), at, readmitted: false, ...(early.nudges === undefined ? {} : { nudges: early.nudges }), ...(plan === undefined ? {} : { plan }) };
     return this.#endInner(attemptId, "abandoned", this.#cleanSummary("abandoned", `${summary}; it stopped early (${how}) and its readmits are used up`), { readmit: false, stoppedEarly: { run, summary: lines.join("\n").slice(0, 1000) } });
   }
 
@@ -3105,13 +3125,13 @@ export class DispatcherService {
   }
 
   /** What the host says the attempt's checkout holds, as two short lines for the blocker; what it cannot say is said so, never guessed. The plan steps are the agent's words: each is quoted. */
-  async #progressOf(b: DispatchBody): Promise<{ plan: string; diff: string }> {
+  async #progressOf(b: DispatchBody, planOnly = false): Promise<Progress> {
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     if (host?.progress === undefined) return { plan: "not known (the host does not report it)", diff: "not known (the host does not report it)" };
     let timer: NodeJS.Timeout | undefined;
     let got: WorkProgress | undefined;
     try {
-      got = await Promise.race([host.progress(b.attemptId, { taskId: b.taskId, projectId: b.projectId }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${PROGRESS_MS} ms`)), PROGRESS_MS); })]);
+      got = await Promise.race([host.progress(b.attemptId, { taskId: b.taskId, projectId: b.projectId, ...(planOnly ? { planOnly: true } : {}) }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${PROGRESS_MS} ms`)), PROGRESS_MS); })]);
     } catch (error) {
       this.#options.onError?.(error);
       const why = `not known (the host could not tell: ${errorText(error).slice(0, 120)})`;
@@ -3122,7 +3142,7 @@ export class DispatcherService {
     const plan = got?.plan === undefined ? "not known (no PLAN.md with checkbox steps was found)"
       : `${done.length} of ${done.length + open.length} step(s) checked${open.length === 0 ? "" : `; not checked: ${open.slice(0, STOPPED_EARLY_SHOWN.steps).map((t) => quoted(t, STOPPED_EARLY_SHOWN.step)).join(", ")}${open.length > STOPPED_EARLY_SHOWN.steps ? ` and ${open.length - STOPPED_EARLY_SHOWN.steps} more` : ""}`}`;
     const diff = typeof got?.diffStat === "string" && got.diffStat.trim() !== "" ? clip(redactText(got.diffStat.replace(/\s+/g, " ").trim()).replace(/[^\x20-\x7e]/g, "?"), STOPPED_EARLY_SHOWN.diff) : "not known (the host did not say)";
-    return { plan, diff };
+    return { plan, diff, ...(got?.plan === undefined ? {} : { count: { done: done.length, total: done.length + open.length } }) };
   }
 
   /** Settles the attempt's hold to what it used, or holds it as uncertain when the worker was lost (its last calls are not known). Settling is by command ID derived from the attempt, so an end done again settles once. */
