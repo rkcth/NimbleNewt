@@ -538,6 +538,8 @@ test("a controller that always hangs, or (with firstBeatMs) never beats, ends in
       const a = await w.release("always", "hang-always");
       await w.point(a);
       const run = w.start({ graceMs: 500, heartbeat: FAST, backoff: { giveUpAfter: 2 } });
+      // bounded: a hang that is not counted as a short run would restart forever
+      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), 120_000);
       const result = await run.done;
       assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
       assert.equal(w.events.filter((e) => e.kind === "hung").length, 2);
@@ -551,6 +553,8 @@ test("a controller that always hangs, or (with firstBeatMs) never beats, ends in
       const a = await w.release("silent", "confirm");
       await w.point(a);
       const run = w.start({ graceMs: 500, heartbeat: { ...FAST, firstBeatMs: 1 }, backoff: { giveUpAfter: 2 } });
+      // bounded: a hang that is not counted as a short run would restart forever
+      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), 120_000);
       const result = await run.done;
       assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
       const hung = w.events.filter((e) => e.kind === "hung") as { thresholdMs: number }[];
