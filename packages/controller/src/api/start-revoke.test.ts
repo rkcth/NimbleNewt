@@ -42,9 +42,10 @@ interface Run {
 async function scenario(act: (x: {
   c: Awaited<ReturnType<typeof startController>>; name: string; owner: string; agent: string; call: (token: string, op: string, args: Record<string, unknown>, commandId?: string) => Promise<Reply>;
   say: (id: string, text: string, intents: unknown[]) => Promise<{ turnId: string; outcomes: any[] }>; ownerPrincipal: any; callsBefore: () => Promise<any[]>; /** Lets the long call end now. */ release: () => void;
-}) => Promise<void>, extra: { revocationPolicy?: "finish" | "cancel" | "pause"; run?: Run; second?: boolean; pauseTask?: unknown; notice?: (n: { commandId: string; taskId: string; text: string }) => Promise<unknown>; /** Runs once the controller is up (a test may wrap a service). */ install?: (c: Awaited<ReturnType<typeof startController>>, owner: () => any) => void; slowPolicyMs?: number; /** The call is expected never to launch. */ noLaunch?: boolean } = {}) {
+  /** The SQLite file of this controller (a second controller may be started on it). */ path: string; /** Whether the runner's signal was aborted so far. */ aborted: () => boolean;
+}) => Promise<void>, extra: { /** The store check's period (`tools.revocationWatchMs`). */ watchMs?: number; /** Another controller took the epoch during `act`: this one's writes are refused, so the call's answer is kept as it comes and no later call is made. */ fenced?: boolean; revocationPolicy?: "finish" | "cancel" | "pause"; run?: Run; second?: boolean; pauseTask?: unknown; notice?: (n: { commandId: string; taskId: string; text: string }) => Promise<unknown>; /** Runs once the controller is up (a test may wrap a service). */ install?: (c: Awaited<ReturnType<typeof startController>>, owner: () => any) => void; slowPolicyMs?: number; /** The call is expected never to launch. */ noLaunch?: boolean } = {}) {
   const d = mkdtempSync(join(tmpdir(), "nn-revoke-"));
-  const out: { aborted: boolean; running?: Record<string, any>; later?: BridgeResponse; failure?: unknown; name?: string } = { aborted: false };
+  const out: { aborted: boolean; running?: Record<string, any>; later?: BridgeResponse; failure?: unknown; name?: string; raw?: unknown } = { aborted: false };
   const sayText: Record<string, unknown[]> = {};
   let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
   let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
@@ -62,7 +63,7 @@ async function scenario(act: (x: {
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter((input) => sayText[input.text] ?? []) },
     dispatch: { timer: new ManualTimer(), manual: true, workers: [worker] },
-    tools: { runner, isLocalHost: (h) => h === "host:w1", facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), ...(extra.revocationPolicy === undefined ? {} : { revocationPolicy: async () => { if (extra.slowPolicyMs !== undefined) await sleep(extra.slowPolicyMs); return extra.revocationPolicy!; } }), ...("pauseTask" in extra ? { pauseTask: extra.pauseTask as never } : {}), ...(extra.notice === undefined ? {} : { notice: extra.notice }) },
+    tools: { runner, isLocalHost: (h) => h === "host:w1", facts: async () => ({ os: "linux", arch: "x64", interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 }), ...(extra.revocationPolicy === undefined ? {} : { revocationPolicy: async () => { if (extra.slowPolicyMs !== undefined) await sleep(extra.slowPolicyMs); return extra.revocationPolicy!; } }), ...("pauseTask" in extra ? { pauseTask: extra.pauseTask as never } : {}), ...(extra.notice === undefined ? {} : { notice: extra.notice }), ...(extra.watchMs === undefined ? {} : { revocationWatchMs: extra.watchMs }) },
   });
   try {
     assert.ok(c.dispatch !== undefined && c.tools !== undefined, c.dispatchProblem);
@@ -107,20 +108,21 @@ async function scenario(act: (x: {
         await s.reviews.decide(rob, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" } as never);
         const running = send("tool.invoke", args, "long-call");
         if (extra.noLaunch === true) await Promise.race([hasStarted, sleep(400)]); else await hasStarted;
-        await act({ c, name, owner: boot.token, agent: annToken, call, say, ownerPrincipal: rob, release, callsBefore: async () => (await call(boot.token, "catalog.running", { name, version: "1.0.0" })).result.items });
+        await act({ c, name, owner: boot.token, agent: annToken, call, say, ownerPrincipal: rob, release, path: join(d, "c.sqlite"), aborted: () => out.aborted, callsBefore: async () => (await call(boot.token, "catalog.running", { name, version: "1.0.0" })).result.items });
         await sleep(30);
         release();
+        if (extra.fenced === true) { out.raw = await running.catch((error: unknown) => ({ threw: String(error) })); return { status: "completed", text: "done" }; }
         out.running = good(await running);
         out.later = await send("tool.invoke", args, "another-call");
       } catch (error) { failure = error; throw error; }
       return { status: "completed", text: "done" };
     };
-    await c.dispatch.dispatcher.tick();
-    await c.dispatch.dispatcher.idle();
+    await c.dispatch.dispatcher.tick().catch((error: unknown) => { if (extra.fenced !== true) throw error; });
+    await c.dispatch.dispatcher.idle().catch((error: unknown) => { if (extra.fenced !== true) throw error; });
     if (failure !== undefined) throw failure;
-    assert.ok(out.running !== undefined, "the scenario ran to its end");
+    assert.ok(out.running !== undefined || (extra.fenced === true && "raw" in out), "the scenario ran to its end");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
-  return out as Required<Pick<typeof out, "aborted" | "running" | "later" | "name">>;
+  return out as Required<Pick<typeof out, "aborted" | "running" | "later" | "name">> & { raw?: unknown };
 }
 
 test("the owner revokes a version through the API and says what happens to running calls: cancel aborts them (they end failed), finish lets them end, a later call is refused; the running calls are listed without their input (card T02b)", async () => {
@@ -605,4 +607,53 @@ test("in chat the owner sets the standing policy in their own words (no fixed wo
   assert.match(seen.values.lines.map((l: any) => l.text).join("\n"), /Retention values in force[\s\S]*derivedDays: none/);
   assert.equal(seen.hold.status, "answered", JSON.stringify(seen.hold));
   assert.match(seen.hold.lines.map((l: any) => l.text).join("\n"), /1\.0\.0 is kept from deletion for \d+ reason\(s\):/);
+});
+
+test("T02d close-out, composed: a second controller started on the same store takes the epoch while the first runs a call; the owner's chat on the second lists that call as running in another process, asks, and the cancel chosen there stops the call in the first", async () => {
+  const seen: Record<string, any> = {};
+  const out = await scenario(async ({ c, name, owner, path, aborted }) => {
+    // The second controller: same SQLite file, its own dispatcher (no workers) and tool bridge, its own chat. It takes the epoch from the first (card F04i).
+    const told: Record<string, unknown[]> = {};
+    const b = await startController({
+      storage: { kind: "sqlite", path }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      chat: { interpreter: new ScriptedInterpreter((input) => told[input.text] ?? []) },
+      dispatch: { timer: new ManualTimer(), manual: true, workers: [] },
+      tools: { runner: { run: async () => { throw new Error("the second controller runs nothing in this test"); } }, isLocalHost: () => true },
+    });
+    try {
+      seen.epochs = [c.epoch, b.epoch];
+      const sayB = async (id: string, text: string, intents: unknown[]) => { told[text] = intents; const r = await b.chat!.submit(owner, { messageId: id, text }); return { turnId: r.turnId, outcomes: r.outcomes as any[] }; };
+      const callB = (op: string, args: Record<string, unknown>) => b.api.handle(owner, { v: 1, op, args } as never) as Promise<Reply>;
+      seen.listed = (await callB("catalog.running", { name, version: "1.0.0" })).result;
+      const text = `revoke ${name} 1.0.0 because it is bad`;
+      const asked = await sayB("b1", text, [{ kind: "command", op: "catalog.revoke", args: { name, version: "1.0.0", reason: "it is bad" }, evidence: text, basis: "owner" }]);
+      seen.askedStatus = asked.outcomes[0].status;
+      seen.question = asked.outcomes[0].message ?? asked.outcomes[0].question;
+      const proposed = await sayB("b2", "cancel them", [{ kind: "answer", turnId: asked.turnId, choice: "cancel", evidence: "cancel them", basis: "owner" }]);
+      seen.proposedStatus = proposed.outcomes[0].status;
+      await sleep(80);
+      seen.abortedBeforeAccept = aborted();
+      const applied = await sayB("b3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+      seen.appliedStatus = applied.outcomes[0].status;
+      seen.recorded = (await b.services.catalog.revocationOf(name, "1.0.0"))?.runningCalls;
+      // The first controller hears from the store (its own revoke listener never fired: the command was taken by the second).
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !aborted()) await sleep(10);
+      seen.aborted = aborted();
+    } finally { await b.close(); }
+  }, { watchMs: 20, fenced: true });
+  assert.ok(seen.epochs[1] > seen.epochs[0], `the second controller took the epoch: ${JSON.stringify(seen.epochs)}`);
+  assert.equal(seen.listed.total, 1, JSON.stringify(seen.listed));
+  assert.equal(seen.listed.items[0].callId, "long-call");
+  assert.equal(seen.listed.items[0].elsewhere, true, "the call runs in the first controller, not in the one asked");
+  assert.equal(seen.askedStatus, "asked", JSON.stringify(seen));
+  assert.match(String(seen.question), /1 running call.*long-call.*in another controller process/);
+  assert.equal(seen.proposedStatus, "proposed", JSON.stringify(seen));
+  assert.equal(seen.abortedBeforeAccept, false, "nothing happens before the owner accepts");
+  assert.equal(seen.appliedStatus, "applied", JSON.stringify(seen));
+  assert.equal(seen.recorded, "cancel", "the owner's choice is on the revocation record");
+  assert.equal(seen.aborted, true, "the cancel reached the call in the other controller process");
+  assert.equal(out.aborted, true);
+  // The first controller lost the epoch, so the call's end cannot be written there: it answers that, never a success.
+  assert.equal((out.raw as { ok?: boolean }).ok, false, JSON.stringify(out.raw));
 });
