@@ -89,6 +89,8 @@ for (const backend of backends) {
       // Without it the chat reads the revision itself; the proposal is shown first and nothing is granted until the owner agrees.
       const shown = await turn("m2", said, cmd("approval.proposal.accept", { proposalId: open[0]!.id, days: 7 }, said));
       assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+      // The line the owner confirms says what the grant would cover, not only the proposal's ID (review).
+      assert.match(JSON.stringify(shown[0].preview), /commit for agent:ann in project [^ ]+ \(development\), approved 3 times, open, suggested \d+ days/, JSON.stringify(shown));
       assert.equal((await ask("approval.proposals", { state: "open" })).result.items.length, 1, "shown, not applied");
       assert.equal((await grantsApi.list(w.owner, {} as never)).items.length, 0);
       const done = await turn("m3", "go ahead", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "go ahead", basis: "owner" }]);

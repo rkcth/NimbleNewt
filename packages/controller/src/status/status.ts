@@ -1127,8 +1127,10 @@ export class StatusService {
       lines.push(line(`${waiting} ask${waiting === 1 ? " is" : "s are"} waiting (longest first${waiting > 10 ? ", 10 shown" : ""}):`, c));
       for (const p of f.pending.slice(0, 10)) lines.push(line(`${shown(p.tool, 80)} for ${shown(p.requester, 80)} in project ${shown(p.projectId, 60)}, waiting on ${p.waitingOn === "owner" ? "you" : "an agent review"} for ${minutes(p.waitingMinutes)}.`, cite("review", p.reviewId)));
     }
-    const open = (await a.load.proposals(by, "open")).slice(-10);
+    const allOpen = await a.load.proposals(by, "open");
+    const open = allOpen.slice(-10);
     if (open.length === 0) lines.push(line("No standing-rule proposal waits for your answer.", c));
+    else if (allOpen.length > open.length) lines.push(line(`${allOpen.length} standing-rule proposals wait for your answer (${open.length} shown).`, c));
     for (const p of open) {
       const b = p;
       lines.push(line(`Proposal ${shown(p.id, 40)} (revision ${p.revision}): you approved ${shown(b.cls, 40)} for ${shown(b.requester, 80)} in project ${shown(b.projectId, 60)} (${shown(b.environment, 20)}) ${b.count} times, and could instead let it stand as an approval grant for ${b.defaultLength?.days ?? b.suggestion.days} days${b.defaultLength === undefined ? "" : ` (${shown(b.defaultLength.why, 200)})`}. Accepting, or switching to the derived profile instead, or dismissing it, is your choice; nothing is applied until you answer.`, cite("standing-proposal", p.id, p.revision)));

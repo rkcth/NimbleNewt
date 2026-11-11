@@ -1541,13 +1541,15 @@ for (const backend of backends) {
     assert.equal(await c.rebuild().ask(c.owner, { kind: "approval_load" }), undefined, "not offered when the approval services are not running");
     // A due profile question is said with its answers (the first is the default) and the revision it cites; many waiting asks are cut to ten.
     const many = c.rebuild({}, { approvals: {
-      load: { ...load, load: async () => ({ days: 7, perDay: [{ day: "2026-10-22", ownerDecisions: 1, agentDecisions: 0 }], ownerDecisions: 1, agentDecisions: 0, averageOwnerWaitMinutes: 200, decidedBy: { rule: 4, grant: 1, agentReview: 2, owner: 1, denied: 0 }, pending: Array.from({ length: 12 }, (_, i) => ({ reviewId: `rev-${i}`, requester: "agent:x", tool: "t", projectId: "p", waitingOn: "agent-review" as const, waitingMinutes: 3000 - i })) }), proposals: async () => [] } as never,
+      load: { ...load, load: async () => ({ days: 7, perDay: [{ day: "2026-10-22", ownerDecisions: 1, agentDecisions: 0 }], ownerDecisions: 1, agentDecisions: 0, averageOwnerWaitMinutes: 200, decidedBy: { rule: 4, grant: 1, agentReview: 2, owner: 1, denied: 0 }, pending: Array.from({ length: 12 }, (_, i) => ({ reviewId: `rev-${i}`, requester: "agent:x", tool: "t", projectId: "p", waitingOn: "agent-review" as const, waitingMinutes: 3000 - i })) }), proposals: async () => Array.from({ length: 12 }, (_, i) => ({ id: `spr-${String(i).padStart(20, "a")}`, revision: 1, requester: "agent:x", projectId: "p", cls: "commit", environment: "development", count: 3, suggestion: { days: 7 }, defaultLength: { days: 7, why: "w" }, state: "open" })) } as never,
       suggestion: { check: async () => ({ due: true, kind: "switch" as const, answers: ["switch", "trial", "not-now"] as const, approvalsSince: 3, every: 3, revision: 2, preview: { changes: [], loosened: [], tightened: [], notes: ["Reviews would run by rule."] } }), answer: async () => ({ switched: false, reverted: false }) },
     } });
     const big = said((await many.ask(c.owner, { kind: "approval_load" }))!.lines);
     assert.match(big, /each after waiting 3 hours on average/);
     assert.match(big, /4 ran by a rule, 1 by a standing grant, 2 went to an agent review, 1 to you and 0 were denied\./);
     assert.match(big, /12 asks are waiting \(longest first, 10 shown\):/);
+    assert.match(big, /12 standing-rule proposals wait for your answer \(10 shown\)\./, "a cut list of proposals says so (review)");
+    assert.equal(big.split("\n").filter((l) => l.startsWith("Proposal spr-")).length, 10);
     assert.match(big, /waiting on an agent review for 2 days\./);
     assert.equal(big.split("\n").filter((l) => l.startsWith("t for agent:x")).length, 10);
     assert.match(big, /You are due to be asked about the derived profile \(you have approved 3 asks since the last answer\): switch, trial, not-now \(the first is the default\)\. Switching would change this: Reviews would run by rule\./);
