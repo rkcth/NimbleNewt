@@ -7,6 +7,7 @@ import { ArtifactService, FileBlobStore } from "../../artifacts/index.js";
 import { buildWorld, type DispatchWorld } from "../../dispatch/testing/world.js";
 import type { DispatcherService } from "../../dispatch/dispatcher.js";
 import type { RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../../dispatch/ports.js";
+import type { EffectBridge } from "../../domain/effects.js";
 import type { Capabilities } from "../../hosts/index.js";
 import type { Principal } from "../../security/index.js";
 import type { ControllerStorage, JsonObject } from "../../storage/types.js";
@@ -112,6 +113,8 @@ export interface RemoteWorld extends DispatchWorld {
   /** How many of the next launch records fail, and the window heartbeats are accepted in before the confirmation (`undefined`: the attempt lease). */
   readonly failLaunchRecords: { count: number };
   readonly confirmWindow: { ms: number | undefined };
+  /** The controller's bridges for effect calls from remote workers (card H12a); a test adds its own by kind. The dispatcher settles an effect it finds after a restart through the same ones. */
+  readonly bridges: Record<string, EffectBridge>;
   done(): Promise<void>;
 }
 
@@ -129,8 +132,9 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const patience: RemoteWorld["patience"] = { ms: 24 * 3600_000 };
   const failLaunchRecords = { count: 0 };
   const confirmWindow: { ms: number | undefined } = { ms: undefined };
+  const bridges: Record<string, EffectBridge> = {};
   const remote = RemoteWorkerService.withEpoch(storage, w.epoch, {
-    principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts,
+    principal: w.dispatcherPrincipal, hosts: w.hosts, artifacts, bridges,
     dispatch: { gateway: (id) => holder.dispatcher.gateway(id), get: (by, id) => holder.dispatcher.get(by, id), relocate: (by, id, m) => holder.dispatcher.relocate(by, id, m), quiesce: (by, id, r, opt) => holder.dispatcher.quiesce(by, id, r, opt), release: (by, id) => holder.dispatcher.release(by, id), liveAttempts: (by) => holder.dispatcher.liveAttempts(by) },
     reaccept: async () => reaccept.mode,
     patienceMs: async () => patience.ms,
@@ -145,7 +149,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
   const transport = await listen();
   let n = 0;
   const world: RemoteWorld = Object.assign(w, {
-    remote, artifacts, blobs, transport, reaccept, notices, launches, patience, failLaunchRecords, confirmWindow,
+    remote, artifacts, blobs, transport, bridges, reaccept, notices, launches, patience, failLaunchRecords, confirmWindow,
     current: holder.dispatcher,
     listen,
     prefer: (host: RemoteHost) => { const i = workers.indexOf(host.worker); if (i > 0) { workers.splice(i, 1); workers.unshift(host.worker); } },
@@ -160,7 +164,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { policy?:
       // A host the dispatcher never places on (idle hosts in a load test) is not added to it, which would rebuild the dispatcher for each one.
       if (hostOptions.dispatcher !== false) {
         workers.push(worker);
-        holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId) });
+        holder.dispatcher = w.restart({ workers, storeOwner: (agentId, attemptId) => remote.storeOwner(w.dispatcherPrincipal, agentId, attemptId) }, { bridges });
         (w as { dispatcher: DispatcherService }).dispatcher = holder.dispatcher;
         (world as { current: DispatcherService }).current = holder.dispatcher;
       }
