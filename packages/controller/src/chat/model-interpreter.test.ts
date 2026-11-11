@@ -104,6 +104,25 @@ test("the prompt tells the model how the owner switches the MCP door off and on 
   assert.match(system, /apply_proposal/);
 });
 
+test("the prompt tells the model how the owner sets where finished work lands, in any words, and how to see it (card H12s); the intents it describes pass the checks", async () => {
+  let system = "";
+  const intents = [
+    { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "workspace.landing.branch", value: "integration" }, evidence: "land work on integration", basis: "owner" },
+    { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "workspace.landing.protectedPaths", value: ["docs/"] }, evidence: "land work on integration", basis: "owner" },
+    { kind: "status", request: { kind: "landing" }, evidence: "land work on integration", basis: "owner" },
+  ];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intents); } }, () => ["a/primary"]);
+  const out = await m.interpret({ ...input, text: "land work on integration", quoted: [] }) as unknown[];
+  assert.equal(out.length, 3, JSON.stringify(out));
+  for (const key of ["workspace.landing.branch", "workspace.landing.protectedPaths", "workspace.landing.requirePermit", "workspace.landing.protectDefaults"]) assert.ok(system.includes(key), key);
+  assert.match(system, /until one is set nothing lands/);
+  assert.match(system, /replaces the whole installation's list, so to add or drop one path first read the status kind landing/);
+  assert.match(system, /which only the owner can do/);
+  assert.match(system, /one landing branch for the whole installation, not one per project/);
+  assert.ok(system.includes("landing() - owner only: where finished work lands"), "the status kind is listed");
+  assert.ok(Object.keys(STATUS_KINDS).includes("landing"));
+});
+
 test("the model is told how the owner switches backup encryption off and on, narrows it and gets a new signing key, with the argument names and no secret in any argument (card K01b3)", async () => {
   let system = "";
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
