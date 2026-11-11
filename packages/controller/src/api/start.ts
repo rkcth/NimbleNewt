@@ -54,6 +54,7 @@ import { ConfigurationService } from "../configuration/index.js";
 import { ConversationService, type Availability } from "../conversations/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { PolicyEditService } from "../chat/index.js";
+import { WebChatDoor, type WebChatOptions } from "../web/index.js";
 
 import { CatalogPolicyService, CatalogService } from "../catalog/index.js";
 import { AdmissionService } from "../admission/index.js";
@@ -180,6 +181,11 @@ export interface StartOptions {
    * The listener is closed with the controller.
    */
   readonly conversationTransport?: Omit<TransportOptions, "conversations" | "principals">;
+  /**
+   * Opens the web chat (card U07): the responsive browser page for the owner, over the owner chat (`chat` must be given). Off unless given. `host` and `network` are required and the address is never public
+   * (see `checkBinding`); `assets` are the page files (`webChatAssets()` from `@nimblenewt/ui`). The listener is closed with the controller.
+   */
+  readonly webChat?: Omit<WebChatOptions, "backend">;
   /** What the lifecycle says about a principal (cards L01 and L02 supply it). Default: everyone is available. */
   readonly availability?: (principalId: string) => Promise<Availability>;
   /** How the host brings an agent its `availability` hook reports stopped or suspended up for one meeting (card M04f). Called only after the owner authorized that wake (`meeting.wake`), once per meeting and agent key, and must treat a repeated key as the same request. Absent: that authorization is refused. */
@@ -296,6 +302,8 @@ export interface Controller {
   readonly mcpJobs?: { call(by: Principal, call: McpJobCall): ReturnType<typeof callToolAsJob> };
   /** What the start-up rule decided for the jobs that were live when this controller started (card T07b), when the dispatcher was built. */
   readonly jobsAtStart?: { readonly decided: number; readonly failed: number };
+  /** The web chat listener, when `webChat` was given. */
+  readonly webChat?: WebChatDoor;
   /** The owner chat and the coordinator, when `chat` was given. */
   readonly chat?: ChatService;
   readonly coordinator?: CoordinatorService;
@@ -1047,6 +1055,21 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     }
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
+    let webChat: WebChatDoor | undefined;
+    if (options.webChat !== undefined) {
+      const owned = chat;
+      if (owned === undefined) throw new DomainError("invalid_command", "the web chat needs the owner chat (the chat option)", { field: "webChat" });
+      webChat = await WebChatDoor.listen({ ...options.webChat, backend: {
+        authenticate: (token) => principals.authenticate(token),
+        submit: (token, message) => owned.submit(token, message),
+        applyProposal: (token, request) => owned.applyProposal(token, request),
+        discardProposal: (token, request) => owned.discardProposal(token, request),
+        query: async (token, op, args) => {
+          const r = await api.handle(token, { v: 1, op, args });
+          return r.ok ? { ok: true, result: r.result } : { ok: false, error: { code: r.error.code, message: r.error.message } };
+        },
+      } });
+    }
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.
@@ -1063,8 +1086,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       api, storage, epoch, check, filesystems, prerequisites, services: { maintenance, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
-      ...(transport === undefined ? {} : { conversationUrl: transport.url }),
-      close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await backups?.finish(); await storage.close(); },
+      ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),
+      close: async () => { maintenanceStopped = true; if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); },
     };
   } catch (error) {
     toolsLive?.dispose();

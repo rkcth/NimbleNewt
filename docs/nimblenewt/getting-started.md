@@ -6,7 +6,7 @@ Written 2026-10-30 against the repository as it stands. NimbleNewt is under deve
 
 - There is **no installer, no command-line launcher and no first-run wizard yet**. The controller is a library function, `startController` (packages/controller/src/api/start.ts). Today a person starts it from a small script (step 1 below, tested). The guided setup through chat is card **U14**.
 - The one door to everything is the **state API** (`controller.api.handle(token, request)`, see [api-v1](api-v1.md)). It is in-process today: there is no HTTP route for it. The HTTP listener (`conversationTransport`, card U02b) carries conversations only.
-- The web UI (U07, U08, U09) is not built. Chat exists as a service (U03 and friends) and needs a model behind it, which needs a model route, which is itself part of setup. So **the first steps cannot be done by chat**; they are done from the script, and once a model route and chat are wired, the rest is changeable by chat.
+- The responsive web chat (U07) is built as a first slice (see [Private web chat](private-web-chat.md)); the settings and setup views (U08, U09) are not. Chat exists as a service (U03 and friends) and needs a model behind it, which needs a model route, which is itself part of setup. So **the first steps cannot be done by chat**; they are done from the script, and once a model route and chat are wired, the rest is changeable by chat.
 - The **local worker host is composed at start-up only from code** (card **H12k**): the start script must pass `dispatch.local.build`, which makes the host from the worker package's parts with the services the controller hands it (model relay, guards, context checks, the owner's limits, the MCP client); `packages/integration/src/h12k-composed-host.test.ts` shows the whole composition. Without it, an agent can be created, given rights and assigned a task, but no attempt runs on this machine's own worker. A ready-made builder and the product workspace composition are cards U14 and H12t. Remote hosts and the dispatcher exist (H07, H12, H12c).
 - `setup.readiness` (owner-only, read-only, built with U14's first piece) tells you at any point what is configured and what is missing. Use it after each step.
 
@@ -26,7 +26,7 @@ Everything below can be changed later; the default is what you get if you decide
 | 8 | Budgets and time limits. **Optional, and none are imposed**: a task with no budget has nothing held against it | none | `model-budget.set`, budget operations (R05) |
 | 9 | Hosts that run agents (this machine, others) | none | enrol more any time |
 | 10 | How you are notified: inbox only, or a named external channel; digest times; quiet hours | inbox only, nothing leaves the installation | `notifications.configure` |
-| 11 | How you talk to the team: chat through the conversation listener, local only unless you add TLS and host names | not started | the `conversationTransport` start option |
+| 11 | How you talk to the team: the owner chat in a phone browser (`webChat`: private network only, never public; [guide](private-web-chat.md)), and chat through the conversation listener (local only unless you add TLS and host names) | not started | the `webChat` and `conversationTransport` start options |
 | 12 | Your first agent: name and role (`author`, `reviewer`, `integrator`, `qa`, `docs`, `director` are seeded) | none | `agent.update`, `agent.retire` |
 
 ## Step by step
@@ -143,7 +143,7 @@ An external channel (`channel: "external"` with `channelName`) needs a channel a
 ### Step 8. Chat
 
 The conversation listener is a start option, `conversationTransport` (local only by default; remote needs `allowRemote`, TLS and `publicHosts`). Chat itself is the `chat` option (an interpreter plus the optional coordinator model). Over HTTP the routes are `/v1/threads`, `/v1/threads/{id}/messages` and so on, authenticated with a principal's token.
-**Not built:** the web chat (U07), a command-line chat client, and the first-run conversation that walks you through all of this (**U14**). Until then, configuration is done as in steps 4 to 7 and chat is for running the team.
+**Not built:** a command-line chat client, and the first-run conversation that walks you through all of this (**U14**). Until then, configuration is done as in steps 4 to 7 and chat is for running the team.
 
 ### Step 9. First agent
 
@@ -180,7 +180,7 @@ Run `ask("setup.readiness")` again. Every required item should be `done` and `re
 | Provider and route editing as an operation or chat step | U14, U08 | `routing.setTable` from code |
 | Credentials issued for hosts and agents through an operation | U14 | `PrincipalService.issueCredential` from code |
 | A local worker host on this machine without hand-built code | U14, H12t | `dispatch.local.build` in the start script (see `h12k-composed-host.test.ts`) |
-| Web chat and settings views | U07, U08, U09 | HTTP conversation routes |
+| Web chat (U07, first slice built: [private web chat](private-web-chat.md)) and settings views (U08, U09) | U07, U08, U09 | HTTP conversation routes |
 | Notification levels, Needs you view | U11b | the inbox |
 | Landing gated on required checks for the exact tree | P09 | checks recorded only |
 | Windows sandbox launcher | A03b | Linux and macOS only |
