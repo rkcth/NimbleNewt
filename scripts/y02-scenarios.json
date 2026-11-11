@@ -1,77 +1,187 @@
 {
   "schema": "nimblenewt.y02-scenarios/1",
-  "note": "Card Y02: the automated scenario set. Each scenario names the compiled test files of a package (\"pkg/path\" is packages/pkg/dist/path.test.js) that prove one acceptance clause on the production code. `platforms` says where the scenario must pass; `platformFiles` adds files that only make sense on one platform. `minTests` is a floor: a file that was emptied or stopped registering its tests cannot keep a scenario green. Changing this file changes its digest, and a report made from another version is refused by the gate.",
+  "note": "Card Y02: the automated scenario set. Each scenario names the compiled test files of a package (\"pkg/path\" is packages/pkg/dist/path.test.js) that prove one acceptance clause on the production code. `platforms` says where the scenario must pass; `platformFiles` adds files that only make sense on one platform. `minTests` is a floor: a file that was emptied or stopped registering its tests cannot keep a scenario green. Changing this file changes its digest, and a report made from another version is refused by the gate. `notApplicable` names, per platform, the exact skip reasons (or a prefix ending in *) of tests that do not apply there, such as a Linux-only test on macOS: they are counted apart, never as passes, and any other skip fails the scenario. Linux has none. `minTests` counts the tests the files register; on Linux, where nothing may skip, that is the passing floor.",
   "scenarios": [
     {
       "id": "sandbox-escape-refused",
       "title": "Escape and path-trick attempts are refused by the real sandbox launcher",
       "clause": "escape and path-trick attempts refused (A03, A03b, G05)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["worker/sandbox/containment", "worker/sandbox/quarantine", "worker/sandbox/launcher", "worker/sandbox/recipe", "integration/h12b-confinement"],
-      "platformFiles": { "darwin": ["worker/sandbox/seatbelt"], "win32": ["worker/sandbox/windows", "worker/sandbox/windows-real"] },
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "worker/sandbox/containment",
+        "worker/sandbox/quarantine",
+        "worker/sandbox/launcher",
+        "worker/sandbox/recipe"
+      ],
+      "platformFiles": {
+        "linux": [
+          "integration/h12b-confinement"
+        ],
+        "darwin": [
+          "worker/sandbox/seatbelt"
+        ],
+        "win32": [
+          "worker/sandbox/windows",
+          "worker/sandbox/windows-real"
+        ]
+      },
+      "notApplicable": {
+        "darwin": [
+          "Linux only",
+          "bubblewrap unusable: *"
+        ],
+        "win32": [
+          "Linux only",
+          "bubblewrap unusable: *",
+          "needs POSIX permissions and a non-root user",
+          "symbolic links need privileges on Windows",
+          "POSIX permissions",
+          "POSIX paths"
+        ]
+      },
       "minTests": 45
     },
     {
       "id": "sandbox-resource-limits",
       "title": "CPU, memory, disk and process-count limits are enforced or reported, never silently skipped",
       "clause": "per-agent resource limits per OS (A08b)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["worker/sandbox/limits", "worker/sandbox/resource-watch"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "worker/sandbox/limits",
+        "worker/sandbox/resource-watch"
+      ],
       "platformFiles": {},
+      "notApplicable": {
+        "darwin": [
+          "Linux only"
+        ],
+        "win32": [
+          "Linux only",
+          "needs a shell",
+          "hard links",
+          "needs signals",
+          "needs ps",
+          "needs ps and two cores"
+        ]
+      },
       "minTests": 28
     },
     {
       "id": "startup-prerequisites",
       "title": "An unsupported filesystem or a missing tool refuses to start and says how to override",
       "clause": "filesystem and prerequisite checks by probing (F04i, F04j)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/environment/filesystem", "controller/environment/prerequisites"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/environment/filesystem",
+        "controller/environment/prerequisites"
+      ],
       "platformFiles": {},
+      "notApplicable": {},
       "minTests": 18
     },
     {
       "id": "human-precommit-gate",
       "title": "A reviewed tree commits once; changed staged content or base needs a new review",
       "clause": "human pre-commit gate and attribution (A06)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/gate/gate", "controller/gate/commit-once"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/gate/gate",
+        "controller/gate/commit-once"
+      ],
       "platformFiles": {},
+      "notApplicable": {},
       "minTests": 40
     },
     {
       "id": "pause-and-stop-settle",
       "title": "Pause and stop settle with no unfinished tool action",
       "clause": "pause, stop and release settle (L02)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/lifecycle/pause", "controller/lifecycle/stop", "controller/lifecycle/stop.worker", "controller/lifecycle/stop-sequences"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/lifecycle/pause",
+        "controller/lifecycle/stop",
+        "controller/lifecycle/stop.worker",
+        "controller/lifecycle/stop-sequences"
+      ],
       "platformFiles": {},
+      "notApplicable": {},
       "minTests": 180
     },
     {
       "id": "checked-resume",
       "title": "Resume invalidates stale evidence and blocks an input changed between review and commit",
       "clause": "checked resume (L04)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/continuation/resume", "controller/continuation/resume-recorded-once", "controller/dispatch/resume-commit"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/continuation/resume",
+        "controller/continuation/resume-recorded-once",
+        "controller/dispatch/resume-commit"
+      ],
       "platformFiles": {},
+      "notApplicable": {},
       "minTests": 30
     },
     {
       "id": "remote-reconnect-epochs",
       "title": "A worker lost mid-task is fenced and reconciled with no duplicate protected effect; an old primary cannot renew work",
       "clause": "reconnect reconciliation and primary epochs (H09, H08)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/remote/new-primary", "controller/remote/reconcile", "controller/remote/effects", "controller/remote/relocation", "integration/h08b-lease-worker"],
-      "platformFiles": {},
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/remote/new-primary",
+        "controller/remote/reconcile",
+        "controller/remote/effects",
+        "controller/remote/relocation"
+      ],
+      "platformFiles": {
+        "linux": [
+          "integration/h08b-lease-worker"
+        ]
+      },
+      "notApplicable": {},
       "minTests": 85
     },
     {
       "id": "idle-subscription-expiry",
       "title": "An abandoned event subscription expires and resumes from its cursor",
       "clause": "idle event subscriptions (H06b)",
-      "platforms": ["linux", "darwin", "win32"],
-      "files": ["controller/events/events"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
+      "files": [
+        "controller/events/events"
+      ],
       "platformFiles": {},
+      "notApplicable": {},
       "minTests": 40
     }
   ]

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  CI_SCHEMA, PLATFORMS, SCENARIO_SCHEMA, SIGNOFF_SCHEMA, assessCheckpoint, evidenceDigest, evidenceNames, expectedScenarios, filesFor, isoMillis, judgeTotals, main,
+  CI_SCHEMA, MAX_SCENARIO_ATTEMPTS, PLATFORMS, notApplicableHere, SCENARIO_SCHEMA, SIGNOFF_SCHEMA, assessCheckpoint, evidenceDigest, evidenceNames, expectedScenarios, filesFor, isoMillis, judgeTotals, main,
   parseCiRuns, parseQaEvidence, parseScenarioMap, parseScenarioReport, parseSignoff, parseStrictJson, parseTapSummary, readBounded, readEvidenceDir, renderVerdict, runScenarios, show, staleness, writeFileAtomic,
 } from "./y02-checkpoint.mjs";
 
@@ -38,11 +38,11 @@ function containment(p) {
 function scenarios(p) {
   return {
     schema: SCENARIO_SCHEMA, platform: p, osType: OS_TYPE[p], arch: "x64", node: "v22.0.0", commit: COMMIT, dirty: false, generatedAt: T, requireSandbox: true, mapDigest,
-    scenarios: expectedScenarios(map, p).map((s) => ({ id: s.id, files: s.files, status: "pass", tests: s.minTests + 3, pass: s.minTests + 3, fail: 0, cancelled: 0, skipped: 0, todo: 0 })),
+    scenarios: expectedScenarios(map, p).map((s) => ({ id: s.id, files: s.files, status: "pass", attempts: 1, tests: s.minTests + 3, pass: s.minTests + 3, fail: 0, cancelled: 0, skipped: 0, notApplicable: 0, skippedSuites: 0, todo: 0 })),
   };
 }
 function qa(p) {
-  const run = (n) => ({ run: n, passed: true, exitCode: 0, seconds: 1, totals: { tests: 100, pass: 100, fail: 0, cancelled: 0, skipped: 0, todo: 0, blocks: 9 }, markers: {}, problems: [], logFile: `run-${n}.log`, tail: "\u001b[31mcolour\u001b[0m" });
+  const run = (n) => ({ run: n, passed: true, exitCode: 0, seconds: 1, totals: { tests: 100, pass: 63, fail: 0, cancelled: 0, skipped: 35, todo: 2, blocks: 9 }, markers: {}, problems: [], logFile: `run-${n}.log`, tail: "\u001b[31mcolour\u001b[0m" });
   return { commit: COMMIT, startedAt: T, environment: { os: `${OS_TYPE[p]} 1.0`, platform: p, arch: "x64", node: "v22.0.0", workingTreeClean: true, ci: true }, requestedRuns: 5, runs: [1, 2, 3, 4, 5].map(run), crossRunProblems: [], passed: true };
 }
 const ciRuns = () => ({ schema: CI_SCHEMA, commit: COMMIT, runs: PLATFORMS.flatMap((p) => ["exhaustive", "qa"].map((workflow, i) => ({ platform: p, workflow, runId: String(1000 + i), conclusion: "success", commit: COMMIT, completedAt: T }))) });
@@ -148,6 +148,9 @@ test("QA evidence: every guard has its own refusal", () => {
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].passed = false; })), /a run did not pass cleanly/);
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].problems = ["x"]; })), /a run did not pass cleanly/);
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].totals.tests = 0; r.runs[2].totals.pass = 0; })), /a run did not pass cleanly/);
+  blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].totals.pass -= 1; })), /a run did not pass cleanly/, "a test that is neither passed, skipped nor todo");
+  blocked(judgeAltered(edit("darwin", (r) => { for (const x of r.runs) { x.totals.skipped += x.totals.pass; x.totals.pass = 0; } })), /a run did not pass cleanly/, "all skipped is not a pass");
+  blocked(judgeAltered(edit("darwin", (r) => { delete r.runs[2].totals.skipped; })), /totals\.skipped must be a whole number/);
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].totals.fail = 1; })), /a run did not pass cleanly/);
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].totals.cancelled = 1; })), /a run did not pass cleanly/);
   blocked(judgeAltered(edit("darwin", (r) => { r.runs[2].totals.tests = 99; r.runs[2].totals.pass = 99; })), /different numbers of tests/);
@@ -293,6 +296,17 @@ test("the scenario map is read as data and an empty or malformed one is refused"
   assert.match(mutate((m) => { m.scenarios[0].platforms = ["plan9"]; }).error, /platforms/);
   assert.match(mutate((m) => { m.scenarios[0].platformFiles = { plan9: ["worker/x"] }; }).error, /platformFiles/);
   assert.match(mutate((m) => { m.scenarios[0].extra = 1; }).error, /a scenario needs/);
+  assert.match(mutate((m) => { delete m.scenarios[0].notApplicable; }).error, /a scenario needs/);
+  assert.match(mutate((m) => { m.scenarios[0].notApplicable = { plan9: ["Linux only"] }; }).error, /notApplicable/);
+  assert.match(mutate((m) => { m.scenarios[0].notApplicable = { linux: [] }; }).error, /notApplicable/);
+  assert.match(mutate((m) => { m.scenarios[0].notApplicable = { darwin: ["*"] }; }).error, /prefix of at least 8/);
+  assert.match(mutate((m) => { m.scenarios[0].notApplicable = { darwin: ["a*b long enough"] }; }).error, /prefix/);
+  assert.match(mutate((m) => { m.scenarios[0].notApplicable = { darwin: ["ok\u001b"] }; }).error, /printable/);
+  // Linux runs everything: no skip is ever excused there, and the host-load skip is never excused anywhere
+  for (const s of map.scenarios) {
+    assert.equal(s.notApplicable.linux, undefined, s.id);
+    for (const list of Object.values(s.notApplicable)) assert.ok(!notApplicableHere("this host gave two busy loops only 0.63 cores' worth just now", list), s.id);
+  }
   assert.match(mutate((m) => { m.scenarios[0].title = "bad\u001b"; }).error, /printable/);
   assert.match(parseScenarioMap('{"schema":"x","schema":"y"}').error, /not strict JSON/);
   assert.match(parseScenarioMap("{}").error, /schema/);
@@ -341,7 +355,12 @@ test("the test runner's summary: only the final block counts, and a test printin
 });
 
 test("judging counts: a skipped, todo, cancelled or failed test, or too few tests, is never a pass", () => {
-  const ok = { tests: 5, pass: 5, fail: 0, cancelled: 0, skipped: 0, todo: 0 };
+  const ok = { tests: 5, pass: 5, fail: 0, cancelled: 0, skipped: 0, notApplicable: 0, skippedSuites: 0, todo: 0 };
+  assert.deepEqual(judgeTotals({ ...ok, pass: 3, skipped: 2, notApplicable: 2 }, 5), [], "tests that do not apply on this platform are not held against it");
+  assert.match(judgeTotals({ ...ok, pass: 3, skipped: 2, notApplicable: 1 }, 5).join(), /1 skipped/);
+  assert.match(judgeTotals({ ...ok, pass: 0, skipped: 5, notApplicable: 5 }, 5).join(), /no test passed/);
+  assert.match(judgeTotals({ ...ok, notApplicable: 1 }, 5).join(), /more tests are counted as not applicable/);
+  assert.match(judgeTotals({ ...ok, skippedSuites: 1 }, 5).join(), /whole suites skipped/);
   assert.deepEqual(judgeTotals(ok, 5), []);
   assert.match(judgeTotals({ ...ok, tests: 0, pass: 0 }, 1).join(), /0 tests ran/);
   assert.match(judgeTotals(ok, 6).join(), /at least 6/);
@@ -354,9 +373,9 @@ test("judging counts: a skipped, todo, cancelled or failed test, or too few test
 test("the producer: runScenarios records real counts, refuses a missing test file, a failing run, a vacuous run and a tree the tests changed", () => {
   const root = dir();
   try {
-    const tiny = { schema: SCENARIO_SCHEMA, note: "n", scenarios: [{ id: "one", title: "t", clause: "c", platforms: ["linux"], files: ["pkga/x", "pkgb/y"], platformFiles: {}, minTests: 2 }, { id: "two", title: "t", clause: "c", platforms: ["linux", "darwin"], files: ["pkga/z"], platformFiles: { darwin: ["pkga/mac"] }, minTests: 1 }] };
+    const tiny = { schema: SCENARIO_SCHEMA, note: "n", scenarios: [{ id: "one", title: "t", clause: "c", platforms: ["linux"], files: ["pkga/x", "pkgb/y"], platformFiles: {}, notApplicable: {}, minTests: 2 }, { id: "two", title: "t", clause: "c", platforms: ["linux", "darwin"], files: ["pkga/z"], platformFiles: { darwin: ["pkga/mac"] }, notApplicable: { darwin: ["Linux only", "bubblewrap unusable: *"] }, minTests: 1 }] };
     const parsed = parseScenarioMap(JSON.stringify(tiny));
-    for (const f of ["pkga/dist/x.test.js", "pkgb/dist/y.test.js", "pkga/dist/z.test.js"]) { mkdirSync(dirname(join(root, "packages", f)), { recursive: true }); writeFileSync(join(root, "packages", f), ""); }
+    for (const f of ["pkga/dist/x.test.js", "pkgb/dist/y.test.js", "pkga/dist/z.test.js", "pkga/src/x.test.ts", "pkgb/src/y.test.ts", "pkga/src/z.test.ts"]) { mkdirSync(dirname(join(root, "packages", f)), { recursive: true }); writeFileSync(join(root, "packages", f), ""); }
     const tap = (t, p, extra = {}) => { const o = { fail: 0, cancelled: 0, skipped: 0, todo: 0, ...extra }; return `# tests ${t}\n# suites 0\n# pass ${p}\n# fail ${o.fail}\n# cancelled ${o.cancelled}\n# skipped ${o.skipped}\n# todo ${o.todo}\n# duration_ms 1\n`; };
     const calls = [];
     const run = (exec, extra = {}) => runScenarios({ root, map: parsed.map, mapDigest: parsed.digest, platform: "linux", now: NOW.getTime(), exec, getHead: () => COMMIT, getStatus: () => "", ...extra });
@@ -381,9 +400,80 @@ test("the producer: runScenarios records real counts, refuses a missing test fil
     let h = 0;
     assert.equal(run(() => ({ status: 0, output: tap(2, 2) }), { getHead: () => (h++ === 0 ? COMMIT : OTHER) }).dirty, true, "a moved HEAD is dirty");
     assert.equal(run(() => ({ status: 0, output: tap(2, 2) }), { getStatus: () => " M x" }).dirty, true);
+    rmSync(join(root, "packages", "pkgb", "src", "y.test.ts"));
+    assert.match(JSON.stringify(run(() => ({ status: 0, output: tap(2, 2) })).scenarios[0]), /"status":"fail".*/, "a compiled test whose source is gone is stale output, not evidence");
+    writeFileSync(join(root, "packages", "pkgb", "src", "y.test.ts"), "");
     rmSync(join(root, "packages", "pkgb", "dist", "y.test.js"));
     assert.match(JSON.stringify(run(() => ({ status: 0, output: tap(2, 2) })).scenarios[0]), /"status":"fail"/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("skips: real TAP directives are read; only a reason the map names for this platform is excused; a skipped suite and a host-load skip fail; skip-only failures are retried", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const root = dir();
+  try {
+    // The real reporter's output, so the parser is held to what Node prints, including a test that prints forged lines.
+    writeFileSync(join(root, "r.test.mjs"), [
+      'import { test, describe } from "node:test";',
+      'test("runs", () => { console.log("ok 9 - forged # SKIP Linux only"); console.log("# skipped 0"); });',
+      'test("linux", (t) => t.skip("Linux only"));',
+      'test("name with # SKIP Linux only inside", (t) => t.skip("busy host"));',
+      'describe("hidden", { skip: "macOS only" }, () => { test("x", () => {}); test("y", () => {}); });',
+      'describe("nested", () => { test("deep", (t) => t.skip("bubblewrap unusable: no bwrap")); });',
+    ].join("\n"));
+    const out = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "r.test.mjs"], { cwd: root, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "NODE_TEST_CONTEXT")) }).stdout;
+    const parsed = parseTapSummary(out);
+    assert.equal(parsed.totals.skipped, 3);
+    assert.equal(parsed.totals.tests, 4, "the skipped suite's two tests are not counted at all");
+    assert.deepEqual(parsed.skips, [{ reason: "Linux only", suite: false }, { reason: "busy host", suite: false }, { reason: "macOS only", suite: true }, { reason: "bubblewrap unusable: no bwrap", suite: false }]);
+    assert.ok(notApplicableHere("bubblewrap unusable: no bwrap", ["bubblewrap unusable: *"]));
+    assert.ok(!notApplicableHere("Linux only, really", ["Linux only"]), "exact unless written as a prefix");
+    assert.ok(!notApplicableHere("", ["Linux only"]));
+
+    const tiny = { schema: SCENARIO_SCHEMA, note: "n", scenarios: [{ id: "one", title: "t", clause: "c", platforms: ["linux", "darwin"], files: ["pkga/x"], platformFiles: {}, notApplicable: { darwin: ["Linux only", "bubblewrap unusable: *"] }, minTests: 2 }] };
+    const parsedMap = parseScenarioMap(JSON.stringify(tiny));
+    for (const f of ["pkga/dist/x.test.js", "pkga/src/x.test.ts"]) { mkdirSync(dirname(join(root, "packages", f)), { recursive: true }); writeFileSync(join(root, "packages", f), ""); }
+    const summary = (t, p, sk) => `# tests ${t}\n# suites 0\n# pass ${p}\n# fail 0\n# cancelled 0\n# skipped ${sk}\n# todo 0\n# duration_ms 1\n`;
+    const line = (n, reason, type = "test") => `ok ${n} - t${n} # SKIP ${reason}\n  ---\n  duration_ms: 1\n  type: '${type}'\n  ...\n`;
+    const logs = [];
+    const go = (platform, outputs) => { let i = 0; const calls = { n: 0 }; const r = runScenarios({ root, map: parsedMap.map, mapDigest: parsedMap.digest, platform, now: 0, exec: () => { calls.n++; return { status: 0, output: outputs[Math.min(i++, outputs.length - 1)] }; }, getHead: () => COMMIT, getStatus: () => "", log: (s) => logs.push(s) }).scenarios[0]; return { ...r, calls: calls.n }; };
+    const linuxOnly = `ok 1 - a\n${line(2, "Linux only")}${line(3, "bubblewrap unusable: none")}${summary(3, 1, 2)}`;
+    const mac = go("darwin", [linuxOnly]);
+    assert.deepEqual([mac.status, mac.notApplicable, mac.skipped, mac.attempts], ["pass", 2, 2, 1], "a Linux-only test on macOS does not apply there");
+    assert.ok("report" in parseScenarioReport(JSON.stringify({ schema: SCENARIO_SCHEMA, platform: "darwin", osType: "Darwin", arch: "x", node: "v", commit: COMMIT, dirty: false, generatedAt: T, requireSandbox: true, mapDigest, scenarios: [{ id: mac.id, files: mac.files, status: mac.status, attempts: mac.attempts, tests: mac.tests, pass: mac.pass, fail: mac.fail, cancelled: mac.cancelled, skipped: mac.skipped, notApplicable: mac.notApplicable, skippedSuites: mac.skippedSuites, todo: mac.todo }] })));
+    const lin = go("linux", [linuxOnly]);
+    assert.equal(lin.status, "fail", "the same skips on Linux are failures: nothing is excused there");
+    assert.equal(lin.attempts, MAX_SCENARIO_ATTEMPTS, "a skip-only failure is run again");
+    assert.equal(lin.calls, MAX_SCENARIO_ATTEMPTS);
+    // a host-load skip that clears on the second attempt: the clean attempt is the evidence, and the attempts are recorded
+    const busy = `ok 1 - a\nok 2 - b\n${line(3, "this host gave two busy loops only 0.63 cores' worth just now")}${summary(3, 2, 1)}`;
+    const clean = `ok 1 - a\nok 2 - b\nok 3 - c\n${summary(3, 3, 0)}`;
+    const retried = go("darwin", [busy, clean]);
+    assert.deepEqual([retried.status, retried.attempts, retried.skipped], ["pass", 2, 0]);
+    assert.ok(logs.some((l) => /attempt 1 had skipped tests only/.test(l)));
+    assert.deepEqual([go("darwin", [busy]).status, go("darwin", [busy]).attempts], ["fail", MAX_SCENARIO_ATTEMPTS], "a load skip never becomes a pass");
+    // a failure is not retried (no rerunning until green)
+    const failing = `ok 1 - a\nnot ok 2 - b\n${line(3, "busy")}${summary(3, 1, 1).replace("# fail 0", "# fail 1")}`;
+    assert.deepEqual([go("darwin", [failing, clean]).status, go("darwin", [failing, clean]).attempts], ["fail", 1]);
+    // a skipped suite hides its tests from the counts: it fails unless its reason does not apply on this platform
+    const suite = (reason) => `ok 1 - a\nok 2 - b\n${line(3, reason, "suite")}${summary(2, 2, 0)}`;
+    assert.deepEqual([go("darwin", [suite("macOS only")]).status, go("darwin", [suite("macOS only")]).skippedSuites], ["fail", 1]);
+    assert.equal(go("darwin", [suite("Linux only")]).status, "pass");
+    // the summary and the directives must agree
+    const mismatch = go("darwin", [`ok 1 - a\nok 2 - b\n${summary(3, 2, 1)}`]);
+    assert.deepEqual([mismatch.status, mismatch.attempts], ["fail", 1], "output that does not add up is not a host-load skip and is not retried");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the gate excuses not-applicable skips only where the map names a reason for that platform", () => {
+  const edit = (p, f) => (raws) => { const r = JSON.parse(raws[evidenceNames(p).scenarios]); f(r); raws[evidenceNames(p).scenarios] = JSON.stringify(r); };
+  const na = (s) => { s.skipped = 2; s.notApplicable = 2; s.pass = s.tests - 2; };
+  const okMac = judgeAltered(edit("darwin", (r) => { na(r.scenarios.find((s) => s.id === "sandbox-escape-refused")); }));
+  assert.deepEqual(okMac.blockers, []);
+  blocked(judgeAltered(edit("linux", (r) => { na(r.scenarios[0]); })), /linux: scenarios: scenario sandbox-escape-refused: 2 skipped tests counted as not applicable, but the map names no such reason for linux/);
+  blocked(judgeAltered(edit("darwin", (r) => { na(r.scenarios.find((s) => s.id === "human-precommit-gate")); })), /darwin: .*human-precommit-gate: 2 skipped tests counted as not applicable/);
+  blocked(judgeAltered(edit("darwin", (r) => { r.scenarios[0].skippedSuites = 1; r.scenarios[0].status = "fail"; })), /whole suites skipped/);
+  blocked(judgeAltered(edit("darwin", (r) => { r.scenarios[0].attempts = 4; })), /attempts must be 1 to 3/);
 });
 
 test("reading the directory: links, directories, oversize files and look-alike names are refused", () => {
@@ -453,7 +543,7 @@ test("writing the verdict: atomic, replaces an old file, refuses a directory, le
 
 test("the command line: usage errors exit 2, an incomplete directory exits 1 and says why, a complete one exits 0 and writes the same verdict twice", async () => {
   const io = () => { const out = []; const err = []; return { out: (s) => out.push(s), err: (s) => err.push(s), lines: out, errors: err }; };
-  for (const argv of [[], ["nope"], ["gate"], ["gate", "--dir", "x"], ["gate", "--commit", COMMIT], ["gate", "--dir", "x", "--commit", COMMIT, "--bogus", "1"], ["gate", "--dir", "x", "--commit", COMMIT, "--dir", "y"], ["gate", "--dir", "x", "--commit", COMMIT, "--now", "tomorrow"], ["digest", "--dir", "x", "--platform", "plan9"], ["run"], ["run", "--dir", "x"], ["gate", "--dir", "--commit", COMMIT]]) {
+  for (const argv of [[], ["nope"], ["gate"], ["gate", "--dir", "x"], ["gate", "--commit", COMMIT], ["gate", "--dir", "x", "--commit", COMMIT, "--bogus", "1"], ["gate", "--dir", "x", "--commit", COMMIT, "--dir", "y"], ["gate", "--dir", "x", "--commit", COMMIT, "--now", "tomorrow"], ["digest", "--dir", "x", "--platform", "plan9"], ["run"], ["run", "--dir", "x"], ["gate", "--dir", "--commit", COMMIT], ["gate", "--dir", "x", "--commit", COMMIT.toUpperCase()], ["gate", "--dir", "x", "--commit", COMMIT.slice(0, 12)]]) {
     const i = io();
     assert.equal(await main(argv, i), 2, JSON.stringify(argv));
     assert.match(i.errors.join(), /usage/);
@@ -497,5 +587,13 @@ test("the command line: usage errors exit 2, an incomplete directory exits 1 and
   mkdirSync(join(empty, "adir"));
   const i5 = io();
   assert.equal(await main(["gate", "--dir", empty, "--commit", COMMIT, "--now", NOW.toISOString(), "--out", join(empty, "adir")], i5), 2);
+  // the verdict never replaces the evidence it judges
+  for (const name of ["containment-linux.json", "y02-scenarios-linux.json", "qa-evidence-darwin.json", "ci-runs.json", "y02-signoff.json", "y02-scenarios.json"]) {
+    const before = (() => { try { return readFileSync(join(empty, name), "utf8"); } catch { return undefined; } })();
+    const i6 = io();
+    assert.equal(await main(["gate", "--dir", empty, "--commit", COMMIT, "--now", NOW.toISOString(), "--out", join(empty, name)], i6), 2, name);
+    assert.match(i6.errors.join(), /evidence file/);
+    assert.equal((() => { try { return readFileSync(join(empty, name), "utf8"); } catch { return undefined; } })(), before, name);
+  }
   rmSync(empty, { recursive: true, force: true });
 });

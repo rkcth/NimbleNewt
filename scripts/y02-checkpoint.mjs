@@ -177,13 +177,18 @@ export function parseScenarioMap(raw) {
   if (!Array.isArray(v.scenarios) || v.scenarios.length === 0 || v.scenarios.length > 64) return { error: "the scenario map needs between 1 and 64 scenarios (an empty set proves nothing)" };
   const ids = new Set();
   for (const s of v.scenarios) {
-    if (!sameKeys(s, ["id", "title", "clause", "platforms", "files", "platformFiles", "minTests"])) return { error: "a scenario needs id, title, clause, platforms, files, platformFiles, minTests" };
+    if (!sameKeys(s, ["id", "title", "clause", "platforms", "files", "platformFiles", "notApplicable", "minTests"])) return { error: "a scenario needs id, title, clause, platforms, files, platformFiles, notApplicable, minTests" };
     if (typeof s.id !== "string" || !SCENARIO_ID.test(s.id) || ids.has(s.id)) return { error: `scenario id ${show(s.id, 30)}: lower-case words, unique` };
     ids.add(s.id);
     if (!printable(s.title) || !printable(s.clause)) return { error: `scenario ${s.id}: title and clause must be short printable text` };
     if (!Array.isArray(s.platforms) || s.platforms.length === 0 || new Set(s.platforms).size !== s.platforms.length || !s.platforms.every((p) => PLATFORMS.includes(p))) return { error: `scenario ${s.id}: platforms must be a non-empty list of linux, darwin, win32` };
     if (!Array.isArray(s.files) || s.files.length === 0 || !isObject(s.platformFiles)) return { error: `scenario ${s.id}: files must be a non-empty list` };
     if (!Number.isSafeInteger(s.minTests) || s.minTests < 1 || s.minTests > 100_000) return { error: `scenario ${s.id}: minTests must be at least 1` };
+    if (!isObject(s.notApplicable)) return { error: `scenario ${s.id}: notApplicable maps a platform to the skip reasons that mean "does not apply here"` };
+    for (const [p, list] of Object.entries(s.notApplicable)) {
+      if (!s.platforms.includes(p) || !Array.isArray(list) || list.length === 0 || list.length > 32 || new Set(list).size !== list.length) return { error: `scenario ${s.id}: notApplicable keys are platforms of the scenario with non-empty lists of distinct reasons` };
+      for (const r of list) if (!printable(r, 200) || r.trim().length < 4 || r.indexOf("*") !== (r.endsWith("*") ? r.length - 1 : -1) || (r.endsWith("*") && r.length < 9)) return { error: `scenario ${s.id}: a notApplicable reason is exact printable text, or a prefix of at least 8 characters ending in *` };
+    }
     const all = [...s.files];
     for (const [p, list] of Object.entries(s.platformFiles)) {
       if (!PLATFORMS.includes(p) || !Array.isArray(list) || list.length === 0) return { error: `scenario ${s.id}: platformFiles keys are platforms with non-empty lists` };
@@ -223,20 +228,46 @@ export function parseTapSummary(output) {
   }
   if (!/^# duration_ms \d+(\.\d+)?$/.test(tail[7] ?? "")) return { error: "the test runner's summary was not found at the end of its output" };
   for (const n of names) if (lines.filter((l) => l.startsWith(`# ${n} `) && /^# [a-z]+ \d+$/.test(l)).length !== 1) return { error: `the output holds more than one "# ${n}" line` };
-  return { totals };
+  // Every SKIP directive, with its reason and whether it skipped a test or a whole suite. The reporter escapes "#" and "\\" in names and
+  // prints a test's own output as "# ..." comments, so a directive cannot be forged by a test name or by printing. A skipped suite is in
+  // neither "# tests" nor "# skipped": its tests vanish from the counts, so it must be seen here.
+  const skips = [];
+  for (let k = 0; k < lines.length; k++) {
+    const m = /^((?: {4})*)(?:not )?ok \d+ - (?:[^\\#]|\\.)*? # SKIP(?: (.*))?$/.exec(lines[k]);
+    if (m === null) continue;
+    let suite = false;
+    for (let j = k + 1; j < Math.min(lines.length, k + 6); j++) { const t = /^ *type: '(test|suite)'$/.exec(lines[j]); if (t !== null) { suite = t[1] === "suite"; break; } }
+    skips.push({ reason: (m[2] ?? "").trim(), suite });
+  }
+  return { totals, skips };
 }
 
-/** Whether counted totals satisfy a scenario's floor and have no failure, cancellation, skip or todo. */
+/** Whether a skip reason is one the map names as "does not apply on this platform" (exact, or a prefix written with a final *). */
+export function notApplicableHere(reason, allowed = []) {
+  return allowed.some((a) => (a.endsWith("*") ? reason.startsWith(a.slice(0, -1)) : reason === a));
+}
+
+/**
+ * Whether counted totals satisfy a scenario's floor and have no failure, cancellation, unexplained skip or todo. `notApplicable` counts the
+ * skipped tests whose reason the map names for this platform (a Linux-only test on macOS): they are not passes and not evidence, they are
+ * only not held against the scenario. Every other skip, and any skipped suite the map does not name, fails it.
+ */
 export function judgeTotals(t, minTests) {
   const problems = [];
   if (t.tests < minTests) problems.push(`${t.tests} tests ran, at least ${minTests} are required`);
-  if (t.pass !== t.tests) problems.push(`${t.pass} of ${t.tests} tests passed`);
+  if (t.pass + t.skipped !== t.tests) problems.push(`${t.pass} of ${t.tests} tests passed`);
+  if (t.tests > 0 && t.pass === 0) problems.push("no test passed");
   if (t.fail !== 0) problems.push(`${t.fail} failed`);
   if (t.cancelled !== 0) problems.push(`${t.cancelled} cancelled`);
-  if (t.skipped !== 0) problems.push(`${t.skipped} skipped (a skipped test is not evidence)`);
+  if (t.notApplicable > t.skipped) problems.push("more tests are counted as not applicable than were skipped");
+  else if (t.skipped !== t.notApplicable) problems.push(`${t.skipped - t.notApplicable} skipped (a skipped test is not evidence; one that skipped because the host was busy needs a rerun on a quiet host)`);
+  if (t.skippedSuites !== 0) problems.push(`${t.skippedSuites} whole suites skipped (their tests are not even counted)`);
   if (t.todo !== 0) problems.push(`${t.todo} marked todo`);
   return problems;
 }
+
+/** A scenario is retried, up to this many attempts in all, only when skipped tests are its sole problem; one clean attempt is the evidence. */
+export const MAX_SCENARIO_ATTEMPTS = 3;
 
 const git = (args, cwd) => { const r = spawnSync("git", args, { cwd, encoding: "utf8" }); return r.status === 0 ? r.stdout.trim() : ""; };
 
@@ -245,24 +276,41 @@ export function runScenarios({ root, map, mapDigest, platform, now, exec = defau
   const commit = getHead();
   const dirtyBefore = getStatus() !== "";
   const scenarios = [];
-  for (const s of expectedScenarios(map, platform)) {
-    const totals = { tests: 0, suites: 0, pass: 0, fail: 0, cancelled: 0, skipped: 0, todo: 0 };
+  const allowedFor = new Map(map.scenarios.map((s) => [s.id, s.notApplicable[platform] ?? []]));
+  const attempt = (s) => {
+    const totals = { tests: 0, suites: 0, pass: 0, fail: 0, cancelled: 0, skipped: 0, notApplicable: 0, skippedSuites: 0, todo: 0 };
     const problems = [];
+    let onlySkips = true;
     const byPackage = new Map();
-    for (const f of s.files) { const [pkg, ...rest] = f.split("/"); byPackage.set(pkg, [...(byPackage.get(pkg) ?? []), `dist/${rest.join("/")}.test.js`]); }
-    for (const [pkg, files] of byPackage) {
+    for (const f of s.files) { const [pkg, ...rest] = f.split("/"); byPackage.set(pkg, [...(byPackage.get(pkg) ?? []), rest.join("/")]); }
+    for (const [pkg, names] of byPackage) {
       const cwd = join(root, "packages", pkg);
-      const missing = files.filter((f) => !isRegularFile(join(cwd, f)));
-      if (missing.length > 0) { problems.push(`${pkg}: compiled test file missing: ${missing.map((m) => show(m, 60)).join(", ")}`); continue; }
+      const files = names.map((n) => `dist/${n}.test.js`);
+      // A compiled test whose source is gone is stale output the build does not remove: it is not evidence about this commit.
+      const missing = names.filter((n) => !isRegularFile(join(cwd, "dist", `${n}.test.js`)) || !isRegularFile(join(cwd, "src", `${n}.test.ts`)));
+      if (missing.length > 0) { problems.push(`${pkg}: test file missing (source and compiled): ${missing.map((m) => show(m, 60)).join(", ")}`); onlySkips = false; continue; }
       const r = exec(cwd, files);
-      if (r.status !== 0) problems.push(`${pkg}: the test run exited with ${r.status ?? "a signal"}`);
+      if (r.status !== 0) { problems.push(`${pkg}: the test run exited with ${r.status ?? "a signal"}`); onlySkips = false; }
       const parsed = parseTapSummary(r.output);
-      if ("error" in parsed) { problems.push(`${pkg}: ${parsed.error}`); continue; }
-      for (const k of Object.keys(totals)) totals[k] += parsed.totals[k];
+      if ("error" in parsed) { problems.push(`${pkg}: ${parsed.error}`); onlySkips = false; continue; }
+      for (const k of ["tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"]) totals[k] += parsed.totals[k];
+      const allowed = allowedFor.get(s.id);
+      const testSkips = parsed.skips.filter((x) => !x.suite);
+      if (testSkips.length !== parsed.totals.skipped) { problems.push(`${pkg}: ${parsed.totals.skipped} tests were counted as skipped but ${testSkips.length} skip directives were found`); onlySkips = false; }
+      totals.notApplicable += testSkips.filter((x) => notApplicableHere(x.reason, allowed)).length;
+      totals.skippedSuites += parsed.skips.filter((x) => x.suite && !notApplicableHere(x.reason, allowed)).length;
     }
-    problems.push(...judgeTotals(totals, s.minTests));
-    log(`${s.id}: ${problems.length === 0 ? "pass" : `FAIL (${problems.join("; ")})`} (${totals.pass}/${totals.tests})`);
-    scenarios.push({ id: s.id, files: s.files, status: problems.length === 0 ? "pass" : "fail", tests: totals.tests, pass: totals.pass, fail: totals.fail, cancelled: totals.cancelled, skipped: totals.skipped, todo: totals.todo });
+    const judged = judgeTotals(totals, s.minTests);
+    const skipOnly = judged.length > 0 && onlySkips && judgeTotals({ ...totals, notApplicable: totals.skipped, skippedSuites: 0 }, s.minTests).length === 0;
+    return { totals, problems: [...problems, ...judged], skipOnly };
+  };
+  for (const s of expectedScenarios(map, platform)) {
+    let attempts = 0;
+    let r;
+    do { attempts++; r = attempt(s); if (r.skipOnly && attempts < MAX_SCENARIO_ATTEMPTS) log(`${s.id}: attempt ${attempts} had skipped tests only (${r.problems.join("; ")}); running it again`); } while (r.skipOnly && attempts < MAX_SCENARIO_ATTEMPTS);
+    const { totals, problems } = r;
+    log(`${s.id}: ${problems.length === 0 ? "pass" : `FAIL (${problems.join("; ")})`} (${totals.pass}/${totals.tests}${totals.notApplicable > 0 ? `, ${totals.notApplicable} not applicable here` : ""}${attempts > 1 ? `, attempt ${attempts}` : ""})`);
+    scenarios.push({ id: s.id, files: s.files, status: problems.length === 0 ? "pass" : "fail", attempts, tests: totals.tests, pass: totals.pass, fail: totals.fail, cancelled: totals.cancelled, skipped: totals.skipped, notApplicable: totals.notApplicable, skippedSuites: totals.skippedSuites, todo: totals.todo });
   }
   // The tests must not have changed the checkout they are evidence about.
   const dirty = dirtyBefore || getStatus() !== "" || getHead() !== commit;
@@ -273,7 +321,7 @@ function isRegularFile(p) { try { return lstatSync(p).isFile(); } catch { return
 
 function defaultExec(cwd, files) {
   const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
-  const r = spawnSync(process.execPath, ["--import", guard, "--test", "--test-reporter=tap", "--test-timeout=600000", ...files], { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: { ...process.env, NIMBLENEWT_REQUIRE_SANDBOX: "1" } });
+  const r = spawnSync(process.execPath, ["--import", guard, "--test", "--test-reporter=tap", "--test-timeout=600000", ...files], { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "NODE_TEST_CONTEXT")), NIMBLENEWT_REQUIRE_SANDBOX: "1" } });
   return { status: r.status, output: r.stdout ?? "" };
 }
 
@@ -293,10 +341,11 @@ export function parseScenarioReport(raw) {
   if (typeof v.mapDigest !== "string" || !HEX64.test(v.mapDigest)) return { error: "mapDigest: 64 hex digits" };
   if (!Array.isArray(v.scenarios) || v.scenarios.length > 64) return { error: "scenarios: a list of at most 64" };
   for (const s of v.scenarios) {
-    if (!sameKeys(s, ["id", "files", "status", "tests", "pass", "fail", "cancelled", "skipped", "todo"]) || typeof s.id !== "string" || !SCENARIO_ID.test(s.id)) return { error: "a scenario entry needs id, files, status and the six counts" };
+    if (!sameKeys(s, ["id", "files", "status", "attempts", "tests", "pass", "fail", "cancelled", "skipped", "notApplicable", "skippedSuites", "todo"]) || typeof s.id !== "string" || !SCENARIO_ID.test(s.id)) return { error: "a scenario entry needs id, files, status, attempts and the eight counts" };
+    if (!Number.isSafeInteger(s.attempts) || s.attempts < 1 || s.attempts > MAX_SCENARIO_ATTEMPTS) return { error: `scenario ${s.id}: attempts must be 1 to ${MAX_SCENARIO_ATTEMPTS}` };
     if (!Array.isArray(s.files) || s.files.length > 64 || !s.files.every((f) => typeof f === "string" && SCENARIO_FILE.test(f))) return { error: `scenario ${s.id}: files` };
     if (s.status !== "pass" && s.status !== "fail") return { error: `scenario ${s.id}: status is pass or fail` };
-    for (const k of ["tests", "pass", "fail", "cancelled", "skipped", "todo"]) if (!count(s[k])) return { error: `scenario ${s.id}: ${k} must be a whole number` };
+    for (const k of ["tests", "pass", "fail", "cancelled", "skipped", "notApplicable", "skippedSuites", "todo"]) if (!count(s[k])) return { error: `scenario ${s.id}: ${k} must be a whole number` };
   }
   return { report: v };
 }
@@ -313,8 +362,8 @@ export function parseQaEvidence(raw) {
   const runs = [];
   for (const r of v.runs) {
     if (!isObject(r) || typeof r.passed !== "boolean" || !isObject(r.totals) || !Array.isArray(r.problems)) return { error: "a run needs passed, totals and problems" };
-    for (const k of ["tests", "pass", "fail", "cancelled", "blocks"]) if (!count(r.totals[k])) return { error: `a run's totals.${k} must be a whole number` };
-    runs.push({ passed: r.passed, problems: r.problems.length, tests: r.totals.tests, pass: r.totals.pass, fail: r.totals.fail, cancelled: r.totals.cancelled, blocks: r.totals.blocks });
+    for (const k of ["tests", "pass", "fail", "cancelled", "skipped", "todo", "blocks"]) if (!count(r.totals[k])) return { error: `a run's totals.${k} must be a whole number` };
+    runs.push({ passed: r.passed, problems: r.problems.length, tests: r.totals.tests, pass: r.totals.pass, fail: r.totals.fail, cancelled: r.totals.cancelled, skipped: r.totals.skipped, todo: r.totals.todo, blocks: r.totals.blocks });
   }
   return { qa: { commit: v.commit, passed: v.passed, startedAt: v.startedAt, requestedRuns: v.requestedRuns, platform: env.platform, os: env.os, node: env.node, workingTreeClean: env.workingTreeClean, crossRunProblems: v.crossRunProblems.length, runs } };
 }
@@ -350,6 +399,8 @@ export function parseSignoff(raw) {
 // The directory
 
 const EVIDENCE_PREFIX = /^(containment-|y02-scenarios-|qa-evidence-)/;
+/** Names the verdict file may never take: it would replace evidence (or the map) it is a judgement of. */
+const VERDICT_REFUSED_NAME = /^(containment-|y02-scenarios|qa-evidence-|ci-runs|y02-signoff)/;
 
 /** Names the gate reads, per platform and shared. */
 export const evidenceNames = (platform) => ({ containment: `containment-${platform}.json`, scenarios: `y02-scenarios-${platform}.json`, qa: `qa-evidence-${platform}.json` });
@@ -477,6 +528,8 @@ export function assessCheckpoint({ files, unexpected = [], dirError }, { commit,
         if (s === undefined) { problems.push(`scenario ${e.id} is missing`); continue; }
         if (JSON.stringify(s.files) !== JSON.stringify(e.files)) problems.push(`scenario ${e.id}: ran other test files than the map names`);
         const why = judgeTotals(s, e.minTests);
+        const mapped = map.scenarios.find((x) => x.id === e.id);
+        if (s.notApplicable > 0 && (mapped.notApplicable[p] ?? []).length === 0) why.push(`${s.notApplicable} skipped tests counted as not applicable, but the map names no such reason for ${p}`);
         if (why.length > 0) problems.push(`scenario ${e.id}: ${why.join("; ")}`);
         if ((why.length === 0) !== (s.status === "pass")) problems.push(`scenario ${e.id}: its status contradicts its counts`);
       }
@@ -498,7 +551,7 @@ export function assessCheckpoint({ files, unexpected = [], dirError }, { commit,
       const stale = staleness(q.startedAt, nowMs, "the record"); if (stale !== undefined) problems.push(stale);
       if (q.requestedRuns < MIN_QA_RUNS) problems.push(`${q.requestedRuns} runs were requested, at least ${MIN_QA_RUNS} are required`);
       if (q.runs.length !== q.requestedRuns) problems.push(`${q.runs.length} runs are recorded for ${q.requestedRuns} requested`);
-      if (q.runs.some((r) => !r.passed || r.problems > 0 || r.tests === 0 || r.pass !== r.tests || r.fail !== 0 || r.cancelled !== 0)) problems.push("a run did not pass cleanly");
+      if (q.runs.some((r) => !r.passed || r.problems > 0 || r.tests === 0 || r.pass === 0 || r.pass + r.skipped + r.todo !== r.tests || r.fail !== 0 || r.cancelled !== 0)) problems.push("a run did not pass cleanly");
       if (q.crossRunProblems > 0) problems.push("the runs were not consistent with each other");
       if (q.runs.some((r) => r.tests !== q.runs[0].tests || r.blocks !== q.runs[0].blocks)) problems.push("the runs ran different numbers of tests");
       if (!q.passed) problems.push("the record itself says it did not pass");
@@ -621,6 +674,8 @@ export async function main(argv, io = { out: (s) => console.log(s), err: (s) => 
   }
   const commit = flags.get("--commit");
   if (commit === undefined) return usage();
+  if (!COMMIT.test(commit)) { io.err("usage: --commit takes the full 40-character lower-case commit SHA (`git rev-parse HEAD`)"); return 2; }
+  if (flags.has("--out") && VERDICT_REFUSED_NAME.test(basename(resolve(flags.get("--out"))))) { io.err("usage: --out: the verdict may not be written over an evidence file or the scenario map"); return 2; }
   let now = new Date();
   if (flags.has("--now")) { const t = isoMillis(flags.get("--now")); if (!Number.isFinite(t)) return usage(); now = new Date(t); }
   const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
