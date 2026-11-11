@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { totalmem, availableParallelism, tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
@@ -85,7 +87,7 @@ export async function detectLimitCapabilities(platform: NodeJS.Platform = proces
   if (platform !== "linux") {
     // Card A08c: no kernel group limit is available to a worker here, so the sampling monitor is the mechanism, and it is claimed only where it is seen to work on this very host. `ps` exists on macOS only (not on Windows).
     const processSampler = platform === "darwin" && process.platform === platform ? await psSampler()(process.pid).then((u) => u !== undefined && u.processes >= 1 && u.rssMb > 0, () => false) : false;
-    const diskSampler = process.platform === platform ? await measureDirs([tmpdir()], 2000).then((m) => m.bytes >= 0, () => false) : false;
+    const diskSampler = process.platform === platform ? await diskWalkWorks() : false;
     return { platform, cgroupScope: false, escapeDollar: false, prlimit: false, taskset: false, processSampler, diskSampler, passEnv: {} };
   }
   const passEnv: Record<string, string> = {};
@@ -103,6 +105,19 @@ export async function detectLimitCapabilities(platform: NodeJS.Platform = proces
     } catch { usable = false; }
   }
   return { platform, cgroupScope: usable, escapeDollar, prlimit: await works("prlimit", ["--nofile=64", "--", "/bin/true"], { PATH: "/usr/bin:/bin" }), taskset: await works("taskset", ["-c", "0", "/bin/true"], { PATH: "/usr/bin:/bin" }), passEnv };
+}
+
+/** The directory walk is claimed only when it measured a known file exactly: a link to it and a second name for it (both not counted again) next to it. */
+async function diskWalkWorks(): Promise<boolean> {
+  let dir: string | undefined;
+  try {
+    dir = await mkdtemp(join(tmpdir(), "nn-disk-probe-"));
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "probe"), Buffer.alloc(4321));
+    try { await link(join(dir, "sub", "probe"), join(dir, "second-name")); } catch { /* no hard links here: the file is counted once anyway */ }
+    const m = await measureDirs([dir], 2000);
+    return !m.truncated && m.bytes === 4321;
+  } catch { return false; } finally { if (dir !== undefined) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
 }
 
 export interface LimitedPlan {
@@ -123,11 +138,11 @@ function sampledLimits(names: readonly LimitName[], limits: ResourceLimits, caps
     const ps = caps.processSampler === true && caps.platform !== "win32";
     switch (limit) {
       case "memoryMb":
-        if (ps) { watch.memoryMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when the resident memory of its process tree passes the limit at a look; a burst between two looks can pass it first, and memory the system has compressed or swapped out is not counted" }); }
+        if (ps) { watch.memoryMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when the resident memory of its process tree passes the limit at a look; a burst between two looks can pass it first, memory the system has compressed or swapped out is not counted, and memory several processes share is counted once for each of them (so a build of many processes sharing pages can be ended below its real use)" }); }
         else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host, and a Job Object on the host side does not bound a virtual machine" : "ps could not list the process tree here"}`);
         break;
       case "processes":
-        if (ps) { watch.processes = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when its process tree holds more processes than the limit at a look; threads are not counted, and a fork storm can pass the limit between two looks" }); }
+        if (ps) { watch.processes = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when its process tree holds more processes than the limit at a look; threads are not counted, a fork storm can pass the limit between two looks, and a process that starts its own session and is handed to init before any look sees it is no longer followed (the whole tree, its process group and every process once seen are)" }); }
         else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
         break;
       case "cpus":
@@ -135,7 +150,7 @@ function sampledLimits(names: readonly LimitName[], limits: ResourceLimits, caps
         else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
         break;
       case "diskMb":
-        if (caps.diskSampler === true) { watch.diskMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (directory walk every 5 s)`, detail: "the run is ended when the files under its checkout, home and scratch have grown by more than the limit since the run began; deleting files offsets writing, a fast writer can pass the limit between two looks, and a directory tree larger than 500000 entries is measured only in part" }); }
+        if (caps.diskSampler === true) { watch.diskMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (directory walk every 5 s)`, detail: "the run is ended when the files under its checkout, home and scratch have grown by more than the limit since the run began; sizes are the files' lengths (a sparse file counts at its full length, a second name of a file counts once), deleting files offsets writing, a fast writer can pass the limit between two looks, and a directory tree larger than 500000 entries is measured only in part" }); }
         else none(limit, `no way to limit ${limit} is available for ${caps.platform}: the directories could not be measured from the host`);
         break;
     }

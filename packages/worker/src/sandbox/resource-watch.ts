@@ -42,31 +42,48 @@ const MAX_TREE = 4096;
 
 /** CPU time as `ps` prints it: `[[dd-]hh:]mm:ss[.cc]` (Linux) or `[hh:]mm:ss.cc` / `m:ss.cc` (macOS). Anything else is `undefined`. */
 export function parseCpuTime(text: string): number | undefined {
-  const m = /^(?:(\d{1,4})-)?(?:(\d{1,3}):)?(\d{1,3}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(text.trim());
+  // macOS prints minutes without bound once a process has used more than an hour (`1234:56.78`), so hours and minutes are not capped at a few digits: a row dropped for its time would hide its whole subtree.
+  const m = /^(?:(\d{1,4})-)?(?:(\d{1,7}):)?(\d{1,9}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(text.trim());
   if (m === null) return undefined;
   const [, d, h, min, s, frac] = m;
   const fraction = frac === undefined ? 0 : Number(`0.${frac}`) * 1000;
   return Math.round((((Number(d ?? 0) * 24 + Number(h ?? 0)) * 60 + Number(min)) * 60 + Number(s)) * 1000 + fraction);
 }
 
-/** The process tree below `rootPid` from `ps -A -o pid=,ppid=,rss=,time=` output. `undefined` when the root is not listed. Lines that do not parse are skipped, never guessed. */
-export function parsePsUsage(output: string, rootPid: number): UsageSample | undefined {
-  const rows = new Map<number, { ppid: number; rssKb: number; cpuMs: number }>();
+/** The `ps` columns the default sampler asks for (the same keywords on macOS and Linux). `lstart` is last because it holds spaces. */
+export const PS_COLUMNS = "pid=,ppid=,pgid=,rss=,time=,lstart=";
+
+/**
+ * The process tree of the run whose launched process is `rootPid`, from `ps -A -o pid=,ppid=,pgid=,rss=,time=,lstart=` output (the older four-column `pid ppid rss time` form is read too). Lines that do not parse are
+ * skipped, never guessed. A member is the launched process, every process of its process group (the launcher starts it as a group leader, and a group id is never reused while the group has a member, so this
+ * stays right after the launched process or an intermediate parent has exited and its children were handed to init), every process `known` from an earlier look that still has the same start time (one that
+ * left the group after it was seen), and everything below those. `known` is updated with this look's members. `undefined`: none of them is listed (the run has ended). Not caught: a process that leaves the
+ * group (setsid) and whose parent exits before any look sees it.
+ */
+export function parsePsUsage(output: string, rootPid: number, known?: Map<number, string>): UsageSample | undefined {
+  const rows = new Map<number, { ppid: number; pgid: number | undefined; rssKb: number; cpuMs: number; start: string | undefined }>();
   const children = new Map<number, number[]>();
   for (const line of output.split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
-    if (m === null) continue;
-    const cpuMs = parseCpuTime(m[4]!);
-    if (cpuMs === undefined) continue;
-    const pid = Number(m[1]);
-    rows.set(pid, { ppid: Number(m[2]), rssKb: Number(m[3]), cpuMs });
-    children.set(Number(m[2]), [...(children.get(Number(m[2])) ?? []), pid]);
+    const full = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+    const short = full === null ? /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line) : null;
+    if (full === null && short === null) continue;
+    const [pid, ppid, pgid, rssKb, time, start] = full !== null ? [Number(full[1]), Number(full[2]), Number(full[3]), Number(full[4]), full[5]!, full[6]!] : [Number(short![1]), Number(short![2]), undefined, Number(short![3]), short![4]!, undefined];
+    const cpuMs = parseCpuTime(time);
+    if (cpuMs === undefined || !Number.isSafeInteger(pid) || !Number.isSafeInteger(rssKb)) continue;
+    rows.set(pid, { ppid, pgid, rssKb, cpuMs, start });
+    children.set(ppid, [...(children.get(ppid) ?? []), pid]);
   }
-  if (!rows.has(rootPid)) return undefined;
+  // Process ids 0 and 1 (the kernel and init or launchd) are never a member, whatever the listing says.
+  const roots = [rootPid];
+  for (const [pid, row] of rows) {
+    if (pid <= 1 || pid === rootPid) continue;
+    if (rootPid > 1 && row.pgid === rootPid) roots.push(pid);
+    else if (known !== undefined && row.start !== undefined && known.get(pid) === row.start) roots.push(pid);
+  }
   const pids: number[] = [];
   let rssKb = 0; let cpuMs = 0; let count = 0;
-  const seen = new Set<number>();
-  for (const queue = [rootPid]; queue.length > 0;) {
+  const seen = new Set<number>([0, 1]);
+  for (const queue = roots; queue.length > 0;) {
     const next = queue.shift()!;
     if (seen.has(next)) continue;
     seen.add(next);
@@ -76,15 +93,26 @@ export function parsePsUsage(output: string, rootPid: number): UsageSample | und
     if (pids.length < MAX_TREE) pids.push(next);
     queue.push(...(children.get(next) ?? []));
   }
+  if (count === 0) return undefined;
+  if (known !== undefined) {
+    known.clear();
+    for (const pid of pids) { const start = rows.get(pid)?.start; if (start !== undefined) known.set(pid, start); }
+  }
   return { pids, processes: count, rssMb: rssKb / 1024, cpuMs };
 }
 
 /** The default sampler: one `ps` for the whole system, then the tree below the run's process. */
-export function psSampler(psPath = "/bin/ps"): UsageSampler {
+export function psSampler(psPath = "/bin/ps", timeoutMs = 5000): UsageSampler {
+  // The members seen per run (process id and start time), so one that left the group is still followed. Bounded: a run that ended is forgotten, and at most a few runs are remembered.
+  const memory = new Map<number, Map<number, string>>();
   return async (rootPid) => {
     try {
-      const out = await run(psPath, ["-A", "-o", "pid=,ppid=,rss=,time="], { timeout: 5000, maxBuffer: 16 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
-      return parsePsUsage(out.stdout, rootPid);
+      const out = await run(psPath, ["-A", "-o", PS_COLUMNS], { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 16 * 1024 * 1024, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+      const known = memory.get(rootPid) ?? new Map<number, string>();
+      const sample = parsePsUsage(out.stdout, rootPid, known);
+      memory.delete(rootPid);
+      if (sample !== undefined) { memory.set(rootPid, known); while (memory.size > 64) memory.delete(memory.keys().next().value!); }
+      return sample;
     } catch { return undefined; }
   };
 }
@@ -93,6 +121,8 @@ export function psSampler(psPath = "/bin/ps"): UsageSampler {
 export async function measureDirs(dirs: readonly string[], maxEntries = 500_000): Promise<{ readonly bytes: number; readonly truncated: boolean }> {
   let bytes = 0; let entries = 0; let truncated = false;
   const pending = [...dirs];
+  // A file with several names (hard links) or a directory reached twice (overlapping roots) is counted once.
+  const counted = new Set<string>();
   while (pending.length > 0) {
     const dir = pending.pop()!;
     let names: string[];
@@ -102,6 +132,11 @@ export async function measureDirs(dirs: readonly string[], maxEntries = 500_000)
       const path = join(dir, name);
       let st;
       try { st = await lstat(path); } catch { continue; }
+      if ((st.isDirectory() || st.nlink > 1) && st.ino !== 0) {
+        const id = `${st.dev}:${st.ino}`;
+        if (counted.has(id)) continue;
+        counted.add(id);
+      }
       if (st.isDirectory()) pending.push(path);
       else bytes += st.size;
     }
@@ -154,16 +189,22 @@ export interface ResourceWatchOptions {
   readonly now?: () => number;
 }
 
+/** Watches holding a paused tree. If the launcher's own process exits while one is paused (a crash, `process.exit`), the tree is continued on the way out instead of being left stopped for ever. */
+const holding = new Set<ResourceWatch>();
+let exitHook = false;
+const continueAllOnExit = (): void => { for (const w of [...holding]) w.stop(); };
+
 /** Runs `judge` on a timer for one run. `stop` resumes anything it paused and ends the timers; it is safe to call more than once. */
 export class ResourceWatch {
   readonly #o: ResourceWatchOptions;
   readonly #state = newJudgeState();
   #timer: NodeJS.Timeout | undefined;
+  #diskTimer: NodeJS.Timeout | undefined;
+  #diskBusy = false;
   #resume: NodeJS.Timeout | undefined;
   #paused: readonly number[] = [];
   #busy = false;
   #done = false;
-  #lastDiskAt = Number.NEGATIVE_INFINITY;
   #disk: { bytesWritten: number } | undefined;
   /** How many times the run was paused to hold its CPU share. */
   pauses = 0;
@@ -176,6 +217,31 @@ export class ResourceWatch {
   start(): void {
     this.#timer = setInterval(() => { void this.tick(); }, this.#o.intervalMs ?? 250);
     this.#timer.unref();
+    // The directory walk has its own timer: a long walk never delays the looks at memory, processes and CPU, and a pause always signals the processes of a look just taken.
+    if (this.#o.limits.diskMb !== undefined) {
+      void this.diskTick();
+      this.#diskTimer = setInterval(() => { void this.diskTick(); }, this.#o.diskEveryMs ?? 5000);
+      this.#diskTimer.unref();
+    }
+  }
+
+  /** One measure of the agent's directories and its consequence. Measures never overlap. */
+  async diskTick(): Promise<void> {
+    const d = this.#o.disk;
+    const limit = this.#o.limits.diskMb;
+    if (this.#done || this.#diskBusy || d === undefined || limit === undefined) return;
+    this.#diskBusy = true;
+    try {
+      const size = await (d.measure ?? measureDirs)(d.dirs);
+      if (this.#done) return;
+      this.#disk = { bytesWritten: Math.max(0, size.bytes - d.baselineBytes) };
+      if (this.#disk.bytesWritten > limit * 1048576) this.#exceed({ limit: "diskMb", value: limit, observed: Math.ceil(this.#disk.bytesWritten / 1048576) });
+    } catch { /* a failed measure is not a decision */ } finally { this.#diskBusy = false; }
+  }
+
+  #exceed(exceeded: LimitExceeded): void {
+    this.stop();
+    this.#o.onExceeded(exceeded);
   }
 
   /** One look and its consequence. Looks never overlap: one that is still running makes the next skip. */
@@ -183,44 +249,44 @@ export class ResourceWatch {
     if (this.#done || this.#busy || this.#resume !== undefined) return;
     this.#busy = true;
     try {
-      const now = (this.#o.now ?? Date.now)();
       const sample = await this.#o.sample(this.#o.rootPid);
-      if (sample === undefined || this.#done) return;
-      const d = this.#o.disk;
-      if (this.#o.limits.diskMb !== undefined && d !== undefined && now - this.#lastDiskAt >= (this.#o.diskEveryMs ?? 5000)) {
-        this.#lastDiskAt = now;
-        const size = await (d.measure ?? measureDirs)(d.dirs);
-        this.#disk = { bytesWritten: Math.max(0, size.bytes - d.baselineBytes) };
-      }
-      if (this.#done) return;
+      if (sample === undefined || this.#done || this.#resume !== undefined) return;
+      // Monotonic by default, so a wall-clock jump neither hands out nor takes away CPU credit.
+      const now = (this.#o.now ?? performance.now.bind(performance))();
       const verdict = judge(this.#o.limits, sample, this.#disk, now, this.#state);
-      if (verdict.action === "kill") { this.#done = true; this.#o.onExceeded(verdict.exceeded); return; }
+      if (verdict.action === "kill") { this.#exceed(verdict.exceeded); return; }
       if (verdict.action === "pause") this.#pause(sample.pids, verdict.ms);
     } catch { /* a failed look is not a decision */ } finally { this.#busy = false; }
   }
 
   #send(pids: readonly number[], signal: "SIGSTOP" | "SIGCONT"): void {
     const send = this.#o.signal ?? ((pid: number, s: "SIGSTOP" | "SIGCONT") => { process.kill(pid, s); });
-    for (const pid of pids) { try { send(pid, signal); } catch { /* already gone */ } }
+    // Never the kernel, init or launchd, nor the launcher itself or its parent, whatever a listing said.
+    for (const pid of pids) { if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid || pid === process.ppid) continue; try { send(pid, signal); } catch { /* already gone */ } }
   }
 
   #pause(pids: readonly number[], ms: number): void {
     this.pauses++;
     this.#paused = pids;
-    this.#send(pids, "SIGSTOP");
-    this.#resume = setTimeout(() => { this.#resume = undefined; this.#continue(); }, ms);
+    if (!exitHook) { exitHook = true; process.on("exit", continueAllOnExit); }
+    holding.add(this);
+    // The continue is armed before anything is stopped, and a pause is never longer than MAX_PAUSE_MS whatever the decision said.
+    this.#resume = setTimeout(() => { this.#resume = undefined; this.#continue(); }, Math.min(MAX_PAUSE_MS, Math.max(0, ms)));
     this.#resume.unref();
+    this.#send(pids, "SIGSTOP");
   }
 
   #continue(): void {
     const paused = this.#paused;
     this.#paused = [];
+    holding.delete(this);
     this.#send(paused, "SIGCONT");
   }
 
   stop(): void {
     this.#done = true;
     if (this.#timer !== undefined) clearInterval(this.#timer);
+    if (this.#diskTimer !== undefined) clearInterval(this.#diskTimer);
     if (this.#resume !== undefined) { clearTimeout(this.#resume); this.#resume = undefined; }
     this.#continue();
   }

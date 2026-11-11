@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -39,6 +39,43 @@ describe("the sampling monitor: reading the system", () => {
     assert.equal(u.rssMb, (2048 + 4096 + 1024) / 1024);
     assert.equal(u.cpuMs, 4000);
     assert.equal(parsePsUsage(out, 999), undefined, "a root that is not listed has ended");
+  });
+
+  test("macOS CPU time past 999 minutes is read, so a long-running process and its subtree are not dropped", () => {
+    assert.equal(parseCpuTime("1234:56.78"), (1234 * 60 + 56) * 1000 + 780);
+    const u = parsePsUsage("  100     1  1000 1234:56.78\n  101   100  1000 0:01.00", 100)!;
+    assert.equal(u.processes, 2);
+  });
+
+  test("a process handed to init stays a member: by its process group, or by its start time once seen; an unrelated one never is", () => {
+    const line = (pid: number, ppid: number, pgid: number, start = "Wed Nov 11 10:00:00 2026") => `${pid} ${ppid} ${pgid} 1024 0:01.00 ${start}`;
+    const out = [line(1, 0, 1), line(100, 1, 100), line(101, 100, 100), line(102, 1, 100), line(103, 102, 103), line(104, 1, 104), line(200, 1, 200), line(201, 200, 100)].join("\n");
+    const known = new Map<number, string>();
+    const u = parsePsUsage(out, 100, known)!;
+    assert.deepEqual([...u.pids].sort(), [100, 101, 102, 103, 201], "the orphan 102 (group 100), its child 103 in its own group, and 201 in the group under an unrelated parent");
+    assert.equal(u.rssMb, 5);
+    // The launched process and the intermediate have exited; 103 left the group, its parent is gone, and it is still followed by its start time. 104 is someone else's.
+    const later = [line(1, 0, 1), line(103, 1, 103), line(104, 1, 104), line(105, 103, 105)].join("\n");
+    assert.deepEqual([...parsePsUsage(later, 100, known)!.pids].sort(), [103, 105]);
+    assert.equal(parsePsUsage([line(1, 0, 1), line(103, 1, 103, "Wed Nov 11 11:00:00 2026")].join("\n"), 100, known), undefined, "a reused process id (another start time) is not the run's");
+    assert.equal(parsePsUsage([line(1, 0, 1), line(104, 1, 104)].join("\n"), 1), undefined, "init is never a run");
+  });
+
+  test("the ps call is bounded in time: a hanging ps is given up", async (t) => {
+    if (process.platform === "win32") return t.skip("needs a shell");
+    const fake = join(dir("fake-ps"), "ps");
+    writeFileSync(fake, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+    const t0 = Date.now();
+    assert.equal(await psSampler(fake, 300)(process.pid), undefined);
+    assert.ok(Date.now() - t0 < 5000, `${Date.now() - t0} ms`);
+  });
+
+  test("a file with two names is counted once", async (t) => {
+    if (process.platform === "win32") return t.skip("hard links");
+    const d = dir("hardlinks");
+    writeFileSync(join(d, "a"), "x".repeat(3000));
+    linkSync(join(d, "a"), join(d, "b"));
+    assert.equal((await measureDirs([d])).bytes, 3000);
   });
 
   test("a parent cycle in the listing cannot loop the walk", () => {
@@ -158,16 +195,65 @@ describe("the sampling monitor: acting on the decision", () => {
     assert.deepEqual(events, []);
   });
 
-  test("disk growth is measured against the size at the start, and only every diskEveryMs", async () => {
-    let measures = 0; let bytes = 10_000_000; let t = 0;
-    const { w, events } = watch({ limits: { diskMb: 5 }, now: () => t, diskEveryMs: 1000, disk: { dirs: ["/x"], baselineBytes: 10_000_000, measure: async () => { measures++; return { bytes, truncated: false }; } } });
-    await w.tick(); assert.deepEqual(events, [], "an existing checkout is not the agent's writing");
-    bytes = 10_000_000 + 4 * 1048576; t = 500; await w.tick();
-    assert.equal(measures, 1, "not measured again before the interval");
-    t = 1500; await w.tick(); assert.deepEqual(events, [], "4 MiB of 5");
-    bytes = 10_000_000 + 6 * 1048576; t = 3000; await w.tick();
+  test("disk growth is measured against the size at the start, by its own looks", async () => {
+    let measures = 0; let bytes = 10_000_000;
+    const { w, events } = watch({ limits: { diskMb: 5 }, disk: { dirs: ["/x"], baselineBytes: 10_000_000, measure: async () => { measures++; return { bytes, truncated: false }; } } });
+    await w.diskTick(); assert.deepEqual(events, [], "an existing checkout is not the agent's writing");
+    await w.tick();
+    assert.equal(measures, 1, "a look at the processes does not walk the directories");
+    bytes = 10_000_000 + 4 * 1048576; await w.diskTick(); assert.deepEqual(events, [], "4 MiB of 5");
+    bytes = 10_000_000 + 6 * 1048576; await w.diskTick();
     assert.deepEqual(events, ["exceeded diskMb"]);
+    await w.diskTick(); await w.tick();
+    assert.deepEqual(events, ["exceeded diskMb"], "reported once");
     assert.throws(() => new ResourceWatch({ limits: { diskMb: 1 }, rootPid: 1, sample: async () => undefined, onExceeded: () => undefined }), /directories/);
+  });
+
+  test("a slow directory walk never holds up the looks at memory and CPU", async () => {
+    let rss = 1;
+    const { w, events } = watch({ limits: { diskMb: 5, memoryMb: 5 }, sample: async () => sample({ rssMb: rss }), disk: { dirs: ["/x"], baselineBytes: 0, measure: () => new Promise(() => undefined) } });
+    void w.diskTick();
+    await w.tick(); assert.deepEqual(events, []);
+    rss = 50; await w.tick();
+    assert.deepEqual(events, ["exceeded memoryMb"], "the memory limit acted while the walk was still going");
+  });
+
+  test("the kernel, init, the launcher itself and its parent are never signalled, whatever a look said", async () => {
+    let t = 0; let cpu = 0;
+    const { w, events } = watch({ limits: { cpus: 1 }, now: () => t, sample: async () => sample({ pids: [0, 1, process.pid, process.ppid, 4242], cpuMs: cpu }) });
+    for (let i = 0; i < 20 && w.pauses === 0; i++) { t += 250; cpu += 1500; await w.tick(); }
+    assert.equal(w.pauses, 1);
+    assert.deepEqual(events, ["SIGSTOP 4242"]);
+    w.stop();
+    assert.deepEqual(events, ["SIGSTOP 4242", "SIGCONT 4242"]);
+  });
+
+  test("a launcher process that exits while a tree is paused continues it on the way out", async (t) => {
+    if (process.platform === "win32") return t.skip("needs signals");
+    const victim = spawn("/bin/sh", ["-c", "sleep 30"], { stdio: "ignore", detached: true });
+    try {
+      const url = new URL("./resource-watch.js", import.meta.url).href;
+      const script = `import { ResourceWatch } from ${JSON.stringify(url)};
+        let t = 0, cpu = 0;
+        const w = new ResourceWatch({ limits: { cpus: 1 }, rootPid: ${victim.pid}, now: () => t, sample: async () => ({ pids: [${victim.pid}], processes: 1, rssMb: 1, cpuMs: cpu }), onExceeded: () => {} });
+        for (let i = 0; i < 20 && w.pauses === 0; i++) { t += 250; cpu += 1500; await w.tick(); }
+        if (w.pauses !== 1) process.exit(3);
+        process.exit(0);`;
+      execFileSync(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
+      const state = execFileSync("ps", ["-o", "stat=", "-p", String(victim.pid)], { encoding: "utf8" }).trim();
+      assert.ok(!state.startsWith("T"), `the paused process was left stopped (${state})`);
+    } finally { victim.kill("SIGKILL"); }
+  });
+
+  test("a pause is bounded and its continue is armed even when stopping a process fails", async () => {
+    let t = 0; let cpu = 0;
+    const events: string[] = [];
+    const w = new ResourceWatch({ limits: { cpus: 0.01 }, rootPid: 10, now: () => t, sample: async () => sample({ pids: [10], cpuMs: cpu }), onExceeded: () => undefined, signal: (pid, s) => { events.push(`${s} ${pid}`); if (s === "SIGSTOP") throw new Error("EPERM"); } });
+    for (let i = 0; i < 5 && w.pauses === 0; i++) { t += 250; cpu += 100_000; await w.tick(); }
+    assert.equal(w.pauses, 1);
+    await sleep(2100);
+    assert.deepEqual(events, ["SIGSTOP 10", "SIGCONT 10"]);
+    w.stop();
   });
 });
 
@@ -241,6 +327,14 @@ describe("the sampling monitor: real runs through the launcher (this host's ps, 
     const small = await go(launcher, [node, "-e", "setTimeout(() => {}, 800);"], { memoryMb: 600 });
     assert.equal(small.limitExceeded, undefined);
     assert.equal(small.exitCode, 0);
+  });
+
+  test("a memory runaway whose parent exited (handed to init) is still ended", async (t) => {
+    if (process.platform === "win32") return t.skip("needs ps");
+    const launcher = await make();
+    const r = await go(launcher, ["/bin/sh", "-c", `(${node} -e 'const b = Buffer.alloc(400e6, 1); setTimeout(() => {}, 15000);' &) ; sleep 15`], { memoryMb: 200 });
+    assert.equal(r.limitExceeded?.limit, "memoryMb", JSON.stringify(r));
+    assert.ok(r.durationMs < 12_000, `${r.durationMs} ms`);
   });
 
   test("a fork storm is ended at its process limit", async (t) => {

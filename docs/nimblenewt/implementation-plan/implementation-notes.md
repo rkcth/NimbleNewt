@@ -7494,3 +7494,18 @@ Card status is NOT changed. The card's acceptance needs fixtures run on real mac
 - ASSUMPTION: on macOS a sampled limit is `partial`, so an owner who sets `requireEnforced` cannot run there; the first release accepted that no limit is enforced on these systems (owner decision 2026-10-22), and partial is strictly more than that.
 - ASSUMPTION: pausing with SIGSTOP/SIGCONT is the right reaction to CPU overuse (a CPU quota slows work, it does not destroy it); memory, process and disk overuse end the run because they cannot be undone by waiting.
 - ASSUMPTION: the disk limit counts growth under the checkout, home and scratch since the launch, not their total size (the card says what the agent may write).
+
+### A08c part 1 review (clean-context Claude reviewer, 2026-11-11)
+
+Merged main e1418825 first (no conflicts). Fixed, each with a test that fails when the fix is removed:
+- **Orphans escaped the limits.** The tree was found only by walking parent ids down from the launched process, so a child whose parent exited (`(cmd &)`, handed to init or a subreaper) was no longer counted, paused or ended: a plain bypass of every sampled limit. `ps` now also prints `pgid` and `lstart`; a member is the launched process, every process of its process group (the launcher starts it as a group leader, and a group id is not reused while the group has a member), every process seen before that still has the same start time (one that left the group after a look saw it), and all below them. The run is still watched when the launched process has exited but its group lives. Remaining gap, written in the record: a process that starts its own session and whose parent exits before any look sees it. A real launcher test ends a 400 MB orphan.
+- **The directory walk held up the process looks.** The disk walk ran inside the 250 ms look, so a long walk delayed the memory and CPU checks for its whole length, and a pause then stopped process ids sampled before the walk (seconds old: a much wider window for a reused id). The walk now has its own timer and busy flag (`diskTick`); a look signals the ids it has just read.
+- **macOS CPU time past 999 minutes** (`1234:56.78`) did not parse, so that process and its whole subtree vanished from the figures.
+- **A tree paused when the launcher's process exits** was left stopped for ever. Watches holding a pause are continued from a `process.on("exit")` hook. (A SIGKILL of the launcher cannot be caught; it is the one way left to leave a tree stopped.) The continue timer is armed before the SIGSTOP and a pause never exceeds `MAX_PAUSE_MS`.
+- The signal function never sends to pids 0 and 1, the launcher itself or its parent.
+- A file with several names (hard links) or a directory reached twice is counted once; `ino` 0 (no inode numbers) is not used for this.
+- `detectLimitCapabilities` claimed `diskSampler` on any macOS or Windows host whatever the walk did (`bytes >= 0` cannot fail); it now writes a 4321-byte probe with a second name and claims the walk only when it measures exactly that.
+- The default clock is monotonic (`performance.now`), and `ps` is killed with SIGKILL at its timeout (`psSampler(path, timeoutMs)`; a hanging `ps` test).
+- Record details now also say: memory shared between processes counts once per process (false kills of a large multi-process build are possible), and disk sizes are lengths (a sparse file counts at full length).
+
+Checked and left: SIGKILL reaches stopped processes, so the time limit and limit ends work while paused; a kill verdict is never taken while paused; `stop()` after a look in flight cannot pause afterwards; `requireEnforced` still refuses on macOS; Windows reports none for CPU, memory and processes.
