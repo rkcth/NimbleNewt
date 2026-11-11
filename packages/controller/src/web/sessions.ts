@@ -36,7 +36,7 @@ const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
  */
 export class WebSessionStore {
   readonly #byKey = new Map<string, WebSession>();
-  readonly #pairings = new Map<string, { principalId: string; token: string; until: number }>();
+  readonly #pairings = new Map<string, { principalId: string; token: string; until: number; by?: string }>();
   readonly #limits: WebSessionLimits;
   readonly #now: () => number;
 
@@ -75,8 +75,13 @@ export class WebSessionStore {
 
   expiresAt(s: WebSession): number { return Math.min(s.lastSeen + this.#limits.idleMs, s.createdAt + this.#limits.maxMs); }
 
+  /** The session's absolute end (the cookie lives this long; the idle limit is enforced here, so an active browser is not dropped after the first idle period). */
+  endsAt(s: WebSession): number { return s.createdAt + this.#limits.maxMs; }
+
   /** Ends the session with this handle; whether there was one. */
   revokeHandle(principalId: string, handle: string): boolean {
+    // The pairing codes this session made end with it: a revoked (perhaps stolen) browser leaves no way back in behind it.
+    for (const [k, p] of this.#pairings) if (p.principalId === principalId && p.by === handle) this.#pairings.delete(k);
     for (const [key, s] of this.#byKey) if (s.handle === handle && s.principalId === principalId) { this.#byKey.delete(key); return true; }
     return false;
   }
@@ -86,6 +91,8 @@ export class WebSessionStore {
 
   /** Ends every session of the principal except (optionally) one handle; how many ended. */
   revokeAll(principalId: string, exceptHandle?: string): number {
+    // Every unused pairing code of the principal ends too: "sign out all other browsers" must not leave a code a thief made a moment ago.
+    for (const [k, p] of this.#pairings) if (p.principalId === principalId) this.#pairings.delete(k);
     let n = 0;
     for (const [key, s] of this.#byKey) if (s.principalId === principalId && s.handle !== exceptHandle) { this.#byKey.delete(key); n += 1; }
     return n;
@@ -97,14 +104,14 @@ export class WebSessionStore {
   }
 
   /** A one-time code that signs a second browser in as the same principal (the phone types a short code instead of the credential). */
-  pair(principalId: string, token: string): { code: string; expiresAt: number } {
+  pair(principalId: string, token: string, byHandle?: string): { code: string; expiresAt: number } {
     const now = this.#now();
     for (const [k, p] of this.#pairings) if (p.until <= now) this.#pairings.delete(k);
     while (this.#pairings.size >= 20) this.#pairings.delete(this.#pairings.keys().next().value as string);
     const bytes = randomBytes(10);
     const code = Array.from(bytes, (b) => ALPHABET[b % 32]).join("");
     const until = now + this.#limits.pairingMs;
-    this.#pairings.set(digest(code), { principalId, token, until });
+    this.#pairings.set(digest(code), { principalId, token, until, ...(byHandle === undefined ? {} : { by: byHandle }) });
     return { code, expiresAt: until };
   }
 

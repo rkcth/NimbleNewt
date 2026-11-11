@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -52,6 +53,11 @@ test("the binding must be stated and agree with the stated network; nothing publ
   refused({ publicHosts: ["newt.example.ts.net"] }, "behindTlsProxy");
   refused({ host: "10.0.0.5", network: "private", tls: true, publicHosts: ["a.b"], behindTlsProxy: true }, "behindTlsProxy");
   refused({ publicHosts: ["bad host!"], behindTlsProxy: true }, "publicHosts");
+  // The resolver reads a leading zero as octal: 010.0.0.1 is 8.0.0.1, a public address, though the range check would read 10.0.0.1.
+  refused({ host: "010.0.0.1", network: "private", tls: true, publicHosts: ["a.b"] }, "host");
+  refused({ host: "127.000.000.001" }, "host");
+  refused({ host: "0177.0.0.1" }, "host");
+  checkBinding({ host: "fe80::1%lo", network: "private", tls: true, behindTlsProxy: false, publicHosts: ["a.b"] });
 });
 
 // ---- sessions ------------------------------------------------------------------------------------------------------------------
@@ -171,17 +177,40 @@ test("sign-in: a wrong credential is refused alike and counted per address; the 
   } finally { await w.c.close(); }
 });
 
-test("only the owner may sign in: an agent's credential is refused", async () => {
-  const w = await world();
+test("only the owner may sign in: an agent's credential is refused, gets no session or CSRF token, and counts as a failed attempt", async () => {
+  const w = await world({ limits: { failedLoginsPerAddressPerMinute: 2 } });
   try {
     const owner = await w.c.services.principals.authenticate(w.token);
     await w.c.services.principals.enroll(owner, { commandId: "e1", kind: "agent", name: "ann", grants: [] });
     const issued = await w.c.services.principals.issueCredential(owner, "agent:ann");
     const r = await w.call("POST", "/web/login", { body: { token: issued.token } });
-    assert.equal(r.status, 200, "the sign-in itself proves who is there");
-    const s = await w.call("GET", "/web/session", { cookie: String([r.headers["set-cookie"]].flat()[0]).split(";")[0]! });
-    assert.equal(s.status, 403, "but the session is refused for anyone but the owner");
+    assert.equal(r.status, 403, r.text);
+    assert.equal(r.headers["set-cookie"], undefined, "no session cookie");
+    assert.equal(r.text.includes("csrf"), false, "no CSRF token");
+    assert.equal((await w.call("POST", "/web/login", { body: { token: issued.token } })).status, 403);
+    assert.equal((await w.call("POST", "/web/login", { body: { token: w.token } })).status, 429, "the refused attempts were counted");
     assert.equal(w.c.webChat!.url.startsWith("http://127.0.0.1:"), true);
+  } finally { await w.c.close(); }
+});
+
+test("failed sign-ins sent all at once cannot pass the per-address limit together; a success gives its attempt back", async () => {
+  const w = await world({ limits: { failedLoginsPerAddressPerMinute: 3 } });
+  try {
+    const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => w.call("POST", "/web/login", { body: { token: `owner:rob.wrongsecret${String(i).padStart(30, "0")}` } })));
+    const statuses = burst.map((r) => r.status);
+    assert.equal(statuses.filter((x) => x === 401).length, 3, statuses.join(","));
+    assert.equal(statuses.filter((x) => x === 429).length, 9, statuses.join(","));
+    w.now.t += 61_000;
+    for (let i = 0; i < 5; i += 1) await w.signIn();
+    assert.equal((await w.call("POST", "/web/login", { body: { token: "owner:rob.wrong" } })).status, 401, "five good sign-ins used none of the allowance");
+  } finally { await w.c.close(); }
+});
+
+test("the session cookie lives until the session's absolute end, not only one idle period (the idle limit is the server's)", async () => {
+  const w = await world({ session: { idleMs: 60_000, maxMs: 600_000 } });
+  try {
+    const { reply } = await w.signIn();
+    assert.match(String([reply.headers["set-cookie"]].flat()[0]), /Max-Age=600(;|$)/);
   } finally { await w.c.close(); }
 });
 
@@ -319,6 +348,26 @@ test("a pairing code signs in a second browser once; only a signed-in owner can 
   } finally { await w.c.close(); }
 });
 
+test("a pairing code ends with the session that made it and with sign-out of all other browsers", async () => {
+  const w = await world();
+  try {
+    const laptop = await w.signIn();
+    const thief = await w.signIn();
+    const code = (await w.call("POST", "/web/pairings", { cookie: thief.cookie, csrf: thief.csrf, body: {} })).body.code as string;
+    const kept = (await w.call("POST", "/web/pairings", { cookie: laptop.cookie, csrf: laptop.csrf, body: {} })).body.code as string;
+    const handle = (await w.call("GET", "/web/sessions", { cookie: laptop.cookie })).body.sessions.find((s: { current: boolean }) => !s.current).handle;
+    assert.equal((await w.call("POST", "/web/sessions/revoke", { cookie: laptop.cookie, csrf: laptop.csrf, body: { handle } })).status, 200);
+    assert.equal((await w.call("POST", "/web/login", { body: { code } })).status, 401, "the revoked browser's code is gone");
+    const viaKept = await w.signIn({ code: kept });
+    const later = (await w.call("POST", "/web/pairings", { cookie: viaKept.cookie, csrf: viaKept.csrf, body: {} })).body.code as string;
+    const fromHost = (await w.c.webChat!.createPairing(w.token)).code;
+    assert.equal((await w.call("POST", "/web/sessions/revoke", { cookie: laptop.cookie, csrf: laptop.csrf, body: { all: true } })).status, 200);
+    assert.equal((await w.call("POST", "/web/login", { body: { code: later } })).status, 401, "sign-out of all others ends every unused code");
+    assert.equal((await w.call("POST", "/web/login", { body: { code: fromHost } })).status, 401);
+    assert.equal((await w.call("GET", "/web/session", { cookie: laptop.cookie })).status, 200);
+  } finally { await w.c.close(); }
+});
+
 test("the views read status, blockers, cost and recovery; an unknown view is refused; the door runs no other operation", async () => {
   const w = await world();
   try {
@@ -378,4 +427,9 @@ test("the web chat needs the owner chat, and a listener that would be public is 
   await assert.rejects(startController({ ...base, webChat: { host: "127.0.0.1", network: "loopback", assets: ASSETS } }), /owner chat/);
   const d2 = mkdtempSync(join(tmpdir(), "nn-web-")); dirs.push(d2);
   await assert.rejects(startController({ ...base, storage: { kind: "sqlite", path: join(d2, "b.sqlite") }, chat: { interpreter: new ScriptedInterpreter({}) }, webChat: { host: "0.0.0.0", network: "private", assets: ASSETS } }), /every interface/);
+  // A web chat that cannot open leaves no conversation transport listening behind the failed start.
+  const port = await new Promise<number>((resolve) => { const s = createNetServer(); s.listen(0, "127.0.0.1", () => { const p = (s.address() as { port: number }).port; s.close(() => resolve(p)); }); });
+  const d3 = mkdtempSync(join(tmpdir(), "nn-web-")); dirs.push(d3);
+  await assert.rejects(startController({ ...base, storage: { kind: "sqlite", path: join(d3, "c.sqlite") }, chat: { interpreter: new ScriptedInterpreter({}) }, conversationTransport: { port }, webChat: { host: "0.0.0.0", network: "private", assets: ASSETS } }), /every interface/);
+  await new Promise<void>((resolve, reject) => { const s = createNetServer(); s.once("error", reject); s.listen(port, "127.0.0.1", () => s.close(() => resolve())); });
 });

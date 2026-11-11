@@ -174,25 +174,25 @@ export class WebChatDoor {
     if (a === "login" && parts.length === 1) {
       allowed("POST");
       this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
+      // The attempt is counted before anything is awaited and given back only when it succeeds: attempts sent all at once cannot pass the check together.
+      this.#count(addr);
       const body = await this.#body(req);
-      let who: Principal; let token: string;
-      try {
-        if (typeof body["code"] === "string") {
-          const paired = this.#sessions.redeem(body["code"]);
-          if (paired === undefined) throw new HttpError(401, "unauthenticated", "the code was not accepted");
-          token = paired.token;
-        } else if (typeof body["token"] === "string") token = body["token"];
-        else throw new HttpError(400, "invalid_command", "send a token or a pairing code");
-        who = await this.#authenticate(token);
-      } catch (error) {
-        if (error instanceof HttpError && error.status === 401) this.#count(addr);
-        throw error;
-      }
+      let token: string;
+      if (typeof body["code"] === "string") {
+        const paired = this.#sessions.redeem(body["code"]);
+        if (paired === undefined) throw new HttpError(401, "unauthenticated", "the code was not accepted");
+        token = paired.token;
+      } else if (typeof body["token"] === "string") token = body["token"];
+      else throw new HttpError(400, "invalid_command", "send a token or a pairing code");
+      const who = await this.#authenticate(token);
+      // Only the owner signs in: any other credential gets no session and no CSRF token, and the attempt stays counted.
+      if (who.kind !== "owner") throw new HttpError(403, "forbidden", "the web chat is the owner's");
+      this.#refund(addr);
       // A browser that signs in again does not leave its old session behind.
       this.#sessions.revokeCookie(this.#cookie(req));
       const label = String(req.headers["user-agent"] ?? "browser").replace(/[^\x20-\x7e]/g, "").slice(0, 60) || "browser";
       const { cookie, session } = this.#sessions.create(who.id, token, label);
-      return this.#reply(res, 200, this.#sessionBody(session, who), { "set-cookie": this.#setCookie(cookie, Math.floor((this.#sessions.expiresAt(session) - this.#now()) / 1000)) });
+      return this.#reply(res, 200, this.#sessionBody(session, who), { "set-cookie": this.#setCookie(cookie, Math.floor((this.#sessions.endsAt(session) - this.#now()) / 1000)) });
     }
 
     const cookie = this.#cookie(req);
@@ -226,7 +226,7 @@ export class WebChatDoor {
     }
     if (a === "pairings" && b === undefined) {
       allowed("POST");
-      const p = this.#sessions.pair(who.id, session.token);
+      const p = this.#sessions.pair(who.id, session.token, session.handle);
       return this.#reply(res, 201, { code: p.code, expiresAt: new Date(p.expiresAt).toISOString() });
     }
     if (a === "chat" && b === undefined) {
@@ -343,6 +343,9 @@ export class WebChatDoor {
     w.count += 1;
     return w.count;
   }
+
+  /** Gives back one counted event (a sign-in that succeeded). */
+  #refund(key: string): void { const w = this.#windows.get(key); if (w !== undefined && w.count > 0) w.count -= 1; }
 
   #limit(key: string, max: number): void { if (this.#count(key) > max) throw new HttpError(429, "rate_limited", "too many requests; slow down", { "retry-after": "5" }); }
 

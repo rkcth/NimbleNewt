@@ -77,7 +77,7 @@ Do these once, and again after any network change:
 
 ## Running it
 
-- **Lost phone:** from any other signed-in browser, **Browsers**, then **Sign out all other browsers**; or rotate the owner's credential (`PrincipalService.issueCredential`), which ends every session on its next request; or restart the controller. In code, `controller.webChat.revokeAll(ownerId)`.
+- **Lost phone:** from any other signed-in browser, **Browsers**, then **Sign out all other browsers** (this also cancels every unused pairing code); or rotate the owner's credential (`PrincipalService.issueCredential`), which ends every session on its next request; or restart the controller. In code, `controller.webChat.revokeAll(ownerId)`.
 - **Credential rotation** means the pairing and sign-in use the new credential from then on.
 - **The transcript** on the phone (your messages and the answers, last 100) is in the browser's local storage so a reload resumes. Signing out removes it. A phone whose storage is blocked still works, but cannot resume after a reload.
 - **Limits** (`webChat.limits`, `webChat.session`): 16 KiB request bodies, 300 requests a minute per session, 10 failed sign-ins a minute per address, 20 sessions, 24 h idle, 7 days absolute, a pairing code lives 5 minutes.

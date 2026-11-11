@@ -87,6 +87,8 @@ export function checkBinding(b: BindingRequest): void {
   if (b.network !== "loopback" && b.network !== "private") refuse("network must be stated as \"loopback\" or \"private\"", "network");
   if (typeof b.host !== "string" || b.host.length === 0) refuse("host must be stated: the address the web chat listens on", "host");
   if (b.host === "0.0.0.0" || b.host === "::" || b.host === "[::]" || b.host === "::0") refuse(`${b.host} listens on every interface; give one loopback or private address`, "host");
+  // Only a canonical IP literal (or `localhost`): the system resolver reads a leading zero as octal, so `010.0.0.1` would pass the range check as 10.0.0.1 and bind 8.0.0.1.
+  if (b.host !== "localhost" && isIP(b.host) === 0) refuse(`${b.host} is not an IP address written plainly; give the listener's address as an IP literal`, "host");
   if (b.network === "loopback") {
     if (!isLoopbackAddress(b.host)) refuse(`${b.host} is not a loopback address; state network "private" for an address on a private network`, "host");
     if (!b.tls && b.publicHosts.length > 0 && !b.behindTlsProxy) refuse("host names without TLS are only accepted behind a TLS proxy on this machine (behindTlsProxy)", "behindTlsProxy");

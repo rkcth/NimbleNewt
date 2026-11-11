@@ -1056,7 +1056,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
     const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     let webChat: WebChatDoor | undefined;
-    if (options.webChat !== undefined) {
+    // A web chat that cannot open (no owner chat, a refused binding, a port in use) must not leave the conversation transport listening behind a failed start.
+    if (options.webChat !== undefined) try {
       const owned = chat;
       if (owned === undefined) throw new DomainError("invalid_command", "the web chat needs the owner chat (the chat option)", { field: "webChat" });
       webChat = await WebChatDoor.listen({ ...options.webChat, backend: {
@@ -1069,7 +1070,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           return r.ok ? { ok: true, result: r.result } : { ok: false, error: { code: r.error.code, message: r.error.message } };
         },
       } });
-    }
+    } catch (error) { await transport?.close().catch(() => undefined); throw error; }
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.
