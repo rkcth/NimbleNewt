@@ -9,6 +9,7 @@ import { redactText } from "../security/redact.js";
 import type { BlockerBody } from "../domain/blockers.js";
 import type { InquiryBody } from "../inquiries/inquiries.js";
 import type { ReviewBody } from "../review/review.js";
+import type { HoldsUp } from "../critical/critical-path.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /** What can be told to the owner (card U11). */
@@ -59,6 +60,8 @@ export interface NotificationSettings {
   readonly securityDetectors?: boolean;
   /** Minutes a decision may wait while its project has nothing else to do before the controller raises it to Urgent (card U11d, stopped work); default 30, `null` turns it off and puts what it raised back to Needs you. */
   readonly stoppedWorkAfterMinutes?: number | null;
+  /** Minutes a decision waiting for the owner may hold up a task on the critical path the owner marked before the controller raises it to Urgent, and the minutes it must have stopped doing so before it is put back (card U11d, "U11f"); default 5, `null` turns it off and puts what it raised back to Needs you. */
+  readonly criticalBlockedAfterMinutes?: number | null;
   /** Set when the owner has named the digest times themselves (card U11d): only the plain default 09:00 digest gives way to a scheduled stand-up, never one the owner chose. */
   readonly digestTimesSet?: boolean;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
@@ -77,6 +80,7 @@ export const DEFAULT_URGENT_MIN_GAP_MINUTES = 30;
 export const DEFAULT_DENIED_ALERTS_PER_HOUR = 5;
 export const DEFAULT_SECURITY_REPORTS_PER_HOUR = 20;
 export const DEFAULT_STOPPED_WORK_AFTER_MINUTES = 30;
+export const DEFAULT_CRITICAL_BLOCKED_AFTER_MINUTES = 5;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 /** Record kinds a controller-side notice may point at that the retention rules can remove (cards K06b, K06d, K06e): an item whose record is gone says so instead of leading to a not-found. */
 const REMOVABLE_REFS: ReadonlySet<string> = new Set(["responsibility-incident", "stall-concern", "responsibility-check"]);
@@ -114,6 +118,8 @@ export interface ItemBody {
   readonly escalatedAt?: string;
   /** When the controller raised this item to Urgent because the project had nothing else to do while it waited (card U11d); cleared when work resumed. */
   readonly stoppedAt?: string;
+  /** When the controller raised this item to Urgent because it holds up the critical path the owner marked (card U11d, "U11f"); cleared when it no longer does. */
+  readonly criticalAt?: string;
   readonly state: "queued" | "sent" | "answered" | "settled";
   /** How many times the same event was reported while this item was open. */
   readonly count: number;
@@ -166,7 +172,7 @@ interface StateBody {
   /** The last open item the sweep examined; the next full sweep goes on after it (and starts over at the end). */
   readonly sweepCursor?: string;
   /** Urgent messages the escalation sweep sent in the current hour. */
-  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number; /** Interrupting items held back this hour by the hourly limit and not yet named in the summary. */ readonly held?: number; readonly summarized?: boolean };
+  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number; /** Interrupting items held back this hour by the hourly limit and not yet named in the summary. */ readonly held?: number; readonly summarized?: boolean; /** Of `sent`, the messages about decisions waiting for the owner (stopped work, a blocked critical path); they may use at most half of the hour (review of U11f). */ readonly decisions?: number };
   /** When an interrupting message about a record was last sent (key: kind|project|ref); bounded, oldest dropped. */
   readonly lastInterrupt?: Readonly<Record<string, string>>;
   /** Small facts the controller's own watches keep across restarts (for example when "no backup" was first seen). */
@@ -197,12 +203,17 @@ const addMinutes = (iso: string, m: number): string => new Date(Date.parse(iso) 
 const EMPTY: IndexBody = { items: [], digests: [], deliveries: [], failed: [] };
 /** The key the gap and the hour's allowance count an Urgent trigger under: its record, except stopped work, which is counted per project (card U11d). */
 const stoppedKey = (projectId: string | undefined): string => `stopped|${projectId ?? "-"}`;
-const interruptKey = (item: Pick<ItemBody, "kind" | "projectId" | "ref" | "stoppedAt">): string => (item.stoppedAt !== undefined ? stoppedKey(item.projectId) : `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
+const criticalKey = (projectId: string | undefined): string => `critical|${projectId ?? "-"}`;
+/** Whether an Urgent trigger is about a decision waiting for the owner (stopped work or a blocked critical path), counted per project. Such messages may use at most half of the hour's Urgent allowance, so that
+ * decisions agents open in several projects can never use up what a missing backup, a silent host or a security event needs (review of U11f). */
+const isDecisionKey = (key: string): boolean => key.startsWith("stopped|") || key.startsWith("critical|");
+const decisionShare = (perHour: number): number => Math.max(1, Math.floor(perHour / 2));
+const interruptKey = (item: Pick<ItemBody, "kind" | "projectId" | "ref" | "stoppedAt" | "criticalAt">): string => (item.stoppedAt !== undefined ? stoppedKey(item.projectId) : item.criticalAt !== undefined ? criticalKey(item.projectId) : `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
 const without = (list: readonly string[], id: string): string[] => list.filter((x) => x !== id);
 const withId = (list: readonly string[], id: string): string[] => (list.includes(id) ? [...list] : [...list, id]);
 
 /** Optional wiring: the owner's time zone (quiet hours are read in it; UTC when it gives none), and test overrides for the send timeout and the time one run may take. */
-interface ServiceExtras { /** The projects with a scheduled stand-up (card U11d): the plain 09:00 digest gives way only when every decision it would carry is on one of their agendas. A failing answer counts as none. */ readonly standupProjects?: () => Promise<ReadonlySet<string>>; readonly timeZone?: () => Promise<string | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
+interface ServiceExtras { /** The projects with a scheduled stand-up (card U11d): the plain 09:00 digest gives way only when every decision it would carry is on one of their agendas. A failing answer counts as none. */ readonly standupProjects?: () => Promise<ReadonlySet<string>>; readonly timeZone?: () => Promise<string | undefined>; /** Card U11d ("U11f"): answers, for one pass, whether a task holds up the critical path the owner marked (`CriticalPathService.holdsUp`). Absent or failing: nothing is critical. */ readonly holdsUp?: () => Promise<HoldsUp | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
 
 export interface Emit extends NoActor {
   readonly kind: NotificationKind;
@@ -243,14 +254,14 @@ export class NotificationService {
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { channels?: Record<string, ChannelAdapter>; responders?: Partial<Record<NotificationKind, Responder>> } & ServiceExtras = {}): NotificationService {
-    const { timeZone, sendTimeoutMs, runBudgetMs, standupProjects } = options;
-    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(standupProjects === undefined ? {} : { standupProjects }), ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
+    const { timeZone, sendTimeoutMs, runBudgetMs, standupProjects, holdsUp } = options;
+    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(standupProjects === undefined ? {} : { standupProjects }), ...(holdsUp === undefined ? {} : { holdsUp }), ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; criticalBlockedAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "criticalBlockedAfterMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -298,7 +309,7 @@ export class NotificationService {
       next = { ...next, securityDetectors: command.securityDetectors };
     }
     // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
-    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"], ["stoppedWorkAfterMinutes", 1, 7 * 24 * 60, "minutes"]] as const) {
+    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"], ["stoppedWorkAfterMinutes", 1, 7 * 24 * 60, "minutes"], ["criticalBlockedAfterMinutes", 1, 7 * 24 * 60, "minutes"]] as const) {
       const v = command[field];
       if (v === null) next = { ...next, [field]: null };
       else if (v !== undefined) next = { ...next, [field]: whole(v, field, lo, hi, unit) };
@@ -514,7 +525,7 @@ export class NotificationService {
   }
 
   /** The current hour's window of Urgent messages (a new one when the hour has passed or the clock went back). */
-  #window(state: StateBody, now: string): { startedAt: string; sent: number; held?: number; summarized?: boolean } {
+  #window(state: StateBody, now: string): { startedAt: string; sent: number; held?: number; summarized?: boolean; decisions?: number } {
     const w = state.urgentWindow;
     return w === undefined || Date.parse(now) - Date.parse(w.startedAt) >= 3_600_000 || Date.parse(now) < Date.parse(w.startedAt) ? { startedAt: now, sent: 0 } : w;
   }
@@ -527,6 +538,8 @@ export class NotificationService {
     if (gap !== null && last !== undefined) { const since = Date.parse(now) - Date.parse(last); if (since >= 0 && since < gap * 60_000) return "gap"; }
     const perHour = settings.escalationsPerHour === null ? undefined : settings.escalationsPerHour ?? DEFAULT_ESCALATIONS_PER_HOUR;
     if (perHour !== undefined && this.#window(state, now).sent >= perHour) return "limit";
+    // Decisions waiting for the owner leave the other half of the hour to the controller's own alarms (backup, host, security).
+    if (perHour !== undefined && isDecisionKey(key) && (this.#window(state, now).decisions ?? 0) >= decisionShare(perHour)) return "limit";
     return undefined;
   }
 
@@ -541,7 +554,7 @@ export class NotificationService {
       const keys = Object.keys(last);
       // Bounded: the oldest are forgotten first.
       if (keys.length > 200) for (const k of keys.sort((a, b) => (last[a]! < last[b]! ? -1 : 1)).slice(0, keys.length - 200)) delete last[k];
-      return { ...x, urgentWindow: { ...w, sent: w.sent + 1 }, lastInterrupt: last };
+      return { ...x, urgentWindow: { ...w, sent: w.sent + 1, ...(isDecisionKey(key) ? { decisions: (w.decisions ?? 0) + 1 } : {}) }, lastInterrupt: last };
     });
   }
 
@@ -636,6 +649,25 @@ export class NotificationService {
       items.push({ ...i, level: levelOf(i, by), ...(gone ? { refGone: true as const, refNote: `The ${i.ref.kind.replace(/-/g, " ")} this notice is about (${i.ref.id}) is no longer available: the retention rules removed it, so there is nothing left to open. The notice stays as a record of what was reported.` } : {}) });
     }
     return { items, digests: await this.#load<DigestBody>("notification-digest", index.digests) };
+  }
+
+  /**
+   * Which of these waiting items hold up the critical path the owner marked (card U11d, "U11f"): the task the item's record is about is on the path or has an open task that waits for it on the path. Bounded to the
+   * open-item limit, one read of the marks and of each task and project for the whole pass; with nothing marked, or a failing source, none are. An item the record of which names no task is never critical.
+   */
+  async #criticalIds(items: readonly (Pick<ItemBody, "kind" | "ref"> & { readonly id: string })[]): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (this.#extra.holdsUp === undefined || items.length === 0) return out;
+    try {
+      const holds = await this.#extra.holdsUp();
+      if (holds === undefined) return out;
+      for (const i of items.slice(0, NOTIFICATION_LIMITS.openItems)) {
+        if (i.kind !== "blocker" && i.kind !== "review-request" && i.kind !== "owner-question") continue;
+        const task = await this.#taskOf(i);
+        if (task !== undefined && (await holds(task))) out.add(i.id);
+      }
+    } catch { /* an unreadable path decides nothing */ }
+    return out;
   }
 
   /** Whether the record a notice points at was removed by retention (only for the kinds retention may remove; other refs are judged by `#describe`). */
@@ -891,23 +923,36 @@ export class NotificationService {
   }
 
   /**
-   * One page of the open items that wait on the owner and belong to a project (card U11d), for the stopped-work watch: a blocker, a review request or an owner question that is still Needs you (not yet
-   * Urgent for another reason), or that the watch itself raised (`stopped`), so it can be put back. Controller only (an internal call, never exposed through the state API). Bounded: at most `limit`
-   * items of the open list after the cursor `after`; `next` is where to go on. Holds IDs and the controller-built label, nothing the record says.
+   * One page of the open items that wait on the owner and belong to a project (card U11d), for the stopped-work and critical-path watches: a blocker, a review request or an owner question that is still Needs you (not yet
+   * Urgent for another reason), or that one of the watches itself raised (`stopped`, `critical`), so it can be put back. Controller only (an internal call, never exposed through the state API). Bounded: at most `limit`
+   * items of the open list after the cursor `after`; `next` is where to go on. Holds IDs and the controller-built label, nothing the record says. `taskId` is the task the item's record is about, read from that record (never
+   * from the reporter) when `withTask` is asked for.
    */
-  async waitingOnOwner(page: { readonly after?: string; readonly limit: number }): Promise<{ items: { id: string; projectId: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean }[]; next?: string }> {
+  async waitingOnOwner(page: { readonly after?: string; readonly limit: number; readonly withTask?: boolean }): Promise<{ items: { id: string; projectId: string; taskId?: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean; critical: boolean }[]; next?: string }> {
     const settings = await this.#settings();
     const open = this.#openIds((await this.#index()).body);
     const at = page.after === undefined ? -1 : open.indexOf(page.after);
     const ids = open.slice(at + 1, at + 1 + Math.max(1, Math.min(page.limit, NOTIFICATION_LIMITS.examinePerRun)));
-    const items: { id: string; projectId: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean }[] = [];
+    const items: { id: string; projectId: string; taskId?: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean; critical: boolean }[] = [];
     for (const i of await this.#load<ItemBody>("notification-item", ids)) {
       if (i.state === "answered" || i.state === "settled" || !WAITS_ON_OWNER.has(i.kind) || i.projectId === undefined) continue;
       const stopped = i.stoppedAt !== undefined;
-      if (!stopped && (i.urgent || i.immediate || levelOf(i, settings.levelByKind) !== "needs-you")) continue;
-      items.push({ id: i.id, projectId: i.projectId, kind: i.kind, label: i.label, firstAt: i.firstAt, stopped });
+      const critical = i.criticalAt !== undefined;
+      if (!stopped && !critical && (i.urgent || i.immediate || levelOf(i, settings.levelByKind) !== "needs-you")) continue;
+      const taskId = page.withTask === true ? await this.#taskOf(i) : undefined;
+      items.push({ id: i.id, projectId: i.projectId, ...(taskId === undefined ? {} : { taskId }), kind: i.kind, label: i.label, firstAt: i.firstAt, stopped, critical });
     }
     return { items, ...(at + 1 + ids.length < open.length ? { next: ids[ids.length - 1]! } : {}) };
+  }
+
+  /** The task a waiting item is about, read from the record it points to (the blocker's subject, the question's task, the review's task); undefined when the record is gone or is about no task. */
+  async #taskOf(item: Pick<ItemBody, "kind" | "ref">): Promise<string | undefined> {
+    try {
+      if (item.kind === "blocker") { const b = (await this.#runner.get("blocker", item.ref.id))?.body as unknown as BlockerBody | undefined; return b?.subject.kind === "task" ? b.subject.id : undefined; }
+      if (item.kind === "owner-question") return ((await this.#runner.get("inquiry", item.ref.id))?.body as unknown as InquiryBody | undefined)?.taskId;
+      if (item.kind === "review-request") return ((await this.#runner.get("review", item.ref.id))?.body as unknown as ReviewBody | undefined)?.binding.taskId;
+    } catch { /* a record that cannot be read names no task */ }
+    return undefined;
   }
 
   /**
@@ -916,38 +961,58 @@ export class NotificationService {
    * for that record (otherwise the item is Urgent in the inbox only). Only the kind, the label (IDs) and the project's ID leave the installation. Never replays: the command ID holds the item and the time it was first seen.
    */
   async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+    return this.#raiseTrigger(itemId, "stoppedAt", why);
+  }
+
+  /**
+   * Raises one waiting item to Urgent because it holds up a task on the critical path the owner marked (card U11d, "U11f"); otherwise exactly as `raiseStopped`. The gap and the release after quiet hours count the
+   * project's critical-path trouble as ONE event (`critical|<project>`), so many decisions an agent opens in one project page the owner once per gap and cannot use up the hour's Urgent allowance; the others are
+   * Urgent in the inbox only. The text that leaves names the project and the item's label (IDs); never a title.
+   */
+  async raiseCritical(itemId: string, why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+    return this.#raiseTrigger(itemId, "criticalAt", why);
+  }
+
+  async #raiseTrigger(itemId: string, field: "stoppedAt" | "criticalAt", why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
     const settings = await this.#settings();
     const now = this.#runner.now();
     const interrupts = settings.urgentInterruptsQuietHours !== false;
     const quiet = this.#quiet(settings, now, await this.#zone());
+    const stopped = field === "stoppedAt";
     for (let attempt = 1; ; attempt++) {
       const current = await this.#runner.get("notification-item", itemId);
       const old = current?.body as unknown as ItemBody | undefined;
-      if (current === undefined || old === undefined || old.state === "answered" || old.state === "settled" || old.stoppedAt !== undefined || old.urgent || old.immediate || levelOf(old, settings.levelByKind) !== "needs-you") return false;
-      // One project's stopped work is ONE event: its decisions share the gap, so an agent that opens many questions or blockers in an idle project is told once per gap, not once per record, and cannot use up the
+      // One trigger per item: an item the other watch raised, or any item Urgent for another reason, is left alone.
+      if (current === undefined || old === undefined || old.state === "answered" || old.state === "settled" || old.stoppedAt !== undefined || old.criticalAt !== undefined || old.urgent || old.immediate || levelOf(old, settings.levelByKind) !== "needs-you") return false;
+      // One project's trouble is ONE event: its decisions share the gap, so an agent that opens many questions or blockers in a project is told once per gap, not once per record, and cannot use up the
       // hour's Urgent allowance that a missing backup or a silent host also needs. The others are still Urgent in the inbox.
-      const base = stoppedKey(old.projectId);
+      const base = stopped ? stoppedKey(old.projectId) : criticalKey(old.projectId);
       let sendNow = interrupts || !quiet;
       let held: ItemBody["held"];
       if (sendNow) { held = await this.#holdReason(settings, now, base); if (held !== undefined) sendNow = false; }
-      const detail = `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`;
-      const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`.slice(0, 400), now, `${itemId}|${old.firstAt}|stopped|${now}`, true) : undefined;
+      const detail = stopped
+        ? `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`
+        : `This waits for you and holds up the critical path you marked in project ${old.projectId ?? "-"} (for ${why.minutes} minutes; limit ${why.limit}).`;
+      const text = stopped
+        ? `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`
+        : `URGENT, the critical path is blocked in project ${old.projectId ?? "-"} by ${old.kind}: ${old.label}`;
+      const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, text.slice(0, 400), now, `${itemId}|${old.firstAt}|${stopped ? "stopped" : "critical"}|${now}`, true) : undefined;
       try {
-        const made = await this.#apply("notification.stopped", { commandId: `stopped-${itemId}-${old.firstAt}-${now}`, actor: "notifications" }, { id: itemId }, async (index) => {
+        const made = await this.#apply(stopped ? "notification.stopped" : "notification.critical", { commandId: `${stopped ? "stopped" : "critical"}-${itemId}-${old.firstAt}-${now}`, actor: "notifications" }, { id: itemId }, async (index) => {
           // Read again inside the command: what is written is built from the record as it stands now.
           const fresh = await this.#runner.get("notification-item", itemId);
           const cur = fresh?.body as unknown as ItemBody | undefined;
-          if (fresh === undefined || cur === undefined || cur.state === "answered" || cur.state === "settled" || cur.stoppedAt !== undefined || cur.urgent || cur.immediate) return undefined;
+          if (fresh === undefined || cur === undefined || cur.state === "answered" || cur.state === "settled" || cur.stoppedAt !== undefined || cur.criticalAt !== undefined || cur.urgent || cur.immediate) return undefined;
           // Not sent now: an item still queued is released when it can be (a trigger, under the same limits); one already told stays told and is only Urgent in the inbox, except that quiet hours defer the message.
           const state = sendNow ? "sent" : held === undefined || cur.state === "queued" ? "queued" : cur.state;
           const { held: _h, ...rest } = cur; void _h;
-          const body: ItemBody = { ...rest, urgent: true, immediate: sendNow, trigger: true, stoppedAt: now, detail, lastAt: now, state, ...(held === undefined ? {} : { held }) };
+          const body: ItemBody = { ...rest, urgent: true, immediate: sendNow, trigger: true, [field]: now, detail, lastAt: now, state, ...(held === undefined ? {} : { held }) };
           const ref: AggregateRef = { kind: "notification-item", id: itemId };
           return { ref, creates: false, changes: [
             { type: "update", ref, expectedRevision: fresh.revision, body: body as unknown as JsonObject },
             ...(delivery === undefined ? [] : [{ type: "create" as const, ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }]),
             this.#indexChange(index, { deliveries: delivery !== undefined && delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
-          ], detail: { stopped: true, sent: sendNow } };
+          ], detail: { [stopped ? "stopped" : "critical"]: true, sent: sendNow } };
         });
         if (made && (sendNow || held !== undefined)) await this.#countInterrupt(now, base, sendNow ? "sent" : held!);
         return made;
@@ -958,15 +1023,22 @@ export class NotificationService {
   }
 
   /** Puts an item the stopped-work watch raised back to Needs you because work has resumed or the trigger was turned off (card U11d). Nothing is sent. `false`: not raised by the watch, or already closed. */
-  async lowerStopped(itemId: string): Promise<boolean> {
+  async lowerStopped(itemId: string): Promise<boolean> { return this.#lower(itemId, "stoppedAt"); }
+
+  /** Puts an item the critical-path watch raised back to Needs you because it no longer holds up the path (or the trigger was turned off). Nothing is sent. `false`: not raised by that watch, or already closed. */
+  async lowerCritical(itemId: string): Promise<boolean> { return this.#lower(itemId, "criticalAt"); }
+
+  async #lower(itemId: string, field: "stoppedAt" | "criticalAt"): Promise<boolean> {
     const now = this.#runner.now();
-    return this.#apply("notification.stopped-over", { commandId: `stopped-over-${itemId}-${now}-${this.#seq++}`, actor: "notifications" }, { id: itemId }, async () => {
+    return this.#apply(field === "stoppedAt" ? "notification.stopped-over" : "notification.critical-over", { commandId: `${field === "stoppedAt" ? "stopped" : "critical"}-over-${itemId}-${now}-${this.#seq++}`, actor: "notifications" }, { id: itemId }, async () => {
       const current = await this.#runner.get("notification-item", itemId);
       const old = current?.body as unknown as ItemBody | undefined;
-      if (current === undefined || old === undefined || old.stoppedAt === undefined || old.state === "answered" || old.state === "settled") return undefined;
-      const { stoppedAt: _s, held: _h, trigger: _t, detail: _d, ...rest } = old; void _s; void _h; void _t; void _d;
+      if (current === undefined || old === undefined || old[field] === undefined || old.state === "answered" || old.state === "settled") return undefined;
+      const { stoppedAt: _s, criticalAt: _c, held: _h, trigger: _t, detail: _d, ...rest } = old; void _s; void _c; void _h; void _t; void _d;
+      // Only this watch's mark is taken off: the other one (an item is never raised by both) stays as it was.
+      const kept = field === "stoppedAt" ? (old.criticalAt === undefined ? {} : { criticalAt: old.criticalAt }) : (old.stoppedAt === undefined ? {} : { stoppedAt: old.stoppedAt });
       const ref: AggregateRef = { kind: "notification-item", id: itemId };
-      return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...rest, urgent: false, immediate: false } as unknown as JsonObject }], detail: { stoppedOver: true } };
+      return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...rest, ...kept, urgent: false, immediate: false } as unknown as JsonObject }], detail: { [field === "stoppedAt" ? "stoppedOver" : "criticalOver"]: true } };
     });
   }
 
@@ -1026,14 +1098,17 @@ export class NotificationService {
       const waiting = open.filter((i) => i.state === "queued" && i.firstAt <= due).sort((a, b) => (a.firstAt < b.firstAt ? -1 : 1));
       // A Notice is never listed or pushed: it stays in the inbox and is only counted in the digest message (card U11b). Every Notice waiting is counted in this pass, and the Notices
       // that were counted quietly earlier (no digest went out) are carried into the first message that does go out, so the number told is the true total.
-      const queued = waiting.filter((i) => levelOf(i, settings.levelByKind) !== "notice").slice(0, NOTIFICATION_LIMITS.digestItems);
+      // What holds up the critical path the owner marked comes first, then the oldest, then the kind (card U11d, "U11f"); the order is fixed by the records and the owner's marks, never by anything an agent wrote.
+      const listed = waiting.filter((i) => levelOf(i, settings.levelByKind) !== "notice");
+      const critical = await this.#criticalIds(listed);
+      const queued = [...listed].sort((a, b) => (critical.has(a.id) === critical.has(b.id) ? 0 : critical.has(a.id) ? -1 : 1) || (a.firstAt < b.firstAt ? -1 : a.firstAt > b.firstAt ? 1 : 0) || NOTIFICATION_KINDS.indexOf(a.kind) - NOTIFICATION_KINDS.indexOf(b.kind)).slice(0, NOTIFICATION_LIMITS.digestItems);
       const notices = waiting.filter((i) => levelOf(i, settings.levelByKind) === "notice");
       const carried = open.filter((i) => levelOf(i, settings.levelByKind) === "notice" && i.state !== "answered" && i.state !== "settled" && i.countedAt !== undefined && i.mentionedAt === undefined);
       if (queued.length === 0 && notices.length === 0) break;
       const told = queued.length === 0 ? [] : [...notices, ...carried];
       const id = derivedId("dgs", `${due}|${queued.map((i) => i.id).sort().join(",")}${notices.length === 0 ? "" : `|n:${notices.map((i) => i.id).sort().join(",")}`}`);
       const ref: AggregateRef = { kind: "notification-digest", id };
-      const lines = queued.map((i, k) => `${k + 1}. ${i.kind}: ${i.label}${i.count > 1 ? ` (x${i.count})` : ""}`);
+      const lines = queued.map((i, k) => `${k + 1}. ${i.kind}: ${i.label}${i.count > 1 ? ` (x${i.count})` : ""}${critical.has(i.id) ? " [holds up the critical path]" : ""}`);
       const noticeLine = told.length === 0 ? "" : `\n${told.length} notice${told.length === 1 ? "" : "s"} in your inbox, no action needed.`;
       const delivery = queued.length === 0 ? undefined : this.#delivery(settings, { kind: "digest", id }, `${queued.length} item${queued.length === 1 ? "" : "s"} for you:\n${lines.join("\n")}${noticeLine}`, now, `digest|${id}`);
       const body: DigestBody = { createdAt: now, itemIds: queued.map((i) => i.id), state: "open" };

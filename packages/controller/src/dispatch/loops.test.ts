@@ -143,10 +143,17 @@ test("a request that cannot be told does not hold back the ones after it, and it
 
 test("the meeting record sweep runs for every project, as the tick's principal (card M02c)", async () => {
   const seen: string[] = [];
-  const [loop] = recordLoops({ sweep: async (by, c) => { seen.push(`${by.id}:${c.projectId}`); return { closed: [], tied: [], failedTies: [], interrupted: [], logChecked: [] }; } }, async () => ["proj-a", "proj-b"]);
+  const [loop] = recordLoops({ sweep: async (by, c) => { seen.push(`${by.id}:${c.projectId}`); return { closed: [], tied: [], failedTies: [], interrupted: [], logChecked: [], returned: [], returnFailed: [] }; } }, async () => ["proj-a", "proj-b"]);
   assert.equal(loop!.name, "meeting-records.sweep");
   await loop!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.deepEqual(seen, ["service:dispatcher:proj-a", "service:dispatcher:proj-b"]);
+});
+
+test("a project whose meeting record sweep fails does not keep the other projects' sweeps from running, and the failure is still raised (card M03i review)", async () => {
+  const seen: string[] = [];
+  const [loop] = recordLoops({ sweep: async (_by, c) => { seen.push(c.projectId); if (c.projectId === "proj-a") throw new Error("proj-a is broken"); return { closed: [], tied: [], failedTies: [], interrupted: [], logChecked: [], returned: [], returnFailed: [] }; } }, async () => ["proj-a", "proj-b", "proj-c"]);
+  await assert.rejects(() => loop!.run({ id: "service:dispatcher", kind: "service" } as never), /proj-a is broken/);
+  assert.deepEqual(seen, ["proj-a", "proj-b", "proj-c"]);
 });
 
 test("each tick records the checks that came due and escalates incidents, for every project, as the tick's principal (card P04)", async () => {

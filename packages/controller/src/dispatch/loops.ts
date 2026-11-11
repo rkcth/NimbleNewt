@@ -318,7 +318,12 @@ export function workspaceLoops(workspace: Pick<WorkspaceOpService, "recover">): 
 
 /** M02c: votes whose time is up are closed, ties past the casting window fail and meeting records nobody finished are ended, for each project (the lease of `MeetingRecordService.sweep`). */
 export function recordLoops(records: Pick<MeetingRecordService, "sweep">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
-  return [{ name: "meeting-records.sweep", run: async (by) => { for (const projectId of await projects()) await records.sweep(by, { projectId }); } }];
+  // One project's failure does not skip the others this tick (card M03i review: the sweep now also hands outcomes back); the first error is raised after all have been tried.
+  return [{ name: "meeting-records.sweep", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) { try { await records.sweep(by, { projectId }); } catch (error) { failure ??= error; } }
+    if (failure !== undefined) throw failure;
+  } }];
 }
 
 /** The task of a project that an agent holds now (the first by id), which anchors a controller notice to the agent: a notice is filed about a task the recipient can read. Absent when it holds none there. */
