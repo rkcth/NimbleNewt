@@ -515,11 +515,13 @@ for (const backend of ["sqlite", "postgres"] as const) {
         assert.match(refused.error.message, /0 before anything was set/, `the owner is told what to give (${String(bad)})`);
       }
 
-      // An installation change someone staged and did not apply is not put into force with the switch.
-      const staged = await c.services.configuration.stage(rob, { commandId: "cfg-draft", layer: "installation", expectedRevision: moved, set: { "conversation.mcp.enabled": false } } as never);
-      const blocked = await call(boot.token, "database.transfer.set", { restart: false }, "blocked");
-      assert.equal(blocked.error.code, "invalid_command"); assert.match(blocked.error.message, /conversation\.mcp\.enabled/);
-      await c.services.configuration.discard(rob, { commandId: "cfg-discard", layer: "installation", expectedRevision: staged.revision } as never);
+      // An installation change someone staged and did not apply neither blocks the switch nor goes into force with it (the switch is one write that never applies a draft).
+      await c.services.configuration.stage(rob, { commandId: "cfg-draft", layer: "installation", expectedRevision: moved, set: { "conversation.mcp.enabled": false } } as never);
+      const alongside = await call(boot.token, "database.transfer.set", { enabled: true }, "alongside");
+      assert.equal(alongside.ok, true, JSON.stringify(alongside));
+      assert.notEqual(await c.services.configuration.installationValue("conversation.mcp.enabled"), false, "the staged change did not go into force with the switch");
+      assert.deepEqual(Object.keys((await c.services.configuration.layer(rob, "installation"))!.draft!.set), ["conversation.mcp.enabled"], "it stays staged, untouched");
+      await c.services.configuration.discard(rob, { commandId: "cfg-discard", layer: "installation", expectedRevision: alongside.result.item.revision } as never);
       assert.notEqual(await c.services.configuration.installationValue("conversation.mcp.enabled"), false, "the staged change never went into force");
 
       // Asked again, it goes through, and a resend of the same confirmation is not applied twice.
@@ -589,7 +591,7 @@ test("a PostgreSQL controller with the host's restart opt-in is restarted by the
   }
 });
 
-// Review of card F04m, third slice: the switch's stage and apply are two writes, so a stop between them leaves the switch staged. No operation discards a staged draft, so refusing it as "someone
+// Review of card F04m, third slice (updated: the switch is now one write that never applies a draft): what follows covers a draft an OLDER controller left. The switch's stage and apply were two writes, so a stop between them left the switch staged. No operation discards a staged draft, so refusing it as "someone
 // else's" blocked the other switch for good; merging it would put the old, unconfirmed value into force. It is discarded first, and the chat's proposal planned while it waited still applies.
 test("a switch left staged by a change stopped between its stage and its apply blocks neither switch, is never put into force, and a chat proposal planned meanwhile applies (review of card F04m)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-xfl-"));
@@ -608,11 +610,13 @@ test("a switch left staged by a change stopped between its stage and its apply b
     await c.services.configuration.stage(rob, { commandId: "half-st", layer: "installation", expectedRevision: r0, set: { "database.transfer.restart": false } } as never);
     const r1 = (await call(boot.token, "database.transfer.settings", {})).result.item;
     assert.deepEqual([r1.restart, r1.revision > r0], [true, true]);
-    // The owner turns moves off: not blocked, and the left-over restart value does not go into force with it.
+    // The owner turns moves off: not blocked, and the left-over restart value does not go into force with it (it stays staged, out of force; the switch never applies a draft).
     const off = await call(boot.token, "database.transfer.set", { enabled: false }, "s1");
     assert.equal(off.ok, true, JSON.stringify(off));
     assert.deepEqual([off.result.item.enabled, off.result.item.restart], [false, true]);
-    assert.equal((await c.services.configuration.layer(rob, "installation"))?.draft, undefined, "nothing stays staged");
+    // A resend of the same call without a revision is answered from the record (it used to get a stale stage) and changes nothing.
+    const resent = await call(boot.token, "database.transfer.set", { enabled: false }, "s1");
+    assert.deepEqual([resent.ok, resent.result?.item.revision], [true, off.result.item.revision], JSON.stringify(resent));
     // Left over again; a chat proposal is planned while it waits, and the owner's yes applies it.
     const r2 = (await call(boot.token, "database.transfer.settings", {})).result.item.revision as number;
     await c.services.configuration.stage(rob, { commandId: "half2-st", layer: "installation", expectedRevision: r2, set: { "database.transfer.restart": false, "database.transfer.enabled": true } } as never);
@@ -622,14 +626,15 @@ test("a switch left staged by a change stopped between its stage and its apply b
     assert.equal(yes[0].status, "applied", JSON.stringify(yes));
     const now = (await call(boot.token, "database.transfer.settings", {})).result.item;
     assert.deepEqual([now.enabled, now.restart], [true, true], "only what the owner confirmed is in force");
-    // A caller whose revision is older than the left-over draft is still refused as stale, and nothing is discarded or changed.
-    await c.services.configuration.stage(rob, { commandId: "half3-st", layer: "installation", expectedRevision: now.revision, set: { "database.transfer.restart": false } } as never);
+    // A caller whose revision is older is still refused as stale, and nothing changes.
     assert.equal((await call(boot.token, "database.transfer.set", { enabled: false, expectedRevision: now.revision - 1 }, "s2")).error.code, "stale_revision");
-    assert.ok((await c.services.configuration.layer(rob, "installation"))?.draft !== undefined, "a stale caller discards nothing");
-    // Someone else's staged installation change is still refused, not applied.
+    assert.equal((await call(boot.token, "database.transfer.settings", {})).result.item.revision, now.revision);
+    // Someone else's staged installation change neither blocks the switch nor is applied with it.
     const r3 = (await c.services.configuration.layer(rob, "installation"))!.revision;
     await c.services.configuration.stage(rob, { commandId: "other-st", layer: "installation", expectedRevision: r3, set: { "conversation.mcp.enabled": false } } as never);
-    const blocked = await call(boot.token, "database.transfer.set", { enabled: false }, "s3");
-    assert.equal(blocked.error.code, "invalid_command"); assert.match(blocked.error.message, /conversation\.mcp\.enabled/);
+    const through = await call(boot.token, "database.transfer.set", { enabled: false }, "s3");
+    assert.equal(through.ok, true, JSON.stringify(through));
+    assert.notEqual(await c.services.configuration.installationValue("conversation.mcp.enabled"), false);
+    assert.notEqual(await c.services.configuration.installationValue("database.transfer.restart"), false, "the left-over restart value never went into force");
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });

@@ -13,9 +13,10 @@ import { WaitService } from "../domain/waits.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { ProjectPlanService } from "../projects/index.js";
+import { AgentMessageService } from "../messaging/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import {
-  ATTENDANCE_LIMITS, AttendanceService, MeetingService, type AttendanceBody, type AttendanceDeps, type Invitation, type MeetingDecision, type OccurrenceBody, type RoomStatus,
+  ATTENDANCE_LIMITS, AttendanceService, MeetingService, meetingNoticeSink, type AttendanceBody, type AttendanceDeps, type Invitation, type MeetingDecision, type NoticeSink, type OccurrenceBody, type RoomStatus,
 } from "./index.js";
 
 after(stopServer);
@@ -53,7 +54,7 @@ for (const backend of backends) {
     occ(occurrenceId: string): Promise<OccurrenceBody>;
     gateIntent(taskId: string): Promise<string>;
     agentGate(agentId: string): Promise<string>;
-    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"] }): AttendanceService;
+    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink }): AttendanceService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -102,12 +103,12 @@ for (const backend of backends) {
         const notices: Notice[] = [];
         const failNotice = { next: false };
         const windows: { key: string; phase: string; taskId: string }[] = [];
-        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"] } = {}): AttendanceService =>
+        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink } = {}): AttendanceService =>
           AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }), ...(extra.leadMinutes === undefined ? {} : { leadMinutes: extra.leadMinutes }) }, {
             availability: pauses.availability, ...options,
             wake: { wake: async (w) => { wakes.push(w); } },
             window: { notify: async (x) => { windows.push({ key: x.key, phase: x.phase, taskId: x.taskId }); } },
-            notices: { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
+            notices: extra.notices ?? { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
           });
         const attendance = make();
         const host = await enroll("host", "h1", []);
@@ -1127,6 +1128,44 @@ for (const backend of backends) {
     const asg = (await c.assignments.getAssignment(meetingTask))!;
     await c.assignments.transferTask({ commandId: cid("tf"), actor: c.owner.id, taskId: meetingTask, expectedRevision: asg.revision, to: { kind: "agent", id: c.agentC } });
     assert.deepEqual((await c.pauses.guard(meetingTask)).blockedBy, [{ kind: "agent", id: c.agentC }]);
+  });
+
+  // Close-out review of U03c/M03h, carried over to meetings: the notice's command ID is its key (occurrence and agent), but its text holds the acknowledgement time, which a repeated end works out
+  // again from the clock. A notice filed just before the controller stopped (so not recorded as sent) was refiled under the same command ID with another text: `command_conflict`, which the sink
+  // re-raised, so the agent stayed "unnotified" although it had been told. Now a conflict counts as told.
+  suite("a notice filed just before a stop is not refused as a conflict when the end is repeated later: the agent counts as told, once, and the sweep has nothing left", async (c) => {
+    const waits = WaitService.withEpoch(c.storage, c.epoch, c.assignments, options);
+    const messages = AgentMessageService.withEpoch(c.storage, c.epoch, { availability: c.pauses.availability, taskPaused: (t) => c.pauses.isPaused(t), guard: (t) => c.pauses.guard(t), waits, assignments: c.assignments, ...options });
+    const real = meetingNoticeSink(messages);
+    // B may read the project's tasks, so it can be told about one.
+    const principal = await c.storage.getAggregate({ kind: "principal", id: c.pB });
+    await c.principals.setGrants(c.owner, { commandId: cid("sg"), principalId: c.pB, expectedRevision: principal!.revision, grants: [{ action: "history.*", project: c.a }, { action: "task.read", project: c.a }] });
+    const filed: string[] = [];
+    let stopAfterFiling = true;
+    const service = c.make({ notices: { notify: async (n) => { await real.notify(n); filed.push(n.dueAt); if (stopAfterFiling) { stopAfterFiling = false; throw new Error("the controller stopped before it recorded the notice"); } } } });
+    const t1 = await c.task(c.agentA);
+    const t3 = await c.task(c.agentB);
+    c.other.set(c.pB, "stopped");
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    await c.attend(id, c.pA, [t1]);
+    const decisions: MeetingDecision[] = [{ ref: "decision:x", supersedes: [t3] }];
+    const first = await service.endMeeting(c.owner, { commandId: "end-1", occurrenceId: id, decisions });
+    assert.deepEqual([first.notified, first.unnotified], [[], [c.pB]], "filed, but the stop came before it was recorded");
+    // Later: the end is repeated (the acknowledgement time it works out has moved).
+    at("2026-10-23T08:10:00.000Z");
+    const again = await service.endMeeting(c.owner, { commandId: "end-2", occurrenceId: id, decisions });
+    assert.deepEqual([again.notified, again.unnotified], [[c.pB], []], "the agent was told; the conflict is not a failure");
+    assert.equal(filed.length, 2);
+    assert.notEqual(filed[0], filed[1], "the repeat carried another text under the same command ID");
+    const notices = (await c.storage.listAggregates("agent-message", { limit: 200 })).filter((m) => (m.body as { to?: string; kind?: string }).to === c.pB && (m.body as { kind?: string }).kind === "notice");
+    assert.equal(notices.length, 1, "told once");
+    assert.match((notices[0]!.body as { text: string }).text, new RegExp(`acknowledge by ${filed[0]!.replace(/[.]/g, "\\.")}`), "the notice the agent has is the first one");
+    assert.ok((await c.attendance.revalidation(c.owner, t3))!.entries[0]!.notifiedAt !== undefined);
+    assert.equal((await service.sweepReturns(c.owner)).unnotified, 0);
+    // Other failures still reach the service, which keeps the agent waiting for the sweep.
+    const refusing = meetingNoticeSink({ noticeFromController: async () => { throw new DomainError("unavailable", "the inbox is full"); } });
+    await assert.rejects(refusing.notify({ key: "k", agent: c.pB, occurrenceId: id, projectId: c.a, decisions: ["d"], taskIds: [t3], dueAt: "x" }), /inbox is full/);
   });
 
   suite("a notice that fails to send never keeps anyone from returning to work, is reported as unnotified, and is retried by the sweep", async (c) => {

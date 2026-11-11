@@ -6,7 +6,8 @@ import { redactText } from "../security/redact.js";
 import { INTERROGATOR_LIMITS } from "./interrogator.js";
 
 /**
- * The shipped model client of the second agent that questions an agent's done (card W10), in two parts (the resume reviewer of card L04d does not use it yet):
+ * The shipped model client of the second agent that questions an agent's done (card W10), in two parts. The resume reviewer of card L04d uses the same client (one instance, so both share its slots) on its own owner
+ * setting (`resume.reviewerRoute`, `RESUME_REVIEWER_ROUTE_SETTING`):
  *
  * - `BoundedReviewerModel` wraps the host's raw client (an HTTP client over the owner's recorded provider addresses, credentials read by NAME at each call, in the launcher). Nothing reaches it that is not redacted and bounded, and
  *   nothing comes back unbounded: the system and user texts are redacted and cut, a reply longer than the verdict parser's own limit is replaced by a marker that holds no verdict (so it is read as unreadable and the report is found unsupported, fail closed: padding after a genuine-looking verdict cannot get a done through, as it would if the reply were merely cut and trimmed) and a call that returns
@@ -22,6 +23,13 @@ export const REVIEWER_LIMITS = { system: 4000, user: INTERROGATOR_LIMITS.prompt,
 /** What stands in for a reply longer than the limit: no JSON, so the interrogator reads it as no verdict (unsupported). */
 export const TOO_LONG = "[the reviewer's reply was longer than the limit for a verdict and was not read]";
 export const REVIEWER_ROUTE_SETTING = "report.reviewerRoute";
+/** The owner's setting naming the route that judges whether what changed under a paused task matters before it resumes (card L04d wiring). Separate from `report.reviewerRoute`: different data goes to it. */
+export const RESUME_REVIEWER_ROUTE_SETTING = "resume.reviewerRoute";
+/** What `reviewerRoute` says when it cannot give a route, for each reviewer role. */
+const UNSET = {
+  report: "no reviewer route is set, so no second agent questioned the report (the owner names one in chat, for example: let provider/model question the agents' reports)",
+  resume: "no resume reviewer route is set, so no second agent judged what changed (the owner names one in chat; until then every change waits for the owner)",
+} as const;
 
 export class BoundedReviewerModel implements ResumeReviewModel, Pick<ModelCall, "completeDetailed"> {
   readonly #raw: ModelCall;
@@ -78,10 +86,13 @@ export class BoundedReviewerModel implements ResumeReviewModel, Pick<ModelCall, 
 export function reviewerRoute(deps: {
   readonly setting: () => Promise<unknown>;
   readonly routing: { select(request: RouteRequest): Promise<Selection & { revision: number }> };
+  /** Which reviewer the route is for, for the words of a refusal (default `report`). */
+  readonly purpose?: keyof typeof UNSET;
 }): () => Promise<readonly string[]> {
+  const unset = UNSET[deps.purpose ?? "report"];
   return async () => {
     const value = await deps.setting();
-    if (typeof value !== "string" || value === "") throw new DomainError("unavailable", "no reviewer route is set, so no second agent questioned the report (the owner names one in chat, for example: let provider/model question the agents' reports)");
+    if (typeof value !== "string" || value === "") throw new DomainError("unavailable", unset);
     let picked: Selection;
     try {
       // The owner's choice is the route; the table judges it by its own rules. The data may go to it (the owner named it) and a paid route is allowed (the daily cap on the controller's model calls still holds).

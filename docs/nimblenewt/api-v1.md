@@ -446,14 +446,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `catalog.running`
 
-The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach. Each is named by attempt, call, task and agent, never by its input; at most 50 are listed, and `total` counts all of them.
+The owner lists the catalogue tool calls of one version that are running now (owner only), so a revocation can say what it would reach: in this controller process and in any other controller process on the same store (`elsewhere: true`). Each is named by attempt, call, task and agent, never by its input; at most 50 are listed, and `total` counts all of them. `elsewhereUnknown: true` says calls in other processes could not be checked.
 
 Arguments:
 
 - `name`: the canonical tool name
 - `version`: major.minor.patch
 
-Result: `{ items: [{ attemptId, callId, taskId, agentId }], total }`.
+Result: `{ items: [{ attemptId, callId, taskId, agentId, elsewhere? }], total, elsewhereUnknown? }`.
 
 #### `catalog.revocations`
 
@@ -4397,7 +4397,7 @@ Result: `{ item: { target, removed } }`.
 
 #### `database.transfer.set`
 
-Owner only: turns database transfers on or off (`enabled`) and/or the host's automatic restart after a move or rollback on or off (`restart`). Only the fields given change. Turning transfers off refuses new ones; it does not undo one. With `expectedRevision` (from database.transfer.settings) the change is made only if nothing changed the installation settings since (else `stale_revision`); the chat always quotes the revision it planned at. Refused while other installation changes are staged and not applied.
+Owner only: turns database transfers on or off (`enabled`) and/or the host's automatic restart after a move or rollback on or off (`restart`). Only the fields given change. Turning transfers off refuses new ones; it does not undo one. With `expectedRevision` (from database.transfer.settings) the change is made only if nothing changed the installation settings since (else `stale_revision`); the chat always quotes the revision it planned at. One write: nothing staged in the installation settings goes into force with it, and a resend of the same command is answered from its record.
 
 Arguments:
 
