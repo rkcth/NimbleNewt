@@ -3772,14 +3772,14 @@ Result: `{ returned, pending, asked, notAsked }`.
 
 #### `meeting.record.sweep`
 
-Closes votes past their time, breaks or fails ties and finishes abandoned meetings in a project.
+Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call).
 
 Arguments:
 
 - `projectId`: the project
 - `commandId`: required
 
-Result: `{ closed, tied, failedTies, interrupted }`.
+Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed }`.
 
 #### `meeting.attend.open-room`
 

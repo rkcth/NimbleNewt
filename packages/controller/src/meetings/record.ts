@@ -205,11 +205,13 @@ export interface RecordOptions extends RunnerOptions {
   readonly logScan?: { readonly pageSize: number; readonly reads: number };
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
   readonly voteMinutes?: number;
+  /** Minutes after a meeting ends before the lease hands its outcomes back by itself (default 60; card M03i). Until then the owner, a host or a service can return them with a question to the owner. */
+  readonly autoReturnMinutes?: number;
 }
 
 export const RECORD_LIMITS = {
   text: 4000, reason: 500, entries: 1000, systemEntries: 50, motions: 30, trail: 60, tagged: 100, corrections: 100, changes: 10, versions: 20, sources: 5, openRecords: 100, patchBytes: 4000,
-  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8, askOwner: 10, ownerAnswers: 10,
+  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8, askOwner: 10, ownerAnswers: 10, autoReturnMinutes: 60, autoReturnPerPass: 5, autoReturnIndex: 50,
 } as const;
 
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -224,6 +226,8 @@ const TASK_ID = /^task-[a-z2-7]{20}$/;
 const NEVER = /^(?:\*|principal\.|grant|restriction|budget\.|config\.|routing\.|review\.policy|catalog\.|environment\.|mcp\.|agent\.manage|recovery\.|resource\.scope|project\.participants|events\.)/;
 
 const OPEN_KIND = "meeting-record-open";
+/** Per project: ended records whose outcomes the lease still has to hand back (card M03i). */
+const RETURN_KIND = "meeting-record-return";
 const LOG_KIND = "meeting-decision-log";
 /** Per project: the decisions that may still lack log lines (see `UnloggedIndexBody`). */
 const UNLOGGED_KIND = "meeting-decision-unlogged";
@@ -1487,6 +1491,13 @@ export class MeetingRecordService {
         const ids = known<OpenIndexBody>(index)?.ids ?? [];
         if (index !== undefined) changes.push({ type: "update", ref: { kind: OPEN_KIND, id: rec.projectId }, expectedRevision: index.revision, body: json({ projectId: rec.projectId, ids: ids.filter((x) => x !== recordId) }) });
         void entries;
+        // A meeting with outcomes to hand back is listed for the lease (bounded: a full list leaves the rest to the owner, a host or a service returning them by hand).
+        const returns = await this.#runner.get(RETURN_KIND, rec.projectId);
+        const waiting = known<OpenIndexBody>(returns)?.ids ?? [];
+        if (!waiting.includes(recordId) && waiting.length < RECORD_LIMITS.autoReturnIndex && await this.#hasOutcomes(rec)) {
+          const body: OpenIndexBody = { projectId: rec.projectId, ids: [...waiting, recordId] };
+          changes.push(returns === undefined ? { type: "create", ref: { kind: RETURN_KIND, id: rec.projectId }, body: json(body) } : { type: "update", ref: { kind: RETURN_KIND, id: rec.projectId }, expectedRevision: returns.revision, body: json(body) });
+        }
         return { ref: done.ref, creates: false, changes: [...done.changes, ...changes], detail: { projectId: rec.projectId, interrupted } };
       },
     })));
@@ -1497,7 +1508,7 @@ export class MeetingRecordService {
    * The lease: closes votes whose time is up (`tied` lists those that came to a tie and now wait for the chair's casting vote), fails ties whose casting window is over, and ends records nobody finished (two hours past the meeting's end), so nothing stays open for ever. Owner, host or service. Each step has a
    * command ID derived from the record, so repeating the sweep, or running it on several processes, does each step once.
    */
-  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[]; logChecked: string[] }> {
+  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[]; logChecked: string[]; returned: string[]; returnFailed: string[] }> {
     onlyKnown(command, ["projectId"]);
     if (!isService(by)) throw forbidden(by, "sweep meeting records");
     const projectId = typeof command.projectId === "string" ? command.projectId : invalid("projectId", "is not a project ID");
@@ -1530,7 +1541,50 @@ export class MeetingRecordService {
     }
     // A log line lost to a crash or a failed write is written here (bounded per call).
     const logChecked = await this.#sweepLog(projectId);
-    return { closed, tied, failedTies, interrupted, logChecked };
+    const handBack = await this.#sweepReturns(by, projectId);
+    return { closed, tied, failedTies, interrupted, logChecked, returned: handBack.returned, returnFailed: handBack.failed };
+  }
+
+  /** Whether an ended record has a motion that answers an agenda topic and whose outcome has not gone back. */
+  async #hasOutcomes(rec: RecordBody): Promise<boolean> {
+    for (const id of rec.motions) { const m = known<MotionBody>(await this.#runner.get("meeting-motion", id)); if (m?.agendaItemId !== undefined && m.outcomeReturned !== true) return true; }
+    return false;
+  }
+
+  /**
+   * Hands the outcomes of ended meetings back by itself (card M03i), without a question to the owner: an hour (`autoReturnMinutes`) after the meeting ended, so that the owner has had the time to return them with a question first. At most
+   * five records per pass; a record whose outcomes all went back leaves the list. Runs as the caller of `sweep` (owner, host or service), through `returnOutcomes`, so it settles each item once however often it runs.
+   */
+  async #sweepReturns(by: Principal, projectId: string): Promise<{ returned: string[]; failed: string[] }> {
+    const returned: string[] = [];
+    const failed: string[] = [];
+    const wait = (this.#options.autoReturnMinutes ?? RECORD_LIMITS.autoReturnMinutes) * 60_000;
+    const ids = known<OpenIndexBody>(await this.#runner.get(RETURN_KIND, projectId))?.ids ?? [];
+    const finished: string[] = [];
+    let handled = 0;
+    for (const recordId of ids) {
+      const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
+      if (rec === undefined) { finished.push(recordId); continue; }
+      if (rec.state === "open" || ms(this.#runner.now()) < ms(rec.endedAt ?? rec.endsAt) + wait) continue;
+      if (handled >= RECORD_LIMITS.autoReturnPerPass) break;
+      handled++;
+      try {
+        const r = await this.returnOutcomes(by, { recordId });
+        if (r.returned.length > 0) returned.push(recordId);
+        if (r.pending.length === 0) finished.push(recordId);
+      } catch { failed.push(recordId); }
+    }
+    if (finished.length > 0) {
+      await this.#retrying(() => this.#runner.command("meeting.record.returned-list", { commandId: `mtg-return-list:${createHash("sha256").update(`${projectId}\0${finished.join(",")}`).digest("hex").slice(0, 32)}`, actor: by.id }, async () => ({
+        payload: { projectId, finished },
+        build: async () => {
+          const cur = await this.#runner.get(RETURN_KIND, projectId);
+          const now = known<OpenIndexBody>(cur)?.ids ?? [];
+          return { ref: { kind: RETURN_KIND, id: projectId }, creates: false, changes: cur === undefined ? [] : [{ type: "update", ref: { kind: RETURN_KIND, id: projectId }, expectedRevision: cur.revision, body: json({ projectId, ids: now.filter((x) => !finished.includes(x)) }) }], detail: { projectId } };
+        },
+      })));
+    }
+    return { returned, failed };
   }
 
   // ---- summary ---------------------------------------------------------------------------------------------------------------------------------
