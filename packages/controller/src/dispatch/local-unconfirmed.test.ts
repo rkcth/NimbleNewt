@@ -46,6 +46,9 @@ for (const backend of backends) {
       assert.equal(await d.confirmStopped(w.owner, attemptId!), true);
       assert.equal(await flag(d as never, w.owner, attemptId!), true);
       assert.deepEqual(await d.unconfirmedAttemptsOf(w.owner, { taskId: taskId! }), []);
+      // Taken off the stored list itself in the same commit (not only hidden when read), so a confirmed attempt never takes one of the list's places.
+      const stored = await store.storage.getAggregate({ kind: "dispatch-unconfirmed", id: "unconfirmed" });
+      assert.deepEqual((stored?.body as unknown as { ids: string[] } | undefined)?.ids, []);
     } finally { await store.close(); }
   });
 
@@ -64,3 +67,27 @@ for (const backend of backends) {
     } finally { await store.close(); }
   });
 }
+
+test("a local worker still starting, or whose handle was not stopped, is never confirmed stopped, though its sandbox lists nothing (review of L02e)", async () => {
+  let opened!: () => void;
+  const sandboxOpen = new Promise<void>((r) => { opened = r; });
+  let letRuntimeOpen!: () => void;
+  const runtimeGate = new Promise<void>((r) => { letRuntimeOpen = r; });
+  // A running worker process is the attempt itself and is not listed, so the sandbox lists nothing the whole time.
+  const sandbox: SandboxPort = { open: async (recipe: RecipeSummary) => { opened(); return { revision: recipe.revision, close: async () => undefined, work: async () => ({ processes: [] }) }; } };
+  const runtimes: RuntimeFactory = { open: async () => { await runtimeGate; return { run: async () => ({ status: "completed", endKind: "normal", text: "" }), checkpoint: async () => ({}), close: async () => undefined }; } };
+  const local = new LocalWorker({ hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "local-2.0.0", sandbox, runtimes, capabilities: () => CAPS });
+  const attemptId = "att-startingstartingstar";
+  const starting = local.start({ attemptId, taskId: "task-x", projectId: "prj-x", agentId: "agent:agt-1", generation: 1, route: "r", credential: "c", recipe: { revision: "rev-1" }, content: "x", requestId: "q" } as never);
+  await sandboxOpen;
+  await assert.rejects(local.release(attemptId, "x"), /starting or has not been stopped/, "an end that runs while the start has not answered is not confirmed");
+  letRuntimeOpen();
+  const handle = await starting;
+  await assert.rejects(local.release(attemptId, "x"), /starting or has not been stopped/, "a handle not yet stopped is not confirmed");
+  await handle.stop();
+  await local.release(attemptId, "x");
+  // A start that fails takes its count off too.
+  const failing = new LocalWorker({ hostId: "host:local", resources: { cpus: 1, memoryMb: 1024 }, version: "local-2.0.0", sandbox, runtimes: { open: async () => { throw new Error("no runtime"); } }, capabilities: () => CAPS });
+  await assert.rejects(failing.start({ attemptId, recipe: { revision: "rev-1" }, content: "x" } as never), /no runtime/);
+  await failing.release(attemptId, "x");
+});
