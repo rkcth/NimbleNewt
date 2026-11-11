@@ -76,3 +76,14 @@ test("the model is told how to answer a held meeting decision by chat: the opera
   assert.match(system, /the needs_you status lists them/);
   assert.ok(Object.keys(STATUS_KINDS).includes("needs_you"));
 });
+
+test("the prompt tells the model how the owner switches the MCP door off and on (card T05b), and the intent it describes passes the checks", async () => {
+  let system = "";
+  const intent = [{ kind: "policy_edit", change: { type: "setting", layer: "installation", key: "conversation.mcp.enabled", value: false }, evidence: "shut the outside app door", basis: "owner" }];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intent); } }, () => ["a/primary"]);
+  const out = await m.interpret({ ...input, text: "shut the outside app door", quoted: [] }) as unknown[];
+  assert.equal(out.length, 1);
+  assert.match(system, /conversation\.mcp\.enabled/);
+  assert.match(system, /policy_edit/);
+  assert.match(system, /apply_proposal/);
+});

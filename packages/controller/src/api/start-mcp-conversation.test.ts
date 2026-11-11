@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -41,5 +42,29 @@ test("a started controller serves the MCP door on its conversation listener for 
     assert.equal((await rpc(c.conversationUrl!, owner, { jsonrpc: "2.0", id: 4, method: "tools/list" })).status, 404);
     await set("on", true);
     assert.equal((await rpc(c.conversationUrl!, owner, { jsonrpc: "2.0", id: 5, method: "tools/list" })).status, 200);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the owner switches the MCP door off and on again through the chat interpreter, with free wording and no fixed phrase (card T05b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-mcpchat-"));
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ScriptedInterpreter((i) => say[i.text] ?? []) } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const probe = async (id: number) => (await rpc(c.conversationUrl!, boot.token, { jsonrpc: "2.0", id, method: "tools/list" })).status;
+    assert.equal(await probe(1), 200);
+    let m = 0;
+    const turn = async (text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: `m${m++}`, text })).outcomes as any[]; };
+    const setDoor = async (wording: string, applyWording: string, value: boolean) => {
+      const shown = await turn(wording, [{ kind: "policy_edit", change: { type: "setting", layer: "installation", key: "conversation.mcp.enabled", value }, evidence: wording, basis: "owner" }]);
+      assert.equal(shown.length, 1, JSON.stringify(shown));
+      assert.equal(shown[0].status, "proposed", "a setting is shown first");
+      const done = await turn(applyWording, [{ kind: "apply_proposal", proposalId: shown[0].editId, evidence: applyWording, basis: "owner" }]);
+      assert.equal(done[0].status, "applied", JSON.stringify(done));
+    };
+    await setDoor("Please shut the outside app door for now, nobody should reach the conversation from outside.", "Yes, go ahead and apply that.", false);
+    assert.equal(await probe(2), 404, "the next request after the chat switch-off is refused");
+    await setDoor("Let outside apps talk to the conversation again.", "Apply it, thanks.", true);
+    assert.equal(await probe(3), 200);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
