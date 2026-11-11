@@ -601,13 +601,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const coverageSettings = CoverageSettingsService.withEpoch(storage, epoch);
     const coverage = CoverageService.withEpoch(storage, epoch, coverageSettings);
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
-    // The plain 09:00 digest gives way to a scheduled stand-up (card U11d): any active stand-up of a live project. The stand-up service starts with the dispatcher; until then, or when it fails, none is known and the owner is told.
-    const standupsActive = async (): Promise<boolean> => {
-      const live = dispatch?.standups as unknown as { anyActive?: () => Promise<boolean> } | undefined;
-      if (live?.anyActive === undefined) return false;
-      return live.anyActive();
+    // The plain 09:00 digest gives way to scheduled stand-ups (card U11d) when they carry every decision it would tell: the active stand-ups of live projects. The stand-up service starts with the dispatcher; until then, or when it fails, none is known and the owner is told.
+    const standupProjects = async (): Promise<ReadonlySet<string>> => {
+      const live = dispatch?.standups as unknown as { activeProjects?: () => Promise<ReadonlySet<string>> } | undefined;
+      if (live?.activeProjects === undefined) return new Set();
+      return live.activeProjects();
     };
-    const notifications = NotificationService.withEpoch(storage, epoch, { standupScheduled: standupsActive, timeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; }, ...(options.notifications?.channels === undefined ? {} : { channels: options.notifications.channels }), ...(options.notifications?.clock === undefined ? {} : { clock: options.notifications.clock }) });
+    const notifications = NotificationService.withEpoch(storage, epoch, { standupProjects, timeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; }, ...(options.notifications?.channels === undefined ? {} : { channels: options.notifications.channels }), ...(options.notifications?.clock === undefined ? {} : { clock: options.notifications.clock }) });
     const messages = AgentMessageService.withEpoch(storage, epoch, {
       onSent: async (e) => { await activity.record({ id: "service:messages", kind: "service", name: "messages", grants: [] } as Principal, { commandId: `msg-act:${e.messageId}`, taskId: e.taskId, kind: e.ownerSent ? "owner-message" : "agent-message", summary: `${e.sender} sent ${e.to} a ${e.class} message: ${e.purpose}`, manifest: { refs: [{ kind: "agent-message", id: e.messageId }] } } as never); },
       availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });

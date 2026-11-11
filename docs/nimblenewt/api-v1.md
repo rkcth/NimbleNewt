@@ -4484,7 +4484,7 @@ Arguments:
 
 - `channel` (optional): inbox or external
 - `channelName` (optional): the name of the external channel (needed for external; it must be a channel adapter registered in this installation, otherwise the change is refused)
-- `digestTimes` (optional): 1 to 8 UTC times such as 09:00; until you name times yourself the plain 09:00 digest is sent only when no stand-up is scheduled, naming them (even 09:00) always sends the digest
+- `digestTimes` (optional): 1 to 8 UTC times such as 09:00; until you name times yourself the plain 09:00 digest gives way to scheduled stand-ups only when every decision it would list belongs to a project whose stand-up carries it, naming them (even 09:00) always sends the digest
 - `quietHours` (optional): { start, end } times in your time zone setting (UTC when none is set), or null to remove them
 - `levelByKind` (optional): { kind: notice | needs-you | urgent } for blocker, review-request, owner-question, maintenance, presence, safety-stop; null puts a kind back to its default (a safety stop stays urgent)
 - `noticeRetentionDays` (optional): whole days (1 to 365) a Notice stays in the inbox before it is closed (default 7)

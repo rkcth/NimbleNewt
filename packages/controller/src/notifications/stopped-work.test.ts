@@ -26,7 +26,7 @@ for (const backend of backends) {
     svc: NotificationService; owner: Principal; sent: { text: string }[]; work: { idle: Map<string, boolean | undefined>; reads: number };
     watch: UrgentWatch; restart(): UrgentWatch; flush(): Promise<unknown>; set(change: Record<string, unknown>): Promise<void>;
     projectA: string; projectB: string; held(projectId?: string, type?: "manual_hold" | "wait_overdue"): Promise<{ blockerId: string; taskId: string }>; report(blockerId: string): Promise<string>;
-    open(): Promise<Item[]>; stopped(): Promise<Item[]>; standup: { scheduled: boolean | "throws"; asked: number }; digestSvc(): NotificationService; resolve(blockerId: string): Promise<void>;
+    open(): Promise<Item[]>; stopped(): Promise<Item[]>; standup: { scheduled: boolean | "throws" | ReadonlySet<string>; asked: number }; digestSvc(): NotificationService; resolve(blockerId: string): Promise<void>;
   }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-11-11T12:00:00.000Z");
@@ -38,8 +38,8 @@ for (const backend of backends) {
         const owner = (await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token))!;
         const sent: { text: string }[] = [];
         const channel: ChannelAdapter = { send: async (m) => { sent.push({ text: m.text }); } };
-        const standup: { scheduled: boolean | "throws"; asked: number } = { scheduled: false, asked: 0 };
-        const make = (): NotificationService => NotificationService.withEpoch(world.storage, projects.epoch, { ...options, channels: { pager: channel }, standupScheduled: async () => { standup.asked++; if (standup.scheduled === "throws") throw new Error("stand-ups are not running"); return standup.scheduled; } });
+        const standup: { scheduled: boolean | "throws" | ReadonlySet<string>; asked: number } = { scheduled: false, asked: 0 };
+        const make = (): NotificationService => NotificationService.withEpoch(world.storage, projects.epoch, { ...options, channels: { pager: channel }, standupProjects: async () => { standup.asked++; if (standup.scheduled === "throws") throw new Error("stand-ups are not running"); return standup.scheduled === true ? new Set([projectA, projectB]) : standup.scheduled === false ? new Set<string>() : standup.scheduled; } });
         const svc = make();
         const blockers = BlockerService.withEpoch(world.storage, projects.epoch, options);
         const projectA = (await projects.createProject({ commandId: cid("pa"), actor: "owner:rob", name: "A" })).id;
@@ -154,6 +154,8 @@ for (const backend of backends) {
     assert.equal((await c.stopped()).length, 0, "off: nothing is raised however long it waits");
     await assert.rejects(() => c.set({ stoppedWorkAfterMinutes: 0 }), (e) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => c.set({ stoppedWorkAfterMinutes: 20_000 }), (e) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => c.set({ stoppedWorkAfterMinutes: 10_081 }), (e) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => c.set({ stoppedWorkAfterMinutes: 2.5 }), (e) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => c.set({ stoppedWorkAfterMinutes: "5" }), (e) => e instanceof DomainError && e.code === "invalid_command");
     await assert.rejects(() => c.svc.configure({ ...c.owner, kind: "agent" } as never, { commandId: cid("x"), stoppedWorkAfterMinutes: 5 } as never), (e) => e instanceof DomainError && e.code === "forbidden");
     assert.equal((await c.svc.settings(c.owner) as { stoppedWorkAfterMinutes?: number | null }).stoppedWorkAfterMinutes, null);
@@ -219,6 +221,62 @@ for (const backend of backends) {
     const third = await c.held(); await c.report(third.blockerId);
     now = Date.parse("2026-11-14T09:01:00.000Z");
     assert.equal(((await c.flush()) as { digestIds: string[] }).digestIds.length, 1);
+  });
+
+  suite("the plain digest gives way only to stand-ups that carry its decisions: an item of a project without one, or of no project, is still told at 09:00 (card U11d review)", async (c) => {
+    now = Date.parse("2026-11-11T08:00:00.000Z");
+    await c.set({ escalateAfterHours: null });
+    // A stand-up in project B does not carry project A's decision: the digest is sent.
+    c.standup.scheduled = new Set([c.projectB]);
+    const a = await c.held(c.projectA); await c.report(a.blockerId);
+    now = Date.parse("2026-11-11T09:01:00.000Z");
+    assert.equal(((await c.flush()) as { digestIds: string[] }).digestIds.length, 1, "project A has no stand-up");
+    // A maintenance item of the installation (no project) is on no stand-up's agenda, and the 24-hour escalation does not cover it: the digest is sent.
+    c.standup.scheduled = new Set([c.projectA, c.projectB]);
+    await c.svc.emitFromController({ commandId: cid("mnt"), kind: "maintenance", ref: { kind: "responsibility", id: "r1" } });
+    now = Date.parse("2026-11-12T09:01:00.000Z");
+    assert.equal(((await c.flush()) as { digestIds: string[] }).digestIds.length, 1, "an item of no project is told");
+    // Everything queued is on a stand-up's agenda: the digest gives way.
+    const b = await c.held(c.projectB); await c.report(b.blockerId);
+    now = Date.parse("2026-11-13T09:01:00.000Z");
+    assert.deepEqual(((await c.flush()) as { digestIds: string[] }).digestIds, [], "project B's stand-up carries it");
+    // An empty answer (no stand-up anywhere) never skips.
+    c.standup.scheduled = new Set();
+    now = Date.parse("2026-11-14T09:01:00.000Z");
+    assert.equal(((await c.flush()) as { digestIds: string[] }).digestIds.length, 1);
+  });
+
+  suite("stopped work is one event per project: many decisions of one idle project send ONE message per gap and leave the hour's Urgent allowance to other triggers (card U11d review)", async (c) => {
+    c.work.idle.set(c.projectA, true); c.work.idle.set(c.projectB, true);
+    for (let i = 0; i < 8; i++) await c.report((await c.held(c.projectA)).blockerId);
+    await c.report((await c.held(c.projectB)).blockerId);
+    await c.watch.sweep(c.owner);
+    now += 31 * MIN; await c.watch.sweep(c.owner);
+    for (let i = 0; i < 3; i++) await c.flush();
+    assert.equal((await c.stopped()).length, 9, "every one is Urgent in the inbox");
+    const told = c.sent.filter((m) => m.text.startsWith("URGENT, work is stopped"));
+    assert.equal(told.length, 2, `one per project, not one per decision: ${JSON.stringify(c.sent)}`);
+    assert.ok(told.some((m) => m.text.includes(c.projectA)) && told.some((m) => m.text.includes(c.projectB)));
+    assert.equal(c.sent.length, 2, "nothing was held for the hour's limit, so no summary either");
+    // Another decision of project A raised inside the owner's gap for the project is still not sent on its own.
+    await c.set({ urgentMinGapMinutes: 120 });
+    await c.report((await c.held(c.projectA)).blockerId);
+    now += 31 * MIN; await c.watch.sweep(c.owner); await c.flush();
+    assert.equal(c.sent.filter((m) => m.text.startsWith("URGENT, work is stopped")).length, 2, "inside the gap for project A");
+  });
+
+  suite("after quiet hours the deferred stopped-work messages of one project are released as one (card U11d review)", async (c) => {
+    now = Date.parse("2026-11-11T12:00:00.000Z");
+    await c.set({ quietHours: { start: "11:00", end: "13:00" }, urgentInterruptsQuietHours: false });
+    c.work.idle.set(c.projectA, true);
+    for (let i = 0; i < 4; i++) await c.report((await c.held(c.projectA)).blockerId);
+    await c.watch.sweep(c.owner);
+    now += 31 * MIN; await c.watch.sweep(c.owner); await c.flush();
+    assert.equal((await c.stopped()).length, 4);
+    assert.equal(c.sent.length, 0, "quiet");
+    now = Date.parse("2026-11-11T13:05:00.000Z");
+    for (let i = 0; i < 3; i++) await c.flush();
+    assert.equal(c.sent.length, 1, `one message for the project after quiet hours: ${JSON.stringify(c.sent)}`);
   });
 
   suite("the service raises an item once, never an item that is Urgent for another reason, and puts back only what the watch raised (card U11d)", async (c) => {

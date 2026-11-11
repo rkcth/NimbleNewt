@@ -330,22 +330,23 @@ export class StandupService {
   }
 
   /**
-   * Whether any stand-up is active in a project that is not archived (card U11d, for the plain 09:00 digest rule). The controller's own question, not a view for a caller: it reads the stand-up records directly, so
-   * it is not on the state API and tells nothing but yes or no. Bounded: at most `STANDUP_LIMITS.activeScan` stand-up records are looked at; a larger installation than that answers yes when it found one and
-   * otherwise throws "unavailable", so the caller falls back to telling the owner.
+   * The projects (not archived) that have an active stand-up (card U11d, for the plain 09:00 digest rule: a stand-up carries the Needs-you items of its own project only). The controller's own question, not a
+   * view for a caller: it reads the stand-up records directly, so it is not on the state API and tells nothing but project IDs. Bounded: at most `STANDUP_LIMITS.activeScan` stand-up records are looked at; a
+   * larger installation throws "unavailable", so the caller falls back to telling the owner.
    */
-  async anyActive(): Promise<boolean> {
+  async activeProjects(): Promise<ReadonlySet<string>> {
+    const out = new Set<string>();
     let looked = 0;
     for (let after: string | undefined; ;) {
       const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const c of chunk) {
         looked++;
         const schedule = (await this.#runner.get("meeting-schedule", c.id))?.body as unknown as { state?: string; projectId?: string } | undefined;
-        if (schedule?.state !== "active" || schedule.projectId === undefined) continue;
+        if (schedule?.state !== "active" || schedule.projectId === undefined || out.has(schedule.projectId)) continue;
         const project = (await this.#runner.get("project", schedule.projectId))?.body as unknown as { state?: string } | undefined;
-        if (project !== undefined && project.state !== "archived") return true;
+        if (project !== undefined && project.state !== "archived") out.add(schedule.projectId);
       }
-      if (chunk.length < 100) return false;
+      if (chunk.length < 100) return out;
       if (looked >= STANDUP_LIMITS.activeScan) throw new DomainError("unavailable", "too many stand-ups to check them all at once");
       after = chunk[chunk.length - 1]!.id;
     }

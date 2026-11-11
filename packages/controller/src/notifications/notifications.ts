@@ -195,11 +195,14 @@ const minutesOf = (hhmm: string): number => Number(hhmm.slice(0, 2)) * 60 + Numb
 const DEFAULTS: NotificationSettings = { channel: "inbox", digestTimes: ["09:00"] };
 const addMinutes = (iso: string, m: number): string => new Date(Date.parse(iso) + m * 60_000).toISOString();
 const EMPTY: IndexBody = { items: [], digests: [], deliveries: [], failed: [] };
+/** The key the gap and the hour's allowance count an Urgent trigger under: its record, except stopped work, which is counted per project (card U11d). */
+const stoppedKey = (projectId: string | undefined): string => `stopped|${projectId ?? "-"}`;
+const interruptKey = (item: Pick<ItemBody, "kind" | "projectId" | "ref" | "stoppedAt">): string => (item.stoppedAt !== undefined ? stoppedKey(item.projectId) : `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
 const without = (list: readonly string[], id: string): string[] => list.filter((x) => x !== id);
 const withId = (list: readonly string[], id: string): string[] => (list.includes(id) ? [...list] : [...list, id]);
 
 /** Optional wiring: the owner's time zone (quiet hours are read in it; UTC when it gives none), and test overrides for the send timeout and the time one run may take. */
-interface ServiceExtras { /** Whether any stand-up is scheduled (card U11d): the plain 09:00 digest is sent only when none is. A failing answer counts as none. */ readonly standupScheduled?: () => Promise<boolean>; readonly timeZone?: () => Promise<string | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
+interface ServiceExtras { /** The projects with a scheduled stand-up (card U11d): the plain 09:00 digest gives way only when every decision it would carry is on one of their agendas. A failing answer counts as none. */ readonly standupProjects?: () => Promise<ReadonlySet<string>>; readonly timeZone?: () => Promise<string | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
 
 export interface Emit extends NoActor {
   readonly kind: NotificationKind;
@@ -240,8 +243,8 @@ export class NotificationService {
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { channels?: Record<string, ChannelAdapter>; responders?: Partial<Record<NotificationKind, Responder>> } & ServiceExtras = {}): NotificationService {
-    const { timeZone, sendTimeoutMs, runBudgetMs, standupScheduled } = options;
-    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(standupScheduled === undefined ? {} : { standupScheduled }), ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
+    const { timeZone, sendTimeoutMs, runBudgetMs, standupProjects } = options;
+    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(standupProjects === undefined ? {} : { standupProjects }), ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
@@ -495,10 +498,19 @@ export class NotificationService {
     return { digestIds, delivered: delivered.delivered, failed: delivered.failed, retrying: delivered.retrying };
   }
 
-  /** Whether this digest time is the owner-less default one and a stand-up is scheduled (card U11d). Asked once per digest time; a source that fails counts as no stand-up, so the owner is told. */
+  /**
+   * Whether this digest time is the owner-less default one and scheduled stand-ups carry everything it would tell (card U11d). A stand-up opens with the Needs-you items of ITS project only, so the digest gives
+   * way only when at least one stand-up is scheduled and every queued Needs-you item it would list belongs to a project that has one; an item of another project, or of none (a maintenance item of the
+   * installation), would otherwise reach the owner by no message at all. Asked once per digest time; a source that fails counts as no stand-up, so the owner is told.
+   */
   async #standupCoversDigest(settings: NotificationSettings, state: StateBody, due: string): Promise<boolean> {
-    if (settings.digestTimesSet === true || this.#extra.standupScheduled === undefined) return false;
-    try { return (await this.#extra.standupScheduled()) === true; } catch { return false; }
+    if (settings.digestTimesSet === true || this.#extra.standupProjects === undefined) return false;
+    void state;
+    let covered: ReadonlySet<string>;
+    try { covered = await this.#extra.standupProjects(); } catch { return false; }
+    if (!(covered instanceof Set) || covered.size === 0) return false;
+    const open = await this.#load<ItemBody>("notification-item", this.#openIds((await this.#index()).body));
+    return open.every((i) => i.state !== "queued" || i.firstAt > due || levelOf(i, settings.levelByKind) === "notice" || (i.projectId !== undefined && covered.has(i.projectId)));
   }
 
   /** The current hour's window of Urgent messages (a new one when the hour has passed or the clock went back). */
@@ -912,7 +924,9 @@ export class NotificationService {
       const current = await this.#runner.get("notification-item", itemId);
       const old = current?.body as unknown as ItemBody | undefined;
       if (current === undefined || old === undefined || old.state === "answered" || old.state === "settled" || old.stoppedAt !== undefined || old.urgent || old.immediate || levelOf(old, settings.levelByKind) !== "needs-you") return false;
-      const base = `${old.kind}|${old.projectId ?? "-"}|${old.ref.kind}:${old.ref.id}`;
+      // One project's stopped work is ONE event: its decisions share the gap, so an agent that opens many questions or blockers in an idle project is told once per gap, not once per record, and cannot use up the
+      // hour's Urgent allowance that a missing backup or a silent host also needs. The others are still Urgent in the inbox.
+      const base = stoppedKey(old.projectId);
       let sendNow = interrupts || !quiet;
       let held: ItemBody["held"];
       if (sendNow) { held = await this.#holdReason(settings, now, base); if (held !== undefined) sendNow = false; }
@@ -983,7 +997,7 @@ export class NotificationService {
       if (item.state !== "queued" || !item.urgent || item.held !== undefined) continue;
       // An Urgent trigger that waited out quiet hours is still held to the hour's limit and the gap.
       if (item.trigger === true) {
-        const reason = await this.#holdReason(settings, now, `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
+        const reason = await this.#holdReason(settings, now, interruptKey(item));
         if (reason !== undefined) {
           await this.#apply("notification.hold", { commandId: `hold-${item.id}-${item.firstAt}`, actor: "notifications" }, { id: item.id }, async () => { const cur = await this.#runner.get("notification-item", item.id); if (cur === undefined || (cur.body as unknown as ItemBody).state !== "queued") return undefined; const ref: AggregateRef = { kind: "notification-item", id: item.id }; return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: cur.revision, body: { ...(cur.body as unknown as ItemBody), held: reason } as unknown as JsonObject }], detail: { held: reason } }; });
           await this.#countInterrupt(now, "", reason);
@@ -1001,7 +1015,7 @@ export class NotificationService {
           this.#indexChange(index, { deliveries: delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
         ], detail: { released: true } };
       });
-      if (item.trigger === true) await this.#countInterrupt(now, `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`, "sent");
+      if (item.trigger === true) await this.#countInterrupt(now, interruptKey(item), "sent");
     }
   }
 
