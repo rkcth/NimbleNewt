@@ -183,4 +183,14 @@ for (const backend of backends) {
     const none = (await CriticalPathService.withEpoch(c.storage, c.epoch, {}).holdsUp())!;
     assert.equal(await none(a), true, "no dependency source at all: the same");
   });
+
+  suite("review: marks sent at the same moment are all kept, also the very first ones that create the record (no lost mark, no command_conflict)", async (c) => {
+    const first = [await c.task(), await c.task(), await c.task()];
+    const results = await Promise.allSettled(first.map((t) => c.mark("task", t)));
+    assert.deepEqual(results.map((r) => r.status === "rejected" ? String((r.reason as Error).message) : "ok"), ["ok", "ok", "ok"]);
+    assert.deepEqual((await c.svc.list(c.owner)).marks.map((m) => m.id).sort(), [...first].sort());
+    const more = [await c.task(), await c.task()];
+    await Promise.all(more.map((t) => c.mark("task", t)));
+    assert.equal((await c.svc.list(c.owner)).marks.length, 5, "updates at the same moment keep every mark too");
+  });
 }

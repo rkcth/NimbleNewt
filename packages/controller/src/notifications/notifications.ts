@@ -172,7 +172,7 @@ interface StateBody {
   /** The last open item the sweep examined; the next full sweep goes on after it (and starts over at the end). */
   readonly sweepCursor?: string;
   /** Urgent messages the escalation sweep sent in the current hour. */
-  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number; /** Interrupting items held back this hour by the hourly limit and not yet named in the summary. */ readonly held?: number; readonly summarized?: boolean };
+  readonly urgentWindow?: { readonly startedAt: string; readonly sent: number; /** Interrupting items held back this hour by the hourly limit and not yet named in the summary. */ readonly held?: number; readonly summarized?: boolean; /** Of `sent`, the messages about decisions waiting for the owner (stopped work, a blocked critical path); they may use at most half of the hour (review of U11f). */ readonly decisions?: number };
   /** When an interrupting message about a record was last sent (key: kind|project|ref); bounded, oldest dropped. */
   readonly lastInterrupt?: Readonly<Record<string, string>>;
   /** Small facts the controller's own watches keep across restarts (for example when "no backup" was first seen). */
@@ -204,6 +204,10 @@ const EMPTY: IndexBody = { items: [], digests: [], deliveries: [], failed: [] };
 /** The key the gap and the hour's allowance count an Urgent trigger under: its record, except stopped work, which is counted per project (card U11d). */
 const stoppedKey = (projectId: string | undefined): string => `stopped|${projectId ?? "-"}`;
 const criticalKey = (projectId: string | undefined): string => `critical|${projectId ?? "-"}`;
+/** Whether an Urgent trigger is about a decision waiting for the owner (stopped work or a blocked critical path), counted per project. Such messages may use at most half of the hour's Urgent allowance, so that
+ * decisions agents open in several projects can never use up what a missing backup, a silent host or a security event needs (review of U11f). */
+const isDecisionKey = (key: string): boolean => key.startsWith("stopped|") || key.startsWith("critical|");
+const decisionShare = (perHour: number): number => Math.max(1, Math.floor(perHour / 2));
 const interruptKey = (item: Pick<ItemBody, "kind" | "projectId" | "ref" | "stoppedAt" | "criticalAt">): string => (item.stoppedAt !== undefined ? stoppedKey(item.projectId) : item.criticalAt !== undefined ? criticalKey(item.projectId) : `${item.kind}|${item.projectId ?? "-"}|${item.ref.kind}:${item.ref.id}`);
 const without = (list: readonly string[], id: string): string[] => list.filter((x) => x !== id);
 const withId = (list: readonly string[], id: string): string[] => (list.includes(id) ? [...list] : [...list, id]);
@@ -521,7 +525,7 @@ export class NotificationService {
   }
 
   /** The current hour's window of Urgent messages (a new one when the hour has passed or the clock went back). */
-  #window(state: StateBody, now: string): { startedAt: string; sent: number; held?: number; summarized?: boolean } {
+  #window(state: StateBody, now: string): { startedAt: string; sent: number; held?: number; summarized?: boolean; decisions?: number } {
     const w = state.urgentWindow;
     return w === undefined || Date.parse(now) - Date.parse(w.startedAt) >= 3_600_000 || Date.parse(now) < Date.parse(w.startedAt) ? { startedAt: now, sent: 0 } : w;
   }
@@ -534,6 +538,8 @@ export class NotificationService {
     if (gap !== null && last !== undefined) { const since = Date.parse(now) - Date.parse(last); if (since >= 0 && since < gap * 60_000) return "gap"; }
     const perHour = settings.escalationsPerHour === null ? undefined : settings.escalationsPerHour ?? DEFAULT_ESCALATIONS_PER_HOUR;
     if (perHour !== undefined && this.#window(state, now).sent >= perHour) return "limit";
+    // Decisions waiting for the owner leave the other half of the hour to the controller's own alarms (backup, host, security).
+    if (perHour !== undefined && isDecisionKey(key) && (this.#window(state, now).decisions ?? 0) >= decisionShare(perHour)) return "limit";
     return undefined;
   }
 
@@ -548,7 +554,7 @@ export class NotificationService {
       const keys = Object.keys(last);
       // Bounded: the oldest are forgotten first.
       if (keys.length > 200) for (const k of keys.sort((a, b) => (last[a]! < last[b]! ? -1 : 1)).slice(0, keys.length - 200)) delete last[k];
-      return { ...x, urgentWindow: { ...w, sent: w.sent + 1 }, lastInterrupt: last };
+      return { ...x, urgentWindow: { ...w, sent: w.sent + 1, ...(isDecisionKey(key) ? { decisions: (w.decisions ?? 0) + 1 } : {}) }, lastInterrupt: last };
     });
   }
 

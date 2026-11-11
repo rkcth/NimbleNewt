@@ -20,7 +20,7 @@ export interface Mark { readonly kind: MarkKind; readonly id: string; readonly m
 interface PathBody { readonly marks: readonly Mark[]; readonly updatedBy: string; readonly updatedAt: string }
 
 /** Bounds: marks kept (the owner's own list is short), and tasks visited while following dependency records from one task. */
-export const CRITICAL_LIMITS = { marks: 100, walk: 2000, retries: 4 } as const;
+export const CRITICAL_LIMITS = { marks: 100, walk: 2000, retries: 8 } as const;
 
 const REF = { kind: "critical-path", id: "installation" } as const;
 const KINDS: readonly MarkKind[] = ["task", "goal", "project"];
@@ -101,7 +101,8 @@ export class CriticalPathService {
             const next: Mark[] = marked ? [...kept, { kind, id, markedAt: had !== undefined && had.kind === kind ? had.markedAt : this.#runner.now() }] : kept;
             const body: PathBody = { marks: next, updatedBy: owner.id, updatedAt: this.#runner.now() };
             const change = current === undefined ? { type: "create" as const, ref: REF, body: body as unknown as JsonObject } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body: body as unknown as JsonObject };
-            return { ref: REF, creates: current === undefined, changes: [change], detail: { kind, id, marked, marks: next.length } };
+            // Two marks at the same moment (also the very first two, which both create the record) meet here; the loser is retried below on the record as it now stands, never refused as a used command ID.
+            return { ref: REF, creates: current === undefined, changes: [change], detail: { kind, id, marked, marks: next.length }, contention: async () => new DomainError("stale_revision", "the critical path was changed at the same moment") };
           },
         }));
         const after = await this.#read();

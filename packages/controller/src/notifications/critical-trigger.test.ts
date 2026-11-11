@@ -149,8 +149,8 @@ for (const backend of backends) {
     assert.equal(c.sent.length, 1, "no summary of held messages either");
   });
 
-  suite("it is inside the hourly Urgent allowance shared with every other trigger and the per-project gap: three marked projects with an allowance of two send two and one summary (bounds)", async (c) => {
-    await c.set({ escalationsPerHour: 2 });
+  suite("it is inside the hourly Urgent allowance shared with every other trigger and the per-project gap: three marked projects with an allowance of four (two of it for decisions) send two and one summary (bounds)", async (c) => {
+    await c.set({ escalationsPerHour: 4 });
     for (const p of [c.projectA, c.projectB, c.projectC]) { await c.mark("project", p); await c.report(await c.block(await c.task(p))); await c.report(await c.block(await c.task(p))); }
     await c.watch.sweep(c.owner); now += 6 * MIN; await c.watch.sweep(c.owner);
     for (let i = 0; i < 4; i++) await c.flush();
@@ -160,6 +160,20 @@ for (const backend of backends) {
     const before = c.sent.length;
     now += 5 * MIN; await c.watch.sweep(c.owner); await c.flush();
     assert.equal(c.sent.length, before, "later sweeps tell nothing more");
+  });
+
+  suite("review: decisions waiting for the owner use at most half of the hour's Urgent allowance, so pages from many marked projects cannot starve a missing backup or a silent host (bounds)", async (c) => {
+    await c.set({ escalationsPerHour: 4 });
+    const projects = [c.projectA, c.projectB, c.projectC];
+    for (const p of projects) { await c.mark("project", p); await c.report(await c.block(await c.task(p))); }
+    await c.watch.sweep(c.owner); now += 6 * MIN; await c.watch.sweep(c.owner);
+    for (let i = 0; i < 3; i++) await c.flush();
+    assert.equal((await c.raised()).length, 3, "all are Urgent in the inbox");
+    assert.equal(c.told().length, 2, `two critical-path pages, half of the four: ${JSON.stringify(c.sent)}`);
+    // The controller's own alarm still goes out in the same hour.
+    await c.svc.emitFromController({ commandId: cid("bk"), kind: "maintenance", interrupt: true, ref: { kind: "backup", id: "installation" }, label: "Urgent: no good backup for 30 hours", detail: "review" });
+    for (let i = 0; i < 2; i++) await c.flush();
+    assert.ok(c.sent.some((m) => m.text.includes("no good backup")), `the backup alarm is not held by the decisions: ${JSON.stringify(c.sent)}`);
   });
 
   suite("the minutes are the owner's: a number moves them, null turns the trigger off and puts what it raised back; bad numbers and non-owners are refused (card U11d)", async (c) => {
