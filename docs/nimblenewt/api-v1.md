@@ -4270,6 +4270,20 @@ Result: `{ id, to, replayed }`: the request and who it was addressed to.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `security.report`
+
+A host or a service tells the controller of a security event it detected (a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check). The controller tells the owner at once as an Urgent item; the same event (same kind, key and project) is told once, also after the owner closed it. Agents and tasks cannot report.
+
+Arguments:
+
+- `kind`: sandbox-escape-attempt, credential-misused, protected-path-touched or integrity-check-failed
+- `key`: your own identifier of the event (up to 200 characters, never a secret, never sent outside); the same key is the same event
+- `projectId` (optional): the project concerned (a project ID)
+
+Result: `{ itemId, held }`: the owner's item; `held` is true when your hourly allowance of separate reports was used and the report went into the collected item.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `notifications.configure`
 
 Owner only: sets how notifications reach the owner; only the fields given change, and they count from the next notification.
@@ -4286,6 +4300,7 @@ Arguments:
 - `escalationsPerHour` (optional): whole number (1 to 1000) of Urgent messages sent outside per hour, escalations and the controller's own Urgent triggers together (default 10); more in a burst are held in the inbox and told in ONE "N more" message; null turns the limit off
 - `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher, also of the Urgent watch (default 60)
 - `urgentMinGapMinutes` (optional): whole minutes (1 to 1440) before the same record (a host that keeps going down and up) is sent again as Urgent (default 30; the item is still raised in the inbox); null turns it off
+- `securityReportsPerHour` (optional): whole number (1 to 1000) of security reports one host or service may raise as separate Urgent items per hour (default 20); the rest of that reporter's burst is collected in ONE item; null turns the limit off
 - `deniedAlertsPerHour` (optional): how many agents' repeated refusals (1 to 1000) may send an Urgent message per hour (default 5; the rest are raised in the inbox only); null turns it off
 - `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
 - `urgentInterruptsQuietHours` (optional): true (default): an escalated Urgent item and its retries are also sent in quiet hours; false: they wait for the end of quiet hours
