@@ -137,6 +137,14 @@ export class RemoteWorkerClient {
     await this.#send("POST", `/worker/session/workspace/${encodeURIComponent(requestId)}`, { body: { outcome: outcome as unknown as Json }, key: `workspace-answer:${requestId}`, session: true });
   }
 
+  /**
+   * Tells the controller of a security event this host detected (card U11d): a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check. The key
+   * is the same for the same event (the controller tells the owner once); it is never a secret. Returns the owner's item; `held` is true when this host's hourly allowance was used.
+   */
+  async reportSecurity(event: { readonly kind: string; readonly key: string; readonly projectId?: string }, key: string = randomUUID()): Promise<{ readonly itemId: string; readonly held: boolean }> {
+    return (await this.#send("POST", "/worker/session/security", { body: { event: event as unknown as Json }, key, session: true })).body as { itemId: string; held: boolean };
+  }
+
   /** One attempt as the worker sees it, under the placement number it was offered. */
   attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 
@@ -427,7 +435,11 @@ export class RemoteAttempt implements ToolGateway {
     const r = await this.#send("GET", `${this.#path(`artifacts/${artifactId}/file`)}?placement=${this.placement}&path=${encodeURIComponent(path)}`, { session: true });
     const said = r.headers[DIGEST_HEADER];
     const actual = createHash("sha256").update(r.raw).digest("hex");
-    if (said !== actual) throw new WorkerRequestError(r.status, "integrity", `${path} does not match the digest the controller gave; it is not used`);
+    if (said !== actual) {
+      // The worker-side hook for a failed integrity check (card U11d, A08): the controller is told once per artifact and file (a digest of the path, never the path or the bytes), without waiting and without changing the refusal.
+      try { void this.client.reportSecurity({ kind: "integrity-check-failed", key: `fetch:${artifactId.slice(0, 80)}:${createHash("sha256").update(path).digest("hex").slice(0, 24)}` }, `integrity:${artifactId}:${createHash("sha256").update(path).digest("hex").slice(0, 16)}`).catch(() => undefined); } catch { /* reporting never changes the refusal */ }
+      throw new WorkerRequestError(r.status, "integrity", `${path} does not match the digest the controller gave; it is not used`);
+    }
     return new Uint8Array(r.raw);
   }
 

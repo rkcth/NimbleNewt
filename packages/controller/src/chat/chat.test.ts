@@ -69,7 +69,7 @@ for (const backend of backends) {
 
   test(`${backend.name}: the owner sets how notifications reach them by chat (escalation hours, quiet hours, digest times); the revision is filled in, an agent cannot use the chat (card U11b)`, async () => {
     assert.ok(CHAT_OPS["notifications.configure"], "the chat's operations include the notification setting");
-    for (const k of ["escalateAfterHours", "quietHours", "digestTimes", "channel", "expectedRevision", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "urgentInterruptsQuietHours"]) assert.ok(acceptedArgs("notifications.configure")!.includes(k), k);
+    for (const k of ["escalateAfterHours", "quietHours", "digestTimes", "channel", "expectedRevision", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "urgentInterruptsQuietHours"]) assert.ok(acceptedArgs("notifications.configure")!.includes(k), k);
     assert.equal(CHAT_OPS["notifications.settings"], undefined, "reading is a query, not a chat command");
     let state: Record<string, unknown> = { revision: 3, escalateAfterHours: 24 };
     const calls: Record<string, unknown>[] = [];
@@ -105,6 +105,15 @@ for (const backend of backends) {
       script[stop] = [cmd("notifications.configure", { backupMaxAgeHours: null, hostDownAfterMinutes: null }, stop)];
       assert.equal(only((await say(w, chat, stop)).outcomes).status, "applied");
       assert.deepEqual([state["backupMaxAgeHours"], state["hostDownAfterMinutes"]], [null, null]);
+      // The security detectors of card U11d: the owner switches them off and on in free-form words.
+      const quiet = "do not tell me about wrong-task credential use or planted git folders for now";
+      script[quiet] = [cmd("notifications.configure", { securityDetectors: false }, quiet)];
+      assert.equal(only((await say(w, chat, quiet)).outcomes).status, "applied");
+      assert.equal(state["securityDetectors"], false);
+      const loud = "tell me about those security signs again";
+      script[loud] = [cmd("notifications.configure", { securityDetectors: true }, loud)];
+      assert.equal(only((await say(w, chat, loud)).outcomes).status, "applied");
+      assert.equal(state["securityDetectors"], true);
     } finally { await w.close(); }
   });
 

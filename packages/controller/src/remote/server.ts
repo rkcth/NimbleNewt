@@ -69,6 +69,7 @@ interface Reply { readonly status: number; readonly body?: unknown; readonly raw
  *
  * Routes (all JSON unless noted; `Idempotency-Key` on those that change state, so a retry applies once; every request after `connect` names the session and the negotiated protocol version):
  * `POST /worker/connect`, `POST /worker/session/heartbeat`, `POST /worker/session/reconcile`, `GET /worker/session/offers`, `POST /worker/attempts/{id}/{accept|begin|effect|report|usage|heartbeat|acknowledge|complete}`,
+ * `POST /worker/session/security` (a host reports a security event it detected as itself, card U11d),
  * `GET /worker/session/workspace` and `POST /worker/session/workspace/{request}` (the workspace requests for this host and its answer to one, card H12m),
  * `PUT /worker/attempts/{id}/checkpoint`, `GET /worker/attempts/{id}/control`, `GET /worker/attempts/{id}/artifacts`, `GET /worker/attempts/{id}/artifacts/{artifact}/file` (bytes), `POST /worker/attempts/{id}/artifacts`.
  */
@@ -263,6 +264,13 @@ export class WorkerTransport {
       const body = this.#only(await this.#body(req), ["outcome"]);
       this.#key(req);
       return { status: 200, body: await svc.answerWorkspace(host, session, c, body["outcome"]) };
+    }
+    if (a === "session" && b === "security" && c === undefined && parts.length === 3) {
+      allowed("POST");
+      const session = await this.#session(req, host);
+      const body = this.#only(await this.#body(req), ["event"]);
+      this.#key(req);
+      return { status: 200, body: await svc.reportSecurity(host, session, body["event"]) };
     }
     if (a !== "attempts" || b === undefined || c === undefined) throw new HttpError(404, "not_found", "no such route");
     const session = await this.#session(req, host);

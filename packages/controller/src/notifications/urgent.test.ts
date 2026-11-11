@@ -339,6 +339,18 @@ for (const backend of backends) {
     await assert.rejects(() => c.watch.reportSecurityFrom(w1, { kind: "integrity-check-failed", key: "x".repeat(201) }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
   });
 
+  suite("the owner's switch for the security detectors takes only true or false and keeps the other settings (card U11d)", async (c) => {
+    await c.set({ securityReportsPerHour: 5 });
+    await c.set({ securityDetectors: false });
+    const s = await c.svc.settings(c.owner);
+    assert.equal(s.securityDetectors, false);
+    assert.equal(s.securityReportsPerHour, 5);
+    await assert.rejects(() => c.set({ securityDetectors: "no" as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await assert.rejects(() => c.set({ securityDetectors: null as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    await c.set({ securityDetectors: true });
+    assert.equal((await c.svc.settings(c.owner)).securityDetectors, true);
+  });
+
   suite("one reporter's burst of security reports is held in ONE item beyond the owner's hourly limit, and the limit is chat-settable and can be turned off (card U11c)", async (c) => {
     await c.set({ securityReportsPerHour: 3 });
     const w = as(c.owner, "host", "noisy");

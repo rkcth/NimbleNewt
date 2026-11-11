@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GitBridge, filesDigest, WorkspaceBridge, WorkspaceHost, type CheckoutLocation, type HostWorkspaceCall } from "./index.js";
+import { GitBridge, filesDigest, WorkspaceBridge, WorkspaceHost, type CheckoutLocation, type HostSecurityEvent, type HostWorkspaceCall } from "./index.js";
+import { WorkspaceError } from "./errors.js";
 
 // Card H12m: the host side of integration, refresh and quarantine, against a real checkout with real git.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
@@ -560,4 +561,50 @@ test("the owner's protected paths add to the built-in list instead of replacing 
     commitCheckout(extra, "agent work");
     assert.equal(detailOf(await extra.host.run(call("landing")))["landed"], false, "the owner's own path holds too");
   } finally { await extra.done(); }
+});
+
+// Card U11d: the worker-side hook that reports a security sign to the controller.
+test("U11d: an agent's .git in its checkout is reported once per event as protected-path-touched, with a key that holds no path and no content; the answer is the same refusal as without the hook", { skip }, async () => {
+  const seen: HostSecurityEvent[] = [];
+  const w = await world({ security: (e) => { seen.push(e); } });
+  const plain = await world();
+  try {
+    for (const x of [w, plain]) { await writeFile(join(x.where.checkout, "README.md"), "an honest change\n"); await writeFile(join(x.where.checkout, "src", ".git"), "gitdir: /tmp/elsewhere-SECRET-path\n"); }
+    const r = await w.host.run(call("integration", { assignee: "agent:ann" }));
+    const p = await plain.host.run(call("integration", { assignee: "agent:ann" }));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.equal(reasonOf(r), reasonOf(p), "the hook changes nothing about the answer");
+    assert.equal(seen.length, 1, JSON.stringify(seen));
+    assert.equal(seen[0]!.kind, "protected-path-touched");
+    assert.equal(seen[0]!.projectId, "prj-one");
+    assert.match(seen[0]!.key, /^ws:integration:[0-9a-f]{24}$/);
+    assert.doesNotMatch(JSON.stringify(seen), /SECRET|elsewhere|src/);
+    // The same event again (a new request, the same checkout) has the same key, so the controller tells it once.
+    await w.host.run(call("integration", { assignee: "agent:ann" }));
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1]!.key, seen[0]!.key);
+  } finally { await w.done(); await plain.done(); }
+});
+
+test("U11d: only signs of tampering are reported: a file swapped under a refresh is a sandbox-escape-attempt; a stale file, a commit that carries a link and a hook that throws or rejects are not reported or change nothing", { skip }, async () => {
+  const seen: HostSecurityEvent[] = [];
+  const base = await world();
+  try {
+    const failing = (error: unknown) => Object.assign(Object.create(base.git) as GitBridge, { changes: async () => { throw error; } });
+    const make = (error: unknown, security: (e: HostSecurityEvent) => void | Promise<void>) => new WorkspaceHost({ git: failing(error), journal: join(base.dir, `j-${Math.random().toString(16).slice(2)}`), locate: () => base.where, security });
+    const run = (h: WorkspaceHost) => h.run(call("integration"));
+    // Tamper: reported.
+    await run(make(new WorkspaceError("link_refused", "a.ts was swapped while the refresh ran", { tamper: true }), (e) => { seen.push(e); }));
+    assert.deepEqual(seen.map((e) => e.kind), ["sandbox-escape-attempt"]);
+    // A link in a commit is refused as always and is not a security event; nor is a stale or missing file.
+    await run(make(new WorkspaceError("link_refused", "a.ts is a link"), (e) => { seen.push(e); }));
+    await run(make(new WorkspaceError("stale", "moved"), (e) => { seen.push(e); }));
+    await run(make(new WorkspaceError("invalid_path", "odd"), (e) => { seen.push(e); }));
+    assert.equal(seen.length, 1);
+    // A hook that throws, or rejects, does not change the answer.
+    const boom = make(new WorkspaceError("protected_path", "no"), () => { throw new Error("sink down"); });
+    assert.equal((await run(boom)).ok, false);
+    const rej = make(new WorkspaceError("protected_path", "no"), async () => { throw new Error("sink down"); });
+    assert.equal((await run(rej)).ok, false);
+  } finally { await base.done(); }
 });
