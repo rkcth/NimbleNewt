@@ -126,11 +126,31 @@ function validNotice(n: unknown): boolean {
 /** The file changed under a change made from what was read before (another process wrote it): the change is made again from the new content. */
 class LauncherConflict extends LauncherStateError { constructor() { super(`${LAUNCHER_FILE} was changed by another process at the same moment`); this.name = "LauncherConflict"; } }
 
+/** The errors Windows gives a rename over a file that another process has open at that moment (until it closes it). */
+const WINDOWS_SHARING = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/**
+ * Renames `from` over `to`. On Windows a rename over a file another process has open at that moment fails (EPERM, EACCES or EBUSY) until that process closes it, and the launcher's watchdog and the
+ * controller read this file while both run: without a retry a confirmation, written once at the controller's start, could be lost to a read of the watchdog and the healthy start judged failed. So on
+ * Windows those errors are retried a few times, about half a second in all; elsewhere a rename does not fail for that reason and is never retried. `rename` and `pause` are injectable for tests.
+ */
+export async function renameReplacing(from: string, to: string, o: { readonly platform?: NodeJS.Platform; readonly rename?: (from: string, to: string) => Promise<void>; readonly pause?: (ms: number) => Promise<void> } = {}): Promise<void> {
+  const tries = (o.platform ?? process.platform) === "win32" ? 10 : 1;
+  const move = o.rename ?? rename;
+  const wait = o.pause ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try { await move(from, to); return; } catch (error) {
+      if (attempt >= tries || !WINDOWS_SHARING.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      await wait(10 * attempt);
+    }
+  }
+}
+
 async function writeAtomic(path: string, text: string): Promise<void> {
   const tmp = `${path}.tmp-${randomBytes(6).toString("hex")}`;
   const fh = await open(tmp, "wx", 0o644);
   try { await fh.writeFile(text); await fh.sync(); } finally { await fh.close(); }
-  try { await rename(tmp, path); } catch (error) { await rm(tmp, { force: true }); throw error; }
+  try { await renameReplacing(tmp, path); } catch (error) { await rm(tmp, { force: true }); throw error; }
   let dir;
   try { dir = await open(join(path, ".."), "r"); await dir.sync(); } catch { /* not every platform syncs a directory */ } finally { await dir?.close().catch(() => undefined); }
 }

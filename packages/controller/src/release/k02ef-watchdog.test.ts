@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_STARTUP_WINDOW_SECONDS, LAUNCHER_FILE, LAUNCHER_LIMITS, Launcher, LauncherStateError, type LauncherNotice } from "./index.js";
+import { DEFAULT_STARTUP_WINDOW_SECONDS, LAUNCHER_FILE, LAUNCHER_LIMITS, Launcher, LauncherStateError, renameReplacing, type LauncherNotice } from "./index.js";
 import { Clock, makeRelease, pointerSwitcher } from "./start-fixture.js";
 
 /**
@@ -339,4 +339,40 @@ test("the notice list is bounded: finished notices make room first, then told on
     assert.equal(after.at(-1)!.release, last.id, "the newest is kept");
     assert.deepEqual(readdirSync(w.root).filter((f) => f.includes("tmp")), [], "no temporary file is left behind");
   });
+});
+
+test("on Windows a write of the launcher's file outlasts a reader that has it open (the rename is retried on EPERM, EACCES, EBUSY); elsewhere, and for any other error, a failed rename fails at once (CI platform repair)", async () => {
+  const busy = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+  const script = (codes: string[]) => { const calls: string[] = []; const waits: number[] = []; return { calls, waits, rename: async (from: string, to: string) => { calls.push(`${from}>${to}`); const c = codes.shift(); if (c !== undefined) throw busy(c); }, pause: async (ms: number) => { waits.push(ms); } }; };
+  // Windows: a reader holding the file for a moment costs a few retries, not the write.
+  const w = script(["EPERM", "EACCES", "EBUSY"]);
+  await renameReplacing("t", "f", { platform: "win32", rename: w.rename, pause: w.pause });
+  assert.equal(w.calls.length, 4);
+  assert.deepEqual(w.waits, [10, 20, 30]);
+  // Bounded: a file that stays held fails after ten tries (about half a second), with the last error.
+  const held = script(Array(20).fill("EPERM"));
+  await assert.rejects(renameReplacing("t", "f", { platform: "win32", rename: held.rename, pause: held.pause }), (e: NodeJS.ErrnoException) => e.code === "EPERM");
+  assert.equal(held.calls.length, 10);
+  assert.equal(held.waits.reduce((a, b) => a + b, 0), 450);
+  // Any other error is not a reader's hold: it fails at once, on Windows too.
+  const gone = script(["ENOENT"]);
+  await assert.rejects(renameReplacing("t", "f", { platform: "win32", rename: gone.rename, pause: gone.pause }), (e: NodeJS.ErrnoException) => e.code === "ENOENT");
+  assert.equal(gone.calls.length, 1);
+  // Elsewhere a rename never fails because a reader has the file open: no retry at all.
+  for (const platform of ["linux", "darwin"] as const) {
+    const p = script(["EPERM"]);
+    await assert.rejects(renameReplacing("t", "f", { platform, rename: p.rename, pause: p.pause }), (e: NodeJS.ErrnoException) => e.code === "EPERM");
+    assert.equal(p.calls.length, 1, platform);
+    assert.deepEqual(p.waits, []);
+  }
+  // The real rename on this host, through the launcher's own writes.
+  const root = mkdtempSync(join(tmpdir(), "nn-k02-rename-"));
+  try {
+    await renameReplacing(join(root, "missing"), join(root, "x")).then(() => assert.fail("a missing file cannot be renamed"), (e: NodeJS.ErrnoException) => assert.equal(e.code, "ENOENT"));
+    writeFileSync(join(root, "a"), "new");
+    writeFileSync(join(root, "b"), "old");
+    await renameReplacing(join(root, "a"), join(root, "b"));
+    assert.equal(readFileSync(join(root, "b"), "utf8"), "new");
+    assert.deepEqual(readdirSync(root), ["b"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

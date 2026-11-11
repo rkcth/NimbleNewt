@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { redactText } from "../security/redact.js";
@@ -28,6 +28,9 @@ const over = (root: string | undefined, paths: readonly string[] = [], options?:
   const read = createTargetVersions({ storage: { getAggregate: async () => undefined }, location: async () => { located++; return root === undefined ? undefined : { root, paths }; }, ...(options === undefined ? {} : { options }) });
   return { read, located: () => located };
 };
+/** The stand-in git programs below are POSIX shell scripts, which Windows cannot start (spawn EFTYPE): the tests that need one run where a script is a program. */
+const SHELL_SCRIPTS = process.platform === "win32" && "the stand-in git programs are POSIX shell scripts, which Windows cannot run";
+
 const refused = async (promise: Promise<unknown>, code?: TargetVersionError["code"]): Promise<void> => {
   await assert.rejects(promise, (e: unknown) => e instanceof TargetVersionError && (code === undefined || e.code === code));
 };
@@ -102,7 +105,7 @@ test("card A05b follow-up review: a ref to an object that is not there is an err
   assert.equal(await over(d).read({ kind: "ref", id: "HEAD" }, "t"), c);
 });
 
-test("card A05b follow-up review: no more git processes run at once than the cap, and a reading waiting its turn still ends in time", async () => {
+test("card A05b follow-up review: no more git processes run at once than the cap, and a reading waiting its turn still ends in time", { skip: SHELL_SCRIPTS }, async () => {
   const d = repo();
   commit(d);
   const box = temp();
@@ -154,7 +157,9 @@ test("card A05b follow-up: a checkout that is not a readable repository is an er
   await refused(over("relative/dir").read({ kind: "branch", id: "main" }, "t"), "unreadable");
   const here = repo();
   commit(here);
-  await refused(over(relative(process.cwd(), here)).read({ kind: "branch", id: "main" }, "t"), "unreadable"); // a location that exists but only relative to the process is not a checkout
+  // A location that exists but only relative to the process is not a checkout. (On Windows a folder on another drive than the current directory has no relative spelling: relative() gives its absolute path.)
+  const onlyRelative = relative(process.cwd(), here);
+  if (!isAbsolute(onlyRelative)) await refused(over(onlyRelative).read({ kind: "branch", id: "main" }, "t"), "unreadable");
   const worktreeFile = temp();
   writeFileSync(join(worktreeFile, ".git"), "gitdir: /elsewhere\n");
   await refused(over(worktreeFile).read({ kind: "branch", id: "main" }, "t"), "unreadable");
@@ -170,10 +175,15 @@ test("card A05b follow-up: the repository's own configuration cannot make the re
   const program = join(temp(), "evil.sh");
   writeFileSync(program, `#!/bin/sh\ntouch ${marker}\n`);
   chmodSync(program, 0o755);
-  writeFileSync(join(d, ".git", "config"), `[core]\n\trepositoryformatversion = 0\n\tfsmonitor = ${program}\n\thooksPath = ${program}\n\tpager = ${program}\n[alias]\n\trev-parse = !${program}\n`, { flag: "a" });
+  // Git reads a backslash in a configuration value as an escape, so a Windows path is written with forward slashes (which Git takes there too).
+  const named = program.replaceAll("\\", "/");
+  writeFileSync(join(d, ".git", "config"), `[core]\n\trepositoryformatversion = 0\n\tfsmonitor = ${named}\n\thooksPath = ${named}\n\tpager = ${named}\n[alias]\n\trev-parse = !${named}\n`, { flag: "a" });
   assert.equal(await over(d).read({ kind: "branch", id: "main" }, "t"), c);
   assert.equal(existsSync(marker), false, "no program named by the repository ran");
   await refused(over(d, [], { git: join(temp(), "no-such-git") }).read({ kind: "branch", id: "main" }, "t"), "unreadable");
+  // A git that cannot be started at all (here a name Node refuses before starting anything; on Windows also a file that is not a program) is unreadable, never a plain error.
+  await refused(over(d, [], { git: "git\u0000x" }).read({ kind: "branch", id: "main" }, "t"), "unreadable");
+  if (SHELL_SCRIPTS) return;
   const slow = join(temp(), "slow.sh");
   writeFileSync(slow, "#!/bin/sh\nsleep 30\n");
   chmodSync(slow, 0o755);
@@ -276,12 +286,14 @@ test("card A05b follow-up review: a directory on the way swapped for a link whil
 test("card A05b follow-up: a pipe, a directory and a too large file are refused, not read; a file at the cap is read; a huge sparse file is refused without being read", async () => {
   const d = temp();
   mkdirSync(join(d, "dir"));
-  execFileSync("mkfifo", [join(d, "pipe")]);
+  // Windows has no named pipes in the file system (a tool that says it makes one there makes a plain file), so the pipe is POSIX only.
+  const fifo = process.platform !== "win32";
+  if (fifo) execFileSync("mkfifo", [join(d, "pipe")]);
   writeFileSync(join(d, "ten"), "0123456789");
   writeFileSync(join(d, "eleven"), "0123456789A");
   const { read } = over(d, [], { fileBytes: 10 });
   const started = Date.now();
-  await refused(read({ kind: "file", id: "pipe" }, "t"), "refused");
+  if (fifo) await refused(read({ kind: "file", id: "pipe" }, "t"), "refused");
   await refused(read({ kind: "file", id: "dir" }, "t"), "refused");
   assert.ok(Date.now() - started < 5_000, "a pipe does not hold the reading");
   await refused(read({ kind: "file", id: "eleven" }, "t"), "too_large");

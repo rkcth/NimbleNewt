@@ -25,7 +25,8 @@ test("init writes a valid configuration that holds only the names of secrets, on
     assert.equal(code, 0, c.text);
     const file = join(dir, "nimblenewt.config.json");
     assert.ok(existsSync(file));
-    assert.equal(statSync(file).mode & 0o077, 0, "owner-only");
+    // Windows has no POSIX permission bits (every file reads as 0o666 there), so the mode says nothing on it.
+    if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o077, 0, "owner-only");
     const doc = JSON.parse(readFileSync(file, "utf8"));
     assert.deepEqual(doc.models.providers.backup.credential, { secret: "backup-key" });
     assert.equal(doc.models.providers.primary.credential, undefined);
