@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stripAnchors } from "../context/anchor.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,7 +89,7 @@ test("the first call of the agent a task was handed to names the hand-off, the p
     assert.ok(at > 0, `the call carries the hand-off paragraph after the task's own text: ${JSON.stringify(order.content.slice(0, 200))}`);
     const next = order.content.indexOf("\n\n[", at + 2);
     const brief = next === -1 ? order.content.slice(at) : order.content.slice(at, next);
-    assert.ok(order.content.startsWith("Water the beds"), "the task's own text still leads");
+    assert.ok(stripAnchors(order.content).replace(/^\s+/, "").startsWith("Water the beds"), "the task's own text still leads (after the goal anchor of card W12)");
     const handoffId = prepared.result.item.id as string;
     assert.ok(brief.includes(`Handed to you by hand-off ${handoffId}:`), "the hand-off the task came with is named by its ID");
     assert.ok(brief.includes(`Read it with the operation handoff.get (handoffId ${JSON.stringify(handoffId)}).`), "and by the operation that reads its package");

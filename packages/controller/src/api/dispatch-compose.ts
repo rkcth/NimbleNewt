@@ -13,7 +13,8 @@ import { AdmissionService } from "../admission/index.js";
 import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
-import { DecisionService, compactionKeep, startupItems, type DecisionDeps } from "../decisions/index.js";
+import { DecisionService, compactionKeep, ownerRuleItems, startupItems, type DecisionDeps } from "../decisions/index.js";
+import { ANCHOR_DEFAULT_CHARS, anchorBudget, findAnchors } from "../context/anchor.js";
 import { ContextEnforcementService, PROMPT_NOTE_RESERVE_CHARS, StartSizeService, startSizeRecorder, type ContextRouteSettingsService, type HandoffFacts } from "../context/index.js";
 import { CachePolicies, type AttemptCache, type CachePolicyDeps } from "../dispatch/cache.js";
 import { CacheEndpoints, MarkerService } from "../inference-cache/index.js";
@@ -78,7 +79,7 @@ const recovering = (by: Principal): Principal => ({ ...by, kind: "owner" });
 
 /** What the operator gives the controller to run the dispatcher (card H12c). Absent from `StartOptions`: no dispatcher is built and no loop runs. */
 /** The worker process's context limits for an order, in the shape of the channel's `ChannelContext` (the controller does not depend on the contracts package; the host's `context` option takes it structurally). */
-export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; /** The owner's decisions the process keeps through its own compactions (card C07q). */ readonly keep?: { readonly note: string; readonly lines: readonly string[] } } }
+export interface WorkerContextLimits { readonly toolOutputBytes?: number; readonly toolOutputLines?: number; readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; /** The owner's decisions the process keeps through its own compactions (card C07q). */ readonly keep?: { readonly note: string; readonly lines: readonly string[] }; /** Card W12: the goal anchor the controller wrote for the attempt, which the process puts at the top of every summary that replaces its cut conversation (replacing the earlier one). */ readonly anchor?: { readonly text: string } } }
 
 /** Remote workers (card H02): the artifact folder the controller owns, the listener workers connect to and the hosts the dispatcher may place attempts on. */
 export interface RemoteStartOptions {
@@ -563,7 +564,10 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       // The process compacts its conversation itself (card C07q): it is given the owner's decisions for the task, read as the controller (as the route view reads them), to keep through every compaction.
       let keep: ReturnType<typeof compactionKeep>;
       try { const record = await decisions.controllerContext({ projectId: order.projectId, taskId: order.taskId }); keep = record === undefined ? undefined : compactionKeep(record); } catch (error) { i.onError?.(error); keep = undefined; }
-      return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive", ...(keep === undefined ? {} : { keep }) } };
+      // Card W12: the anchor at the top of the order's content that the order's contract names by digest (the task's own text may hold a block of its own; it is not the controller's and is never taken).
+      const named = order.contract?.anchorDigest;
+      const anchor = named === undefined ? undefined : findAnchors(order.content).find((a) => a.digest === named);
+      return { toolOutputBytes: Math.min(Math.floor(budget.toolOutputChars), 10_000_000), compaction: { fallback: "extractive", ...(keep === undefined ? {} : { keep }), ...(anchor === undefined ? {} : { anchor: { text: anchor.text } }) } };
     };
     // The task's own process compacted its conversation (card C07q): the compaction takes its place in the task's chain, so the lineage a continuation capture lists is the real one. A failure is reported and changes nothing for the attempt.
     const recordCompaction = async (order: WorkOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }): Promise<void> => {
@@ -709,6 +713,23 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs } } as never); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string) => { const deps = await i.contracts.prerequisitesOf(taskId); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      // Card W12: the goal anchor of an attempt about to start: on unless the owner turned it off, at most the owner's characters and the route's share of its window, and only where the route states a window.
+      anchor: {
+        plan: async (c) => {
+          const settings = i.contextRouteSettings === undefined ? undefined : await i.contextRouteSettings.effective();
+          if (settings?.anchor === false) return undefined;
+          const window = await windowOfRoute({ route: c.route } as WorkOrder);
+          if (window === undefined) return undefined;
+          const maxChars = anchorBudget(window, settings?.anchorChars ?? ANCHOR_DEFAULT_CHARS);
+          return maxChars === undefined ? undefined : { maxChars };
+        },
+        rules: async (c) => {
+          const record = await decisions.controllerContext({ projectId: c.projectId, taskId: c.taskId });
+          if (record === undefined) return undefined;
+          const items = ownerRuleItems(record);
+          return items.length === 0 ? undefined : { version: record.version, total: items.length, items: items.slice(0, 12).map((x) => ({ id: x.id, text: x.text })) };
+        },
+      },
       routeChange: async (c) => {
         // The task's own text is in the prompt beside the view; `PROMPT_NOTE_RESERVE_CHARS` keeps room for the notes not measured here (the project's rules, a resume note), and the paragraph of what the task
         // was handed with (card C07m) is counted as it is on top of that — taking the larger of the two instead would let a long hand-off paragraph eat the room the rules were promised (C07m review).

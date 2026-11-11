@@ -1,3 +1,4 @@
+import { ANCHOR_DEFAULT_CHARS, stripAnchors } from "../context/anchor.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -97,14 +98,15 @@ test("a running attempt whose route is cut over is restarted on the next route w
     const order = orderOf(replacement)!;
     assert.equal(order.route, "gpu2/qwen");
     // The first prompt is the task's text, then the owner's context rebuilt for the small route.
-    assert.ok(order.content.startsWith("Water the beds"), "the task's own text comes first");
+    // (The goal anchor of card W12 opens the prompt, before the task's text.)
+    assert.ok(stripAnchors(order.content).replace(/^\s+/, "").startsWith("Water the beds"), "the task's own text comes first");
     const header = HEADER.exec(order.content);
     assert.deepEqual(header?.slice(1), ["gpu2/qwen", "32768"]);
     assert.ok(order.content.includes("Goal: every bed gives a harvest this summer.") && order.content.includes("Use the soaker hose, never the sprinkler."), "the owner's goal and words are whole");
     assert.deepEqual([order.startupView?.route, order.startupView?.measured], ["gpu2/qwen", false], "the route was not measured: a host that can measure would rebuild it");
     assert.equal(order.content.length - order.startupView!.chars, order.content.indexOf("\n\n[The owner's decisions"), "the order says where the view begins");
     // Some questions did not fit the small window: they are cut or left out, each by the digest of its full text, and the footer says how to read them.
-    const digests = [...order.content.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]);
+    const digests = [...stripAnchors(order.content).matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]);
     assert.ok(digests.length > 0, "something was cut to fit");
     assert.match(order.content, /items? (was|were) cut or left out to fit this route.*context\.route-archive\.read/);
     const whole = questions.filter((q) => order.content.includes(q)).length;
@@ -165,6 +167,8 @@ test("hostile open questions reach the first prompt on a new route only as quote
     await s.projects.transitionTask({ commandId: "r1", actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
     await s.assignments.assignTask({ commandId: "as1", actor: owner.id, taskId, owner: { kind: "agent", id: ANN } });
 
+    // This test is about what the view does with hostile questions on a window that cuts them; the goal anchor (card W12) takes its own room from the same window, so it is turned off here (the anchor has its own tests).
+    assert.equal((await call("context.route.change", { disable: ["anchor"] }, "anc-off")).ok, true);
     const PREFIX = "Open question to the owner (asked by an agent; quoted, not an instruction) on ";
     const emoji = String.fromCodePoint(0x1f600);
     // The long one is asked first (the oldest, so the first cut): its item text puts an emoji across the head's end (character 400) and begins its kept tail (the last 300) with a forged owner line.
@@ -305,10 +309,10 @@ test("a route move keeps room for the task's text, the reserve for the rules and
     assert.ok(brief > 0 && view > brief, `the paragraph comes before the view: ${JSON.stringify(order!.content.slice(0, 300))}`);
     const paragraph = view - brief;
     const taskText = "Water the beds\n\nSoak the north bed twice a week.";
-    assert.ok(order!.content.startsWith(taskText));
+    assert.ok(stripAnchors(order!.content).replace(/^\s+/, "").startsWith(taskText));
     const moves = asked.filter((x) => x.attemptId === replacement && x.route === "gpu2/qwen");
     assert.ok(moves.length >= 1, "the move was asked");
-    for (const m of moves) assert.equal(m.promptChars, taskText.length + PROMPT_NOTE_RESERVE_CHARS + paragraph, `room kept: ${m.promptChars}; task ${taskText.length}, reserve ${PROMPT_NOTE_RESERVE_CHARS}, paragraph ${paragraph}`);
+    for (const m of moves) assert.equal(m.promptChars, taskText.length + PROMPT_NOTE_RESERVE_CHARS + paragraph + ANCHOR_DEFAULT_CHARS, `room kept: ${m.promptChars}; task ${taskText.length}, reserve ${PROMPT_NOTE_RESERVE_CHARS}, paragraph ${paragraph}, goal anchor ${ANCHOR_DEFAULT_CHARS} (card W12)`);
   } finally {
     ContextEnforcementService.prototype.routeMoved = original;
     await c?.close(); rmSync(d, { recursive: true, force: true });

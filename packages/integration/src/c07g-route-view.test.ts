@@ -134,7 +134,8 @@ test("a task that moves to a route nobody has measured: the real process is meas
     assert.ok(wholeIn(prompt) > wholeIn(assumedView), `more questions whole on the measured figure (${wholeIn(prompt)}) than on the assumed one (${wholeIn(assumedView)})`);
     assert.equal(prompt.includes(assumedView.slice(2)), false, "the assumed view was not sent");
     // Some still did not fit: each is named by the digest of its full text, which reads it back through the API.
-    const digests = [...new Set([...prompt.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))];
+    // (The goal anchor of card W12 opens the prompt with its own digest in its frame lines; it is not a cut item.)
+    const digests = [...new Set([...prompt.replace(/\[\/?NN-ANCHOR[^\]]*\]/g, "").matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))];
     assert.ok(wholeIn(prompt) < questions.length && digests.length > 0, "the window still cuts some questions");
     for (const digest of digests) {
       const back = await call("context.route-archive.read", { taskId, digest });

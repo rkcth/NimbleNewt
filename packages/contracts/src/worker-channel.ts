@@ -1,4 +1,5 @@
 import type { JsonValue } from "./index.js";
+import { ANCHOR_CHANNEL_MAX, verifyAnchor } from "./anchor.js";
 
 /**
  * The channel between the controller's worker host and the worker process that runs an attempt's Pi conversation inside the sandbox (card H12b). The sandbox has no network and the process holds only its task credential, so everything it needs from outside
@@ -55,8 +56,10 @@ export interface ChannelContext {
    * out of room. Without `extractive` Pi's own summariser runs.
    * `keep` (card C07q): the owner's decisions for the task as the controller had them when the process started (a note saying what they are and how to read the current ones, then one line each, the owner's wording quoted); the process
    * adds them to every summary it writes, so a compaction never drops them. At most `CHANNEL_KEEP.lines` lines of `CHANNEL_KEEP.line` characters.
+   * `anchor` (card W12): the goal anchor the controller wrote for the attempt, exactly one block that checks out (`anchor.ts`). The process takes any block out of the conversation it summarises and puts this one at the top of the summary, so
+   * the conversation that goes on holds one, never a stack of them.
    */
-  readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; readonly keep?: { readonly note: string; readonly lines: readonly string[] } };
+  readonly compaction?: { readonly timeoutMs?: number; readonly fallback?: "extractive"; readonly keep?: { readonly note: string; readonly lines: readonly string[] }; readonly anchor?: { readonly text: string } };
 }
 
 export interface ChannelStart {
@@ -205,9 +208,12 @@ function parseContext(o: Obj): ChannelContext {
   const fallback = compaction === undefined ? undefined : optStr(compaction, "fallback", 20);
   if (fallback !== undefined && fallback !== "extractive") fail("compaction.fallback: extractive");
   const out = { streamTimeoutMs: bounded(o, "streamTimeoutMs", 1000, 3_600_000), streamMaxRetries: bounded(o, "streamMaxRetries", 0, 10), toolOutputBytes: bounded(o, "toolOutputBytes", 1000, 10_000_000), toolOutputLines: bounded(o, "toolOutputLines", 10, 100_000) };
+  const anchorObj = compaction?.["anchor"] === undefined ? undefined : obj(compaction, "anchor");
+  const anchorText = anchorObj === undefined ? undefined : str(anchorObj, "text", ANCHOR_CHANNEL_MAX);
+  if (anchorText !== undefined && verifyAnchor(anchorText) === undefined) fail("compaction.anchor.text: must be exactly one goal anchor block whose digest checks out");
   return {
     ...Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)),
-    ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }), ...(keep === undefined ? {} : { keep }) } }),
+    ...(compaction === undefined ? {} : { compaction: { ...(timeoutMs === undefined ? {} : { timeoutMs }), ...(fallback === undefined ? {} : { fallback: "extractive" as const }), ...(keep === undefined ? {} : { keep }), ...(anchorText === undefined ? {} : { anchor: { text: anchorText } }) } }),
   };
 }
 

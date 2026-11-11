@@ -133,6 +133,11 @@ export interface DispatchBody {
    */
   readonly verifications?: readonly DoneVerification[];
   /**
+   * Card W12: the goal anchor the controller put at the top of this attempt's first prompt, newest last (at most `ANCHOR_RECORD_KEEP`): what the agent was shown, by digest, not its text (the text is recomputed from the records
+   * and its digest must match). A start of the same attempt that composed the same block adds nothing. `sources` lists the records it was made from, by kind and ID, for the owner and for card W13's recall.
+   */
+  readonly anchors?: readonly AnchorRecord[];
+  /**
    * Card W11: the attempt ended its turn while jobs of its task ran, and parked to wait for them (its place given back, its hold, credential, checkpoint and host kept, as for a parked call) instead of being readmitted at once as a
    * stop before the work was done. The first of those jobs to reach a final state wakes it (the dispatcher's job wakes). The job IDs, at most `JOB_WAKE_LIMITS.waitsOn`.
    */
@@ -279,6 +284,20 @@ export interface ToolOperationBody {
   readonly resultSummary?: string;
   /** The revisions the call was judged under. */
   readonly judgedAt: { readonly policy: { readonly installation: number; readonly project?: number }; readonly decisions: number };
+}
+
+/** How many anchors an attempt's record keeps (card W12). */
+export const ANCHOR_RECORD_KEEP = 6;
+/** One goal anchor an attempt was started with (card W12); see `DispatchBody.anchors`. */
+export interface AnchorRecord {
+  readonly at: string;
+  readonly digest: string;
+  readonly chars: number;
+  /** The most characters the block was allowed (the owner's cap and the route's share of its window). */
+  readonly maxChars: number;
+  /** Something the records hold was shortened or left out to fit. */
+  readonly truncated: boolean;
+  readonly sources: readonly { readonly kind: string; readonly id: string; readonly version?: number }[];
 }
 
 /** One check of an agent's done (card W05); see `DispatchBody.verifications`. */

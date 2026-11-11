@@ -362,13 +362,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.get`
 
-The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Shows the entries, the defaults and what applies now.
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Also, for the goal anchor (card W12): `anchor` (on by default: each attempt's first prompt opens with a short block the controller writes from its own records, the task's goal, acceptance criteria, what a done is checked against, the agent's own work notes, the owner's rules and the IDs of the records it was made from, and the worker puts that block again at the top of every summary that replaces a cut conversation, so an agent that has lost its place finds its goal again; off: no block) and `anchorChars` (the most characters the block may take, 900 to 6000, default 2400; the route's window caps it further at 4 percent of the window, always well under the reply reserve). Shows the entries, the defaults and what applies now.
 
 Arguments:
 
 - none
 
-Result: `{ item }`: `revision`, `settings`, `defaults`, `effective` (`check`, `floorChars`; 0 is off).
+Result: `{ item }`: `revision`, `settings`, `defaults`, `effective` (`check`, `floorChars`; 0 is off; `anchor`, `anchorChars`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -2727,13 +2727,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.change`
 
-The owner changes the route-change check (owner only), leaving the other as it is: `enable` or `disable` name `check` or `floorChars` (a disabled floor counts nothing for an unmeasured route; the figure is kept); `set` gives `floorChars` a figure (1 to 4000000); `unset` returns a setting to its default. With `check` off a task that moves to another route starts as before (no rebuilt context in its first prompt), and the first call on the route is still checked by admission.
+The owner changes the route-change check and the goal anchor (owner only), leaving the others as they are: `enable` or `disable` name `check`, `floorChars` (a disabled floor counts nothing for an unmeasured route; the figure is kept) or `anchor` (the block of the task's goal, criteria and plan put at the top of each attempt's first prompt and of every summary after a cut; takes effect from the next attempt's start); `set` gives `floorChars` a figure (1 to 4000000) or `anchorChars` one (900 to 6000); `unset` returns a setting to its default. With `check` off a task that moves to another route starts as before (no rebuilt context in its first prompt), and the first call on the route is still checked by admission.
 
 Arguments:
 
-- `enable` (optional): list of `check`, `floorChars`
-- `disable` (optional): list of `check`, `floorChars`
-- `set` (optional): for example `{ "floorChars": 14000 }`
+- `enable` (optional): list of `check`, `floorChars`, `anchor`
+- `disable` (optional): list of `check`, `floorChars`, `anchor`
+- `set` (optional): for example `{ "floorChars": 14000 }` or `{ "anchorChars": 2400 }`
 - `unset` (optional): list of names
 - `expectedRevision` (optional): the revision you read
 

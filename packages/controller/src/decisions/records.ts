@@ -277,6 +277,15 @@ export function startupItems(context: DecisionContext): StartupItem[] {
   return out;
 }
 
+/**
+ * The owner's items for a task in the order a compaction keeps them (card C07q) and the goal anchor lists them (card W12): an unresolved conflict and a gate say what must not be done, so they come before the other
+ * items when there are more than are kept; an agent's open question is never one. The text is the item's wording, not yet quoted.
+ */
+export function ownerRuleItems(context: DecisionContext): StartupItem[] {
+  const rank = (i: StartupItem): number => context.disputes.some((d) => d.id === i.id) ? 0 : context.gates.some((g) => g.id === i.id) ? 1 : 2;
+  return startupItems(context).filter((i) => i.kind !== "decision").map((i, n) => ({ i, n })).sort((a, b) => rank(a.i) - rank(b.i) || a.n - b.n).map((x) => x.i);
+}
+
 /** How many of the owner's items a compaction of the model process keeps, and how much of each (card C07q): the same 12 as the controller's own compaction pins. */
 export const COMPACTION_KEEP = { items: 12, chars: 200, /** The longest line as written (ID, quotes and escapes included): the worker channel's `CHANNEL_KEEP.line`, which refuses the whole start message past it. */ line: 600 } as const;
 /**
@@ -286,9 +295,7 @@ export const COMPACTION_KEEP = { items: 12, chars: 200, /** The longest line as 
  * how to read the current ones whole, so a later correction is never hidden by an older line. `undefined` when the owner has decided nothing for the task.
  */
 export function compactionKeep(context: DecisionContext): { readonly note: string; readonly lines: readonly string[] } | undefined {
-  // An unresolved conflict and a gate say what must not be done, so they come before the other items when there are more than are kept (review).
-  const rank = (i: StartupItem): number => context.disputes.some((d) => d.id === i.id) ? 0 : context.gates.some((g) => g.id === i.id) ? 1 : 2;
-  const items = startupItems(context).filter((i) => i.kind !== "decision").map((i, n) => ({ i, n })).sort((a, b) => rank(a.i) - rank(b.i) || a.n - b.n).map((x) => x.i);
+  const items = ownerRuleItems(context);
   if (items.length === 0) return undefined;
   // Cut by characters, then shorter still while the quoted line is past the channel's bound: an escape writes one character as up to twelve (review: a line past the bound failed every launch of the task).
   const line = (id: string, text: string): string => {
