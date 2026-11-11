@@ -1,8 +1,10 @@
 /**
  * The credential-pattern list (card C01b): what a secret looks like in text. One list serves two jobs: redaction of anything logged or shown (`redactText`) and refusal at write time
- * (shared working notes; later cards may reuse `findCredentialShapes`). The patterns are shapes, not a promise: text that hides a secret from them (split, encoded, paraphrased) is not caught,
+ * (shared working notes; later cards may reuse `findCredentialShapes`). The patterns are shapes, not a promise: they are matched through a folded view (`secret-scan.ts`: fullwidth letters, invisible characters and line-split tokens are seen through), but a secret that is encoded or paraphrased is not caught,
  * and an ordinary sentence that happens to look like a key is refused, so a refusal names the kind of shape and never the text.
  */
+import { scanSecrets } from "./secret-scan.js";
+
 export interface CredentialPattern {
   /** What the shape is called in a refusal message. */
   readonly name: string;
@@ -26,7 +28,10 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   { name: "named secret assignment", pattern: /\b(?:password|passwd|secret|api[-_]?key|token)\s*[=:]\s*\S{4,}/gi },
 ];
 
-/** The names of the credential shapes found in the text (each at most once), empty when none. */
+/**
+ * The names of the credential shapes found in the text (each at most once), empty when none. Seen as `redactText` sees it (`scanSecrets`): NFKC-folded with invisible characters left out, key prefixes in any
+ * case, prefixed tokens split over lines, a private key's END with no BEGIN, and long high-entropy hex or base64 runs (`high-entropy key`).
+ */
 export function findCredentialShapes(text: string): string[] {
   const found: string[] = [];
   for (const { name, pattern } of CREDENTIAL_PATTERNS) {
@@ -34,5 +39,6 @@ export function findCredentialShapes(text: string): string[] {
     if (pattern.test(text)) found.push(name);
     pattern.lastIndex = 0;
   }
+  for (const { name } of scanSecrets(text)) if (!found.includes(name)) found.push(name);
   return found;
 }

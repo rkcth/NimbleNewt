@@ -1,5 +1,6 @@
 import { REDACTED, redactText } from "../security/redact.js";
 import { CREDENTIAL_PATTERNS } from "../security/credential-patterns.js";
+import { JOINABLE, replaceSpans, scanSecrets } from "../security/secret-scan.js";
 import { quoted } from "../status/explain.js";
 import { createHash } from "node:crypto";
 
@@ -217,7 +218,10 @@ export function cutNote(input: { readonly head: readonly string[]; readonly list
   const flat = (l: string): string => l.replace(/[\r\n]+/g, " ");
   const given = [...(input.list === undefined ? [] : [{ lines: input.list }]), ...(input.lists ?? [])].map((g: NoteList) => ({ heading: g.heading === undefined || g.lines.length === 0 ? undefined : flat(g.heading), lines: g.lines.map(flat) }));
   const sequence = [...input.head.map(flat), ...given.flatMap((g) => [...(g.heading === undefined ? [] : [g.heading]), ...g.lines])];
-  const keyFree = sequence.join("\n").replace(new RegExp(PRIVATE_KEY_BLOCK.source, PRIVATE_KEY_BLOCK.flags), (m) => (m.includes("\n") ? m.split("\n").map(() => REDACTED).join("\n") : m)).split("\n");
+  // A credential split over two entries (a token wrapped onto the next line, a key's END in a later entry) is found in the joined note too; `replaceSpans` marks each line's part and keeps the lines.
+  const pemFree = sequence.join("\n").replace(new RegExp(PRIVATE_KEY_BLOCK.source, PRIVATE_KEY_BLOCK.flags), (m) => (m.includes("\n") ? m.split("\n").map(() => REDACTED).join("\n") : m));
+  // Only the shapes that are one token (or a key) are taken across lines here: `token:` ending one line is not a secret with the next line's first word (C07p review); the line-by-line redaction below sees the rest.
+  const keyFree = replaceSpans(pemFree, scanSecrets(pemFree).filter((s) => JOINABLE.has(s.name) || s.name === "private key block"), REDACTED).split("\n");
   let at = 0;
   const fold = (): string => redactText(keyFree[at++]!).replace(/[\r\n]+/g, " ");
   const head = input.head.map(fold);

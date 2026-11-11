@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { redactText } from "../security/redact.js";
+import { cleanUntrusted } from "../security/clean.js";
 
 /**
  * Card W12: the goal anchor. After the model's conversation is cut (compacted) an agent can lose its task's goal, acceptance criteria and plan, and drift, repeat finished work or declare done against the wrong goal. The
@@ -83,13 +83,8 @@ export function datum(value: string | undefined, max: number): string {
 
 /** Cleans words someone else wrote exactly as `datum` does, but does not cut them (card W13 pages long texts by whole characters over the cleaned text). */
 export function cleanText(value: string | undefined): string {
-  const stripped = redactText(value ?? "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .replace(/\p{Cf}/gu, "")
-    .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "");
-  // Redacted again once the invisible characters are gone (W13 review): a token with a zero-width, tag or half-surrogate character inside it does not have a credential's shape before they are removed, and has it after.
-  return redactText(stripped)
+  // The shared pipeline (security/clean.ts): redact (matching NFKC-folded), strip invisible characters and fold whitespace to one line, redact again (W13 review: stripping can join a token's pieces into a credential's shape).
+  return cleanUntrusted(value ?? "", { lines: "fold" }).text
     .replace(/NN-(ANCHOR|RECALL)/gi, (_m, w: string) => `NN_${w}`)
     .trim()
     // A mark with nothing to attach to (the text began with it) would combine with the opening quote.
