@@ -50,6 +50,21 @@ export function localHostBuilder(setup) {
       await launcher.stop().catch(() => undefined);
       return { problem: `the tool runner could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
     }
+    // Changing an agent's environment (card A09 follow-up) is off unless the setup asks for it: the local host has no worker process to restore between attempts (each attempt starts its own), so the session probe below can only
+    // confirm that nothing of the agent's session was touched, not read it back. With it on, approved package requests are installed into <data>.environments by the worker package's runtime; without it approved changes wait, as before.
+    let environments;
+    if (setup.environments === true) {
+      environments = worker.localEnvironmentHost({
+        root: worker.hostEnvironmentsBase(dataDir), protectedPaths: [dataDir],
+        // An offline mirror: the request's https source is looked up under <environments>/mirror/<host>/<path>. No network.
+        source: worker.directoryArtifactSource(join(worker.hostEnvironmentsBase(dataDir), "mirror")),
+        // Each attempt starts its own worker from the active link; nothing to restart. The session lives in the controller's records, which an environment change never writes.
+        worker: { session: async () => ({ sessionIntact: true, compactionIntact: true }) },
+        scripts: worker.sandboxInstallScripts({ launcher, interpreter: { root: nodeRoot, executable: "bin/node" }, base: join(worker.hostEnvironmentsBase(dataDir), "install-runs") }),
+      });
+      if (environments.problem !== undefined) { ctx.print(`Agents' environments cannot be changed here: ${environments.problem}`); environments = undefined; }
+      else { mkdirSync(join(environments.runtime.root, "mirror"), { recursive: true, mode: 0o700 }); mkdirSync(join(environments.runtime.root, "install-runs"), { recursive: true, mode: 0o700 }); await environments.runtime.recover(); }
+    }
     let git;
     try { git = await worker.GitBridge.create({ scratch: join(base, "git") }); } catch (error) {
       await scripts.stop().catch(() => undefined);
@@ -86,6 +101,7 @@ export function localHostBuilder(setup) {
     const start = {
       harnesses: [piAdapter.PI_DECLARATION],
       tools,
+      ...(environments?.runtime === undefined ? {} : { maintenance: { environmentRuntime: environments.runtime } }),
       dispatch: {
         local: {
           // The routing table's context size for the route is used (the host states none of its own).
@@ -118,6 +134,7 @@ export function localHostBuilder(setup) {
                 return services.attemptRelay(order, relay, { model: route.slice(route.indexOf("/") + 1) }).relay(request);
               },
               context: (order) => services.context(order),
+              ...(environments === undefined ? {} : { reach: (name, order) => environments.reach(name, order) }),
               heldForReview: (order) => ctx.controller().dispatch.dispatcher.heldForReview(order.attemptId),
               ...worker.ownerPolicyOptions(services),
             });
