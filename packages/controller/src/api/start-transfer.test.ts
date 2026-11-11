@@ -509,7 +509,11 @@ for (const backend of ["sqlite", "postgres"] as const) {
       assert.ok(JSON.stringify(stale).includes("stale_revision"), JSON.stringify(stale));
       assert.equal((await call(boot.token, "database.transfer.settings", {})).result.item.restart, true, "the stale proposal changed nothing");
       assert.equal((await call(boot.token, "database.transfer.set", { restart: false, expectedRevision: before.revision }, "stale-api")).error.code, "stale_revision");
-      assert.equal((await call(boot.token, "database.transfer.set", { restart: false, expectedRevision: -1 }, "neg")).error.code, "invalid_command");
+      for (const [i, bad] of ([-1, "3", 1.5, 2 ** 60, null] as unknown[]).entries()) {
+        const refused = await call(boot.token, "database.transfer.set", { restart: false, expectedRevision: bad }, `neg-${i}`);
+        assert.equal(refused.error.code, "invalid_command", JSON.stringify(refused));
+        assert.match(refused.error.message, /0 before anything was set/, `the owner is told what to give (${String(bad)})`);
+      }
 
       // An installation change someone staged and did not apply is not put into force with the switch.
       const staged = await c.services.configuration.stage(rob, { commandId: "cfg-draft", layer: "installation", expectedRevision: moved, set: { "conversation.mcp.enabled": false } } as never);
@@ -583,4 +587,49 @@ test("a PostgreSQL controller with the host's restart opt-in is restarted by the
     await withClient(url, async (client) => { await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }).catch(() => undefined);
     rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
+});
+
+// Review of card F04m, third slice: the switch's stage and apply are two writes, so a stop between them leaves the switch staged. No operation discards a staged draft, so refusing it as "someone
+// else's" blocked the other switch for good; merging it would put the old, unconfirmed value into force. It is discarded first, and the chat's proposal planned while it waited still applies.
+test("a switch left staged by a change stopped between its stage and its apply blocks neither switch, is never put into force, and a chat proposal planned meanwhile applies (review of card F04m)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-xfl-"));
+  const say: Record<string, unknown[]> = {};
+  const newPath = join(d, "moved.sqlite");
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), tickMs: 3_600_000 },
+    chat: chatOf(say), transfer: { stateDirectory: d, targets: [{ ...(await sqliteTarget({ name: "moved", path: newPath, open: () => SqliteStorage.open({ path: newPath }) })), freeBytes: async () => 1e12 }], restart: { delayMs: 20, run: () => undefined } } } as never);
+  const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<any>;
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const first = await call(boot.token, "database.transfer.set", { enabled: true, expectedRevision: 0 }, "s0");
+    assert.equal(first.ok, true, JSON.stringify(first));
+    // An earlier "stop restarting" was staged and the controller stopped before applying it.
+    const r0 = first.result.item.revision as number;
+    await c.services.configuration.stage(rob, { commandId: "half-st", layer: "installation", expectedRevision: r0, set: { "database.transfer.restart": false } } as never);
+    const r1 = (await call(boot.token, "database.transfer.settings", {})).result.item;
+    assert.deepEqual([r1.restart, r1.revision > r0], [true, true]);
+    // The owner turns moves off: not blocked, and the left-over restart value does not go into force with it.
+    const off = await call(boot.token, "database.transfer.set", { enabled: false }, "s1");
+    assert.equal(off.ok, true, JSON.stringify(off));
+    assert.deepEqual([off.result.item.enabled, off.result.item.restart], [false, true]);
+    assert.equal((await c.services.configuration.layer(rob, "installation"))?.draft, undefined, "nothing stays staged");
+    // Left over again; a chat proposal is planned while it waits, and the owner's yes applies it.
+    const r2 = (await call(boot.token, "database.transfer.settings", {})).result.item.revision as number;
+    await c.services.configuration.stage(rob, { commandId: "half2-st", layer: "installation", expectedRevision: r2, set: { "database.transfer.restart": false, "database.transfer.enabled": true } } as never);
+    const asked = await rolePlay(c, boot.token, say, "m1", "let the database be moved again", { kind: "command", op: "database.transfer.set", args: { enabled: true } });
+    assert.equal(asked[0].status, "proposed", JSON.stringify(asked));
+    const yes = await rolePlay(c, boot.token, say, "m2", "yes, go ahead and do that", { kind: "apply_proposal", proposalId: asked[0].proposalId });
+    assert.equal(yes[0].status, "applied", JSON.stringify(yes));
+    const now = (await call(boot.token, "database.transfer.settings", {})).result.item;
+    assert.deepEqual([now.enabled, now.restart], [true, true], "only what the owner confirmed is in force");
+    // A caller whose revision is older than the left-over draft is still refused as stale, and nothing is discarded or changed.
+    await c.services.configuration.stage(rob, { commandId: "half3-st", layer: "installation", expectedRevision: now.revision, set: { "database.transfer.restart": false } } as never);
+    assert.equal((await call(boot.token, "database.transfer.set", { enabled: false, expectedRevision: now.revision - 1 }, "s2")).error.code, "stale_revision");
+    assert.ok((await c.services.configuration.layer(rob, "installation"))?.draft !== undefined, "a stale caller discards nothing");
+    // Someone else's staged installation change is still refused, not applied.
+    const r3 = (await c.services.configuration.layer(rob, "installation"))!.revision;
+    await c.services.configuration.stage(rob, { commandId: "other-st", layer: "installation", expectedRevision: r3, set: { "conversation.mcp.enabled": false } } as never);
+    const blocked = await call(boot.token, "database.transfer.set", { enabled: false }, "s3");
+    assert.equal(blocked.error.code, "invalid_command"); assert.match(blocked.error.message, /conversation\.mcp\.enabled/);
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });

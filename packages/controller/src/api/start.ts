@@ -997,12 +997,27 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           const layer = await configuration.layer(who, "installation", undefined);
           const set: Record<string, boolean> = { ...(patch.enabled === undefined ? {} : { "database.transfer.enabled": patch.enabled }), ...(patch.restart === undefined ? {} : { "database.transfer.restart": patch.restart }) };
           // Applying puts the layer's whole draft into force: installation changes someone staged and has not applied would go into force with this switch, unseen. They are refused instead.
-          const foreign = Object.keys(layer?.draft?.set ?? {}).filter((k) => !(k in set));
+          const switches = ["database.transfer.enabled", "database.transfer.restart"];
+          const drafted = Object.keys(layer?.draft?.set ?? {});
+          const foreign = drafted.filter((k) => !switches.includes(k));
           if (foreign.length > 0) throw new DomainError("invalid_command", `the installation settings have changes staged and not applied (${foreign.slice(0, 5).join(", ")}${foreign.length > 5 ? ", ..." : ""}); apply or discard them first, then change the database transfer settings`);
           // The caller's revision (0: nothing set yet) when given, else the layer as it is now. The stage checks it, so a change in between is refused as stale.
-          const expected = patch.expectedRevision === undefined ? layer?.revision : patch.expectedRevision === 0 ? undefined : patch.expectedRevision;
+          let expected = patch.expectedRevision === undefined ? layer?.revision : patch.expectedRevision === 0 ? undefined : patch.expectedRevision;
+          // A draft holding only these switches is what an earlier change of them left when it was stopped between its stage and its apply (two writes; nothing else stages them). It was never in force
+          // and nobody can discard it otherwise (no operation does), so refusing it would block these switches for good, and merging it would put an old, unconfirmed value into force with this one:
+          // it is discarded first, at the revision the caller saw (review of card F04m, third slice).
+          if (drafted.length > 0 && layer !== undefined) {
+            if (expected !== layer.revision) throw new DomainError("stale_revision", `the installation settings are at revision ${layer.revision}, not ${expected ?? 0}`, { currentRevision: layer.revision });
+            await configuration.discard(who, { commandId: `${patch.commandId}-lo`, layer: "installation", expectedRevision: layer.revision } as never);
+            expected = (await configuration.layer(who, "installation", undefined))?.revision;
+          }
           const staged = await configuration.stage(who, { commandId: `${patch.commandId}-st`, layer: "installation", ...(expected === undefined ? {} : { expectedRevision: expected }), set } as never);
-          const applied = await configuration.apply(who, { commandId: `${patch.commandId}-ap`, layer: "installation", expectedRevision: staged.revision } as never);
+          let applied: Awaited<ReturnType<typeof configuration.apply>>;
+          // An apply that throws (a write in between) must not leave this switch staged either.
+          try { applied = await configuration.apply(who, { commandId: `${patch.commandId}-ap`, layer: "installation", expectedRevision: staged.revision } as never); } catch (error) {
+            await configuration.discard(who, { commandId: `${patch.commandId}-dc`, layer: "installation", expectedRevision: staged.revision } as never).catch(() => undefined);
+            throw error;
+          }
           // A refused change does not stay staged (it would go into force with the next apply of the layer, unasked); the draft held only these switches, checked above.
           if (!applied.applied) await configuration.discard(who, { commandId: `${patch.commandId}-dc`, layer: "installation", expectedRevision: applied.revision } as never).catch(() => undefined);
           if (!applied.applied) throw new DomainError("invalid_command", `the installation settings refused the change: ${applied.problems.join("; ") || "no reason given"}`);
