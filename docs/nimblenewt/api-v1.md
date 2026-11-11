@@ -2078,7 +2078,7 @@ Result: `{ attempts }`.
 
 #### `release.status`
 
-Owner only: the current and previous release, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
+Owner only: the current and previous release, the last known good and whether the current release has confirmed a healthy start, releases the launcher found failing to start, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
 
 Arguments:
 
@@ -5778,6 +5778,20 @@ Arguments:
 - `commandId`: required
 
 Result: `{ revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.confirm`
+
+Owner only: marks the current release as the last known good (the one a failed start of a later release falls back to) when it did not confirm itself, for example because it was not started by the launcher. Its files are verified first. A release that started under the launcher and reported itself healthy is confirmed without this.
+
+Arguments:
+
+- `releaseId`: the current release's ID, as release.status shows it
+- `expectedRevision` (optional): the `revision` of release.status
+- `commandId`: required
+
+Result: `{ revision, releaseId }`.
 
 Completion: finished when accepted (`completed: true`).
 

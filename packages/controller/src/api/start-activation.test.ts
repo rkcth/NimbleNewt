@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { SimulatedCrash } from "../release/index.js";
+import { Launcher, PointerSwitcher, SimulatedCrash, SymlinkSwitcher } from "../release/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -20,10 +20,11 @@ test("release staging and activation end to end: the owner's word only, bound to
   const root = join(d, "rel");
   const say: Record<string, unknown[]> = {};
   let crashAt: string | undefined;
+  let running: string | undefined;
   const open = () => startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [],
     chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
-    releases: { root, switcher: process.platform === "win32" ? "pointer" : "symlink", platform: { os: "linux", arch: "x64" }, hook: (p) => { if (p === crashAt) throw new SimulatedCrash(p); } },
+    releases: { root, switcher: process.platform === "win32" ? "pointer" : "symlink", platform: { os: "linux", arch: "x64" }, ...(running === undefined ? {} : { runningRelease: running }), hook: (p) => { if (p === crashAt) throw new SimulatedCrash(p); } },
   });
   const link = (): string | undefined => {
     if (process.platform === "win32") return existsSync(join(root, "current.json")) ? `releases/${(JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release}` : undefined;
@@ -51,8 +52,11 @@ test("release staging and activation end to end: the owner's word only, bound to
       for (const [k, v] of Object.entries(files)) { const p = join(root, "incoming", id, k); mkdirSync(join(p, ".."), { recursive: true }); writeFileSync(p, v); }
       return id;
     };
-    const one = await candidate("1", { "nn.js": "v1" });
-    const two = await candidate("2", { "nn.js": "v2", "lib/x.js": "x" });
+    const compat = JSON.stringify({ protocol: { min: 1, max: 1 } });
+    const one = await candidate("1", { "nn.js": "v1", "compat.json": compat });
+    const two = await candidate("2", { "nn.js": "v2", "lib/x.js": "x", "compat.json": compat });
+    const noCompat = await candidate("3", { "nn.js": "v3" });
+    assert.equal((await owner("release.stage", { candidateId: noCompat }, "st3")).error?.code, "invalid_command", "a release that declares no worker protocol range is not staged");
 
     // Authority: the agent that built and reported the candidate cannot stage, activate, roll back or read; nothing changed.
     for (const [op, args] of [["release.stage", { candidateId: one }], ["release.activate", { candidateId: one, digest: sha("x") }], ["release.rollback", { releaseId: one }], ["release.staging.settings.set", { requireApproval: false }], ["release.approval.disable", {}]] as const)
@@ -73,6 +77,25 @@ test("release staging and activation end to end: the owner's word only, bound to
     const act = await owner("release.activate", { candidateId: one, digest: st1.digest, expectedRevision: 0 }, "a3");
     assert.ok(act.ok, JSON.stringify(act));
     assert.equal(link(), `releases/${one}`);
+
+    // The launcher starts the release; the controller restarted from it reports a healthy start, and it becomes the last known good. A start from some other release confirms nothing.
+    let item = (await owner("release.status", {})).result.item;
+    assert.deepEqual([item.confirmed, item.lastKnownGood], [false, undefined]);
+    await c.close();
+    running = two;
+    c = await open();
+    item = (await owner("release.status", {})).result.item;
+    assert.equal(item.confirmed, false, "a process that runs as another release confirms nothing");
+    await c.close();
+    // The launcher decides what to run (the controller announced the release when it switched), records the start, and the controller it starts is told which release it is.
+    const decision = await new Launcher({ root, switcher: process.platform === "win32" ? new PointerSwitcher(root) : new SymlinkSwitcher(root) }).prepare();
+    assert.deepEqual([decision.action, (decision as { releaseId?: string }).releaseId], ["run", one]);
+    running = one;
+    c = await open();
+    item = (await owner("release.status", {})).result.item;
+    assert.deepEqual([item.confirmed, item.lastKnownGood.id, item.lastKnownGood.via], [true, one, "startup"]);
+    assert.equal((await call(builderToken, "release.confirm", { releaseId: one }, "b-cf")).error?.code, "forbidden");
+    running = undefined; // later restarts in this test are not launcher starts
 
     // Chat: stage applies at once, activate is only proposed and switches on the owner's word; the approval requirement is turned off by a proposal and on at once.
     const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
@@ -95,6 +118,15 @@ test("release staging and activation end to end: the owner's word only, bound to
     const req = await turn("m4", reqText, [{ kind: "command", op: "release.approval.enable", args: {}, evidence: reqText, basis: "owner" }]);
     assert.equal(req[0]!.status, "applied", JSON.stringify(req));
     assert.equal((await owner("release.staging.settings.get", {})).result.item.requireApproval, true, "narrowing applied at once");
+
+    // Confirming a release by hand is only proposed (it decides where a failed start falls back to).
+    const cfText = `mark ${two} as the release that is known to work`;
+    const cf = await turn("m4b", cfText, [{ kind: "command", op: "release.confirm", args: { releaseId: two }, evidence: cfText, basis: "owner" }]);
+    assert.equal(cf[0]!.status, "proposed", JSON.stringify(cf));
+    assert.equal((await owner("release.status", {})).result.item.lastKnownGood.id, one, "a proposal changes nothing");
+    const cfYes = await turn("m4c", "yes, mark it", [{ kind: "apply_proposal", proposalId: cf[0]!.proposalId, evidence: "mark it", basis: "owner" }]);
+    assert.equal(cfYes[0]!.status, "applied", JSON.stringify(cfYes));
+    assert.deepEqual([(await owner("release.status", {})).result.item.lastKnownGood.id, (await owner("release.status", {})).result.item.lastKnownGood.via], [two, "owner"]);
 
     // Removing a staged release and closing a stranded switch are shown first, and the owner-only operations exist for them.
     const rmText = `remove the staged release ${one}`;

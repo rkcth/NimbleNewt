@@ -130,6 +130,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
   "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
+  // Marking the current release as the last known good decides where a failed start falls back to: shown first (card K02, second slice).
+  "release.confirm": { verb: "Confirm the current release as the last known good", mode: "propose" },
   "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
   "release.approval.enable": { verb: "Require an approved release for activation", mode: "apply" },
   "release.approval.disable": { verb: "Stop requiring an approved release for activation", mode: "propose" },
