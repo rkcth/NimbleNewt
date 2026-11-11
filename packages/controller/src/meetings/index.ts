@@ -13,4 +13,5 @@ export { INVITATION_LIMITS, InvitationInbox, withNudge, type InvitationView, typ
 export { meetingNoticeSink, meetingWindowSink } from "./notice-sink.js";
 export { SAFE_LONG_RUNNING_SETTING, safeLongRunningOf, type SafeLongRunningJobs, type SafeLongRunningOptions } from "./safe-long-running.js";
 export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
+export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, type WakeHostLifecycle } from "./wake-host.js";
 export { MeetingDeskReadService, type DeskReadBody } from "./desk-reads.js";

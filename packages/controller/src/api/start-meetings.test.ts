@@ -187,7 +187,7 @@ test("through the composed controller a paused agent and an agent the host repor
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("through the composed controller the owner's wake of an agent the host reports stopped reaches the host once, and without a host wake path it is refused (card M04f)", async () => {
+test("through the composed controller the owner's wake of an agent the host reports stopped reaches the host once, and with the controller's own host an agent no finished stop holds is refused (card M04f, M04h)", async () => {
   for (const withHost of [true, false]) {
     const d = mkdtempSync(join(tmpdir(), "nn-meet-"));
     const slot = Date.parse(`${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T08:00:00.000Z`);
@@ -217,7 +217,8 @@ test("through the composed controller the owner's wake of an agent the host repo
       const occurrenceId = (await call("meeting.schedule-get", { scheduleId: made.result.id })).result.item.lastOccurrenceId;
       const opened = await call("meeting.attend.open-room", { occurrenceId }, "or1"); assert.ok(opened.ok, JSON.stringify(opened));
       const wake = await call("meeting.attend.wake", { occurrenceId, agent: `agent:${ids.cat}` }, "wk1");
-      if (!withHost) { assert.equal(wake.ok, false); assert.match(wake.error!.message, /no wake path/); assert.deepEqual(recovered, []); continue; }
+      if (!withHost) { assert.equal(wake.ok, false); // The controller's own host is composed now (card M04h): it refuses an agent that no finished stop holds, so the wake is not accepted and nothing reached the embedding application.
+      assert.match(wake.error!.message, /^the host did not wake agent:/); assert.deepEqual(recovered, []); continue; }
       assert.ok(wake.ok, JSON.stringify(wake));
       assert.deepEqual(recovered, [{ key: `${occurrenceId}:agent:${ids.cat}:1`, agent: `agent:${ids.cat}` }]);
       // The agent that is available needs no wake, and nothing else reached the host.

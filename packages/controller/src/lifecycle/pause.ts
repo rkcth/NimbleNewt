@@ -125,6 +125,8 @@ export interface PauseOptions extends RunnerOptions {
   readonly testHooks?: { readonly afterBackgroundRead?: () => Promise<void>; /** Runs after `liftDue` read a gate and decided it is due, before it lifts it; a throw counts as that gate failing to lift. */ readonly beforeLift?: (scope: PauseScope) => Promise<void> };
   /** Reports suspended and stopped agents (L02, L03 will supply it) for `availability`; consulted only when no pause applies. Default: available. */
   readonly otherAvailability?: (principalId: string) => Promise<Availability>;
+  /** Card M04h: asked only for an agent a pause holds, and replaces `paused` with what it answers (the agent is stopped or suspended, or a meeting wake made it available); undefined keeps `paused`. */
+  readonly pausedAvailability?: (principalId: string) => Promise<Availability | undefined>;
 }
 
 export const PAUSE_LIMITS = { reason: 500, evidence: 500, summary: 1000, jobRef: 120, chain: 64 } as const;
@@ -202,12 +204,14 @@ export class PauseService implements PauseGuard, PauseLookup {
   readonly #runner: CommandRunner;
   readonly #waits: WaitService | undefined;
   readonly #other: PauseOptions["otherAvailability"];
+  readonly #pausedAs: PauseOptions["pausedAvailability"];
   readonly #hooks: PauseOptions["testHooks"];
 
   private constructor(runner: CommandRunner, deps: { waits?: WaitService }, options: PauseOptions) {
     this.#runner = runner;
     this.#waits = deps.waits;
     this.#other = options.otherAvailability;
+    this.#pausedAs = options.pausedAvailability;
     this.#hooks = options.testHooks;
   }
 
@@ -642,7 +646,7 @@ export class PauseService implements PauseGuard, PauseLookup {
    */
   availability = async (principalId: string): Promise<Availability> => {
     const m = /^agent:(agt-[a-z2-7]{20})$/.exec(typeof principalId === "string" ? principalId : "");
-    if (m !== null) for (const scope of await this.#chain({ kind: "agent", id: m[1]! })) if (await this.#paused(scope)) return "paused";
+    if (m !== null) for (const scope of await this.#chain({ kind: "agent", id: m[1]! })) if (await this.#paused(scope)) return (await this.#pausedAs?.(principalId)) ?? "paused";
     return this.#other === undefined ? "available" : this.#other(principalId);
   };
 
