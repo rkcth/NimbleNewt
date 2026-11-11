@@ -253,6 +253,75 @@ export class ConfigurationService {
     return { ...outcome, revision: r.revision };
   }
 
+  /**
+   * Sets or removes settings of one layer and puts them into force in ONE write, with the checks of `stage` and `apply` together (each value valid for its setting, no wider than the layers above
+   * allow, nothing locked above, the whole combination fitting together). It is what the controller's own setting changes use (the chat's policy edit, the database transfer switches), so a stop can
+   * never leave a half-made change staged (review of card F04m, third slice). It never reads, applies or discards the layer's draft: anything staged there stays staged and out of force, so a change
+   * cannot carry into force something its caller did not see. `expectedRevision`: the layer must be at that revision (0: the layer must not exist yet); left out, the layer as it is when the write
+   * is made. A repeat of the same command ID is answered from the history entry it wrote. A change the checks refuse writes nothing and is `invalid_command` naming the problems.
+   */
+  async change(by: Principal, command: NoActor & { layer: LayerKind; scopeId?: string; expectedRevision?: number; set?: Readonly<Record<string, unknown>>; remove?: readonly string[] }): Promise<{ revision: number; replayed: boolean; takesEffect: Record<string, Effect> }> {
+    onlyKnown(command, ["commandId", "layer", "scopeId", "expectedRevision", "set", "remove"]);
+    const { layer, scopeId } = this.#target(command.layer, command.scopeId);
+    const expected = command.expectedRevision === undefined ? undefined : command.expectedRevision === 0 ? 0 : checkRevision(command.expectedRevision);
+    const set = command.set ?? {};
+    if (set === null || typeof set !== "object" || Array.isArray(set)) invalid("set", "must be an object of setting names and values");
+    const remove = this.#keys(command.remove ?? [], "remove");
+    const setKeys = Object.keys(set);
+    if (setKeys.length + remove.length === 0) invalid("set", "nothing to change");
+    for (const key of remove) if (setKeys.includes(key)) invalid("remove", `${key} is both set and removed`);
+    const fresh = await this.#fresh(by.id, by.taskScope);
+    let effects: Record<string, Effect> = {};
+    const r = await this.#runner.command("config.change", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { layer, scopeId, expectedRevision: expected ?? null, set: set as JsonObject, remove },
+      build: async () => {
+        this.#mayWrite(by, fresh, layer, false);
+        await this.#exists(layer, scopeId);
+        const chain = await this.#parents(layer, scopeId);
+        const id = layerIdOf(layer, scopeId);
+        const current = await this.#runner.get("config-layer", id);
+        if (expected !== undefined && (current?.revision ?? 0) !== expected) throw new DomainError("stale_revision", `${id} is at revision ${current?.revision ?? 0}, not ${expected}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
+        const body = (current?.body as unknown as LayerBody | undefined) ?? { layer, scopeId, applied: {}, history: [] };
+        const applied: Record<string, SettingEntry> = { ...body.applied };
+        const changed: string[] = []; const removed: string[] = [];
+        for (const key of setKeys) {
+          const def = this.#define(key);
+          let value: unknown;
+          try { value = def.check(set[key]); } catch (message) { return invalid(`set.${key}`, String(message)); }
+          this.#checkAbove(chain, key, def, value, layer);
+          if (body.applied[key] === undefined || !same(body.applied[key]?.value, value)) changed.push(key);
+          applied[key] = { value, ...(body.applied[key]?.locked === true ? { locked: true } : {}) };
+        }
+        for (const key of remove) {
+          this.#define(key);
+          if (!(key in body.applied)) invalid("remove", `${key} is not set in this layer`);
+          delete applied[key];
+          removed.push(key);
+        }
+        if (Object.keys(applied).length > CONFIG_LIMITS.keysPerLayer) invalid("set", `a layer holds at most ${CONFIG_LIMITS.keysPerLayer} settings`);
+        const problems = (await this.#combined([...chain, { layer, id: scopeId, applied, aggregate: current }])).problems;
+        if (problems.length > 0) throw new DomainError("invalid_command", `the configuration check refused it: ${problems.slice(0, CONFIG_LIMITS.problems).join("; ")}`, { field: "set" });
+        const now = this.#runner.now();
+        effects = {};
+        for (const key of [...changed, ...removed]) effects[key] = this.#define(key).effect;
+        const revisionAfter = (current?.revision ?? 0) + 1;
+        const entry: HistoryEntry = { revision: revisionAfter, at: now, by: by.id, set: changed, removed, locked: [], unlocked: [], effects };
+        // The draft is kept exactly as it was (out of force); a refusal recorded by an earlier apply is history, not this change's.
+        const { lastFailure: _f, ...rest } = body;
+        const next: LayerBody = { ...rest, applied, history: [...body.history, entry].slice(-CONFIG_LIMITS.history) };
+        const ref: AggregateRef = { kind: "config-layer", id };
+        const changes: Change[] = [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }, ...this.#guards(chain, id)];
+        return { ref, creates: current === undefined, changes, detail: { layer, scopeId, changed: changed.length + removed.length } };
+      },
+    }));
+    if (r.replayed) {
+      const stored = (await this.#runner.get("config-layer", layerIdOf(layer, scopeId)))?.body as unknown as LayerBody | undefined;
+      const entry = stored?.history.find((h) => h.revision === r.revision);
+      return { revision: r.revision, replayed: true, takesEffect: entry === undefined ? {} : { ...entry.effects } };
+    }
+    return { revision: r.revision, replayed: false, takesEffect: effects };
+  }
+
   /** One layer as stored: what is in force, what is staged, the last refusal. For the owner and those who may write or read configuration. */
   async layer(by: Principal, layer: LayerKind, scopeId?: string): Promise<View<LayerBody> | undefined> {
     const target = this.#target(layer, scopeId);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DomainError } from "../domain/errors.js";
 import { meetingNoticeSink, meetingWindowSink } from "./notice-sink.js";
 
 test("an agent that was away is told what the meeting decided, against the first task it touches, once per key (card M04c)", async () => {
@@ -24,4 +25,12 @@ test("the window warnings are filed as controller notices against the task named
   assert.match(sent[0]!.text, /no long-running work/);
   assert.match(sent[1]!.text, /has begun/);
   assert.match(sent[2]!.text, /is over/);
+});
+
+test("a notice already filed under its key with another text counts as sent; any other refusal still reaches the attendance service (U03c/M03h close-out, carried over)", async () => {
+  const notice = { key: "mto-aaa:agent:agt-bbb", agent: "agent:agt-bbb", occurrenceId: "mto-aaa", projectId: "proj-x", decisions: ["d"], taskIds: ["t"], dueAt: "2026-10-30T10:00:00.000Z" };
+  await meetingNoticeSink({ noticeFromController: async () => { throw new DomainError("command_conflict", "this command ID was used with another payload"); } }).notify(notice);
+  for (const code of ["forbidden", "unavailable", "not_found", "stale_revision"] as const) {
+    await assert.rejects(meetingNoticeSink({ noticeFromController: async () => { throw new DomainError(code, code); } }).notify(notice), (e: unknown) => e instanceof DomainError && e.code === code);
+  }
 });

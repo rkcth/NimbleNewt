@@ -4397,7 +4397,7 @@ Result: `{ item: { target, removed } }`.
 
 #### `database.transfer.set`
 
-Owner only: turns database transfers on or off (`enabled`) and/or the host's automatic restart after a move or rollback on or off (`restart`). Only the fields given change. Turning transfers off refuses new ones; it does not undo one. With `expectedRevision` (from database.transfer.settings) the change is made only if nothing changed the installation settings since (else `stale_revision`); the chat always quotes the revision it planned at. Refused while other installation changes are staged and not applied.
+Owner only: turns database transfers on or off (`enabled`) and/or the host's automatic restart after a move or rollback on or off (`restart`). Only the fields given change. Turning transfers off refuses new ones; it does not undo one. With `expectedRevision` (from database.transfer.settings) the change is made only if nothing changed the installation settings since (else `stale_revision`); the chat always quotes the revision it planned at. One write: nothing staged in the installation settings goes into force with it, and a resend of the same command is answered from its record.
 
 Arguments:
 
