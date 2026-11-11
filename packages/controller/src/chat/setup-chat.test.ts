@@ -49,3 +49,20 @@ test("the interpreter prompt tells the model about credentials for agents and ho
   for (const op of ["credential.issue", "credential.revoke", "host.local.set", "host.local.get"]) assert.match(OPERATIONS.find((o) => o.name === op)!.summary, /Owner only/);
   assert.match(OPERATIONS.find((o) => o.name === "host.local.set")!.summary, /next start/);
 });
+
+// Card M05 and the owner's rule that everything is reachable by free-form chat: the model is told that a finished meeting's outcomes can be handed back and that the meeting can ask the owner about the decisions it left open.
+test("the interpreter prompt tells the model how to have a meeting hand its outcomes back and ask the owner about deferred decisions, from the one operation table (card M05)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+  await m.interpret({ text: "ask me about what the sync left open", quoted: [], focus: {}, proposals: [] });
+  const op = "meeting.record.outcomes";
+  assert.equal(CHAT_OPS[op]?.mode, "propose", "it settles agenda topics and may fill the owner's inbox: shown first");
+  assert.ok(OPERATIONS.some((o) => o.name === op && o.kind === "command"), "it is an operation of the API");
+  assert.ok(system.includes(`${op}(${(acceptedArgs(op) ?? []).filter((k) => k !== "projectName").join(", ")})`), "listed with its arguments from the one table");
+  assert.ok((acceptedArgs(op) ?? []).includes("askOwner") && (acceptedArgs(op) ?? []).includes("meetingTopic"));
+  assert.match(system, /meeting\.record\.outcomes \(meetingTopic: words from the meeting/);
+  assert.match(system, /askOwner true: each such decision then puts one question to the owner \(at most 10 wait at a time\)/);
+  assert.match(system, /writes the answer back onto the meeting's record/);
+  assert.match(OPERATIONS.find((o) => o.name === op)!.summary, /never an agent, an outside app or a task credential/);
+  assert.ok(OPERATIONS.some((o) => o.name === "meeting.owner-outcomes" && o.kind === "query"));
+});

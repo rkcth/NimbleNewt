@@ -203,7 +203,7 @@ export interface Context {
   readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
   readonly watchControl?: {
@@ -513,7 +513,7 @@ const HELP: Readonly<Record<string, string>> = {
   kind: "statement, owner-message, ruling or correction", text: "the words", speaker: "an agent speaking (agent:name)", tag: "decision, action, plan, question or similar tag", assignee: "an agent an action or plan item is for", taskId: "a task this concerns",
   corrects: "an entry this corrects", overrules: "a ruling this overrules", answers: "a question this answers", sources: "records the words rest on", topic: "the topic", agendaItemId: "the agenda item discussed", changes: "proposed changes to tasks (applied only if adopted and allowed)",
   expectedVersion: "the motion version you read", material: "true if the change alters what is voted on", reason: "why", limitMinutes: "how long the vote stays open", version: "the motion version voted on", value: "yes, no or abstain (casting vote: yes or no)",
-  ownerMessageEntryId: "the owner's message this vote follows", response: "agree, decline or alternative", alternative: "the owner's own decision instead", interrupted: "true if the meeting was cut short", fromSeq: "first entry number", toSeq: "last entry number", limit: "at most 100",
+  ownerMessageEntryId: "the owner's message this vote follows", response: "agree, decline or alternative", alternative: "the owner's own decision instead", interrupted: "true if the meeting was cut short", askOwner: "true to put a question to the owner for every decision the meeting deferred, or a list of { motionId, question? } (words made from the motion when left out); owner, host or service only, never an agent or a task credential", fromSeq: "first entry number", toSeq: "last entry number", limit: "at most 100",
 };
 const recordOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["records"]>, fields: readonly string[], result: string, shape: "id" | "viewer" = "id", viewerArgs: readonly string[] = []): Operation => ({
   name: `meeting.record.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
@@ -1004,7 +1004,7 @@ export const OPERATIONS: readonly Operation[] = [
   })(),
   recordOp("finish", "command", "Ends the meeting; an interrupted meeting voids open votes and keeps the record.", "finish", ["recordId", "interrupted", "reason"], "`{ voided }`."),
   recordOp("summarize", "command", "Builds the summary from the record alone.", "summarize", ["recordId"], "`{ builds, overviewFailed? }`."),
-  recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from.", "returnOutcomes", ["recordId"], "`{ returned, pending }`.", "viewer"),
+  recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from. With `askOwner` (owner, host or service holding meeting.manage; never an agent, an outside app or a task credential) a decision the meeting deferred also puts a question to the owner (at most 10 open per project; past that the outcome is returned without the question and listed in `notAsked`). The owner's answer is written back onto this meeting record and shown on the next stand-up agenda.", "returnOutcomes", ["recordId", "askOwner"], "`{ returned, pending, asked, notAsked }`.", "viewer"),
   recordOp("sweep", "command", "Closes votes past their time, breaks or fails ties and finishes abandoned meetings in a project.", "sweep", ["projectId"], "`{ closed, tied, failedTies, interrupted }`.", "viewer"),
   recordOp("get", "query", "A meeting record, if you may read it.", "record", ["recordId"], "`{ item }`.", "id", ["recordId"]),
   recordOp("of-meeting", "query", "The record of a meeting occurrence.", "recordFor", ["occurrenceId"], "`{ item }`.", "id", ["occurrenceId"]),
@@ -1037,6 +1037,15 @@ export const OPERATIONS: readonly Operation[] = [
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid("args.limit", "must be 1 to 50");
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.ownerControls(c.principal, limit) } as object);
+    } },
+  { name: "meeting.owner-outcomes", kind: "query", summary: "The meetings whose outcomes are still to be handed back (card M05): per meeting record, the concluded motions that answer an agenda topic and are not yet returned, `deferred` on those that decided nothing (tabled, failed, no quorum, void), for returning them and asking the owner about the deferred ones; owner only (not a task-scoped credential). `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { meetings: [{ id, projectId, title, motions: [{ id, number, text, state, deferred }] }], truncated } }`.",
+    run: async (c, a) => {
+      only(a, ["limit"]);
+      if (c.principal.kind !== "owner" || c.principal.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads the outcomes still to be returned");
+      const limit = optNum(a, "limit") ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid("args.limit", "must be 1 to 50");
+      const svc = c.records ?? unavailable("meeting records");
+      return asJson({ item: await svc.ownerOutcomes(c.principal, limit) } as object);
     } },
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),

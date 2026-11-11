@@ -733,27 +733,30 @@ export class ChatService {
    * several candidates the owner is asked. The version of the motion a vote is opened on is read here, never said. Returns a refusal or question, or nothing when `args` now holds what the operation takes.
    */
   async #resolveMeetingControl(token: string, op: string, args: Record<string, unknown>, labels: Record<string, string>, notes: string[], projectId: string | undefined, words: string): Promise<(Resolved & { ok: false }) | undefined> {
-    const wordsKey = op === "meeting.record.finish" ? "meetingTopic" : op === "meeting.record.apply" ? "decisionTopic" : "motionTopic";
-    const idKey = op === "meeting.record.finish" ? "recordId" : op === "meeting.record.apply" ? "decisionId" : "motionId";
+    const wordsKey = op === "meeting.record.finish" || op === "meeting.record.outcomes" ? "meetingTopic" : op === "meeting.record.apply" ? "decisionTopic" : "motionTopic";
+    const idKey = op === "meeting.record.finish" || op === "meeting.record.outcomes" ? "recordId" : op === "meeting.record.apply" ? "decisionId" : "motionId";
     const named = args[wordsKey];
     delete args[wordsKey];
     if (named !== undefined && typeof named !== "string") return refuse("invalid_command", `${wordsKey} must be text`);
     if (named !== undefined && args[idKey] !== undefined) return refuse("invalid_command", `${idKey === "motionId" ? "the motion" : idKey === "recordId" ? "the meeting" : "the meeting decision"} is named twice over, as ${idKey} and as ${wordsKey}; which one is meant has to be settled.`);
     if (op === "meeting.record.finish" && args["interrupted"] !== undefined && typeof args["interrupted"] !== "boolean") return refuse("invalid_command", "interrupted must be true or false");
     delete args["expectedVersion"];
-    const listed = await this.#get(token, "meeting.owner-controls", {});
+    // Handing outcomes back (card M05): the meetings found are those with outcomes still to go back; asking the owner is a plain yes or no, and only a deferred decision has something to ask about.
+    const outcomes = op === "meeting.record.outcomes";
+    if (outcomes && args["askOwner"] !== undefined && typeof args["askOwner"] !== "boolean") return refuse("invalid_command", "askOwner is true or false when asked by chat");
+    const listed = await this.#get(token, outcomes ? "meeting.owner-outcomes" : "meeting.owner-controls", {});
     const cut = listed?.["truncated"] === true;
     type Candidate = { id: string; projectId: string; text: string; label: string; version?: number };
-    const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string; version: number }[] }[] | undefined) ?? [];
+    const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string; version: number; deferred?: boolean }[] }[] | undefined) ?? [];
     const unfinished = (listed?.["unfinished"] as { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] | undefined) ?? [];
     // The states the operation acts on, as the records service checks them: a vote opens on a proposed motion, closes when open, and only a motion not yet put to a vote can be tabled.
     const states = op === "meeting.record.close-vote" ? ["voting"] : ["proposed"];
-    const all: Candidate[] = op === "meeting.record.finish"
-      ? meetings.map((m) => ({ id: m.id, projectId: m.projectId, text: m.title, label: m.title.slice(0, 80) }))
+    const all: Candidate[] = op === "meeting.record.finish" || outcomes
+      ? meetings.map((m) => ({ id: m.id, projectId: m.projectId, text: outcomes ? `${m.title} ${m.motions.map((x) => x.text).join(" ")}` : m.title, label: m.title.slice(0, 80) }))
       : op === "meeting.record.apply"
         ? unfinished.map((d) => ({ id: d.id, projectId: d.projectId, text: `${d.text} ${d.topic ?? ""}`, label: `${d.text.slice(0, 80)}; ${d.left} change${d.left === 1 ? "" : "s"} left to carry out` }))
         : meetings.flatMap((m) => m.motions.filter((x) => states.includes(x.state)).map((x) => ({ id: x.id, projectId: m.projectId, text: `${x.text} ${x.topic ?? ""} ${m.title}`, label: `motion ${x.number} in ${m.title.slice(0, 40)}: ${x.text.slice(0, 60)}`, version: x.version })));
-    const what = op === "meeting.record.finish" ? "open meeting" : op === "meeting.record.apply" ? "meeting decision with changes left to carry out" : op === "meeting.record.open-vote" ? "motion waiting for a vote" : op === "meeting.record.close-vote" ? "motion with a vote open" : "motion not yet put to a vote";
+    const what = outcomes ? "meeting with outcomes still to be handed back" : op === "meeting.record.finish" ? "open meeting" : op === "meeting.record.apply" ? "meeting decision with changes left to carry out" : op === "meeting.record.open-vote" ? "motion waiting for a vote" : op === "meeting.record.close-vote" ? "motion with a vote open" : "motion not yet put to a vote";
     const candidates = projectId === undefined ? all : all.filter((c) => c.projectId === projectId);
     const tooMany = `More records exist than could be read at once, and the words do not say which one. Which ${what} is it?`;
     if (candidates.length === 0) return refuse("not_found", cut ? `More records exist than could be read at once, and none of those read is a ${what}; which one is meant cannot be told from the words.` : all.length > 0 ? `no ${what} in that project` : `there is no ${what}`);
@@ -770,7 +773,7 @@ export class ChatService {
     } else {
       const typed = typeof named === "string" ? named : "";
       let matches = candidates.filter((c) => decisionWordsMatch(typed, c.text, true));
-      if (matches.length === 0 && op !== "meeting.record.finish" && op !== "meeting.record.apply") {
+      if (matches.length === 0 && op !== "meeting.record.finish" && op !== "meeting.record.apply" && !outcomes) {
         // Every word fits a motion in another state (its vote already open, or not open yet): that motion is the one meant, so a looser fit on some other motion is not taken in its place.
         const elsewhere = meetings.filter((m) => projectId === undefined || m.projectId === projectId).flatMap((m) => m.motions.filter((x) => !states.includes(x.state) && decisionWordsMatch(typed, `${x.text} ${x.topic ?? ""} ${m.title}`, true)));
         if (elsewhere.length > 0) return refuse("invalid_command", `${elsewhere.length === 1 ? `motion ${elsewhere[0]!.number} (${quotedText(elsewhere[0]!.text, 60)}) is` : "the motions those words fit are"} ${[...new Set(elsewhere.map((x) => x.state))].join(" or ")}, not a ${what}; nothing was proposed.`);
@@ -784,6 +787,7 @@ export class ChatService {
     // Only part of the records was read: another that fits may be among the rest.
     if (cut) notes.push("Not everything you can act on in meetings could be read; check this is the one you mean.");
     labels[chosen.id] = chosen.label;
+    if (outcomes && args["askOwner"] === true && !(meetings.find((m) => m.id === chosen!.id)?.motions ?? []).some((m) => m.deferred === true)) return refuse("invalid_command", "that meeting deferred nothing, so there is no question to ask you; the outcomes can be handed back without one.");
     if (op === "meeting.record.open-vote") args["expectedVersion"] = chosen.version;
     // A motion is tabled for a reason: the owner's own words when they gave one, else their message.
     if (op === "meeting.record.table" && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) args["reason"] = words.trim().slice(0, 500);
