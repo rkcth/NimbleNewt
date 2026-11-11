@@ -72,6 +72,15 @@ export const REMOTE_LIMITS = {
   toolBytes: 160 * 1024,
   /** The longest task credential a bridge request may carry, in characters (the controller authenticates it; a longer one cannot be one). */
   toolTokenChars: 512,
+  /**
+   * The model's thinking a remote host reports (card U09c): blocks per message and characters per block are the worker channel's own bounds (`THINKING_REPORT`, the same figures a local process is held to); the body is bounded
+   * so the largest message (50 blocks of 8000 characters, escaped) fits, and an attempt may send `thinkingMessages` messages (the figure a local process is held to) and have `thinkingInFlight` of them in the controller at once.
+   */
+  thinkingBlocks: 50,
+  thinkingChars: 8000,
+  thinkingBytes: 640 * 1024,
+  thinkingMessages: 2000,
+  thinkingInFlight: 2,
 } as const;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
@@ -125,3 +134,8 @@ export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: strin
 export interface ToolBridgeRequest { readonly op: string; readonly callId: string; readonly args?: JsonObject }
 /** The controller's answer to it: a result, or a refusal with a code (a refusal is an answer, not a failed request). */
 export type ToolBridgeAnswer = { readonly ok: true; readonly result: JsonObject } | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** One block of the model's thinking a remote host's process reported (card U09c): the worker channel's `ThinkingReport`, restated because the worker side imports nothing of the controller. The text is untrusted; the controller cleans and bounds it. */
+export interface ThinkingWire { readonly entryId: number; readonly block: number; readonly provider: string; readonly model: string; readonly text: string; readonly opaque: boolean }
+/** The controller's answer to a thinking message: how many blocks it kept (`reason` says why none: the owner's switch is off, the record was removed, the blocks were already kept, the attempt is no longer the task's current one, or the attempt sent more than it may). Never the text. */
+export interface ThinkingAnswer { readonly kept: number; readonly reason?: "off" | "removed" | "nothing-new" | "stale" | "limit" | "unavailable" }

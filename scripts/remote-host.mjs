@@ -110,6 +110,8 @@ export async function startRemoteWorker(setup, config) {
     namespaceId: (order) => createHash("sha256").update(String(order.agentId)).digest("hex").slice(0, 16),
     // The process's tool requests go to the controller's own bridge through the protocol route (card L05e): the credential the process holds is forwarded in the body of that one request and never kept.
     bridge: (order, _call, token, request) => runner.bridge(order.attemptId, token, request),
+    // The model's thinking the process reports goes to the controller's thinking store through the protocol route (card U09c): untrusted text, sent as it came; a controller without the route, or a failure, drops it and never changes the turn.
+    onThinking: (order, blocks) => runner.thinking(order.attemptId, blocks),
     // Every model call of the process is recorded by the controller as a generation of the task through the runner's tap, and its progress reaches stall detection from the stream messages.
     relay: (order, request) => {
       const route = String(order.route);

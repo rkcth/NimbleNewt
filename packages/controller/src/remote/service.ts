@@ -22,7 +22,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 /** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
 interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
@@ -262,6 +262,13 @@ export interface RemoteDeps {
    * same generation check and effect ledger as a local worker's. Absent: every bridge request from a remote worker is answered `unavailable`.
    */
   readonly toolBridge?: { readonly handle: (token: string, gateway: { readonly attemptId: string; readonly call: ToolGateway["call"] }, request: ToolBridgeRequest) => Promise<ToolBridgeAnswer> };
+  /**
+   * Keeps the model thinking a remote host's process reported (card U09c): the composed controller passes the thinking store, so a remote host's blocks are cleaned, redacted, bounded and kept exactly as a local process's are. It is called only
+   * for the host's own accepted placement of the attempt, and judges the rest itself (the attempt must still be the task's current one at the generation of the placement). Absent: every thinking message is answered `unavailable`, nothing kept.
+   */
+  readonly thinking?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number }, blocks: readonly ThinkingWire[]) => Promise<ThinkingAnswer>;
+  /** The most thinking messages an attempt may send (default `REMOTE_LIMITS.thinkingMessages`, the figure a local process is held to); settable so a test need not send two thousand. */
+  readonly thinkingMessages?: number;
   /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
   readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
@@ -343,6 +350,8 @@ export class RemoteWorkerService {
   /** One monitor per attempt, like the local relay's: its reports are numbered in order. */
   readonly #monitors = new Map<string, RelayMonitor>();
   /** The tool bridge requests being handled now, by attempt, call ID and placement (card L05e). */
+  /** Per attempt: the thinking messages taken so far and those being kept now (card U09c). Bounded like the other per-attempt memos; an attempt that falls out starts counting again. */
+  readonly #thinkingFlow = new Map<string, { messages: number; open: number }>();
   readonly #bridging = new Map<string, { readonly request: string; readonly answer: Promise<ToolBridgeAnswer> }>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
@@ -1315,6 +1324,36 @@ export class RemoteWorkerService {
     this.#bridging.set(key, { request: canonical, answer });
     while (this.#bridging.size > 256) this.#bridging.delete(this.#bridging.keys().next().value as string);
     try { return await answer; } finally { if (this.#bridging.get(key)?.answer === answer) this.#bridging.delete(key); }
+  }
+
+  /**
+   * The model's thinking a remote host's process reported for one of its attempts (card U09c), the counterpart of what a local host tells the thinking store. The session, host, placement and dispatch contract are checked like every message about
+   * an attempt (another host's attempt is `not_found` with the security signal, a stale placement or session `fenced`). The shape is strict (1 to 50 blocks, each with exactly the channel's six fields, text at most 8000 characters, no unknown or
+   * prototype members); the text is untrusted and goes unread to the thinking store, which cleans, redacts, bounds and dedups it and keeps it only while the attempt is still the task's current one at the placement's generation. Like the
+   * local path, an attempt may send 2000 messages and have 2 in the controller at once; past that a message is answered `limit` and dropped. A message that fails is an error that names a field, never a block's text. The answer says how many
+   * blocks were kept, never what they said.
+   */
+  async thinking(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, blocks: unknown): Promise<ThinkingAnswer> {
+    if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > REMOTE_LIMITS.thinkingBlocks) invalid("blocks", `must be 1 to ${REMOTE_LIMITS.thinkingBlocks} blocks`);
+    const whole = (v: unknown, field: string): number => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= 1_000_000_000 ? v : invalid(field, "must be a whole number"));
+    const short = (v: unknown, field: string, max: number): string => (typeof v === "string" && v.length >= 1 && v.length <= max ? v : invalid(field, `must be text of 1 to ${max} characters`));
+    const wire: ThinkingWire[] = (blocks as unknown[]).map((b, i) => {
+      if (b === null || typeof b !== "object" || Array.isArray(b)) return invalid(`blocks[${i}]`, "each block is an object");
+      onlyKnown(b as object, ["entryId", "block", "provider", "model", "text", "opaque"]);
+      const r = b as Record<string, unknown>;
+      if (typeof r["opaque"] !== "boolean") invalid("opaque", "must be true or false");
+      if (typeof r["text"] !== "string" || (r["text"] as string).length > REMOTE_LIMITS.thinkingChars) invalid("text", `must be text of at most ${REMOTE_LIMITS.thinkingChars} characters`);
+      return { entryId: whole(r["entryId"], "entryId"), block: whole(r["block"], "block"), provider: short(r["provider"], "provider", 80), model: short(r["model"], "model", 200), text: r["text"] as string, opaque: r["opaque"] as boolean };
+    });
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "any thinking report");
+    const keep = this.#deps.thinking;
+    if (keep === undefined) return { kept: 0, reason: "unavailable" };
+    let flow = this.#thinkingFlow.get(b.attemptId);
+    if (flow === undefined) { flow = { messages: 0, open: 0 }; this.#thinkingFlow.set(b.attemptId, flow); while (this.#thinkingFlow.size > 256) this.#thinkingFlow.delete(this.#thinkingFlow.keys().next().value as string); }
+    if (flow.open >= REMOTE_LIMITS.thinkingInFlight || flow.messages >= (this.#deps.thinkingMessages ?? REMOTE_LIMITS.thinkingMessages)) return { kept: 0, reason: "limit" };
+    flow.messages++; flow.open++;
+    try { return await keep({ attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation }, wire); } finally { flow.open--; }
   }
 
   async report(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, operationId: string, outcome: Parameters<ToolGateway["report"]>[1]): Promise<ToolResult> {

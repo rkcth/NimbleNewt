@@ -4,7 +4,7 @@ import type { JsonObject } from "../storage/types.js";
 import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import type { WorkerAbilities } from "./contract.js";
-import type { Offer, SequencedControl, ToolBridgeAnswer, ToolBridgeRequest } from "./protocol.js";
+import type { Offer, SequencedControl, ThinkingWire, ToolBridgeAnswer, ToolBridgeRequest } from "./protocol.js";
 
 export interface RemoteOfferRunnerOptions {
   /** The worker's session with the controller (connected by the host's poller). */
@@ -37,7 +37,7 @@ export type OfferOutcome = "completed" | "refused" | "fenced" | "failed";
  */
 export class RemoteOfferRunner {
   readonly #o: RemoteOfferRunnerOptions;
-  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle }>();
+  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle; noThinking?: true }>();
 
   constructor(options: RemoteOfferRunnerOptions) { this.#o = options; }
 
@@ -74,6 +74,22 @@ export class RemoteOfferRunner {
         return { ok: false, code: error.code === "error" ? "invalid_command" : error.code, message: error.message.slice(0, 300) };
       }
       return { ok: false, code: "unavailable", message: "the controller could not be reached; ask again" };
+    }
+  }
+
+  /**
+   * The model's thinking the agent process of an attempt this runner is running reported (card U09c): sent to the controller's thinking store through the attempt. It is told, not asked: it never throws and never changes the turn. A report for an
+   * attempt this runner does not run is dropped; a controller that has no such route (an older one: 404, or a refusal of the message), or that fenced the attempt, is not asked again for this attempt (said once, without any text); any other
+   * failure (the connection, a busy controller) drops that message only. The text is untrusted and is in no log line and no error made here.
+   */
+  async thinking(attemptId: string, blocks: readonly ThinkingWire[]): Promise<void> {
+    const live = this.#live.get(attemptId);
+    if (live === undefined || live.noThinking === true || blocks.length === 0) return;
+    try { await live.attempt.thinking(blocks); } catch (error) {
+      if (error instanceof WorkerRequestError && (error.fenced || error.status === 404 || error.status === 400 || error.status === 405)) {
+        live.noThinking = true;
+        try { this.#o.onTrouble?.(attemptId, "thinking report", new Error(error.fenced ? "the attempt is fenced" : `the controller does not take thinking reports (${error.status})`)); } catch { /* ignored */ }
+      }
     }
   }
 
