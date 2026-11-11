@@ -57,6 +57,10 @@ export interface NotificationSettings {
   readonly securityReportsPerHour?: number | null;
   /** Whether the controller's own security detectors (a credential of another task, a host naming an attempt it never held, and the hooks of its workers) report at all (card U11d). Default true; false stops the reports, not the refusals. */
   readonly securityDetectors?: boolean;
+  /** Minutes a decision may wait while its project has nothing else to do before the controller raises it to Urgent (card U11d, stopped work); default 30, `null` turns it off and puts what it raised back to Needs you. */
+  readonly stoppedWorkAfterMinutes?: number | null;
+  /** Set when the owner has named the digest times themselves (card U11d): only the plain default 09:00 digest gives way to a scheduled stand-up, never one the owner chose. */
+  readonly digestTimesSet?: boolean;
   /** The owner's own level per kind; it overrides the default level of the kind (a safety stop cannot be set below Urgent). */
   readonly levelByKind?: Readonly<Partial<Record<NotificationKind, NotificationLevel>>>;
 }
@@ -72,6 +76,7 @@ export const DEFAULT_DENIED_WINDOW_MINUTES = 60;
 export const DEFAULT_URGENT_MIN_GAP_MINUTES = 30;
 export const DEFAULT_DENIED_ALERTS_PER_HOUR = 5;
 export const DEFAULT_SECURITY_REPORTS_PER_HOUR = 20;
+export const DEFAULT_STOPPED_WORK_AFTER_MINUTES = 30;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
 /** Record kinds a controller-side notice may point at that the retention rules can remove (cards K06b, K06d, K06e): an item whose record is gone says so instead of leading to a not-found. */
 const REMOVABLE_REFS: ReadonlySet<string> = new Set(["responsibility-incident", "stall-concern", "responsibility-check"]);
@@ -107,6 +112,8 @@ export interface ItemBody {
   readonly trigger?: boolean;
   /** When the controller raised this item to Urgent because it waited too long (card U11b); told once. */
   readonly escalatedAt?: string;
+  /** When the controller raised this item to Urgent because the project had nothing else to do while it waited (card U11d); cleared when work resumed. */
+  readonly stoppedAt?: string;
   readonly state: "queued" | "sent" | "answered" | "settled";
   /** How many times the same event was reported while this item was open. */
   readonly count: number;
@@ -150,6 +157,8 @@ export interface DeliveryBody {
 }
 interface StateBody {
   readonly lastDigestAt?: string;
+  /** The digest time that gave way to a scheduled stand-up (card U11d); kept so the skip is visible and the digest of that time is not tried again on every run. */
+  readonly digestSkippedFor?: string;
   /** When the escalation sweep first ran with escalation on. A wait is measured from the later of an item's creation and this, so switching the sweep on for a backlog does not flood the owner. */
   readonly escalationEnabledAt?: string;
   /** The earliest time the next full sweep may run (when the dispatcher runs it); everything before that is a cheap check. */
@@ -190,7 +199,7 @@ const without = (list: readonly string[], id: string): string[] => list.filter((
 const withId = (list: readonly string[], id: string): string[] => (list.includes(id) ? [...list] : [...list, id]);
 
 /** Optional wiring: the owner's time zone (quiet hours are read in it; UTC when it gives none), and test overrides for the send timeout and the time one run may take. */
-interface ServiceExtras { readonly timeZone?: () => Promise<string | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
+interface ServiceExtras { /** Whether any stand-up is scheduled (card U11d): the plain 09:00 digest is sent only when none is. A failing answer counts as none. */ readonly standupScheduled?: () => Promise<boolean>; readonly timeZone?: () => Promise<string | undefined>; readonly sendTimeoutMs?: number; readonly runBudgetMs?: number }
 
 export interface Emit extends NoActor {
   readonly kind: NotificationKind;
@@ -231,14 +240,14 @@ export class NotificationService {
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { channels?: Record<string, ChannelAdapter>; responders?: Partial<Record<NotificationKind, Responder>> } & ServiceExtras = {}): NotificationService {
-    const { timeZone, sendTimeoutMs, runBudgetMs } = options;
-    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
+    const { timeZone, sendTimeoutMs, runBudgetMs, standupScheduled } = options;
+    return new NotificationService(new CommandRunner(storage, epoch, options), new Map(Object.entries(options.channels ?? {})), new Map(Object.entries(options.responders ?? {})) as ReadonlyMap<NotificationKind, Responder>, { ...(standupScheduled === undefined ? {} : { standupScheduled }), ...(timeZone === undefined ? {} : { timeZone }), ...(sendTimeoutMs === undefined ? {} : { sendTimeoutMs }), ...(runBudgetMs === undefined ? {} : { runBudgetMs }) });
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -253,7 +262,7 @@ export class NotificationService {
     }
     if (command.digestTimes !== undefined) {
       if (!Array.isArray(command.digestTimes) || command.digestTimes.length < 1 || command.digestTimes.length > 8 || command.digestTimes.some((t) => typeof t !== "string" || !HHMM.test(t))) invalid("digestTimes", "must be 1 to 8 UTC times such as 09:00");
-      next = { ...next, digestTimes: [...new Set(command.digestTimes)].sort() };
+      next = { ...next, digestTimes: [...new Set(command.digestTimes)].sort(), digestTimesSet: true };
     }
     if (command.quietHours !== undefined) {
       if (command.quietHours === null) { const { quietHours: _q, ...rest } = next; void _q; next = rest; }
@@ -286,7 +295,7 @@ export class NotificationService {
       next = { ...next, securityDetectors: command.securityDetectors };
     }
     // The Urgent triggers of card U11c: a number sets one, null turns it off (and a number turns it on again).
-    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"]] as const) {
+    for (const [field, lo, hi, unit] of [["backupMaxAgeHours", 1, 24 * 365, "hours"], ["hostDownAfterMinutes", 1, 24 * 60, "minutes"], ["deniedThreshold", 2, 10_000, "denials"], ["urgentMinGapMinutes", 1, 24 * 60, "minutes"], ["deniedAlertsPerHour", 1, 1000, "messages"], ["securityReportsPerHour", 1, 1000, "reports"], ["stoppedWorkAfterMinutes", 1, 7 * 24 * 60, "minutes"]] as const) {
       const v = command[field];
       if (v === null) next = { ...next, [field]: null };
       else if (v !== undefined) next = { ...next, [field]: whole(v, field, lo, hi, unit) };
@@ -473,13 +482,23 @@ export class NotificationService {
     try {
       if (!quiet && !outOfTime()) await this.#releaseUrgent(settings, now);
       const due = this.#latestDigestTime(settings, now);
-      if (due !== undefined && (state.lastDigestAt === undefined || state.lastDigestAt < due) && !quiet && !outOfTime()) digestIds.push(...await this.#collect(settings, now, due));
+      if (due !== undefined && (state.lastDigestAt === undefined || state.lastDigestAt < due) && !quiet && !outOfTime()) {
+        // The plain 09:00 digest (the default, never one the owner named) gives way to a scheduled stand-up (card U11d): the time passes without a digest, and the queued items stay in the Needs-you view.
+        if (await this.#standupCoversDigest(settings, state, due)) state = await this.#patchState((x) => ({ ...x, lastDigestAt: due, digestSkippedFor: due }), `digest-time-${due}`);
+        else digestIds.push(...await this.#collect(settings, now, due));
+      }
     } catch (error) { problem ??= error; }
     try { if (!outOfTime()) await this.#summarizeHeld(settings, now); } catch (error) { problem ??= error; }
     const delivered = await this.#deliverDue(settings, now, quiet, outOfTime);
     problem ??= delivered.problem;
     if (problem !== undefined) throw problem;
     return { digestIds, delivered: delivered.delivered, failed: delivered.failed, retrying: delivered.retrying };
+  }
+
+  /** Whether this digest time is the owner-less default one and a stand-up is scheduled (card U11d). Asked once per digest time; a source that fails counts as no stand-up, so the owner is told. */
+  async #standupCoversDigest(settings: NotificationSettings, state: StateBody, due: string): Promise<boolean> {
+    if (settings.digestTimesSet === true || this.#extra.standupScheduled === undefined) return false;
+    try { return (await this.#extra.standupScheduled()) === true; } catch { return false; }
   }
 
   /** The current hour's window of Urgent messages (a new one when the hour has passed or the clock went back). */
@@ -857,6 +876,84 @@ export class NotificationService {
       return { closed: await this.#settle(item, this.#runner.now()) };
     }
     return { closed: false };
+  }
+
+  /**
+   * One page of the open items that wait on the owner and belong to a project (card U11d), for the stopped-work watch: a blocker, a review request or an owner question that is still Needs you (not yet
+   * Urgent for another reason), or that the watch itself raised (`stopped`), so it can be put back. Controller only (an internal call, never exposed through the state API). Bounded: at most `limit`
+   * items of the open list after the cursor `after`; `next` is where to go on. Holds IDs and the controller-built label, nothing the record says.
+   */
+  async waitingOnOwner(page: { readonly after?: string; readonly limit: number }): Promise<{ items: { id: string; projectId: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean }[]; next?: string }> {
+    const settings = await this.#settings();
+    const open = this.#openIds((await this.#index()).body);
+    const at = page.after === undefined ? -1 : open.indexOf(page.after);
+    const ids = open.slice(at + 1, at + 1 + Math.max(1, Math.min(page.limit, NOTIFICATION_LIMITS.examinePerRun)));
+    const items: { id: string; projectId: string; kind: NotificationKind; label: string; firstAt: string; stopped: boolean }[] = [];
+    for (const i of await this.#load<ItemBody>("notification-item", ids)) {
+      if (i.state === "answered" || i.state === "settled" || !WAITS_ON_OWNER.has(i.kind) || i.projectId === undefined) continue;
+      const stopped = i.stoppedAt !== undefined;
+      if (!stopped && (i.urgent || i.immediate || levelOf(i, settings.levelByKind) !== "needs-you")) continue;
+      items.push({ id: i.id, projectId: i.projectId, kind: i.kind, label: i.label, firstAt: i.firstAt, stopped });
+    }
+    return { items, ...(at + 1 + ids.length < open.length ? { next: ids[ids.length - 1]! } : {}) };
+  }
+
+  /**
+   * Raises one waiting item to Urgent because its project has nothing else to do while it waits (card U11d). Once per episode: an item already raised, answered, closed or Urgent for another reason is left
+   * alone (`false`). The message is an Urgent trigger of the controller like the U11c ones: sent at once, also in quiet hours unless the owner chose otherwise, inside the hourly Urgent limit and the minimum gap
+   * for that record (otherwise the item is Urgent in the inbox only). Only the kind, the label (IDs) and the project's ID leave the installation. Never replays: the command ID holds the item and the time it was first seen.
+   */
+  async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+    const settings = await this.#settings();
+    const now = this.#runner.now();
+    const interrupts = settings.urgentInterruptsQuietHours !== false;
+    const quiet = this.#quiet(settings, now, await this.#zone());
+    for (let attempt = 1; ; attempt++) {
+      const current = await this.#runner.get("notification-item", itemId);
+      const old = current?.body as unknown as ItemBody | undefined;
+      if (current === undefined || old === undefined || old.state === "answered" || old.state === "settled" || old.stoppedAt !== undefined || old.urgent || old.immediate || levelOf(old, settings.levelByKind) !== "needs-you") return false;
+      const base = `${old.kind}|${old.projectId ?? "-"}|${old.ref.kind}:${old.ref.id}`;
+      let sendNow = interrupts || !quiet;
+      let held: ItemBody["held"];
+      if (sendNow) { held = await this.#holdReason(settings, now, base); if (held !== undefined) sendNow = false; }
+      const detail = `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`;
+      const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`.slice(0, 400), now, `${itemId}|${old.firstAt}|stopped|${now}`, true) : undefined;
+      try {
+        const made = await this.#apply("notification.stopped", { commandId: `stopped-${itemId}-${old.firstAt}-${now}`, actor: "notifications" }, { id: itemId }, async (index) => {
+          // Read again inside the command: what is written is built from the record as it stands now.
+          const fresh = await this.#runner.get("notification-item", itemId);
+          const cur = fresh?.body as unknown as ItemBody | undefined;
+          if (fresh === undefined || cur === undefined || cur.state === "answered" || cur.state === "settled" || cur.stoppedAt !== undefined || cur.urgent || cur.immediate) return undefined;
+          // Not sent now: an item still queued is released when it can be (a trigger, under the same limits); one already told stays told and is only Urgent in the inbox, except that quiet hours defer the message.
+          const state = sendNow ? "sent" : held === undefined || cur.state === "queued" ? "queued" : cur.state;
+          const { held: _h, ...rest } = cur; void _h;
+          const body: ItemBody = { ...rest, urgent: true, immediate: sendNow, trigger: true, stoppedAt: now, detail, lastAt: now, state, ...(held === undefined ? {} : { held }) };
+          const ref: AggregateRef = { kind: "notification-item", id: itemId };
+          return { ref, creates: false, changes: [
+            { type: "update", ref, expectedRevision: fresh.revision, body: body as unknown as JsonObject },
+            ...(delivery === undefined ? [] : [{ type: "create" as const, ref: { kind: "notification-delivery", id: delivery.id }, body: delivery.body as unknown as JsonObject }]),
+            this.#indexChange(index, { deliveries: delivery !== undefined && delivery.body.state === "pending" ? withId(index.body.deliveries, delivery.id) : index.body.deliveries }),
+          ], detail: { stopped: true, sent: sendNow } };
+        });
+        if (made && (sendNow || held !== undefined)) await this.#countInterrupt(now, base, sendNow ? "sent" : held!);
+        return made;
+      } catch (error) {
+        if (!(error instanceof DomainError) || error.code !== "stale_revision" || attempt >= 4) throw error;
+      }
+    }
+  }
+
+  /** Puts an item the stopped-work watch raised back to Needs you because work has resumed or the trigger was turned off (card U11d). Nothing is sent. `false`: not raised by the watch, or already closed. */
+  async lowerStopped(itemId: string): Promise<boolean> {
+    const now = this.#runner.now();
+    return this.#apply("notification.stopped-over", { commandId: `stopped-over-${itemId}-${now}-${this.#seq++}`, actor: "notifications" }, { id: itemId }, async () => {
+      const current = await this.#runner.get("notification-item", itemId);
+      const old = current?.body as unknown as ItemBody | undefined;
+      if (current === undefined || old === undefined || old.stoppedAt === undefined || old.state === "answered" || old.state === "settled") return undefined;
+      const { stoppedAt: _s, held: _h, trigger: _t, detail: _d, ...rest } = old; void _s; void _h; void _t; void _d;
+      const ref: AggregateRef = { kind: "notification-item", id: itemId };
+      return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...rest, urgent: false, immediate: false } as unknown as JsonObject }], detail: { stoppedOver: true } };
+    });
   }
 
   /** A Notice that has stayed in the inbox past the retention (default 7 days since it was last reported) is closed as settled; nobody had to answer it. */

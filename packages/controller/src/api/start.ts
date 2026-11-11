@@ -17,7 +17,7 @@ import { reassignWarningSink } from "../meetings/reassign-warning.js";
 import { MeetingRecordService, budgetRaiseApplier, grantApplier, taskReassignApplier, taskUpdateApplier } from "../meetings/record.js";
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
-import { NotificationService, UrgentWatch, type ChannelAdapter } from "../notifications/index.js";
+import { NotificationService, UrgentWatch, workSource, type ChannelAdapter } from "../notifications/index.js";
 import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
@@ -578,7 +578,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const coverageSettings = CoverageSettingsService.withEpoch(storage, epoch);
     const coverage = CoverageService.withEpoch(storage, epoch, coverageSettings);
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
-    const notifications = NotificationService.withEpoch(storage, epoch, { timeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; }, ...(options.notifications?.channels === undefined ? {} : { channels: options.notifications.channels }), ...(options.notifications?.clock === undefined ? {} : { clock: options.notifications.clock }) });
+    // The plain 09:00 digest gives way to a scheduled stand-up (card U11d): any active stand-up of a live project. The stand-up service starts with the dispatcher; until then, or when it fails, none is known and the owner is told.
+    const standupsActive = async (): Promise<boolean> => {
+      const live = dispatch?.standups as unknown as { anyActive?: () => Promise<boolean> } | undefined;
+      if (live?.anyActive === undefined) return false;
+      return live.anyActive();
+    };
+    const notifications = NotificationService.withEpoch(storage, epoch, { standupScheduled: standupsActive, timeZone: async () => { const v = await configuration.installationValue("meeting.timeZone"); return typeof v === "string" ? v : undefined; }, ...(options.notifications?.channels === undefined ? {} : { channels: options.notifications.channels }), ...(options.notifications?.clock === undefined ? {} : { clock: options.notifications.clock }) });
     const messages = AgentMessageService.withEpoch(storage, epoch, {
       onSent: async (e) => { await activity.record({ id: "service:messages", kind: "service", name: "messages", grants: [] } as Principal, { commandId: `msg-act:${e.messageId}`, taskId: e.taskId, kind: e.ownerSent ? "owner-message" : "agent-message", summary: `${e.sender} sent ${e.to} a ${e.class} message: ${e.purpose}`, manifest: { refs: [{ kind: "agent-message", id: e.messageId }] } } as never); },
       availability: pauses.availability, taskPaused: (t) => pauses.isPaused(t), guard: (t) => pauses.guard(t), waits, assignments, inquiries, notifications });
@@ -931,7 +937,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const stagedRestore = backups === undefined || dataDirectory === undefined ? undefined : new StagedRestore({ backups, root: options.backup!.directory, barrier, ...restoreDatabase, dataDirectory, storage, ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(piFinal === undefined ? {} : { piFinal }), piStateConfigured: piState !== undefined, ...(dataLock === undefined ? {} : { lock: dataLock }), confirmMinutes: async () => (await retentionSettings.effective()).restoreConfirmMinutes, changeMargin: async () => (await retentionSettings.effective()).restoreChangeMargin, ...(backupEncryption === undefined ? {} : { unlock: (m) => backupEncryption!.unlock(m) }), deletions: () => new DeletionLedger(join(options.backup!.directory, LEDGER_FILE)).read(), ...(options.backup!.restore?.onStaged === undefined ? {} : { onStaged: options.backup!.restore.onStaged }), ...(options.backup!.restore?.restart === undefined ? {} : { restart: options.backup!.restore.restart }), ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
     // The controller's own Urgent triggers (card U11c): no good backup in time, a silent host, repeated policy denials; swept by the dispatcher and told through the notification service.
     const urgentClock = options.notifications?.clock;
-    const urgentWatch = new UrgentWatch({ notifications, ...(backups === undefined ? {} : { backups }), hosts: HostService.withEpoch(storage, epoch, assignments, urgentClock === undefined ? {} : { clock: urgentClock }), ...(urgentClock === undefined ? {} : { clock: urgentClock }) });
+    const urgentWatch = new UrgentWatch({ notifications, work: workSource({ tasks: projects, blockers: BlockerService.withEpoch(storage, epoch) }), ...(backups === undefined ? {} : { backups }), hosts: HostService.withEpoch(storage, epoch, assignments, urgentClock === undefined ? {} : { clock: urgentClock }), ...(urgentClock === undefined ? {} : { clock: urgentClock }) });
     // The controller's security detectors (card U11d): a sign seen in the controller or reported by a worker's hook is told to the Urgent watch in the background, bounded and deduped.
     const securityDetectors = new SecurityDetectors({ report: (by, e) => urgentWatch.reportSecurityFrom(by, e), enabled: async () => (await notifications.controllerSettings()).securityDetectors !== false, onError: (error) => options.onInternalError?.(error) });
     const improvements = ImprovementService.withEpoch(storage, epoch, { meetings });
