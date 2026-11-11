@@ -24,8 +24,11 @@ export interface RunningCallRecords {
   begin(entry: RunningCallEntry & { readonly seconds: number }): Promise<string | undefined>;
   /** Removes the record of a call this writer began. Never throws. */
   end(id: string): Promise<void>;
-  /** The calls of a version that OTHER writers recorded and that can still be running. Throws when the store cannot be read. */
-  elsewhere(name: string, version: string): Promise<{ readonly calls: readonly RunningCallRecord[]; readonly total: number }>;
+  /**
+   * The calls of a version that OTHER writers recorded and that can still be running. Throws when the store cannot be read. `incomplete: true` when there were more records than one bounded look reads, so calls may be
+   * missing from the answer (the caller must not present it as everything).
+   */
+  elsewhere(name: string, version: string): Promise<{ readonly calls: readonly RunningCallRecord[]; readonly total: number; readonly incomplete?: true }>;
   /** Removes records past their `until` (any writer). Answers how many were removed. Never throws. */
   sweep(): Promise<number>;
 }
@@ -43,12 +46,18 @@ export class RunningCallStore implements RunningCallRecords {
   /** This writer (one per service instance): its own records are not "elsewhere", and only it removes them before their time. */
   readonly #holder: string;
   readonly #graceMs: number;
-  private constructor(runner: CommandRunner, holder: string, graceMs: number) { this.#runner = runner; this.#holder = holder; this.#graceMs = graceMs; }
+  readonly #page: number;
+  readonly #pages: number;
+  private constructor(runner: CommandRunner, holder: string, graceMs: number, page: number, pages: number) { this.#runner = runner; this.#holder = holder; this.#graceMs = graceMs; this.#page = page; this.#pages = pages; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { readonly holder?: string; readonly graceMs?: number } = {}): RunningCallStore {
+  /** `page` and `pages` bound one look through the records (defaults `RUNNING_CALL_LIMITS`; smaller values are for tests). */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { readonly holder?: string; readonly graceMs?: number; readonly page?: number; readonly pages?: number } = {}): RunningCallStore {
     const graceMs = options.graceMs ?? RUNNING_CALL_LIMITS.graceMs;
     if (!Number.isSafeInteger(graceMs) || graceMs < 0) throw new RangeError("graceMs must be a whole number of milliseconds, 0 or more");
-    return new RunningCallStore(new CommandRunner(storage, epoch, options), options.holder ?? `h-${randomBytes(12).toString("hex")}`, graceMs);
+    const page = options.page ?? RUNNING_CALL_LIMITS.page;
+    const pages = options.pages ?? RUNNING_CALL_LIMITS.pages;
+    if (!Number.isSafeInteger(page) || page < 1 || page > RUNNING_CALL_LIMITS.page || !Number.isSafeInteger(pages) || pages < 1 || pages > RUNNING_CALL_LIMITS.pages) throw new RangeError("page and pages must be whole numbers from 1 to the defaults");
+    return new RunningCallStore(new CommandRunner(storage, epoch, options), options.holder ?? `h-${randomBytes(12).toString("hex")}`, graceMs, page, pages);
   }
 
   get holder(): string { return this.#holder; }
@@ -83,21 +92,22 @@ export class RunningCallStore implements RunningCallRecords {
     } catch { /* past its time the record is never listed, and the next sweep removes it */ }
   }
 
-  async elsewhere(name: string, version: string): Promise<{ readonly calls: readonly RunningCallRecord[]; readonly total: number }> {
+  async elsewhere(name: string, version: string): Promise<{ readonly calls: readonly RunningCallRecord[]; readonly total: number; readonly incomplete?: true }> {
     const now = Date.parse(this.#runner.now());
     const calls: RunningCallRecord[] = [];
-    for (const b of await this.#all()) {
+    const all = await this.#all();
+    for (const b of all.bodies) {
       if (b.holder === this.#holder || b.name !== name || b.version !== version || Date.parse(b.until) <= now) continue;
       calls.push({ name: b.name, version: b.version, attemptId: b.attemptId, callId: b.callId, taskId: b.taskId, agentId: b.agentId, startedAt: b.startedAt, until: b.until });
     }
-    return { calls, total: calls.length };
+    return { calls, total: calls.length, ...(all.complete ? {} : { incomplete: true as const }) };
   }
 
   async sweep(): Promise<number> {
     let removed = 0;
     try {
       const now = Date.parse(this.#runner.now());
-      const pages = await this.#runner.list(RUNNING_CALL_KIND, { limit: RUNNING_CALL_LIMITS.page });
+      const pages = await this.#runner.list(RUNNING_CALL_KIND, { limit: this.#page });
       for (const a of pages) {
         if (removed >= RUNNING_CALL_LIMITS.sweep) break;
         // A record that cannot be read names no time, so it can never be listed; it is removed too.
@@ -108,16 +118,17 @@ export class RunningCallStore implements RunningCallRecords {
     return removed;
   }
 
-  async #all(): Promise<Body[]> {
+  /** Every record, at most `pages` pages; `complete: false` when the last page read was full, so more may follow (review: the cut was silent, and calls past it were hidden). */
+  async #all(): Promise<{ readonly bodies: Body[]; readonly complete: boolean }> {
     const out: Body[] = [];
     let afterId: string | undefined;
-    for (let i = 0; i < RUNNING_CALL_LIMITS.pages; i++) {
-      const page = await this.#runner.list(RUNNING_CALL_KIND, { ...(afterId === undefined ? {} : { afterId }), limit: RUNNING_CALL_LIMITS.page });
+    for (let i = 0; i < this.#pages; i++) {
+      const page = await this.#runner.list(RUNNING_CALL_KIND, { ...(afterId === undefined ? {} : { afterId }), limit: this.#page });
       for (const a of page) if (isBody(a.body)) out.push(a.body);
-      if (page.length < RUNNING_CALL_LIMITS.page) break;
+      if (page.length < this.#page) return { bodies: out, complete: true };
       afterId = page[page.length - 1]!.id;
     }
-    return out;
+    return { bodies: out, complete: false };
   }
 
   async #remove(id: string, revision: number, type: string): Promise<void> {

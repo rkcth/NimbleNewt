@@ -841,6 +841,11 @@ for (const backend of backends) {
         out["fragile"] = await fragile.handle(s.token, s.gateway, { op: "tool.invoke", callId: "fragile-call", args });
         seen["fragileList"] = await fragile.runningEverywhere(name, "1.0.0");
         seen["swept"] = await fragile.sweepRunRecords().catch(() => "threw");
+        // Review: a record larger than one bounded look: what was read is listed and the rest is said to be unknown, never presented as everything.
+        const away = { name, version: "1.0.0", attemptId: "att-away", callId: "call-away", taskId: "tsk-away", agentId: ann.id, startedAt: "2026-11-11T10:00:00.000Z", until: "2099-01-01T00:00:00.000Z" };
+        const cutRecords = { begin: async () => undefined, end: async () => undefined, elsewhere: async () => ({ calls: [away], total: 1, incomplete: true as const }), sweep: async () => 0 };
+        const cut = deps(cutRecords, async () => ({ text: '{"ok":true}' }));
+        try { seen["cutList"] = await cut.runningEverywhere(name, "1.0.0"); } finally { cut.dispose(); }
       });
       await c.tick();
       const there1 = seen["there"] as { calls: Record<string, unknown>[]; total: number };
@@ -857,6 +862,7 @@ for (const backend of backends) {
       assert.equal(good(out["fragile"]!)["state"], "confirmed", "a record that cannot be written does not stop the call");
       assert.deepEqual(seen["fragileList"], { calls: [], total: 0, elsewhereUnknown: true });
       assert.equal(seen["swept"], 0, "a sweep that cannot reach the store answers 0, never throws");
+      assert.deepEqual(seen["cutList"], { calls: [{ attemptId: "att-away", callId: "call-away", taskId: "tsk-away", agentId: ann.id, elsewhere: true }], total: 1, elsewhereUnknown: true }, "a cut record is listed as far as it was read and said to be incomplete");
     } finally { here.dispose(); there.dispose(); fragile.dispose(); }
   });
 

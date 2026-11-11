@@ -365,7 +365,8 @@ export class ToolExecutionService {
     const mine = new Set([...(this.#running.get(`${name}|${version}`) ?? [])].map((r) => `${r.attemptId}\0${r.callId}`));
     const away = other.calls.filter((r) => !mine.has(`${r.attemptId}\0${r.callId}`));
     const calls = [...here, ...away.map(({ attemptId, callId, taskId, agentId }) => ({ attemptId, callId, taskId, agentId, elsewhere: true as const }))].slice(0, BRIDGE_LIMITS.runningListed);
-    return { calls, total: hereTotal + away.length };
+    // Review: a record too large for one bounded look is not presented as everything; what was read is listed and the rest is said to be unknown.
+    return { calls, total: hereTotal + away.length, ...(other.incomplete === true ? { elsewhereUnknown: true as const } : {}) };
   }
 
   /** Removes durable records of runs that can no longer be running (left by a process that stopped or lost the epoch). Best effort; answers how many. */

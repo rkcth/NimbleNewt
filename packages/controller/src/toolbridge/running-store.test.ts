@@ -41,6 +41,9 @@ for (const backend of backends) {
       assert.equal(again, id);
       assert.equal((await b0.elsewhere("a-ann.slow", "1.0.0")).total, 1);
       await a.end(again!);
+      // Review: the second removal is its own command, never answered as a replay of the first removal (its command ID names the record's revision, which is not reused after a delete).
+      assert.equal((await b0.elsewhere("a-ann.slow", "1.0.0")).total, 0, "the second end removes the second record too");
+      assert.equal(await w.storage.getAggregate({ kind: RUNNING_CALL_KIND, id: id! }), undefined);
 
       // A writer that lost the epoch cannot remove its record: the newer process lists it until it can no longer be running, then sweeps it.
       const left = await a.begin(entry("c2", { seconds: 5 }));
@@ -63,6 +66,26 @@ for (const backend of backends) {
       assert.equal(await w.storage.getAggregate({ kind: RUNNING_CALL_KIND, id: left! }), undefined);
       assert.ok(await w.storage.getAggregate({ kind: RUNNING_CALL_KIND, id: live! }));
       assert.equal(await a.sweep(), 0, "a fenced writer's sweep removes nothing and never throws");
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: T02d close-out review: more records than one bounded look reads are never presented as all of them`, async () => {
+    const w = await backend.open();
+    try {
+      const epoch = (await w.storage.acquireEpoch({ holder: "a", at: new Date().toISOString() })).epoch;
+      const a = RunningCallStore.withEpoch(w.storage, epoch, { page: 2, pages: 2 });
+      const b = RunningCallStore.withEpoch(w.storage, epoch, { page: 2, pages: 2 });
+      for (const c of ["c1", "c2", "c3"]) assert.ok(await a.begin(entry(c)));
+      const three = await b.elsewhere("a-ann.slow", "1.0.0");
+      assert.equal(three.total, 3);
+      assert.equal(three.incomplete, undefined, "three records fit in two pages of two");
+      assert.ok(await a.begin(entry("c4")));
+      assert.ok(await a.begin(entry("c5", { name: "a-ann.other" })));
+      const cut = await b.elsewhere("a-ann.slow", "1.0.0");
+      assert.equal(cut.incomplete, true, "the look ended on a full page, so more may follow: said, not hidden");
+      assert.ok(cut.total <= 4);
+      assert.throws(() => RunningCallStore.withEpoch(w.storage, epoch, { page: 0 }), RangeError);
+      assert.throws(() => RunningCallStore.withEpoch(w.storage, epoch, { pages: 11 }), RangeError);
     } finally { await w.close(); }
   });
 }
