@@ -53,7 +53,12 @@ const CAV = /^cav-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 /** The controller's own identity for carrying out an approved maintenance request (card A09): it may stage, activate and roll back a revision. The approval is judged by the maintenance service before it acts; nothing a caller sends can produce this principal. */
 export const MAINTENANCE_SERVICE = "service:maintenance";
-const mayManage = (by: Principal): boolean => by.kind === "owner" || (by.kind === "service" && by.id === MAINTENANCE_SERVICE);
+/**
+ * The principal the controller's environment applier acts as. It is recognised by identity (this very object), never by its ID: the owner can enrol a service principal named `maintenance` (it would read as
+ * `service:maintenance`), and such an enrolled credential must gain no right over environments. It carries `agent.manage` only so it may suspend and resume an agent.
+ */
+export const MAINTENANCE_PRINCIPAL: Principal = Object.freeze({ id: MAINTENANCE_SERVICE, kind: "service", name: "maintenance", grants: Object.freeze([Object.freeze({ action: "agent.manage", project: "*" })]), restrictions: Object.freeze([]), asOf: "2026-11-11T00:00:00.000Z" }) as unknown as Principal;
+const mayManage = (by: Principal): boolean => by.kind === "owner" || by === MAINTENANCE_PRINCIPAL;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (v: string): string => createHash("sha256").update(v).digest("hex");
 

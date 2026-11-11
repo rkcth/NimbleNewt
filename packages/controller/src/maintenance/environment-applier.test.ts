@@ -3,10 +3,11 @@ import { after, test } from "node:test";
 import { AgentService } from "../agents/index.js";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
 import { ProjectService } from "../domain/service.js";
-import { EnvironmentService, type EnvironmentManifest } from "../environments/index.js";
+import { EnvironmentService, MAINTENANCE_PRINCIPAL, type EnvironmentManifest } from "../environments/index.js";
 import { PauseService, StopService, type InventoryItem, type StopPorts } from "../lifecycle/index.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
-import { EnvironmentChangeApplier, MemoryJournal, type EnvironmentRuntime, type ReloadInput, type TrialInput, type TrialResult, type ValidateResult } from "./environment-applier.js";
+import type { ControllerStorage } from "../storage/types.js";
+import { EnvironmentChangeApplier, MemoryJournal, StorageJournal, type JournalBody, type EnvironmentRuntime, type ReloadInput, type TrialInput, type TrialResult, type ValidateResult } from "./environment-applier.js";
 import type { MaintenanceView } from "./maintenance.js";
 
 after(stopServer);
@@ -29,17 +30,21 @@ class Runtime implements EnvironmentRuntime {
   trialResult: TrialResult | "throw" = { ok: true, digestVerified: true, scriptsDeclared: false, scriptsRan: false };
   reloadResults: Array<{ ok: true; observed: Record<string, string> } | { ok: false; reason: string } | "throw"> = [];
   validateResults: ValidateResult[] = [];
+  /** When set, a reload waits for this before it answers (to hold an application part way). */
+  gate: Promise<void> | undefined;
   async trial(input: TrialInput): Promise<TrialResult> { this.calls.push("trial"); this.trials.push(input); if (this.trialResult === "throw") throw new Error("no sandbox"); return this.trialResult; }
-  async reload(input: ReloadInput) { this.calls.push(`reload:${input.revision}`); this.reloads.push(input); const r = this.reloadResults.shift() ?? { ok: true as const, observed: OBSERVED }; if (r === "throw") throw new Error("host went away"); return r; }
+  async reload(input: ReloadInput) { this.calls.push(`reload:${input.revision}`); this.reloads.push(input); if (this.gate !== undefined) await this.gate; const r = this.reloadResults.shift() ?? { ok: true as const, observed: OBSERVED }; if (r === "throw") throw new Error("host went away"); return r; }
   async validate(input: ReloadInput): Promise<ValidateResult> { this.calls.push(`validate:${input.revision}`); return this.validateResults.shift() ?? { ok: true, sessionIntact: true, compactionIntact: true }; }
 }
 class Stopping implements StopPorts {
   calls: string[] = [];
   durable = true;
   cannot: string | undefined;
+  /** How many cleanups still report work running (a busy agent settles over several looks). */
+  busy = 0;
   unsupported(): string | undefined { return this.cannot; }
   async inventory(): Promise<InventoryItem[]> { return []; }
-  async cleanup() { return { remaining: [] }; }
+  async cleanup() { if (this.busy > 0) { this.busy--; return { remaining: [{ kind: "foreground" as const, ref: "tool-call-1", state: "running" as const }] }; } return { remaining: [] }; }
   async checkpoint() { this.calls.push("checkpoint"); return { checkpointId: `cp-${this.calls.length}`, durable: this.durable, artifactsDurable: true }; }
   async terminate() { this.calls.push("terminate"); return { ended: true, unresolved: [] }; }
 }
@@ -51,7 +56,7 @@ const view = (agentId: string, id: string, spec: Record<string, unknown> = {}, k
 for (const backend of backendsNamed("SQLite")) {
   const suite = (name: string, body: (c: {
     owner: Principal; agentId: string; scope: { kind: "agent"; id: string }; env: EnvironmentService; pauses: PauseService; stops: StopService; rt: Runtime; sp: Stopping; journal: MemoryJournal;
-    applier(): EnvironmentChangeApplier; active(): Promise<{ revision: number; names: string[] }>; latest(): Promise<number>;
+    applier(): EnvironmentChangeApplier; active(): Promise<{ revision: number; names: string[] }>; latest(): Promise<number>; storage: ControllerStorage; epoch: number;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -72,10 +77,10 @@ for (const backend of backendsNamed("SQLite")) {
       const rt = new Runtime();
       const journal = new MemoryJournal();
       const scope = { kind: "agent", id: agentKey } as const;
-      const applier = (): EnvironmentChangeApplier => new EnvironmentChangeApplier({ environments: env, pauses, stops, runtime: rt, journal });
+      const applier = (): EnvironmentChangeApplier => new EnvironmentChangeApplier({ environments: env, pauses, stops, runtime: rt, journal, pollMs: 1 });
       const active = async () => { const e = (await env.get(owner, agentId))!; return { revision: e.active!.revision, names: e.active!.manifest.packages.map((p) => p.name).sort() }; };
       const latest = async () => (await env.get(owner, agentId))!.latest;
-      await body({ owner, agentId, scope, env, pauses, stops, rt, sp, journal, applier, active, latest });
+      await body({ owner, agentId, scope, env, pauses, stops, rt, sp, journal, applier, active, latest, storage: world.storage, epoch });
     } finally { await world.close(); }
   });
 
@@ -228,5 +233,139 @@ for (const backend of backendsNamed("SQLite")) {
     const skill = await c.applier().apply(view(c.agentId, "mnt-k2", { name: "notes", digest: D("2") }, "skill"));
     assert.equal(skill.outcome, "applied");
     assert.equal(await c.latest(), 1);
+  });
+
+  suite("a revision the agent wrote with the request's marker is never taken for the staged one: the trial still runs and only the approved artifact is activated", async (c) => {
+    // An agent may write its own package revisions (environment.manage). It knows its request's ID, so it can write a revision whose reason carries the applier's marker.
+    const self = { id: c.agentId, kind: "agent", name: "A", grants: [{ action: "environment.manage", project: "*" }], restrictions: [], asOf: "2026-11-11T00:00:00.000Z" } as unknown as Principal;
+    const evil = { ...base(), packages: [...base().packages, { name: "jq", version: "1.7.1", digest: D("f") }, { name: "evil", version: "6.6.6", digest: D("6") }] };
+    await c.env.change(self, { commandId: cid("spoof"), agentId: c.agentId, manifest: evil, reason: "maintenance mnt-spoof: package jq@1.7.1 (was revision 1)", expectedRevision: 1 });
+    const out = await c.applier().apply(view(c.agentId, "mnt-spoof"));
+    assert.equal(out.outcome, "applied", JSON.stringify(out));
+    assert.equal(c.rt.trials.length, 1, "the approved artifact was tried; nothing skipped the trial");
+    assert.deepEqual(await c.active(), { revision: 3, names: ["jq", "ripgrep"] }, "the agent's own revision was not activated");
+  });
+
+  suite("only the controller's own maintenance principal manages environments: a service enrolled under the same name gains nothing", async (c) => {
+    const forged = { id: "service:maintenance", kind: "service", name: "maintenance", grants: [], restrictions: [], asOf: "2026-11-11T00:00:00.000Z" } as unknown as Principal;
+    await assert.rejects(c.env.change(forged, { commandId: cid("f"), agentId: c.agentId, manifest: base(), reason: "x", expectedRevision: 1 }), /may not change/);
+    await assert.rejects(c.env.activate(forged, { commandId: cid("f"), agentId: c.agentId, revision: 1, observed: OBSERVED }), /not the owner/);
+    await assert.rejects(c.env.rollback(forged, { commandId: cid("f"), agentId: c.agentId, toRevision: 1, reason: "x", observed: OBSERVED, expectedRevision: 1 }), /not the owner/);
+    assert.equal(await c.env.get(forged, c.agentId), undefined, "nor may it read another agent's environment");
+    assert.equal((await c.env.get(MAINTENANCE_PRINCIPAL, c.agentId))?.latest, 1);
+  });
+
+  suite("the intent given back is the one right before the suspension: a pause lifted while the change waited does not leave the applier's own hold in place", async (c) => {
+    await c.pauses.pause(c.owner, { commandId: cid("p"), scope: c.scope, reason: "owner is thinking" });
+    c.sp.durable = false;
+    assert.equal((await c.applier().apply(view(c.agentId, "mnt-l1"))).outcome, "unsupported");
+    assert.equal((await c.pauses.gate(c.owner, c.scope))?.intent, "pause", "the owner's pause stays");
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: c.scope, reason: "go on" });
+    c.sp.durable = true;
+    const out = await c.applier().apply(view(c.agentId, "mnt-l1"));
+    assert.equal(out.outcome, "applied", JSON.stringify(out));
+    assert.equal((out as { effect: Record<string, unknown> }).effect["restoredIntent"], "resumed");
+    assert.equal((await c.pauses.gate(c.owner, c.scope))?.intent, "active", "the agent runs again: the hold the suspension made was lifted");
+  });
+
+  suite("a busy agent whose work settles over several looks is suspended, not given up on at the first look", async (c) => {
+    c.sp.busy = 3;
+    const out = await c.applier().apply(view(c.agentId, "mnt-busy"));
+    assert.equal(out.outcome, "applied", JSON.stringify(out));
+    assert.equal(c.sp.busy, 0);
+  });
+
+  suite("a change reverted after an unclear application is applied afresh when it is tried again, never reported from the old round", async (c) => {
+    const first = await c.applier().apply(view(c.agentId, "mnt-m1"));
+    assert.equal(first.outcome, "applied");
+    const back = await c.applier().revert(view(c.agentId, "mnt-m1"), { uncertain: true });
+    assert.equal(back.outcome, "reverted");
+    assert.deepEqual((await c.active()).names, ["ripgrep"]);
+    const again = await c.applier().apply(view(c.agentId, "mnt-m1"));
+    assert.equal(again.outcome, "applied", JSON.stringify(again));
+    assert.deepEqual((await c.active()).names, ["jq", "ripgrep"], "the application that reports applied really is active");
+    assert.equal((again as { effect: Record<string, unknown> }).effect["environmentRevision"], (await c.active()).revision);
+    assert.equal(c.rt.trials.length, 2, "the new round tried the artifact again");
+    assert.equal((await c.pauses.gate(c.owner, c.scope))?.intent, "active");
+    // Revoked now: the active round is taken back; a second revert has nothing more to do.
+    assert.equal((await c.applier().revert(view(c.agentId, "mnt-m1"), {})).outcome, "reverted");
+    assert.deepEqual((await c.active()).names, ["ripgrep"]);
+    assert.equal((await c.applier().revert(view(c.agentId, "mnt-m1"), {})).outcome, "reverted");
+    assert.deepEqual((await c.active()).names, ["ripgrep"]);
+  });
+
+  suite("an environment the owner changed after the change was staged is not undone: the change is staged again on what is active", async (c) => {
+    c.sp.durable = false;
+    assert.equal((await c.applier().apply(view(c.agentId, "mnt-n1"))).outcome, "unsupported");
+    assert.equal(await c.latest(), 2, "staged and waiting");
+    const owners = { ...base(), packages: [...base().packages, { name: "fd", version: "9.0.0", digest: D("1") }] };
+    await c.env.change(c.owner, { commandId: cid("c"), agentId: c.agentId, manifest: owners, reason: "owner adds fd", expectedRevision: 2 });
+    await c.env.activate(c.owner, { commandId: cid("a"), agentId: c.agentId, revision: 3, observed: OBSERVED });
+    c.sp.durable = true;
+    const moved = await c.applier().apply(view(c.agentId, "mnt-n1"));
+    assert.equal(moved.outcome, "unsupported");
+    assert.match((moved as { reason: string }).reason, /environment changed/);
+    assert.deepEqual(await c.active(), { revision: 3, names: ["fd", "ripgrep"] }, "the owner's revision stays active");
+    const out = await c.applier().apply(view(c.agentId, "mnt-n1"));
+    assert.equal(out.outcome, "applied", JSON.stringify(out));
+    assert.deepEqual((await c.active()).names, ["fd", "jq", "ripgrep"], "the change is made on top of the owner's");
+    assert.equal((await c.pauses.gate(c.owner, c.scope))?.intent, "active");
+  });
+
+  suite("an agent resumed between its suspension and the reload is not reloaded while it may run; the revert suspends it again first", async (c) => {
+    c.rt.reloadResults = ["throw"];
+    await assert.rejects(c.applier().apply(view(c.agentId, "mnt-o1")), /host went away/);
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: c.scope, reason: "I need it now" });
+    const out = await c.applier().apply(view(c.agentId, "mnt-o1"));
+    assert.equal(out.outcome, "unsupported", JSON.stringify(out));
+    assert.equal(c.rt.reloads.length, 1, "the running agent's worker was not reloaded");
+    // The service's verify-and-restore pass after the throw: the agent runs, so it is suspended again before its worker is touched.
+    c.rt.reloadResults = ["throw"];
+    await assert.rejects(c.applier().apply(view(c.agentId, "mnt-o2", { name: "fd", version: "9.0.0", digest: D("1"), source: "https://example.org/fd.tgz" })), /host went away/);
+    await c.pauses.resume(c.owner, { commandId: cid("r"), scope: c.scope, reason: "again" });
+    const checkpoints = c.sp.calls.filter((x) => x === "checkpoint").length;
+    const back = await c.applier().revert(view(c.agentId, "mnt-o2", { name: "fd", version: "9.0.0", digest: D("1"), source: "https://example.org/fd.tgz" }), { uncertain: true });
+    assert.equal(back.outcome, "reverted", JSON.stringify(back));
+    assert.equal(c.sp.calls.filter((x) => x === "checkpoint").length, checkpoints + 1, "suspended again before the reload");
+    assert.equal((await c.pauses.gate(c.owner, c.scope))?.intent, "active");
+    assert.deepEqual((await c.active()).names, ["ripgrep"]);
+  });
+
+  suite("a revert or a second application never races an application still running", async (c) => {
+    let release!: () => void;
+    c.rt.gate = new Promise<void>((r) => { release = r; });
+    const a = c.applier();
+    const running = a.apply(view(c.agentId, "mnt-p1"));
+    for (let i = 0; i < 200 && c.rt.reloads.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(c.rt.reloads.length, 1);
+    assert.equal((await a.revert(view(c.agentId, "mnt-p1"), { uncertain: true })).outcome, "unsupported");
+    assert.equal((await a.apply(view(c.agentId, "mnt-p1"))).outcome, "unsupported");
+    release();
+    assert.equal((await running).outcome, "applied");
+    assert.deepEqual((await c.active()).names, ["jq", "ripgrep"]);
+  });
+
+  suite("a rollback whose activation failed is finished by the repeat with the same new revision; the reloads carry the approved script behaviour", async (c) => {
+    c.rt.validateResults = [{ ok: false, reason: "session lost" }];
+    c.rt.reloadResults = [{ ok: true, observed: OBSERVED }, { ok: true, observed: { "nimblenewt.desk": D("9") } }];
+    await assert.rejects(c.applier().apply(view(c.agentId, "mnt-q1")), /could not be activated/);
+    assert.equal(await c.latest(), 3, "the rollback revision exists, not active");
+    assert.equal((await c.active()).revision, 2);
+    const back = await c.applier().revert(view(c.agentId, "mnt-q1"), { uncertain: true });
+    assert.equal(back.outcome, "reverted", JSON.stringify(back));
+    assert.deepEqual(await c.active(), { revision: 3, names: ["ripgrep"] }, "the same rollback revision was activated; no second one was written");
+    assert.equal(await c.latest(), 3);
+    assert.equal(c.rt.reloads[0]!.change?.installScripts, false, "the forward reload says scripts stay off");
+    assert.equal(c.rt.reloads[1]!.change, undefined, "a rollback reload installs nothing with scripts");
+  });
+
+  suite("access changes are never applied here, so a revert of one has nothing to undo; the stored journal takes a body written again after another", async (c) => {
+    for (const kind of ["mount", "network"] as const) assert.equal((await c.applier().revert(view(c.agentId, `mnt-r-${kind}`, {}, kind), { uncertain: true })).outcome, "reverted", kind);
+    const j = new StorageJournal(c.storage, c.epoch, options);
+    const a: JournalBody = { agentId: c.agentId, previousRevision: 1, stagedRevision: 2, prior: { paused: false }, phase: "staged", suspends: 1 };
+    await j.write("mnt-s1", a);
+    await j.write("mnt-s1", { ...a, phase: "suspended", checkpointId: "cp-1" });
+    await j.write("mnt-s1", a);
+    assert.equal((await j.read("mnt-s1"))?.phase, "staged");
   });
 }
