@@ -35,6 +35,10 @@ test("card A05b follow-up: the controller's file version is the workspace bridge
     const stale = await bridge.write({ path: "src/a.txt", expectedVersion: token, content: Buffer.from("three"), author: "agent:ann", reason: "stale" });
     assert.equal(stale.status, "rejected");
     assert.equal((await bridge.read("src/a.txt")).content?.toString(), "someone else");
+    // An empty file: the same token both ways too.
+    writeFileSync(join(shared, "src", "empty"), "");
+    assert.equal(await version("src/empty"), (await bridge.read("src/empty")).version);
+    assert.equal(await version("src/empty"), "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     // The paths the bridge refuses are refused by the controller's reading too.
     for (const bad of [".git/config", "../x", "src/../../x"]) {
       await assert.rejects(version(bad));
