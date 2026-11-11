@@ -6,6 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { withShortConnection } from "./connection.js";
 
 const SCHEMA_NAME = /^[a-z][a-z0-9_]{0,40}$/;
 /** Any name PostgreSQL keeps whole (63 bytes): the aside name is longer than a name the storage accepts, and is only ever renamed. */
@@ -66,13 +67,13 @@ function check(s: SchemaSwap): void {
   if (!/^nnrs_[0-9a-f]{8}_[0-9]{8}t[0-9]{6}z$/.test(s.staged)) throw new Error("the staged schema does not have a staged restore's name");
 }
 
-async function withClient<T>(connectionString: string, work: (client: import("pg").Client) => Promise<T>): Promise<T> {
-  const { default: pg } = await import("pg");
-  // Not the controller's application name: this short connection must not count as a controller using the schema.
-  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 10_000, statement_timeout: 30_000, application_name: "nimblenewt-restore" });
-  await client.connect();
-  try { return await work(client); } finally { await client.end().catch(() => undefined); }
-}
+/**
+ * A short connection with client-side limits (`withShortConnection`): a server that stops answering fails the step as `PostgresNoAnswer` (the swap is one
+ * transaction, so an unanswered swap is made entirely or not at all, and the restore at start checks which before it undoes anything).
+ * Not the controller's application name: this short connection must not count as a controller using the schema.
+ */
+const withClient = <T>(connectionString: string, step: { name: string; writes: boolean }, work: (client: import("pg").Client) => Promise<T>): Promise<T> =>
+  withShortConnection(connectionString, { ...step, applicationName: "nimblenewt-restore" }, work);
 
 const schemaExists = async (c: import("pg").Client, schema: string): Promise<boolean> => (await c.query("SELECT 1 AS x FROM pg_namespace WHERE nspname = $1", [schema])).rows.length > 0;
 const othersConnected = async (c: import("pg").Client, live?: string): Promise<number> => Number((await c.query(
@@ -83,8 +84,8 @@ const othersConnected = async (c: import("pg").Client, live?: string): Promise<n
        AND classid = $2::int4::oid AND objid = hashtext($3)::oid AND objsubid = 2 AND granted) x
    WHERE pid <> pg_backend_pid()`, [CONTROLLER_APPLICATION, LIVE_LOCK_CLASS, live === undefined ? null : liveLockKey(live)])).rows[0]?.n ?? 0);
 
-async function renameInOne(connectionString: string, s: SchemaSwap, steps: readonly (readonly [string, string])[], expect: { absent: string; present: readonly string[] }): Promise<void> {
-  await withClient(connectionString, async (c) => {
+async function renameInOne(connectionString: string, s: SchemaSwap, step: string, steps: readonly (readonly [string, string])[], expect: { absent: string; present: readonly string[] }): Promise<void> {
+  await withClient(connectionString, { name: step, writes: true }, async (c) => {
     await c.query("BEGIN");
     try {
       if (!(await c.query("SELECT pg_try_advisory_xact_lock($1, hashtext($2)) AS got", [LOCK_CLASS, `nimblenewt:${s.live}`])).rows[0]?.got) throw new PostgresSwapBusy("a controller is opening this schema right now (its migration lock is held)");
@@ -105,22 +106,22 @@ async function renameInOne(connectionString: string, s: SchemaSwap, steps: reado
 /** The port the staged restore uses on the database the address names. */
 export function postgresRestorePort(connectionString: string): PostgresRestorePort {
   return {
-    exists: async (schema) => { if (!ANY_NAME.test(schema)) throw new Error("invalid schema name"); return withClient(connectionString, (c) => schemaExists(c, schema)); },
-    controllersConnected: (live) => { if (live !== undefined && !SCHEMA_NAME.test(live)) throw new Error("invalid schema name"); return withClient(connectionString, (c) => othersConnected(c, live)); },
-    swap: async (s) => { check(s); await renameInOne(connectionString, s, [[s.live, s.aside], [s.staged, s.live]], { absent: s.aside, present: [s.live, s.staged] }); },
-    unswap: async (s) => { check(s); await renameInOne(connectionString, s, [[s.live, s.staged], [s.aside, s.live]], { absent: s.staged, present: [s.live, s.aside] }); },
+    exists: async (schema) => { if (!ANY_NAME.test(schema)) throw new Error("invalid schema name"); return withClient(connectionString, { name: `checking whether schema ${schema} exists`, writes: false }, (c) => schemaExists(c, schema)); },
+    controllersConnected: (live) => { if (live !== undefined && !SCHEMA_NAME.test(live)) throw new Error("invalid schema name"); return withClient(connectionString, { name: "checking for other controllers connected to the database", writes: false }, (c) => othersConnected(c, live)); },
+    swap: async (s) => { check(s); await renameInOne(connectionString, s, `swapping the restored schema ${s.staged} in as ${s.live}`, [[s.live, s.aside], [s.staged, s.live]], { absent: s.aside, present: [s.live, s.staged] }); },
+    unswap: async (s) => { check(s); await renameInOne(connectionString, s, `undoing the swap of the restored schema ${s.staged}`, [[s.live, s.staged], [s.aside, s.live]], { absent: s.staged, present: [s.live, s.aside] }); },
     dropStaged: async (live, staged) => {
       if (!SCHEMA_NAME.test(live) || !SCHEMA_NAME.test(staged) || !/^nnrs_[0-9a-f]{8}_[0-9]{8}t[0-9]{6}z$/.test(staged) || !staged.startsWith(stagedSchemaOf(live, "20000101T000000Z").slice(0, 14))) throw new Error("only a staged restore schema of this installation may be dropped");
-      await withClient(connectionString, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${staged} CASCADE`); });
+      await withClient(connectionString, { name: `dropping the staged restore schema ${staged}`, writes: true }, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${staged} CASCADE`); });
     },
     keptSchemas: async (live) => {
       if (!SCHEMA_NAME.test(live)) throw new Error("invalid schema name");
       const pattern = `^${live}_br_[0-9]{8}t[0-9]{6}z$`;
-      return withClient(connectionString, async (c) => (await c.query("SELECT nspname FROM pg_namespace WHERE nspname ~ $1 ORDER BY nspname", [pattern])).rows.map((r: { nspname: string }) => r.nspname));
+      return withClient(connectionString, { name: "listing the schemas earlier restores kept", writes: false }, async (c) => (await c.query("SELECT nspname FROM pg_namespace WHERE nspname ~ $1 ORDER BY nspname", [pattern])).rows.map((r: { nspname: string }) => r.nspname));
     },
     swapRefusal: async (live) => {
       if (!SCHEMA_NAME.test(live)) throw new Error("invalid schema name");
-      const row = await withClient(connectionString, async (c) => (await c.query("SELECT has_database_privilege(current_database(), 'CREATE') AS can_create, (SELECT pg_has_role(nspowner, 'USAGE') FROM pg_namespace WHERE nspname = $1) AS owns", [live])).rows[0] as { can_create: boolean; owns: boolean | null } | undefined);
+      const row = await withClient(connectionString, { name: "checking that this role may swap a restore in", writes: false }, async (c) => (await c.query("SELECT has_database_privilege(current_database(), 'CREATE') AS can_create, (SELECT pg_has_role(nspowner, 'USAGE') FROM pg_namespace WHERE nspname = $1) AS owns", [live])).rows[0] as { can_create: boolean; owns: boolean | null } | undefined);
       if (row?.owns === false) return `the PostgreSQL role this controller uses does not own the schema ${live}, so it cannot rename it to swap a restore in (PostgreSQL lets only the schema's owner rename it); have the database administrator make this role the schema's owner, or restore from the command line`;
       if (row?.can_create !== true) return `the PostgreSQL role this controller uses may not create schemas in this database, so a restore cannot be staged in a new schema or swapped in (a schema rename needs CREATE on the database); have the database administrator grant it, or restore from the command line`;
       return undefined;

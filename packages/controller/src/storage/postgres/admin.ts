@@ -1,22 +1,20 @@
 /**
  * Server-side reads and clean-up a database transfer needs on a PostgreSQL destination (card F04l). They live here because only the storage folders may touch the database driver.
  * Each opens a short-lived connection to the address it is given and closes it; errors are the driver's own and may name the server, so callers hide the address before showing them.
+ * A server that stops answering fails a step as `PostgresNoAnswer` (connection.ts): never a wait for ever, and never a cut while the server is still answering.
  */
 
+import { withShortConnection } from "./connection.js";
 import { CONTROLLER_TABLES } from "./schema.js";
 
 const SCHEMA_NAME = /^[a-z][a-z0-9_]{0,40}$/;
 
-async function withClient<T>(connectionString: string, work: (client: import("pg").Client) => Promise<T>): Promise<T> {
-  const { default: pg } = await import("pg");
-  const client = new pg.Client({ connectionString, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
-  await client.connect();
-  try { return await work(client); } finally { await client.end().catch(() => undefined); }
-}
+/** A short connection with client-side limits (`withShortConnection`): a server that stops answering fails the step as `PostgresNoAnswer` instead of waiting for ever. */
+const withClient = <T>(connectionString: string, step: { name: string; writes: boolean }, work: (client: import("pg").Client) => Promise<T>): Promise<T> => withShortConnection(connectionString, step, work);
 
 /** The size in bytes the server reports for the whole database the address names (all its schemas, indexes and TOAST data). */
 export async function postgresDatabaseBytes(connectionString: string): Promise<number> {
-  return withClient(connectionString, async (c) => databaseSizeFrom((await c.query("SELECT pg_database_size(current_database())::text AS n")).rows[0]?.n));
+  return withClient(connectionString, { name: "reading the size of the destination database", writes: false }, async (c) => databaseSizeFrom((await c.query("SELECT pg_database_size(current_database())::text AS n")).rows[0]?.n));
 }
 
 /** The server's size answer as a number of bytes; anything that is not a whole, non-negative number is an error (a NaN would make every room check pass). */
@@ -35,7 +33,7 @@ export function databaseSizeFrom(answer: unknown): number {
  */
 export async function discardPostgresTransferCopy(connectionString: string, schema: string, pendingHolder: string): Promise<void> {
   if (!SCHEMA_NAME.test(schema)) throw new Error("invalid PostgreSQL schema name");
-  await withClient(connectionString, async (c) => {
+  await withClient(connectionString, { name: `removing the transfer's partial copy in schema ${schema}`, writes: true }, async (c) => {
     await c.query("BEGIN");
     try {
       if ((await c.query("SELECT 1 AS x FROM pg_namespace WHERE nspname = $1", [schema])).rows.length === 0) { await c.query("COMMIT"); return; }
@@ -61,10 +59,10 @@ export async function discardPostgresTransferCopy(connectionString: string, sche
 /** Drops a schema and everything in it (CASCADE). For tests' clean-up only: a transfer never uses it (see `discardPostgresTransferCopy`). */
 export async function dropPostgresSchema(connectionString: string, schema: string): Promise<void> {
   if (!SCHEMA_NAME.test(schema)) throw new Error("invalid PostgreSQL schema name");
-  await withClient(connectionString, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); });
+  await withClient(connectionString, { name: `dropping schema ${schema}`, writes: true }, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); });
 }
 
 /** Whether the schema exists on the server (for checks that a failed copy was cleaned up). */
 export async function postgresSchemaExists(connectionString: string, schema: string): Promise<boolean> {
-  return withClient(connectionString, async (c) => Number((await c.query("SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1", [schema])).rows[0]?.n) > 0);
+  return withClient(connectionString, { name: `checking whether schema ${schema} exists`, writes: false }, async (c) => Number((await c.query("SELECT count(*)::int AS n FROM information_schema.schemata WHERE schema_name = $1", [schema])).rows[0]?.n) > 0);
 }

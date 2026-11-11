@@ -9,7 +9,7 @@ import type { LedgerEntry } from "../retention/ledger.js";
 import { canonicalJson } from "../storage/json.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
-import { PostgresStorage, PostgresSwapBusy, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { PostgresNoAnswer, PostgresStorage, PostgresSwapBusy, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { postgresFingerprint } from "../transfer/transfer.js";
 import { UnlockFailed, type BackupKey } from "./crypto.js";
 import type { MaintenanceBarrier } from "./barrier.js";
@@ -343,6 +343,7 @@ async function rollBack(data: string, key: Buffer, j: Journal, o: ApplyOptions, 
     const m = j.moves[i - 1]!;
     try { await undoMove(o, m, live); } catch (error) {
       await writeJournal(data, key, { stamp: j.stamp, mode: "back", moves: j.moves, at: i });
+      if (error instanceof PostgresNoAnswer) throw new Error(`the restore could not be undone yet: ${error.what}. Nothing more was changed; the journal ${JOURNAL_FILE} lists every move. Start again when the database server answers: putting things back continues from where it stopped, checking each move first.`, { cause: error });
       throw new Error(`the restore could not be undone: ${basename(m.to)} could not be moved back to ${basename(m.from)} (${(error as NodeJS.ErrnoException).code ?? "error"}). The data directory is half-swapped; the journal ${JOURNAL_FILE} lists every move. Free the file and start again: the rollback continues from where it stopped.`);
     }
   }
@@ -424,6 +425,7 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
     const code = (failure as NodeJS.ErrnoException | undefined)?.code;
     const why = failure === undefined ? "an earlier attempt to put things back was interrupted"
       : failure instanceof PostgresSwapBusy ? `the schema was not swapped: ${failure.message}`
+      : failure instanceof PostgresNoAnswer ? failure.what
       : code === "42501" ? "the PostgreSQL role this controller uses may not rename the schema (it must own it and may create schemas in the database)"
       : `${code ?? "error"} while moving files into place`;
     await rollBack(data, k, journal, options, live);
@@ -668,7 +670,7 @@ export class StagedRestore {
       await this.#checkMargin(manifest, margin, shown);
       // PostgreSQL: a role that may not rename the live schema would stage a restore that no start can swap in; it is refused now, plainly (the driver's own error may name the server, so it is not shown).
       if (liveDb.pg?.port.swapRefusal !== undefined) {
-        const why = await liveDb.pg.port.swapRefusal(liveDb.pg.schema).catch((error: unknown) => `the PostgreSQL server could not be asked whether this controller's role may swap a restore in (${(error as NodeJS.ErrnoException).code ?? "error"}); nothing was changed`);
+        const why = await liveDb.pg.port.swapRefusal(liveDb.pg.schema).catch((error: unknown) => error instanceof PostgresNoAnswer ? `${error.what}; nothing was changed, prepare the restore again when it answers` : `the PostgreSQL server could not be asked whether this controller's role may swap a restore in (${(error as NodeJS.ErrnoException).code ?? "error"}); nothing was changed`);
         if (why !== undefined) throw new DomainError("unavailable", why);
       }
       let unlock: BackupKey | undefined;
