@@ -130,8 +130,11 @@ for (const backend of backends) {
     const first = attempt.toolBridge(TOKEN, REQUEST("call_1"));
     const gaveUp = first.catch(() => release());
     await Promise.race([begun, gaveUp]);
-    const forged = await attempt.toolBridge("nnt-some-other-credential-000000", REQUEST("call_1"), "forged");
+    const forgedP = attempt.toolBridge("nnt-some-other-credential-000000", REQUEST("call_1"), "forged");
+    // The copy is on the controller's side of the wire before the first is let go (a shared answer would then be the first's result).
+    await new Promise((r) => setTimeout(r, 400));
     release();
+    const forged = await forgedP;
     assert.deepEqual(forged, { ok: false, code: "unauthenticated", message: "the credential was not accepted" });
     assert.deepEqual(await first, { ok: true, result: { callId: "call_1" } });
     assert.equal(c.toolBridge.calls.length, 2, "the copy with another credential reached the bridge on its own");
