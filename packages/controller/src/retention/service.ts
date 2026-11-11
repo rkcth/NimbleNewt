@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assignmentIdOf } from "../domain/assignment-model.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
@@ -318,10 +319,20 @@ export class RetentionService {
       if (!complete) partial = true;
       for (const a of old) {
         if (candidates.length >= limit) { partial = true; break; }
-        const c = a.body as { state: string; taskId?: string; projectId?: unknown; lastChangedAt: string; dismissedUntil?: string };
-        let over = c.state === "cleared";
-        if (c.state === "dismissed") over = c.dismissedUntil === undefined || Date.parse(c.dismissedUntil) < now;
-        if (c.state === "confirmed") { const task = typeof c.taskId === "string" ? (await this.#runner.get("task", c.taskId))?.body as { state?: string } | undefined : undefined; over = task === undefined || task.state === "done" || task.state === "cancelled"; }
+        const c = a.body as { state: string; taskId?: string; projectId?: unknown; lastChangedAt: string; dismissedUntil?: string; generation?: unknown; recoveryPending?: unknown };
+        if (c.state !== "cleared" && c.state !== "dismissed" && c.state !== "confirmed") continue;
+        // A dismissal is in force until its end (one with no end is in force for good, as the stall scan reads it); a recovery step half made is finished on this record.
+        if (c.state === "dismissed" && !(c.dismissedUntil !== undefined && Date.parse(c.dismissedUntil) < now)) continue;
+        if (c.recoveryPending !== undefined) continue;
+        // The stall scan names a concern by (task, generation, kind) and opens it with a command ID made from that name alone, so a concern removed while its task can still
+        // stall under the same generation could never be opened again (the scan's create would be answered as the old command). Only a concern that can never be written
+        // again goes: its task is done, cancelled or gone (final), or the task was assigned again since (the generation only grows). Both stay true, so no race with the confirm.
+        const task = typeof c.taskId === "string" ? (await this.#runner.get("task", c.taskId))?.body as { state?: string } | undefined : undefined;
+        let over = task === undefined || task.state === "done" || task.state === "cancelled";
+        if (!over && typeof c.taskId === "string" && typeof c.generation === "number") {
+          const generation = ((await this.#runner.get("assignment", assignmentIdOf(c.taskId)))?.body as { generation?: unknown } | undefined)?.generation;
+          over = typeof generation === "number" && generation > c.generation;
+        }
         if (!over) continue;
         candidates.push({ kind: "stall-concern", id: a.id, revision: a.revision, projectId: typeof c.projectId === "string" ? c.projectId : undefined, ageDays: Math.floor((now - Date.parse(c.lastChangedAt)) / DAY) });
       }

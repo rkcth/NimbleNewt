@@ -19,7 +19,7 @@ export interface RetentionValues {
   readonly contextRouteDays: number | null;
   /** Responsibility checks that came due (card P04) and were finished (a check was recorded on the responsibility after their slot, or the responsibility is retired or gone) are removed this many days after their slot. A check still owed is never removed. `null`: kept (default). Card K06d. */
   readonly checkRecordDays: number | null;
-  /** Stall concerns (card H11) that are over are removed this many days after their last change: cleared ones, dismissed ones whose dismissal has run out, and confirmed ones whose task is done or cancelled. A suspected concern, and a concern whose task still runs and was confirmed, is never removed. `null`: kept (default). Card K06d. */
+  /** Stall concerns (card H11) that are over are removed this many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once they can never be written again (their task is done, cancelled or gone, or was assigned again since: the stall scan names a concern by task, generation and kind). A suspected concern, a dismissal still in force (one with no end is in force for good) and a concern with a recovery step half made are never removed. `null`: kept (default). Card K06d. */
   readonly concernDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;

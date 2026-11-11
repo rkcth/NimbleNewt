@@ -37,47 +37,59 @@ test("finished checks and over stall concerns are kept by default; with checkRec
     const has = async (kind: string, id: string) => (await c.storage.getAggregate({ kind, id })) !== undefined;
     await put("responsibility", "resp-aaaaaaaaaaaaaaaaaaaa", { projectId: project, state: "active" });
     await put("responsibility", "resp-bbbbbbbbbbbbbbbbbbbb", { projectId: project, state: "retired" });
-    await put("responsibility-log", "resp-aaaaaaaaaaaaaaaaaaaa", { n: 1, lastCheckAt: ago(50) });
-    const chk = (id: string, responsibilityId: string, days: number) => put("responsibility-check", id, { responsibilityId, projectId: project, slotStart: ago(days), scheduledAt: ago(days), inMaintenanceWindow: false });
+    const lastCheck = ago(50);
+    await put("responsibility-log", "resp-aaaaaaaaaaaaaaaaaaaa", { n: 1, lastCheckAt: lastCheck });
+    const chk = (id: string, responsibilityId: string, days: number, slot = ago(days)) => put("responsibility-check", id, { responsibilityId, projectId: project, slotStart: slot, scheduledAt: slot, inMaintenanceWindow: false });
     await chk("rck-done0000000000000000", "resp-aaaaaaaaaaaaaaaaaaaa", 60);      // before the last check: finished
+    await chk("rck-equal000000000000000", "resp-aaaaaaaaaaaaaaaaaaaa", 50, lastCheck); // its slot is the last check's time: finished (owed only while the slot is after it, as P04 pending reads it)
     await chk("rck-owed0000000000000000", "resp-aaaaaaaaaaaaaaaaaaaa", 40);      // after the last check, old, still owed
     await chk("rck-new00000000000000000", "resp-aaaaaaaaaaaaaaaaaaaa", 5);       // too new
     await chk("rck-retired0000000000000", "resp-bbbbbbbbbbbbbbbbbbbb", 70);      // retired responsibility: history
     const liveTask = await task("still going", "t-live");
+    const movedTask = await task("handed on", "t-moved");
     const doneTask = await task("finished", "t-done"); await finish(doneTask, "f");
-    const con = (id: string, state: string, days: number, taskId: string, extra: object = {}) => put("stall-concern", id, { taskId, projectId: project, generation: 1, kind: "silent", state, detail: "x", firstSeenAt: ago(days + 1), lastChangedAt: ago(days), reopened: 0, ...extra });
-    await con("cncr-cleared00000000000", "cleared", 40, liveTask);
+    const assigned = (taskId: string, generation: number) => put("assignment", `asg-${taskId.slice(5)}`, { taskId, generation, state: "assigned", owner: { kind: "agent", id: "ann" }, attempts: 0 });
+    await assigned(liveTask, 1); await assigned(movedTask, 2);
+    const con = (id: string, state: string, days: number, taskId: string, extra: object = {}) => put("stall-concern", id, { taskId, projectId: project, generation: 1, kind: "silent", state, detail: "secret words of the concern", firstSeenAt: ago(days + 1), lastChangedAt: ago(days), reopened: 0, ...extra });
+    // The stall scan names a concern by (task, generation, kind) and opens it with a command ID made from that name: one removed while its task can still stall under that generation could never be opened again.
+    await con("cncr-clearedlive00000000", "cleared", 40, liveTask);                       // live task, same generation: can come back, kept
+    await con("cncr-clearedmoved0000000", "cleared", 40, movedTask);                      // the task was assigned again (generation 2): over
     await con("cncr-suspected0000000000", "suspected", 400, liveTask);
     await con("cncr-confirmedlive000000", "confirmed", 40, liveTask);
     await con("cncr-confirmeddone000000", "confirmed", 40, doneTask);
-    await con("cncr-dismissedrun0000000", "dismissed", 40, liveTask, { dismissedUntil: ago(30) });
+    await con("cncr-pendingdone00000000", "confirmed", 40, doneTask, { recoveryPending: { action: "nudge", key: "rec-x", by: "owner", at: ago(40) } }); // a recovery step half made: kept
+    await con("cncr-dismissedrun0000000", "dismissed", 40, liveTask, { dismissedUntil: ago(30) });   // run out, but the scan may still reopen it: kept
+    await con("cncr-dismisseddone000000", "dismissed", 40, doneTask, { dismissedUntil: ago(30) });   // run out on a finished task: over
+    await con("cncr-dismissednoend00000", "dismissed", 40, doneTask);                                 // no end: in force for good, kept
     await con("cncr-dismissedwait000000", "dismissed", 40, liveTask, { dismissedUntil: new Date(Date.now() + 86_400_000).toISOString() });
-    await con("cncr-newcleared000000000", "cleared", 2, liveTask);
+    await con("cncr-newcleared000000000", "cleared", 2, doneTask);
 
     const eff = (await call(boot.token, "retention.settings.get", {})).result.item.effective;
     assert.equal(eff.checkRecordDays, null); assert.equal(eff.concernDays, null);
     assert.equal((await call(boot.token, "retention.run", {}, "g0")).result.candidates.length, 0, "off by default: nothing is a candidate");
     const status = (await call(boot.token, "retention.status", {})).result.item;
-    assert.equal(status.growth["responsibility-check"], 4); assert.equal(status.growth["stall-concern"], 7);
+    assert.equal(status.growth["responsibility-check"], 5); assert.equal(status.growth["stall-concern"], 11);
 
-    const bad = await call(boot.token, "retention.settings.set", { checkRecordDays: 3 }, "g-bad"); assert.equal(bad.ok, false, "below the minimum is refused");
+    for (const [field, value] of [["checkRecordDays", 6], ["concernDays", 6], ["checkRecordDays", 3651], ["concernDays", 3651], ["concernDays", 30.5], ["checkRecordDays", "30"]] as const) {
+      const bad = await call(boot.token, "retention.settings.set", { [field]: value }, `g-bad-${field}-${value}`); assert.equal(bad.ok, false, `${field} ${value} is refused`);
+    }
     const set = await call(boot.token, "retention.settings.set", { checkRecordDays: 30, concernDays: 30 }, "g1");
     assert.ok(set.ok); assert.match(JSON.stringify(set.result), /checkRecordDays none -> 30/); assert.match(JSON.stringify(set.result), /concernDays none -> 30/);
 
     const preview = (await call(boot.token, "retention.run", {}, "g2")).result;
     assert.equal(preview.dryRun, true);
-    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id).sort(), ["cncr-cleared00000000000", "cncr-confirmeddone000000", "cncr-dismissedrun0000000", "rck-done0000000000000000", "rck-retired0000000000000"]);
-    for (const id of ["rck-done0000000000000000", "cncr-cleared00000000000"]) assert.equal(await has(id.startsWith("rck") ? "responsibility-check" : "stall-concern", id), true, "a preview removes nothing");
+    const removable = ["cncr-clearedmoved0000000", "cncr-confirmeddone000000", "cncr-dismisseddone000000", "rck-done0000000000000000", "rck-equal000000000000000", "rck-retired0000000000000"];
+    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id).sort(), removable);
+    for (const id of removable) assert.equal(await has(id.startsWith("rck") ? "responsibility-check" : "stall-concern", id), true, "a preview removes nothing");
     assert.match((await call(boot.token, "retention.run", { dryRun: false, confirm: "wrong" }, "g3")).error?.code ?? "", /invalid_command/, "the digest of the preview is required");
     const real = (await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "g4")).result;
-    assert.equal(real.removed, 5);
-    for (const id of ["rck-done0000000000000000", "rck-retired0000000000000"]) assert.equal(await has("responsibility-check", id), false, id);
-    for (const id of ["cncr-cleared00000000000", "cncr-confirmeddone000000", "cncr-dismissedrun0000000"]) assert.equal(await has("stall-concern", id), false, id);
+    assert.equal(real.removed, 6);
+    for (const id of removable) assert.equal(await has(id.startsWith("rck") ? "responsibility-check" : "stall-concern", id), false, id);
     for (const id of ["rck-owed0000000000000000", "rck-new00000000000000000"]) assert.equal(await has("responsibility-check", id), true, `${id} is kept`);
-    for (const id of ["cncr-suspected0000000000", "cncr-confirmedlive000000", "cncr-dismissedwait000000", "cncr-newcleared000000000"]) assert.equal(await has("stall-concern", id), true, `${id} is kept`);
+    for (const id of ["cncr-clearedlive00000000", "cncr-suspected0000000000", "cncr-confirmedlive000000", "cncr-pendingdone00000000", "cncr-dismissedrun0000000", "cncr-dismissednoend00000", "cncr-dismissedwait000000", "cncr-newcleared000000000"]) assert.equal(await has("stall-concern", id), true, `${id} is kept`);
     let n = 0; let after = 0; const rules: string[] = [];
-    for (;;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); for (const e of page) { after = e.seq; if (e.type === "retention.expire") { n += 1; rules.push((e.detail as { rule: string }).rule); } } if (page.length < 500) break; }
-    assert.equal(n, 5, "every removal is audited"); assert.deepEqual([...new Set(rules)].sort(), ["check-record-days", "concern-days"]);
+    for (;;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); for (const e of page) { after = e.seq; if (e.type === "retention.expire") { n += 1; rules.push((e.detail as { rule: string }).rule); assert.doesNotMatch(JSON.stringify(e), /secret words/, "the audit names IDs, never content"); } } if (page.length < 500) break; }
+    assert.equal(n, 6, "every removal is audited"); assert.deepEqual([...new Set(rules)].sort(), ["check-record-days", "concern-days"]);
     assert.equal((await call(boot.token, "retention.run", {}, "g5")).result.candidates.length, 0, "a second pass finds nothing");
   } finally { await c.close(); clean(d); }
 });
