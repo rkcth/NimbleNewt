@@ -119,19 +119,20 @@ test("an offer whose attempt ID is not an attempt ID (a path, `..`) is not run a
   const lines = [];
   const { seen, load } = packages();
   const base = mkdtempSync(join(tmpdir(), "nn-l05e-ids-"));
+  // Unique, so a folder left by an earlier broken run cannot fail or pass this one; `../../<name>` from base/attempts is a sibling of base.
+  const name = `escaped-${process.pid}-${Date.now()}`;
   const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ base, log: (l) => lines.push(l) }));
   try {
     const good = "att-abcdefghijklmnopqrst";
-    await seen.poller.onOffers([{ placement: 1, order: { attemptId: "../../escaped" } }, { placement: 1, order: { attemptId: "att-../x" } }, { placement: 1, order: { attemptId: good } }]);
+    await seen.poller.onOffers([{ placement: 1, order: { attemptId: `../../${name}` } }, { placement: 1, order: { attemptId: "att-../x" } }, { placement: 1, order: { attemptId: good } }]);
     await new Promise((r) => setTimeout(r, 10));
     assert.deepEqual(seen.ran, [good]);
     assert.equal(lines.filter((l) => /not an attempt ID was not run/.test(l)).length, 2);
-    await assert.rejects(seen.parts.workspace({ attemptId: "../../escaped", taskId: "task-1", projectId: "proj-1" }), /not an attempt ID/);
-    assert.equal(existsSync(join(base, "escaped")), false);
-    assert.equal(existsSync(join(base, "..", "escaped")), false);
+    await assert.rejects(seen.parts.workspace({ attemptId: `../../${name}`, taskId: "task-1", projectId: "proj-1" }), /not an attempt ID/);
+    assert.equal(existsSync(join(base, "..", name)), false);
     const made = await seen.parts.workspace({ attemptId: good, taskId: "task-1", projectId: "proj-1" });
     assert.equal(made.home, join(base, "attempts", good, "home"));
-  } finally { seen.stopPoller(); await host.stop(); rmSync(base, { recursive: true, force: true }); }
+  } finally { seen.stopPoller(); await host.stop(); rmSync(base, { recursive: true, force: true }); rmSync(join(base, "..", name), { recursive: true, force: true }); }
 });
 
 test("a host that cannot confine agents does not start, and says why without a value that could be a secret", async () => {
