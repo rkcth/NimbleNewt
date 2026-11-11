@@ -5,7 +5,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import type { CallMonitor, RelayMonitor } from "../dispatch/relay.js";
-import { turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
+import { StartRefused, turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
 import type { SecurityEvent } from "../notifications/urgent.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import type { EffectBridge } from "../domain/effects.js";
@@ -630,7 +630,7 @@ export class RemoteWorkerService {
     if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements })));
     // A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it.
-    return { reasons, lasting: reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities/.test(r)) };
+    return { reasons, lasting: lastingReasons(reasons) };
   }
 
   /**
@@ -662,12 +662,13 @@ export class RemoteWorkerService {
     const reasons = capabilityReasons(hostId, status, requirements);
     if (session === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, requirements })));
-    if (reasons.length > 0) throw new DomainError("invalid_command", `${hostId} cannot take attempt ${attemptId}: ${reasons.join("; ")}`, { field: "hostId" });
+    // A typed refusal (card H07b): nothing was offered, so the dispatcher may try the attempt on another host.
+    if (reasons.length > 0) throw new StartRefused(hostId, attemptId, reasons, lastingReasons(reasons));
     for (const id of inputs) await this.#deps.artifacts.assertResumable([id]);
     const placed = { ...requirements, os: status!.capabilities!.os, arch: status!.capabilities!.arch };
     let offered = 0;
     for (const o of this.#offers.values()) if (o.hostId === hostId) offered++;
-    if (offered >= REMOTE_LIMITS.offers && !this.#offers.has(attemptId)) throw new DomainError("unavailable", `${hostId} already has ${REMOTE_LIMITS.offers} offers that are not accepted`);
+    if (offered >= REMOTE_LIMITS.offers && !this.#offers.has(attemptId)) throw new StartRefused(hostId, attemptId, [`${hostId} already has ${REMOTE_LIMITS.offers} offers that are not accepted`], false, "unavailable");
     const now = this.#runner.now();
     const result = await this.#changePlacement(attemptId, async (current) => {
       const store = await this.#runner.get(STORE_KIND, order.agentId);
@@ -2072,4 +2073,9 @@ export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
       default: return invalid(`events[${i}].kind`, "must be text, tool, note or end");
     }
   });
+}
+
+/** A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it (cards H07e, H07b). */
+export function lastingReasons(reasons: readonly string[]): boolean {
+  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted/.test(r));
 }

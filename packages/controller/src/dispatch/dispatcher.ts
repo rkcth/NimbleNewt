@@ -45,7 +45,7 @@ import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND,
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
-import { turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
+import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
@@ -281,6 +281,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly computeReserveMs?: number;
   /** After this many ticks in a row in which an attempt pinned to a host could not start because that host was unavailable, a blocker names the owner (who can move it). Default 5. */
   readonly pinnedStaleTicks?: number;
+  /** Card H07b: how many hosts may refuse an attempt at its start (a refusal made before anything was given to the host) before the attempt fails with every reason. Each is tried once. Default 3, at most `DISPATCH_LIMITS.startRefusals` (8, what the record keeps). An attempt pinned to one host (a move, or its native store) fails on its first refusal. */
+  readonly startTries?: number;
   /** How long the end hook (the agent's ending) may take before the attempt ends with the dispatcher's own outcome and the hook's delay is reported through `onError`. Default 30 seconds. */
   readonly endHookMs?: number;
   /** How long the ended hook may run before it is cut off (default: `endHookMs`). */
@@ -1807,7 +1809,7 @@ export class DispatcherService {
   /**
    * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
    */
-  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit; resumeNote?: string; passed?: { readonly from: string; readonly to: string; readonly why: string } }> {
+  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; passedOver: readonly { readonly hostId: string; readonly reason: string }[]; resume?: PendingResumeCommit; resumeNote?: string; passed?: { readonly from: string; readonly to: string; readonly why: string } }> {
     const taskId = task.id;
     const skip = (check: DispatchCheck, reason: string): ClaimOutcome => ({ kind: "skipped", check, reason });
     const block = async (check: DispatchCheck, type: "grant_needed" | "dispatch_blocked", reason: string, resolver = "owner"): Promise<ClaimOutcome> => {
@@ -1953,9 +1955,10 @@ export class DispatcherService {
         pinned ??= store.hostId;
       }
     }
-    const expiresAt = (await this.#load(attemptId))?.body.expiresAt;
+    const loaded = (await this.#load(attemptId))?.body;
+    const expiresAt = loaded?.expiresAt;
     const probe: HostProbe = { attemptId, taskId, projectId: task.projectId, agentId, generation: (await this.#load(attemptId))?.body.generation ?? 0, ...(chosen.harness === undefined ? {} : { harness: chosen.harness }), route: chosen.route, ...(expiresAt === undefined ? {} : { expiresAt }) };
-    const hostPick = await this.#pickHost(chosen.harness, pinned, probe);
+    const hostPick = await this.#pickHost(chosen.harness, pinned, probe, loaded?.startRefusals ?? []);
     if (hostPick.kind !== "ok") {
       if (hostPick.blocked) return block("host", "dispatch_blocked", hostPick.reason);
       if (pinned === undefined) {
@@ -1976,7 +1979,7 @@ export class DispatcherService {
     this.#refusedWaits.delete(attemptId);
     // The task is placed now, so the grants it needs were used (card A07h). Not earlier: a task that waits for a host, a route or a context rebuild uses nothing, and must not keep an unused grant open.
     await recordUse();
-    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }), ...(passed === undefined ? {} : { passed }) };
+    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, passedOver: hostPick.passedOver, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }), ...(passed === undefined ? {} : { passed }) };
   }
 
   /**
@@ -2031,11 +2034,15 @@ export class DispatcherService {
     } catch (error) { this.#options.onError?.(error); return ""; }
   }
 
-  async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string } } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
+  async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe, tried: NonNullable<DispatchBody["startRefusals"]>): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string }; passedOver: readonly { readonly hostId: string; readonly reason: string }[] } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
     // An attempt pinned to a host (it was relocated there, or it parked on it and the host owns its store) goes nowhere else: it waits for that host, and the owner can move it.
     const candidates = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
     if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
     const choice = await chooseHost(candidates, async (worker): Promise<HostVerdict> => {
+      // A host that already refused this attempt at its start is not chosen again for it (card H07b): its refusal was its answer, and asking again would only offer it the same attempt once more.
+      // A pinned attempt is the exception: the owner (a move) or its native store chose that one host, so it is asked again, and a refusal there fails the attempt rather than leaving it to wait for a host never asked.
+      const earlier = pinned === undefined ? tried.find((t) => t.hostId === worker.hostId) : undefined;
+      if (earlier !== undefined) return { kind: "refuse", reason: `${worker.hostId} refused this attempt at its start (${earlier.reason}) and is not tried again for it`, lasting: true };
       const status = await this.#deps.hosts.status(this.#deps.principal, worker.hostId);
       if (status === undefined) return { kind: "refuse", reason: `${worker.hostId} is not an enrolled host`, lasting: false };
       if (status.identity !== "active") return { kind: "refuse", reason: `${worker.hostId} is revoked`, lasting: true, revoked: true };
@@ -2050,7 +2057,7 @@ export class DispatcherService {
       }
       return { kind: "take" };
     });
-    if (choice.kind === "chosen") return { kind: "ok", host: choice.candidate };
+    if (choice.kind === "chosen") return { kind: "ok", host: choice.candidate, passedOver: choice.refusals.slice(0, DISPATCH_LIMITS.passedOver).map((r) => ({ hostId: r.hostId, reason: clipText(r.reason, DISPATCH_LIMITS.hostReason) })) };
     return { kind: "none", reason: choice.reason, blocked: choice.blocked, ...(choice.lastingRefusal ? { refused: true as const } : {}) };
   }
 
@@ -2196,7 +2203,7 @@ export class DispatcherService {
     // The task's routing decision names the configured route; the owner reads here why this attempt goes elsewhere (card G09: after a provider change, the views follow the route the attempt really takes). Once per attempt and move
     // (a reason whose words change between ticks is not repeated), and written only now that the attempt starts on that route, so an attempt that waited and then ran on its configured route is not said to have moved.
     if (pre.passed !== undefined) await this.#stepOf(b.attemptId, `route-closed:${createHash("sha256").update(`${pre.passed.from}>${pre.passed.to}`).digest("hex").slice(0, 24)}`, "model-selected", `The task's configured route ${pre.passed.from} is closed to new work, so attempt ${b.attemptId} goes to the next open route ${pre.passed.to} (${pre.passed.why}).`, [{ kind: "dispatch", id: b.attemptId }]);
-    return this.#start(d, pre.host, requestId, pre.resumeNote);
+    return this.#start(d, pre.host, requestId, pre.resumeNote, pre.passedOver);
   }
 
   async #callKey(attemptId: string): Promise<string> { return `dpa-call:${attemptId}:${(await this.#load(attemptId))?.body.modelCallSeq ?? 0}`; }
@@ -2397,18 +2404,18 @@ export class DispatcherService {
       async (x) => (x.lateHeld !== undefined && left(x) === undefined && x.state === "finished" ? this.#liveChange(attemptId, false) : []));
   }
 
-  async #start(d: Loaded, host: WorkerHost, requestId: string, reviewed?: string): Promise<AdvanceOutcome> {
+  async #start(d: Loaded, host: WorkerHost, requestId: string, reviewed?: string, passedOver: readonly { readonly hostId: string; readonly reason: string }[] = []): Promise<AdvanceOutcome> {
     let done!: () => void;
     const starting = new Promise<void>((ok) => { done = ok; });
     this.#starting.set(d.body.attemptId, starting);
     let outcome: AdvanceOutcome;
-    try { outcome = await this.#startNow(d, host, requestId, reviewed); } finally { this.#starting.delete(d.body.attemptId); done(); }
+    try { outcome = await this.#startNow(d, host, requestId, reviewed, passedOver); } finally { this.#starting.delete(d.body.attemptId); done(); }
     // Frozen while it waited (an operation on its checkout made it quiet after the busy check above): it is not started; the place is given back and a later tick looks again (card H12q).
     if (outcome.kind === "waiting") await this.#giveBack((await this.#load(d.body.attemptId)) ?? d);
     return outcome;
   }
 
-  async #startNow(d: Loaded, host: WorkerHost, requestId: string, reviewed?: string): Promise<AdvanceOutcome> {
+  async #startNow(d: Loaded, host: WorkerHost, requestId: string, reviewed: string | undefined, passedOver: readonly { readonly hostId: string; readonly reason: string }[]): Promise<AdvanceOutcome> {
     const b = d.body;
     // The place, the host and the generation were judged just before (`#advance`, which runs every check again for a claim that waits); here the claim on the attempt is made. The record says "running"
     // before the worker exists, and only one caller can make it: it must still be waiting, with the place this caller holds. If this process dies now, the lease ends and the attempt is taken as lost.
@@ -2431,14 +2438,17 @@ export class DispatcherService {
     const now = this.#runner.now();
     const until = new Date(Date.parse(now) + this.#options.leaseMs).toISOString();
     let frozen = false;
+    // What the task's placement record says before this start (card H07b): a host that refuses the start took nothing, so the record goes back to this.
+    const placedBefore = await this.#runner.get(PLACED_KIND, b.taskId);
     try {
       await this.#update(b.attemptId, (x) => {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
         // A frozen attempt may make no call, so it is not started (its worker would only come up beside whatever froze it, such as a landing on its checkout). An ending freeze is a stop: the start goes on and the stop ends it.
         if (x.frozen !== undefined && x.frozen.ending !== true) { frozen = true; throw new DomainError("unavailable", `attempt ${b.attemptId} is frozen (${x.frozen.reason})`); }
         const { resumeNote: _n, resumeFrom: _f, pinnedHost: _p, ...rest } = x; void _n; void _f; void _p;
-        const { adoptedAt: _ad, ...fresh } = rest; void _ad;
-        return { ...fresh, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until }, primaryEpoch: this.#runner.epoch };
+        const { adoptedAt: _ad, hostChoice: _hc, ...fresh } = rest; void _ad; void _hc;
+        // The hosts passed over for this one stay on the record with why (card H07b), so the owner can read why the attempt runs where it does.
+        return { ...fresh, state: "running", hostId: host.hostId, startedAt: x.startedAt ?? now, lease: { holder: this.#holder, until }, primaryEpoch: this.#runner.epoch, ...(passedOver.length === 0 ? {} : { hostChoice: { hostId: host.hostId, at: now, passedOver } }) };
       }, async () => this.#placedChange(b.taskId, host.hostId, b.route));
     } catch (error) {
       if (frozen) return { kind: "waiting" };
@@ -2485,7 +2495,13 @@ export class DispatcherService {
     if (anchor !== undefined) await this.#recordAnchor(b.attemptId, anchor);
     let handle: WorkerHandle;
     try { handle = await host.start(sealed); } catch (error) {
-      const why = error instanceof Error ? error.message.slice(0, 200) : "failed";
+      let why = error instanceof Error ? error.message.slice(0, 200) : "failed";
+      // Card H07b: the host refused the attempt before anything was given to it. Another host is tried if one is left and the bound allows; otherwise the attempt fails with every host's reason.
+      if (error instanceof StartRefused && error.hostId === host.hostId) {
+        const fell = await this.#startRefused(d, host, error, placedBefore);
+        if (fell.kind === "fallback") return fell.outcome;
+        why = fell.why;
+      }
       await this.#end(b.attemptId, "failed", `the worker did not start: ${why}`, { readmit: false });
       // The report says why too (a host that cannot meet a requirement is a visible refusal, not a silent skip).
       return { kind: "skipped", check: "host", reason: `the worker did not start: ${why}` };
@@ -2517,6 +2533,53 @@ export class DispatcherService {
     const turn = this.#run(b.attemptId, handle);
     this.#live.set(b.attemptId, { handle, host, turn });
     return { kind: "started" };
+  }
+
+  /**
+   * A host refused the attempt at its start (card H07b). The refusal is kept on the record. If the attempt is not pinned, fewer than `startTries` hosts have refused it and a worker host is left that has not, the start is
+   * undone: the attempt waits again holding nothing (the place is given back, the credential nobody received is ended, the task's placement record goes back), and the next tick chooses among the hosts that have not
+   * refused it. Otherwise the caller fails the attempt with `why`, which names every host that refused it.
+   */
+  async #startRefused(d: Loaded, host: WorkerHost, error: StartRefused, placedBefore: Awaited<ReturnType<CommandRunner["get"]>>): Promise<{ kind: "fallback"; outcome: AdvanceOutcome } | { kind: "fail"; why: string }> {
+    const b = d.body;
+    const now = this.#runner.now();
+    const fresh = (await this.#load(b.attemptId))?.body;
+    const reason = clipText(error.reasons.join("; ") || "no reason given", DISPATCH_LIMITS.hostReason);
+    const tried = [...(fresh?.startRefusals ?? []).filter((r) => r.hostId !== host.hostId), { hostId: host.hostId, reason, lasting: error.lasting, at: now }].slice(-DISPATCH_LIMITS.startRefusals);
+    // At most as many as the record keeps: past that the oldest refusal would drop off, its host could be chosen again and the bound would never be reached (H07b review).
+    const asked = this.#options.startTries;
+    const max = asked === undefined || !Number.isFinite(asked) ? 3 : Math.min(DISPATCH_LIMITS.startRefusals, Math.max(1, Math.floor(asked)));
+    // Pinned to this host by a move, or by its agent's native store (which no other host can open): it runs nowhere else, so the refusal fails it, as before (H07b review).
+    let store: Awaited<ReturnType<NonNullable<DispatcherDeps["storeOwner"]>>>;
+    try { store = await this.#deps.storeOwner?.(b.agentId, b.attemptId); } catch (e) { this.#options.onError?.(e); store = undefined; }
+    const pinned = b.pinnedHost ?? store?.hostId;
+    const left = pinned === undefined ? this.#deps.workers.filter((w) => !tried.some((t) => t.hostId === w.hostId)) : [];
+    const all = tried.map((t) => `${t.hostId}: ${t.reason}`).join("; ");
+    if (fresh === undefined || fresh.state !== "running" || fresh.hostId !== host.hostId || left.length === 0 || tried.length >= max) {
+      if (fresh !== undefined) await this.#update(b.attemptId, (x) => ({ ...x, startRefusals: tried }));
+      const why = tried.length <= 1 || pinned !== undefined ? error.message : left.length === 0 ? `every worker host refused it (${all})` : `${tried.length} hosts refused it, the most that are tried (${all})`;
+      return { kind: "fail", why: why.slice(0, 600) };
+    }
+    // Undo the start: the fields the start wrote go back to what they were, and the hosts that refused it are kept.
+    await this.#update(b.attemptId, (x) => {
+      if (x.state !== "running" || x.hostId !== host.hostId) return x;
+      const { lease: _l, primaryEpoch: _e, startedAt: _s, hostChoice: _h, ...rest } = x; void _l; void _e; void _s; void _h;
+      return {
+        ...rest, state: "waiting", hostId: b.hostId, startRefusals: tried,
+        ...(b.startedAt === undefined ? {} : { startedAt: b.startedAt }), ...(b.primaryEpoch === undefined ? {} : { primaryEpoch: b.primaryEpoch }), ...(b.hostChoice === undefined ? {} : { hostChoice: b.hostChoice }),
+        ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined ? {} : { resumeNote: b.resumeNote }), ...(b.adoptedAt === undefined ? {} : { adoptedAt: b.adoptedAt }),
+      };
+    }, async () => {
+      const found = await this.#runner.get(PLACED_KIND, b.taskId);
+      if (found === undefined) return [];
+      if (placedBefore !== undefined && found.revision === placedBefore.revision) return [];
+      // No record before: an empty one reads as none (no host, no route), since a removal is only for retention.
+      return [{ type: "update", ref: { kind: PLACED_KIND, id: b.taskId }, expectedRevision: found.revision, body: placedBefore === undefined ? {} : placedBefore.body }];
+    });
+    // The credential was issued for this start and given to nobody: it ends now, and the next start issues a fresh one.
+    await this.#deps.credentials.endForAttempt(this.#deps.principal, { commandId: `dpa-refused-cred:${b.attemptId}:${tried.length}`, attemptId: b.attemptId, reason: `${host.hostId} refused the attempt at its start` }).catch((e: unknown) => { if (!isDomainError(e, "not_found")) this.#options.onError?.(e); });
+    await this.#giveBack((await this.#load(b.attemptId)) ?? d);
+    return { kind: "fallback", outcome: { kind: "skipped", check: "host", reason: `${error.message.slice(0, 500)}; nothing was given to it, and the attempt is tried on another host that has not refused it (refusal ${tried.length} of at most ${max})`.slice(0, 800) } };
   }
 
   /** How many characters the anchor may take on this route (card W12), 0 when it is off or does not fit; asked when the room for a route change is judged. Never throws. */
