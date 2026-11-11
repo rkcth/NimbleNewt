@@ -228,6 +228,8 @@ export interface StateApiDeps {
   readonly events?: Pick<EventService, "configureIdle" | "cancel">;
   /** When present, the owner can read and set notification settings through the API (card U11b). */
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
+  /** When present, hosts and services can report security events to the Urgent watch (card U11c). */
+  readonly security?: { report(by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }): Promise<{ itemId: string; held: boolean }> };
   /** When present, budgets can be read, asked for and decided through the API (card R05c). */
   readonly budgets?: Pick<BudgetService, "report" | "usage" | "request" | "pending" | "requestMore" | "decide" | "open" | "raise" | "close" | "aggregate" | "setAggregate">;
   /** When present, difficulty profiles, delegation and escalation can be used through the API (card R03). */
@@ -370,6 +372,7 @@ export class StateApi {
         ...(this.#deps.handoffNotes === undefined ? {} : { handoffNotes: this.#deps.handoffNotes }),
         ...(this.#deps.events === undefined ? {} : { events: this.#deps.events }),
         ...(this.#deps.notifications === undefined ? {} : { notifications: this.#deps.notifications }),
+        ...(this.#deps.security === undefined ? {} : { security: this.#deps.security }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
         ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),

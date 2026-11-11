@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/index.js";
 import {
-  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SWEEP_SECONDS, type NotificationService,
+  DEFAULT_BACKUP_MAX_AGE_HOURS, DEFAULT_DENIED_ALERTS_PER_HOUR, DEFAULT_DENIED_WINDOW_MINUTES, DEFAULT_HOST_DOWN_AFTER_MINUTES, DEFAULT_SECURITY_REPORTS_PER_HOUR, DEFAULT_SWEEP_SECONDS, type NotificationService,
 } from "./notifications.js";
 
 /** What the watch needs from the backup service (card K01): the newest good backup by the scheduler's own rule, the folder being unreadable, and the last failed run. */
@@ -22,7 +23,7 @@ export interface UrgentWatchOptions {
 }
 
 /** Bounds: hosts examined per sweep (the rest on the next sweeps, from a cursor), hosts remembered in one pass, agents whose denials are counted at once. */
-export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8 } as const;
+export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200 } as const;
 
 export type SecurityEvent = "sandbox-escape-attempt" | "credential-misused" | "protected-path-touched" | "integrity-check-failed";
 const SECURITY_TEXT: Readonly<Record<SecurityEvent, string>> = {
@@ -58,6 +59,7 @@ export class UrgentWatch {
   readonly #o: UrgentWatchOptions;
   readonly #denials = new Map<string, { times: number[]; total: number; raised: boolean; capped: boolean }>();
   readonly #alerts: number[] = [];
+  readonly #reports = new Map<string, number[]>();
   #nextSweepAt = 0;
   #seq = 0;
   #hostCursor: string | undefined;
@@ -216,5 +218,37 @@ export class UrgentWatch {
     if (!(event.kind in SECURITY_TEXT)) throw new Error(`unknown security event ${String(event.kind)}`);
     const r = await this.#n.emitFromController({ commandId: `urg-sec:${event.kind}:${event.key}`, kind: "maintenance", interrupt: true, label: `Urgent: ${SECURITY_TEXT[event.kind]}`.slice(0, 200), ref: { kind: "security", id: hash(`${event.kind}|${event.key}`) }, ...(event.projectId === undefined ? {} : { projectId: event.projectId }), detail: `${SECURITY_TEXT[event.kind]}.` });
     return { itemId: r.itemId };
+  }
+  /**
+   * A security event reported by another service over the API (card U11c): only a host or a service (not an agent, not a task credential) may report. The event is the reporter's own: its
+   * key is taken together with the reporter's ID, so one reporter can neither mute nor fake another's event, and the same key from the same reporter is the same event (told once). Each reporter
+   * may raise `securityReportsPerHour` separate items an hour (the owner's setting, default 20, `null` off); the rest of its burst goes into ONE collected item for that reporter (Needs you, not
+   * paged, its count rising), so a reporter that is wrong or compromised cannot fill the inbox. The kind is checked and the key is bounded; only the kind, a hash of the key and the reporter's name leave.
+   */
+  async reportSecurityFrom(by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }): Promise<{ itemId: string; held: boolean }> {
+    if (by.kind !== "host" && by.kind !== "service") throw new DomainError("forbidden", "only a host or a service reports security events");
+    if (!(event.kind in SECURITY_TEXT)) throw new DomainError("invalid_command", `kind: must be one of ${Object.keys(SECURITY_TEXT).join(", ")}`);
+    if (typeof event.key !== "string" || event.key.length === 0 || event.key.length > URGENT_LIMITS.securityKeyChars) throw new DomainError("invalid_command", `key: must be 1 to ${URGENT_LIMITS.securityKeyChars} characters`);
+    if (event.projectId !== undefined && (typeof event.projectId !== "string" || event.projectId.length === 0 || event.projectId.length > 100)) throw new DomainError("invalid_command", "projectId: must be a project ID");
+    const settings = await this.#n.controllerSettings();
+    const cap = settings.securityReportsPerHour === undefined ? DEFAULT_SECURITY_REPORTS_PER_HOUR : settings.securityReportsPerHour;
+    const nowMs = Date.parse(this.#now());
+    const times = (this.#reports.get(by.id) ?? []).filter((t) => nowMs - t < HOUR);
+    const key = `${by.id}|${event.key}`;
+    const project = event.projectId === undefined ? {} : { projectId: event.projectId };
+    const name = code(by.id.replace(/^(host|service):/, ""));
+    // The same event again is not a new report: it replays its own item and costs no allowance.
+    const known = await this.#n.openRefIds("security");
+    const ref = hash(`${event.kind}|${key}`);
+    if (cap !== null && times.length >= cap && !known.includes(ref)) {
+      const bucket = hash(`over|${by.id}`);
+      const r = await this.#n.emitFromController({ commandId: this.#id(`urg-secover:${bucket}`), kind: "maintenance", level: "needs-you", ref: { kind: "security", id: bucket }, label: `Security reports from ${name} are held: more than ${cap} in an hour`, detail: `Host or service ${name} sent more than ${cap} security reports in an hour; the rest are not raised one by one. Look at the reporter.` });
+      return { itemId: r.itemId, held: true };
+    }
+    if (!known.includes(ref)) times.push(nowMs);
+    this.#reports.delete(by.id); this.#reports.set(by.id, times);
+    while (this.#reports.size > URGENT_LIMITS.reportersCounted) this.#reports.delete(this.#reports.keys().next().value as string);
+    const r = await this.#n.emitFromController({ commandId: `urg-sec:${event.kind}:${key}`, kind: "maintenance", interrupt: true, label: `Urgent: ${SECURITY_TEXT[event.kind as SecurityEvent]} (reported by ${name})`.slice(0, 200), ref: { kind: "security", id: ref }, ...project, detail: `${SECURITY_TEXT[event.kind as SecurityEvent]}; reported by ${name}.` });
+    return { itemId: r.itemId, held: false };
   }
 }
