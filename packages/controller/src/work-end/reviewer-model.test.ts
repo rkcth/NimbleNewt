@@ -37,7 +37,7 @@ test("the client redacts what it is given, cuts it to the bounds and replaces a 
   assert.equal(await m.complete("mine/big", ask), TOO_LONG, "complete is the same bounded call");
 });
 
-test("the client refuses a raw reply that holds no text, a throw passes through, a client with only complete() is used, and more than the allowed calls at once are refused at once (card W10 wiring)", async () => {
+test("the client refuses a raw reply that holds no text, a throw passes through, a client with only complete() is used, and a call past the allowed number at once waits in order for a slot (card W10 wiring)", async () => {
   for (const bad of [null, undefined, {}, { text: 5 }, { text: { verdict: "supported" } }]) {
     const m = new BoundedReviewerModel({ complete: async () => "", completeDetailed: async () => bad as never });
     await assert.rejects(m.completeDetailed("mine/big", ask), /returned no text/, JSON.stringify(bad));
@@ -47,14 +47,37 @@ test("the client refuses a raw reply that holds no text, a throw passes through,
   const gates: (() => void)[] = [];
   const slow = new BoundedReviewerModel({ complete: async () => { await new Promise<void>((ok) => gates.push(ok)); return "ok"; } });
   const first = [slow.complete("mine/big", ask), slow.complete("mine/big", ask)];
-  const third = await Promise.race([slow.complete("mine/big", ask).then(() => "was accepted", (error: Error) => error.message), new Promise<string>((ok) => setTimeout(() => ok("was left waiting"), 300))]);
-  assert.match(third, /too many questions/, "a third call is refused at once");
+  const thirdCall = slow.complete("mine/big", ask);
+  await new Promise((ok) => setTimeout(ok, 50));
+  assert.equal(gates.length, 2, "a third call is not sent while two are in flight");
   gates.splice(0).forEach((g) => g());
   assert.deepEqual(await Promise.all(first), ["ok", "ok"]);
+  await new Promise((ok) => setImmediate(ok));
+  assert.equal(gates.length, 1, "the waiting call is sent once a slot is free");
+  gates.splice(0).forEach((g) => g());
+  assert.equal(await thirdCall, "ok", "a burst of dones is questioned, not left not run");
   const again = slow.complete("mine/big", ask);
   await new Promise((ok) => setImmediate(ok));
   gates.splice(0).forEach((g) => g());
   assert.equal(await again, "ok", "the slots are free again once the calls ended, failed ones included");
+});
+
+test("a call that waits for a reviewer slot is bounded: past the wait or with too many waiting it fails as a failure that may pass, and the slots are not lost (review of the W10 wiring)", async () => {
+  const gates: (() => void)[] = [];
+  const sent: string[] = [];
+  const m = new BoundedReviewerModel({ complete: async (_r, q) => { sent.push(q.user); await new Promise<void>((ok) => gates.push(ok)); return "ok"; } }, { waitMs: 100, maxWaiting: 1 });
+  const busy = [m.complete("mine/big", { system: "S", user: "a" }), m.complete("mine/big", { system: "S", user: "b" })];
+  const waits = m.complete("mine/big", { system: "S", user: "c" }).then(() => "answered", (error: Error) => error.message);
+  await assert.rejects(m.complete("mine/big", { system: "S", user: "d" }), /^Error: unknown: too many questions to the reviewer are waiting/, "past the most waiting: at once");
+  assert.match(await waits, /^unknown: no reviewer slot came free within 100 ms/, "past the wait: refused, never answered");
+  gates.splice(0).forEach((g) => g());
+  assert.deepEqual(await Promise.all(busy), ["ok", "ok"]);
+  assert.deepEqual(sent, ["a", "b"], "a call given up while waiting is never sent");
+  const both = [m.complete("mine/big", ask), m.complete("mine/big", ask)];
+  await new Promise((ok) => setImmediate(ok));
+  assert.equal(gates.length, 2, "both slots are free again: a timed-out waiter took none");
+  gates.splice(0).forEach((g) => g());
+  assert.deepEqual(await Promise.all(both), ["ok", "ok"]);
 });
 
 for (const backend of backends) {
