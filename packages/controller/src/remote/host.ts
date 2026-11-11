@@ -4,6 +4,7 @@ import type { FirstCall } from "../context/dispatch.js";
 import { judgeResume, type RuntimeGuards } from "../dispatch/local-worker.js";
 import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
+import { tightenLimits } from "../environments/launch-limits.js";
 import { sealContract } from "./contract.js";
 import type { ContractLimits, HostLocalWork, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
@@ -94,9 +95,10 @@ export class RemoteWorkerHost implements WorkerHost {
   async #carry(order: WorkOrder): Promise<WorkOrder> {
     const policy = this.options.ownerPolicy;
     if (policy === undefined) return order;
-    const limits = await policy.limits();
-    const bestEffort = await policy.bestEffort();
     const c = order.contract;
+    // The figures the dispatcher put in the contract (the agent's environment cut by the installation, card A08d) and the owner's now: the smaller of each, never the owner's alone (that would drop an environment's tighter figure).
+    const limits = tightenLimits(await policy.limits(), c?.limits);
+    const bestEffort = await policy.bestEffort();
     return sealContract(order, { taskContractVersion: c?.taskContractVersion ?? 0, permissions: c?.permissions ?? [], ...(c?.budget === undefined ? {} : { budget: c.budget }), ...(limits === undefined ? {} : { limits }), bestEffort });
   }
 

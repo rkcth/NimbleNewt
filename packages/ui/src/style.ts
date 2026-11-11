@@ -37,6 +37,11 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--fg);background:var
 .card{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:.6rem .8rem;margin:.4rem 0}
 .card-title{font-weight:600;margin-bottom:.25rem}
 .card-line{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.9rem}
+.tablewrap{overflow-x:auto;margin:.3rem 0}
+.grid{border-collapse:collapse;width:100%;font-size:.85rem}
+.grid th,.grid td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:.35rem .45rem;overflow-wrap:anywhere}
+.grid thead th{color:var(--muted);font-weight:600}
+h3.card-title,h4.card-title{margin:.1em 0 .25rem;font-size:1rem;overflow-wrap:anywhere}
 .row{display:flex;gap:.5rem;flex-wrap:wrap}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 @media (prefers-reduced-motion:no-preference){.log{scroll-behavior:smooth}}
