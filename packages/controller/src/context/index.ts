@@ -6,7 +6,7 @@ export { PublicationService, pathIdOf, type PublicationPathBody } from "./public
 export * from "./budget.js";
 export { NOTE_CATEGORIES, NOTE_LIMITS, WorkingNoteService, type NoteCategory, type NoteDeletionBody, type NotePromotionBody, type NoteVersionBody, type NoteVisibility, type ReviseNote, type WorkingNoteBody, type WriteNote } from "./notes.js";
 export * from "./dispatch.js";
-export { ENFORCEMENT_LIMITS, ContextEnforcementService, contextRouteKey, startupViewText, PROMPT_NOTE_RESERVE_CHARS, type AdmissionBody, type CompactionBody, type CompactionOutcome, type EnforcementOptions, type HandoffBody, type OverflowAction, type OverflowBody } from "./enforcement.js";
+export { ENFORCEMENT_LIMITS, ContextEnforcementService, contextRouteKey, startupViewText, PROMPT_NOTE_RESERVE_CHARS, type AdmissionBody, type CompactionBody, type CompactionOutcome, type EnforcementOptions, type HandoffBody, type OverflowAction, type OverflowBody, type ProcessCompactionNote } from "./enforcement.js";
 export { LINEAGE_KEEP, LINEAGE_DIGEST, foldLineage, lineageDigest, type LineageEarlier } from "./lineage.js";
 export { THINKING_LIMITS, THINKING_RETENTION_DAYS, ThinkingService, deleteAfter, type ReadBlock, type ThinkingBlock, type ThinkingDropBody, type ThinkingExportPolicyBody, type ThinkingLookBody, type ThinkingSource } from "./thinking.js";
 export { ContextRouteSettingsService, DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS, type RouteSettingsEffective } from "./route-settings.js";

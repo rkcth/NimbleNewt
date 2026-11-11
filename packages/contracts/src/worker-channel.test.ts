@@ -17,7 +17,7 @@ test("every message of both directions survives a round trip through the line co
   const fromChild: FromChild[] = [
     { t: "ready", v: 1 }, { t: "bridge", id: 1, token: "tok", request: { op: "desk.read", callId: "c1", args: { recordId: "x" } } }, { t: "bridge", id: 2, token: "tok", request: { op: "task.get", callId: "c2" } },
     { t: "fetch", id: 9, url: "http://relay.invalid/m0/v1/chat/completions", method: "POST", headers: [["accept", "*/*"]], body: Buffer.from("{}").toString("base64") }, { t: "fetch", id: 10, url: "http://relay.invalid/m0/x", method: "GET", headers: [] },
-    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "completed", text: "ok", endKind: "no-work-end", visibleChars: 2 }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "checkpoint.ok", id: 6, checkpoint: { n: 2 }, durable: { verified: true } }, { t: "checkpoint.ok", id: 7, checkpoint: { n: 3 }, durable: { verified: false, error: "history_changed" } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
+    { t: "fetch.abort", id: 9 }, { t: "result", status: "completed", text: "ok" }, { t: "result", status: "completed", text: "ok", endKind: "no-work-end", visibleChars: 2 }, { t: "result", status: "failed", error: "boom" }, { t: "compact.ok", id: 4, contextTokens: 900 }, { t: "compact.ok", id: 5 }, { t: "compacted", messageCount: 40, summaryChars: 900, digest: "a".repeat(64) }, { t: "checkpoint.ok", id: 3, checkpoint: { n: 1 } }, { t: "checkpoint.ok", id: 6, checkpoint: { n: 2 }, durable: { verified: true } }, { t: "checkpoint.ok", id: 7, checkpoint: { n: 3 }, durable: { verified: false, error: "history_changed" } }, { t: "tell.ok", id: 4 }, { t: "fault", message: "bad" }, { t: "fault", id: 3, message: "bad" },
   ];
   const decoder = new LineDecoder();
   for (const m of toChild) assert.deepEqual(parseToChild(decoder.push(encodeMessage(m))[0]), m);
@@ -103,4 +103,10 @@ test("a turn's nudges (card W04): a whole number up to the bound on any result; 
   assert.deepEqual(parseFromChild({ t: "result", status: "failed", error: "e", nudges: 0 }), { t: "result", status: "failed", error: "e", nudges: 0 });
   assert.deepEqual(parseFromChild({ t: "result", status: "cancelled" }), { t: "result", status: "cancelled" });
   for (const nudges of [-1, 1.5, "2", MAX_TURN_NUDGES + 1]) assert.throws(() => parseFromChild({ t: "result", status: "completed", nudges }), ChannelError, JSON.stringify(nudges));
+});
+
+test("a compacted notice carries the count, the summary length and a sha-256 digest, and nothing else is accepted (card C07q)", () => {
+  const ok = { t: "compacted", messageCount: 3, summaryChars: 10, digest: "0".repeat(64) };
+  assert.deepEqual(parseFromChild(ok), ok);
+  for (const bad of [{ ...ok, digest: "G".repeat(64) }, { ...ok, digest: "0".repeat(63) }, { ...ok, messageCount: -1 }, { ...ok, messageCount: undefined }, { ...ok, summaryChars: 1.5 }, { ...ok, summaryChars: undefined }, { ...ok, messageCount: 10_000_001 }]) assert.throws(() => parseFromChild(bad), ChannelError);
 });

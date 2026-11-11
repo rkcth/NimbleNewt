@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { DecisionService } from "../decisions/index.js";
+import { ContextEnforcementService } from "../context/index.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,7 +172,7 @@ test("a dispatcher the owner disables while the controller runs is noticed on th
 test("start binds the controller's services to the local worker's guards, offers the quiesce coordinator, and reaches remote MCP servers only at checked public addresses (card H12k)", async () => {
   const d = dir();
   const timer = new ManualTimer();
-  const built: { guards: RuntimeGuards; context: (order: never) => Promise<{ compaction?: { keep?: { note: string; lines: readonly string[] } } } | undefined> }[] = [];
+  const built: { guards: RuntimeGuards; recordCompaction: (order: never, note: { messageCount: number; summaryChars: number; digest: string }) => Promise<void>; context: (order: never) => Promise<{ compaction?: { keep?: { note: string; lines: readonly string[] } } } | undefined> }[] = [];
   const worker = { hostId: "host:w1" } as unknown as WorkerHost;
   let answer: string[] | string[][] = ["10.0.0.5"];
   let lookups = 0;
@@ -203,6 +204,26 @@ test("start binds the controller's services to the local worker's guards, offers
     assert.equal(keep?.lines.length, 1);
     assert.ok(keep!.lines[0]!.startsWith(`${rec.id}: "[AUTHORITATIVE] Only raised beds in the garden, \\"final\\"`), keep!.lines[0]);
     assert.match(keep!.note, /decision version \d+.*decision\.context/);
+    // Card C07q: a compaction the process reports joins the task's chain (the second one continues the first), and one for a task that does not exist is reported, never thrown at the attempt.
+    const chain = ContextEnforcementService.withEpoch(c.storage, c.epoch, { blockers: BlockerService.withEpoch(c.storage, c.epoch, {}), retrieval: {} as never }, {});
+    const note = { messageCount: 30, summaryChars: 800, digest: "c".repeat(64) };
+    // The compaction is the task's only while its attempt is the task's active one at the order's generation (C07q review): a notice from another attempt, or from an older generation, adds nothing.
+    const annId = (await c.services.agents.create(owner, { commandId: "ag-keep", friendlyName: "ann" })).id;
+    await c.services.projects.transitionTask({ commandId: "r-keep", actor: owner.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as-keep", actor: owner.id, taskId: task, owner: { kind: "agent", id: annId } });
+    const assigned = (await c.services.assignments.getAssignment(task))!;
+    const attemptId = (await c.services.assignments.admitAttempt({ commandId: "ad-keep", actor: "inbox", taskId: task, expectedRevision: assigned.revision, generation: assigned.generation, owner: { kind: "agent", id: annId }, harness: "pi" })).id;
+    const compacted = { ...(order as object), attemptId, generation: assigned.generation } as never;
+    await built[0]!.recordCompaction({ ...(order as object), attemptId: "att-keep", generation: assigned.generation } as never, note);
+    await built[0]!.recordCompaction({ ...(compacted as object), generation: assigned.generation + 1 } as never, note);
+    assert.equal(await chain.latestCompaction(owner, task), undefined, "a notice from an attempt that is not the task's current one is not kept");
+    await built[0]!.recordCompaction(compacted, note);
+    await built[0]!.recordCompaction(compacted, note);
+    await built[0]!.recordCompaction(compacted, { ...note, digest: "d".repeat(64) });
+    const latest = await chain.latestCompaction(owner, task);
+    assert.equal(latest?.generation, 2, "the repeat of the same compaction is one; the other follows it");
+    assert.equal(latest?.lineage.length, 1);
+    await built[0]!.recordCompaction({ ...(order as object), taskId: "tsk-bbbbbbbbbbbbbbbbbbbb", attemptId: "att-none" } as never, note);
     const mcp = c.dispatch.mcp!;
     const server = (await mcp.service.register(owner, { commandId: "m1", name: "docs", mode: "remote", transport: "streamable-http", protocolRevision: "2025-06-18", sdk: { name: "@modelcontextprotocol/sdk", version: "1.12.0" }, remote: { url: "https://mcp.example.com/v1", credentialRef: "docs.token", scopes: ["docs:read"] }, audience: [project], allowed: { tools: ["search"] } } as never)).id;
     await assert.rejects(mcp.connector.connect(server, async () => "connected"), /internal address/);

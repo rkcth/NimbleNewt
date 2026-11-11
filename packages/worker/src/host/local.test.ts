@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { WORKER_CHANNEL_VERSION, encodeMessage, type FromChild, type ToChild } from "@nimblenewt/contracts";
 import type { LaunchRequest, RunResult, SandboxRun } from "../sandbox/launcher.js";
 import type { RunProcess } from "../sandbox/proc.js";
-import { estimateStoredTokens, localWorkerParts, recoveryFor, type HostOrder } from "./local.js";
+import { estimateStoredTokens, localWorkerParts, ownerPolicyOptions, recoveryFor, type HostOrder } from "./local.js";
 import { PROCESS_LIMITS } from "./process.js";
 
 // Card H12b: the recipe the dispatcher states (named reaches and limits) becomes a real recipe when the sandbox is opened. Nothing is launched here; the launcher's own checks run on the recipe at open.
@@ -405,4 +405,15 @@ test("the process's read-back check of a checkpoint goes on the checkpoint the h
   assert.deepEqual(failed.turn?.nn["durable"], { verified: false, error: "the checkpoint did not read back: history_changed" });
   const none = await run();
   assert.equal(none.turn?.nn["durable"], undefined, "nothing is said for a process that did not check");
+});
+
+test("C07q: ownerPolicyOptions connects the controller's compaction record to the host, and leaves it out when the controller gave none", async () => {
+  const seen: unknown[] = [];
+  const base = { currentLimits: async () => undefined, bestEffortAllowed: async () => false, recordLaunch: async () => undefined };
+  const note = { messageCount: 4, summaryChars: 50, digest: "e".repeat(64) };
+  const order = { attemptId: "att-1" } as never;
+  const withRecord = ownerPolicyOptions({ ...base, recordCompaction: async (o, n) => { seen.push([o, n]); } });
+  await withRecord.onCompaction!(order, note);
+  assert.deepEqual(seen, [[order, note]]);
+  assert.equal(ownerPolicyOptions(base).onCompaction, undefined);
 });

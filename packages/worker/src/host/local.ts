@@ -189,10 +189,13 @@ export interface OwnerPolicyServices {
   readonly currentLimits: () => Promise<ResourceLimits | undefined>;
   readonly bestEffortAllowed: () => Promise<boolean>;
   readonly recordLaunch: (record: LaunchEnforcement) => Promise<void>;
+  /** Card C07q: keeps a compaction the attempt's process made. Optional, so a builder written before it still type-checks. The order is the controller's own (it names the task), as for the other services the builder passes through. */
+  readonly recordCompaction?: (order: never, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => Promise<void>;
 }
 /** The three options that connect a host to the owner's limits, best-effort setting and launch record, from the services the controller gave `build`. Spread into `localWorkerParts` options. */
-export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch"> {
-  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (record) => services.recordLaunch(record) };
+export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch" | "onCompaction"> {
+  const record = services.recordCompaction;
+  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (r) => services.recordLaunch(r), ...(record === undefined ? {} : { onCompaction: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => record(order as never, note) }) };
 }
 /** What one named reach of the sandbox adds to the recipe: read-only inputs (under /inputs or /opt) and environment. Nothing else can be added by a name: not a writable path, not a network. */
 export interface ReachGrant { readonly readOnly?: readonly ReadOnlyMount[]; readonly env?: Readonly<Record<string, string>> }
@@ -238,6 +241,8 @@ export interface LocalHostOptions<Call> {
   readonly bestEffort?: (order: HostOrder) => Promise<boolean> | boolean;
   /** Told what each launch came to, started or refused, before the launch is used. If it throws, a started process is ended and the launch refused: nothing runs unrecorded. */
   readonly onLaunch?: (record: LaunchEnforcement) => Promise<void> | void;
+  /** Told when an attempt's process compacted its own conversation (card C07q): how much and the summary's digest. A failure is dropped; it never changes the attempt. */
+  readonly onCompaction?: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => Promise<void> | void;
   /**
    * How the sandbox shows what it mounts. `private` (default; bubblewrap): its own view, so the program is at `/opt/node/...` and the conversation store at `/home/agent/pi`. `host` (Seatbelt on macOS, which confines by what a process may touch and has no private filesystem
    * view): every path is the host's own, so the program, its entry file and the store are given by their host paths. The mounts are still checked and still the only things the profile lets the process read.
@@ -413,6 +418,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         }, {
           bridge: (token, request) => options.bridge(order, call, token, request),
           relay: (request) => options.relay(order, request),
+          ...(options.onCompaction === undefined ? {} : { compacted: (note) => options.onCompaction!(order, note) }),
           ...(lease === undefined ? {} : {
             renew: async () => {
               try { return { leaseMs: (await lease.renew()).leaseMs }; } catch (error) {
