@@ -31,10 +31,12 @@ export interface IncidentBody {
   readonly resolvedBy?: string;
   readonly evidence?: string;
 }
-interface SlotBody { readonly generation: number; readonly openId?: string }
+interface SlotBody { readonly generation: number; readonly openId?: string; /** Which responsibility the slot belongs to (written since card K06e; older slots lack it), so retention can tell a slot of a retired responsibility after its incidents were purged. */ readonly responsibilityId?: string }
 
 const INCIDENT = "responsibility-incident";
 const SLOT = "responsibility-incident-slot";
+/** The ID of the slot that counts the incidents of one responsibility and signature (the incident IDs are made from its generation, so a slot is removed only when nothing can be reported on its responsibility). */
+export const incidentSlotId = (responsibilityId: string, signature: string): string => `rslot-${hash(responsibilityId, signature)}`;
 const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24);
 
 /** How an observed state is told apart from the intended one (card P04): never "healthy" without a recent check. */
@@ -97,7 +99,7 @@ export class IncidentService {
             ref = { kind: INCIDENT, id: `rinc-${hash(duty.id, signature, String(generation))}` };
             const body: IncidentBody = { responsibilityId: duty.id, projectId: duty.projectId, signature, state: "open", count: 1, firstAt: now, lastAt: now, lastSummary: summary, worst: outcome };
             changes.push({ type: "create", ref, body: body as unknown as JsonObject });
-            const slotBody: SlotBody = { generation, openId: ref.id };
+            const slotBody: SlotBody = { generation, openId: ref.id, responsibilityId: duty.id };
             changes.push(slot === undefined ? { type: "create", ref: slotRef, body: slotBody as unknown as JsonObject } : { type: "update", ref: slotRef, expectedRevision: slot.revision, body: slotBody as unknown as JsonObject });
           }
           return { ref, creates: true, changes, detail: { responsibilityId: duty.id, signature }, contention: async () => new DomainError("stale_revision", "the incident changed meanwhile; try again") };
@@ -123,7 +125,7 @@ export class IncidentService {
           const slotRef: AggregateRef = { kind: SLOT, id: `rslot-${hash(b.responsibilityId, b.signature)}` };
           const slot = await this.#runner.get(SLOT, slotRef.id);
           const changes: Change[] = [{ type: "update", ref: { kind: INCIDENT, id: found.id }, expectedRevision: found.revision, body: next as unknown as JsonObject }];
-          if (slot !== undefined) changes.push({ type: "update", ref: slotRef, expectedRevision: slot.revision, body: { generation: (slot.body as unknown as SlotBody).generation } as unknown as JsonObject });
+          if (slot !== undefined) changes.push({ type: "update", ref: slotRef, expectedRevision: slot.revision, body: { generation: (slot.body as unknown as SlotBody).generation, responsibilityId: b.responsibilityId } as unknown as JsonObject });
           return { ref: { kind: INCIDENT, id: found.id }, creates: false, changes, detail: { responsibilityId: b.responsibilityId }, contention: async () => new DomainError("stale_revision", "the incident changed meanwhile; try again") };
         },
       };

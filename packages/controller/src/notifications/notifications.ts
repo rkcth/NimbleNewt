@@ -68,6 +68,8 @@ export const DEFAULT_DENIED_WINDOW_MINUTES = 60;
 export const DEFAULT_URGENT_MIN_GAP_MINUTES = 30;
 export const DEFAULT_DENIED_ALERTS_PER_HOUR = 5;
 /** The kinds whose record is a pointer the owner answers (a blocker, a review, a question): they are closed when the record is settled elsewhere. */
+/** Record kinds a controller-side notice may point at that the retention rules can remove (cards K06b, K06d, K06e): an item whose record is gone says so instead of leading to a not-found. */
+const REMOVABLE_REFS: ReadonlySet<string> = new Set(["responsibility-incident", "stall-concern", "responsibility-check"]);
 const WAITS_ON_OWNER: ReadonlySet<NotificationKind> = new Set<NotificationKind>(["blocker", "review-request", "owner-question"]);
 
 /** The three levels of everything that reaches the owner (card U11b, owner decision 2026-10-22). */
@@ -584,12 +586,20 @@ export class NotificationService {
   }
 
   /** What is waiting for the owner: unanswered items and open digests (owner only). */
-  async inbox(owner: Principal): Promise<{ items: (View<ItemBody> & { level: NotificationLevel })[]; digests: View<DigestBody>[] }> {
+  async inbox(owner: Principal): Promise<{ items: (View<ItemBody> & { level: NotificationLevel; refGone?: true; refNote?: string })[]; digests: View<DigestBody>[] }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
     const index = (await this.#index()).body;
     const by = (await this.#settings()).levelByKind;
-    return { items: (await this.#load<ItemBody>("notification-item", this.#openIds(index))).map((i) => ({ ...i, level: levelOf(i, by) })), digests: await this.#load<DigestBody>("notification-digest", index.digests) };
+    const items: (View<ItemBody> & { level: NotificationLevel; refGone?: true; refNote?: string })[] = [];
+    for (const i of await this.#load<ItemBody>("notification-item", this.#openIds(index))) {
+      const gone = await this.#refGone(i.ref);
+      items.push({ ...i, level: levelOf(i, by), ...(gone ? { refGone: true as const, refNote: `The ${i.ref.kind.replace(/-/g, " ")} this notice is about (${i.ref.id}) is no longer available: the retention rules removed it, so there is nothing left to open. The notice stays as a record of what was reported.` } : {}) });
+    }
+    return { items, digests: await this.#load<DigestBody>("notification-digest", index.digests) };
   }
+
+  /** Whether the record a notice points at was removed by retention (only for the kinds retention may remove; other refs are judged by `#describe`). */
+  async #refGone(ref: { kind: string; id: string }): Promise<boolean> { return REMOVABLE_REFS.has(ref.kind) && (await this.#runner.get(ref.kind, ref.id)) === undefined; }
 
   /** Deliveries still waiting, and the latest ones given up on, so a failure is visible (owner only). */
   async report(owner: Principal): Promise<{ pending: View<DeliveryBody>[]; failed: View<DeliveryBody>[] }> {
@@ -735,7 +745,8 @@ export class NotificationService {
         const first = Date.parse(item.firstAt);
         if (!Number.isFinite(first)) throw new DomainError("integrity", `notification ${item.id} has no valid first time`);
         if (Math.max(first, since) > limit) continue;
-        // What the item points at may have been settled in its own flow (a blocker resolved, a review decided): a settled record is not raised as Urgent.
+        // What the item points at may have been settled in its own flow (a blocker resolved, a review decided) or removed by retention: a settled record is not raised as Urgent.
+        if (await this.#refGone(item.ref)) continue;
         try { await this.#describe(item.kind, item.ref, item.projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command")) continue; throw error; }
         candidates.push(item);
       } catch (error) { problem ??= error; }
@@ -789,8 +800,11 @@ export class NotificationService {
     let problem: unknown;
     for (const item of await this.#load<ItemBody>("notification-item", ids)) {
       if (outOfTime()) break;
-      if (item.state === "answered" || item.state === "settled" || !WAITS_ON_OWNER.has(item.kind)) continue;
+      if (item.state === "answered" || item.state === "settled") continue;
       try {
+        // The record it points at was removed by the retention rules (an incident purged, a concern or a check expired): nothing is left to decide, so the item is closed.
+        if (await this.#refGone(item.ref)) { await this.#settle(item, now); continue; }
+        if (!WAITS_ON_OWNER.has(item.kind)) continue;
         try { await this.#describe(item.kind, item.ref, item.projectId); continue; } catch (error) { if (!(error instanceof DomainError && (error.code === "not_found" || error.code === "invalid_command"))) throw error; }
         await this.#settle(item, now);
       } catch (error) { problem ??= error; }

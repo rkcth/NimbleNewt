@@ -21,6 +21,12 @@ export interface RetentionValues {
   readonly checkRecordDays: number | null;
   /** Stall concerns (card H11) that are over are removed this many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once they can never be written again (their task is done, cancelled or gone, or was assigned again since: the stall scan names a concern by task, generation and kind). A suspected concern, a dismissal still in force (one with no end is in force for good) and a concern with a recovery step half made are never removed. `null`: kept (default). Card K06d. */
   readonly concernDays: number | null;
+  /** Progress evidence (`stall-evidence`, card H) of a task that is done, cancelled or gone is removed this many days after the later of its last report and the task's last change. Evidence of a task that can still run is never removed, nor is that of a task with a suspected concern or a recovery step half made. `null`: kept (default). Card K06e. */
+  readonly stallEvidenceDays: number | null;
+  /** Measured model speeds per route and host (`stall-speed`, card V01b) not updated for this many days are removed; no task or concern refers to them (the stall scan falls back to the declared or default speed and measures again). One a request in flight still names is kept. `null`: kept (default). Card K06e. */
+  readonly stallSpeedDays: number | null;
+  /** The operational history (`responsibility-event` entries) and the incident slot (`responsibility-incident-slot`) of a retired responsibility are removed this many days after it was retired (a retired responsibility is final: nothing can be recorded or reported on it again). The responsibility, its log (count and last check), its incidents and the check records stay; a slot whose incident is still open stays. `null`: kept (default). Card K06e. */
+  readonly responsibilityHistoryDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
   /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). Recorded here; the deletion itself needs adapter support (card K06c). */
@@ -59,7 +65,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, autoRun: false, thinkingDays: 14, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -71,6 +77,9 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   contextRouteDays: { kind: "days", min: 1, max: 3650, nullable: true },
   checkRecordDays: { kind: "days", min: 7, max: 3650, nullable: true },
   concernDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  stallEvidenceDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  stallSpeedDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  responsibilityHistoryDays: { kind: "days", min: 7, max: 3650, nullable: true },
   autoRun: { kind: "flag", min: 0, max: 1, nullable: false },
   thinkingDays: { kind: "days", min: 1, max: 365, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },

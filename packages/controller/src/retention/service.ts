@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { assignmentIdOf } from "../domain/assignment-model.js";
+import { incidentSlotId } from "../projects/incidents.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
@@ -173,7 +174,7 @@ export class RetentionService {
     const deletions = (await this.#recent("retention-deletion", 20)).map((a) => ({ id: a.id, ...(a.body as object) }));
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
     return {
       values: values as unknown as JsonObject,
       growth: growth as unknown as JsonObject,
@@ -337,6 +338,81 @@ export class RetentionService {
         candidates.push({ kind: "stall-concern", id: a.id, revision: a.revision, projectId: typeof c.projectId === "string" ? c.projectId : undefined, ageDays: Math.floor((now - Date.parse(c.lastChangedAt)) / DAY) });
       }
     }
+    if (values.stallEvidenceDays !== null || values.stallSpeedDays !== null) {
+      // Card K06e. What the stall scan keeps about progress. Evidence is per task (one record, ID = task), and a done, cancelled or gone task is final, so nothing writes it again;
+      // a measured speed is per route and host and the writer reads before it creates, so a removed one is simply measured again (a record created again under the same ID continues the removed revision, so the removal command of the earlier one is never mistaken for it).
+      const evidence: Aggregate[] = [];
+      if (!(await scan(this.#runner, "stall-evidence", (a) => { evidence.push(a); }))) partial = true;
+      if (values.stallEvidenceDays !== null) {
+        const cutoff = now - values.stallEvidenceDays * DAY;
+        const old = evidence.filter((a) => Date.parse((a.body as { lastReportAt?: string }).lastReportAt ?? "") < cutoff);
+        // A task with a suspected concern or a recovery step half made is still being worked on.
+        const live = new Set<string>(); let concernsComplete = true;
+        if (old.length > 0) concernsComplete = await scan(this.#runner, "stall-concern", (a) => { const c = a.body as { taskId?: unknown; state?: string; recoveryPending?: unknown }; if (typeof c.taskId === "string" && (c.state === "suspected" || c.recoveryPending !== undefined)) live.add(c.taskId); });
+        if (!concernsComplete) partial = true;
+        else for (const a of old) {
+          if (candidates.length >= limit) { partial = true; break; }
+          const b = a.body as { taskId?: unknown; projectId?: unknown; lastReportAt: string };
+          const taskId = typeof b.taskId === "string" ? b.taskId : a.id;
+          const task = await this.#runner.get("task", taskId);
+          const state = (task?.body as { state?: string } | undefined)?.state;
+          if (task !== undefined && state !== "done" && state !== "cancelled") continue;
+          if (live.has(taskId)) continue;
+          const last = Math.max(Date.parse(b.lastReportAt), task === undefined ? 0 : Date.parse(task.updatedAt));
+          if (!(last < cutoff)) continue;
+          candidates.push({ kind: "stall-evidence", id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, ageDays: Math.floor((now - last) / DAY) });
+        }
+      }
+      if (values.stallSpeedDays !== null) {
+        const cutoff = now - values.stallSpeedDays * DAY;
+        // A request in flight names its route: its speed is kept.
+        const inFlight = new Set<string>();
+        for (const a of evidence) { const r = (a.body as { request?: { route?: unknown } }).request?.route; if (typeof r === "string") inFlight.add(r); }
+        const old: Aggregate[] = [];
+        if (!(await scan(this.#runner, "stall-speed", (a) => { if (Date.parse((a.body as { updatedAt?: string }).updatedAt ?? "") < cutoff) old.push(a); }))) partial = true;
+        for (const a of old) {
+          if (candidates.length >= limit) { partial = true; break; }
+          const b = a.body as { route?: unknown; updatedAt: string };
+          if (typeof b.route === "string" && inFlight.has(b.route)) continue;
+          candidates.push({ kind: "stall-speed", id: a.id, revision: a.revision, projectId: undefined, ageDays: Math.floor((now - Date.parse(b.updatedAt)) / DAY) });
+        }
+      }
+    }
+    if (values.responsibilityHistoryDays !== null) {
+      // Card K06e. A retired responsibility is final (nothing can be recorded or reported on it), so its history entries (the log keeps the count, so no sequence number is used twice) and
+      // its incident slots (the incident IDs are made from the slot's generation, which is only counted up by a report) can never be written again. The responsibility, its log, its incidents and its check records stay.
+      const cutoff = now - values.responsibilityHistoryDays * DAY;
+      const retiredOld: Aggregate[] = [];
+      if (!(await scan(this.#runner, "responsibility", (a) => { if ((a.body as { state?: string }).state === "retired" && Date.parse(a.updatedAt) < cutoff) retiredOld.push(a); }))) partial = true;
+      const retiredIds = new Map(retiredOld.map((a) => [a.id, a] as const));
+      full: for (const r of retiredOld) {
+        const n = ((await this.#runner.get("responsibility-log", r.id))?.body as { n?: unknown } | undefined)?.n;
+        const project = (r.body as { projectId?: unknown }).projectId;
+        for (let seq = 1; typeof n === "number" && seq <= n; seq++) {
+          const ev = await this.#runner.get("responsibility-event", `${r.id}.${seq}`);
+          if (ev === undefined) continue;
+          if (candidates.length >= limit) { partial = true; break full; }
+          candidates.push({ kind: "responsibility-event", id: ev.id, revision: ev.revision, projectId: typeof project === "string" ? project : undefined, ageDays: Math.floor((now - Date.parse(r.updatedAt)) / DAY) });
+        }
+      }
+      if (retiredIds.size > 0 && !partial) {
+        // Which responsibility a slot belongs to: its own record (written since this card), else an incident of that responsibility and signature (a slot whose incidents were all purged before is not tied to anyone and stays).
+        const owner = new Map<string, string>(); const openIncident = new Set<string>();
+        if (!(await scan(this.#runner, "responsibility-incident", (a) => { const b = a.body as { responsibilityId?: unknown; signature?: unknown; state?: string }; if (typeof b.responsibilityId === "string" && typeof b.signature === "string") { const slot = incidentSlotId(b.responsibilityId, b.signature); owner.set(slot, b.responsibilityId); if (b.state === "open") openIncident.add(slot); } }))) partial = true;
+        const slots: Aggregate[] = [];
+        if (!(await scan(this.#runner, "responsibility-incident-slot", (a) => { slots.push(a); }))) partial = true;
+        for (const a of slots) {
+          const rid = (a.body as { responsibilityId?: unknown }).responsibilityId;
+          const resp = retiredIds.get(typeof rid === "string" ? rid : owner.get(a.id) ?? "");
+          if (resp === undefined || openIncident.has(a.id)) continue;
+          const openId = (a.body as { openId?: unknown }).openId;
+          if (typeof openId === "string" && (await this.#runner.get("responsibility-incident", openId)) !== undefined && ((await this.#runner.get("responsibility-incident", openId))!.body as { state?: string }).state === "open") continue;
+          if (candidates.length >= limit) { partial = true; break; }
+          const project = (resp.body as { projectId?: unknown }).projectId;
+          candidates.push({ kind: "responsibility-incident-slot", id: a.id, revision: a.revision, projectId: typeof project === "string" ? project : undefined, ageDays: Math.floor((now - Date.parse(resp.updatedAt)) / DAY) });
+        }
+      }
+    }
     const keepVersions = values.catalogVersionsKept;
     let versions: { items: { name: string; version: string; versionId: string; revision: number; ageDays: number }[]; partial: boolean } | undefined;
     const versionsRetained: { name: string; version: string; reasons: string[] }[] = [];
@@ -370,7 +446,7 @@ export class RetentionService {
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -387,7 +463,7 @@ export class RetentionService {
       for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
         const why = material.why(c.kind, c.id);
         if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
-        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -494,7 +570,7 @@ export class RetentionService {
           const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
           const changes: Change[] = [{ type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;
@@ -845,5 +921,5 @@ export class RetentionService {
 }
 
 /** The kinds in an export, in order. Secret-bearing kinds are absent by design. */
-export const EXPORT_KINDS = ["project", "task", "desk-record", "summary-record", "artifact", "retention-archive"] as const;
+export const EXPORT_KINDS = ["project", "task", "desk-record", "summary-record", "artifact", "retention-archive", "responsibility-check", "stall-concern", "responsibility-incident"] as const;
 const archiveIdOf = (recordId: string): string => `arc-${recordId}`;
