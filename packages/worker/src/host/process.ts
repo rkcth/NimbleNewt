@@ -26,7 +26,7 @@ export interface ProcessHandlers {
 }
 
 /** `killWaitMs`: how long `close` waits after the kill for the process to end before it gives up and says so (card L02d: a process the OS cannot end is reported, never waited on for ever). */
-export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
+export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, compactedInFlight: 2, compactions: 1000, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
 
 /** `close` gave up: the process was asked to end, then killed, and it is still there (card L02d). */
 export class ProcessNotEnded extends Error {}
@@ -48,6 +48,9 @@ export class WorkerProcess {
   #bridges = 0;
   /** Lease renewals the host is asking the controller about now (card H08b): each is a write at the controller, so a process may not have more than a few waiting. */
   #renewals = 0;
+  /** Compaction notices being kept at the controller now, and all this process has sent (card C07q): each is a write at the controller, so a process may not flood it. Past the in-flight bound a notice is refused (and counts toward the kill); past the total it is dropped. */
+  #compacting = 0;
+  #compactions = 0;
   #pendingBytes = 0;
   #refused = 0;
   #next = 0;
@@ -157,7 +160,16 @@ export class WorkerProcess {
         if (this.#resultWaiter !== undefined) { const w = this.#resultWaiter; this.#resultWaiter = undefined; w.reject(why); }
         return;
       }
-      case "compacted": { const told = this.#handlers.compacted; if (told !== undefined) { const { messageCount, summaryChars, digest } = m; void Promise.resolve().then(() => told.call(this.#handlers, { messageCount, summaryChars, digest })).catch(() => undefined); } return; }
+      case "compacted": {
+        const told = this.#handlers.compacted;
+        if (told === undefined) return;
+        if (this.#compacting >= PROCESS_LIMITS.compactedInFlight) return this.#refuse();
+        if (++this.#compactions > PROCESS_LIMITS.compactions) return;
+        const { messageCount, summaryChars, digest } = m;
+        this.#compacting++;
+        void Promise.resolve().then(() => told.call(this.#handlers, { messageCount, summaryChars, digest })).catch(() => undefined).finally(() => { this.#compacting--; });
+        return;
+      }
       case "bridge": void this.#bridge(m); return;
       case "fetch": void this.#fetch(m); return;
       case "fetch.abort": this.#fetches.get(m.id)?.abort(); return;

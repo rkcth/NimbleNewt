@@ -102,4 +102,31 @@ for (const backend of backends) {
       assert.equal((await enf.latestCompaction(w.owner, t))!.generation, joined.length);
     } finally { await w.close(); }
   });
+  test(`${backend.name}: a compaction that finishes between the read of the chain's head and the write is met by a retry against the new head (C07q review)`, async () => {
+    const w = await openWorld(backend);
+    try {
+      const st = w.world.storage, epoch = w.projects.epoch;
+      const blockers = BlockerService.withEpoch(st, epoch, options);
+      const plain = ContextEnforcementService.withEpoch(st, epoch, { blockers, retrieval: w.retrieval }, options);
+      const a = await w.project("A");
+      const t = await w.task(a, "a long task");
+      // The storage the racing service reads: the first read of the chain's head is answered as it was, and only then does another compaction of the task finish.
+      let armed = false, raced: string | undefined;
+      const racing = new Proxy(st, { get(target, prop) {
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (prop !== "getAggregate") return typeof value === "function" ? (value as (...x: unknown[]) => unknown).bind(target) : value;
+        return async (ref: { kind: string; id: string }) => {
+          const found = await (value as (r: unknown) => Promise<unknown>).call(target, ref);
+          if (armed && ref.kind === "ctx-chain") { armed = false; raced = (await plain.recordProcessCompaction(w.owner, { taskId: t, attemptId: "att-1", key: "other", messageCount: 1, summaryChars: 1, digest: digestOf(1) })).id; }
+          return found;
+        };
+      } });
+      const enf = ContextEnforcementService.withEpoch(racing, epoch, { blockers, retrieval: w.retrieval }, options);
+      armed = true;
+      const out = await enf.recordProcessCompaction(w.owner, { taskId: t, attemptId: "att-1", key: "mine", messageCount: 2, summaryChars: 2, digest: digestOf(2) });
+      assert.ok(raced !== undefined, "the other compaction finished in between");
+      assert.deepEqual([out.superseded, out.generation, out.lineage], [undefined, 2, [raced]], "it continues the compaction that finished first");
+      assert.equal((await plain.latestCompaction(w.owner, t))!.id, out.id);
+    } finally { await w.close(); }
+  });
 }

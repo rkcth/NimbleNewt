@@ -247,3 +247,24 @@ test("C07q: a compacted notice from the process reaches the host's handler; a ha
   assert.equal(plain.alive, true);
   f.exit(); g.exit();
 });
+
+test("C07q review: compaction notices are bounded; a flood is refused past the in-flight bound and the process that keeps on is ended, and no more than the per-process total reach the controller", async () => {
+  const note = { messageCount: 9, summaryChars: 400, digest: "b".repeat(64) };
+  // Held: nothing finishes, so every notice past the in-flight bound is refused.
+  let held = 0;
+  const f = fake();
+  const p = await WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, compacted: () => { held++; return new Promise<void>(() => undefined); } });
+  for (let i = 0; i < PROCESS_LIMITS.compactedInFlight + PROCESS_LIMITS.refusals + 5; i++) f.send({ t: "compacted", ...note });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(held, PROCESS_LIMITS.compactedInFlight, "only the in-flight bound reaches the controller");
+  assert.equal(p.alive, false, "a process that keeps flooding is ended");
+  // Answered at once: one at a time, all are kept up to the per-process total, then dropped (not refused: the process is not ended for compacting often).
+  let kept = 0;
+  const g = fake();
+  const q = await WorkerProcess.launch(g.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, compacted: async () => { kept++; } });
+  for (let i = 0; i < PROCESS_LIMITS.compactions + 10; i++) { g.send({ t: "compacted", ...note }); await new Promise((r) => setImmediate(r)); }
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(kept, PROCESS_LIMITS.compactions);
+  assert.equal(q.alive, true);
+  f.exit(); g.exit();
+});

@@ -554,7 +554,11 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     };
     // The task's own process compacted its conversation (card C07q): the compaction takes its place in the task's chain, so the lineage a continuation capture lists is the real one. A failure is reported and changes nothing for the attempt.
     const recordCompaction = async (order: WorkOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }): Promise<void> => {
-      try { await context.recordProcessCompaction(principal, { taskId: order.taskId, attemptId: order.attemptId, key: `pc-${createHash("sha256").update(`${order.attemptId}\0${note.digest}`).digest("hex").slice(0, 40)}`, ...note }); } catch (error) { i.onError?.(error); }
+      try {
+        // Only the task's current attempt adds to its chain: a process whose attempt was superseded, released or ended (its lease lost, the task reassigned) may still be running for a moment, and its compaction is not the task's (C07q review).
+        const [assignment, attempt] = await Promise.all([i.assignments.getAssignment(order.taskId), i.assignments.getAttempt(order.attemptId)]);
+        if (assignment === undefined || attempt === undefined || assignment.state !== "assigned" || assignment.activeAttemptId !== order.attemptId || assignment.generation !== order.generation || attempt.state !== "active") return;
+        await context.recordProcessCompaction(principal, { taskId: order.taskId, attemptId: order.attemptId, key: `pc-${createHash("sha256").update(`${order.attemptId}\0${note.digest}`).digest("hex").slice(0, 40)}`, ...note }); } catch (error) { i.onError?.(error); }
     };
     const confirmFirstCall = async (order: WorkOrder, usage: { readonly inputTokens: number; readonly requestChars: number }): Promise<void> => {
       try { await guards.context?.confirm?.(order, { reportedInputTokens: usage.inputTokens, promptChars: Math.max(1, usage.requestChars) }); } catch (error) { i.onError?.(error); }

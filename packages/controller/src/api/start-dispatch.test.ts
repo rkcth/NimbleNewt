@@ -207,7 +207,16 @@ test("start binds the controller's services to the local worker's guards, offers
     // Card C07q: a compaction the process reports joins the task's chain (the second one continues the first), and one for a task that does not exist is reported, never thrown at the attempt.
     const chain = ContextEnforcementService.withEpoch(c.storage, c.epoch, { blockers: BlockerService.withEpoch(c.storage, c.epoch, {}), retrieval: {} as never }, {});
     const note = { messageCount: 30, summaryChars: 800, digest: "c".repeat(64) };
-    const compacted = { ...(order as object), attemptId: "att-keep" } as never;
+    // The compaction is the task's only while its attempt is the task's active one at the order's generation (C07q review): a notice from another attempt, or from an older generation, adds nothing.
+    const annId = (await c.services.agents.create(owner, { commandId: "ag-keep", friendlyName: "ann" })).id;
+    await c.services.projects.transitionTask({ commandId: "r-keep", actor: owner.id, taskId: task, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: "as-keep", actor: owner.id, taskId: task, owner: { kind: "agent", id: annId } });
+    const assigned = (await c.services.assignments.getAssignment(task))!;
+    const attemptId = (await c.services.assignments.admitAttempt({ commandId: "ad-keep", actor: "inbox", taskId: task, expectedRevision: assigned.revision, generation: assigned.generation, owner: { kind: "agent", id: annId }, harness: "pi" })).id;
+    const compacted = { ...(order as object), attemptId, generation: assigned.generation } as never;
+    await built[0]!.recordCompaction({ ...(order as object), attemptId: "att-keep", generation: assigned.generation } as never, note);
+    await built[0]!.recordCompaction({ ...(compacted as object), generation: assigned.generation + 1 } as never, note);
+    assert.equal(await chain.latestCompaction(owner, task), undefined, "a notice from an attempt that is not the task's current one is not kept");
     await built[0]!.recordCompaction(compacted, note);
     await built[0]!.recordCompaction(compacted, note);
     await built[0]!.recordCompaction(compacted, { ...note, digest: "d".repeat(64) });

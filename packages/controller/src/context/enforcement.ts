@@ -693,6 +693,9 @@ export class ContextEnforcementService {
           record = await this.#begin(principal, { taskId, projectId, k, id, ref, compressorId: "process", title: `Compaction by the task's process (${process.messageCount} messages)`, process, command: { sources: [], ...(head === undefined ? {} : { parent: head }) } });
           break;
         } catch (error) {
+          // Another run of the same key began the record first (its begin had another parent, so this one's conflicts): that record is this compaction, and it is finished below (C07q review).
+          const began = error instanceof DomainError && error.code === "command_conflict" ? await this.#runner.get(ref.kind, id) : undefined;
+          if (began !== undefined && (began.body as unknown as CompactionBody).process !== undefined) { record = began; break; }
           if (!(error instanceof DomainError && (error.code === "invalid_command" || error.code === "stale_revision" || error.code === "command_conflict")) || tries >= 3) throw error;
           if (error.code === "invalid_command" && !/parent/.test(String(error.message))) throw error;
         }
