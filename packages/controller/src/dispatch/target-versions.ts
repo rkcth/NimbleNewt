@@ -44,9 +44,10 @@ export interface TargetVersionOptions {
   readonly gitProcesses?: number;
   /**
    * How a file reading proves that what it opened is where its walk was (tests only; the default is right for the platform): `kernel` asks Linux where the open file is (/proc/self/fd); `walk` checks that
-   * the checkout root and every directory on the way did not change from before the walk to after the read. Without Linux's answer the default is `walk`.
+   * the checkout root and every directory on the way did not change from before the walk to after the read; `path` asks the real path again after the open (it cannot see a swap undone by then).
+   * Defaults: `kernel` on Linux, `path` on Windows (see `createTargetVersions`), `walk` elsewhere (macOS).
    */
-  readonly readCheck?: "kernel" | "walk";
+  readonly readCheck?: "kernel" | "walk" | "path";
   /** Tests only: called during a file reading, to change the checkout at exactly these moments (before the last name is looked at, and right after the file is opened). */
   readonly readHooks?: { readonly beforeLastName?: () => Promise<void> | void; readonly afterOpen?: () => Promise<void> | void };
 }
@@ -214,7 +215,10 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
     return detached.code === 0 && COMMIT.test(out) ? out : unreadable("git could not read HEAD");
   };
 
-  const readCheck = deps.options?.readCheck ?? (process.platform === "linux" ? "kernel" : "walk");
+  // Windows keeps the earlier check (the real path asked again after the open): there the walk check refused readings in folders nothing changed (exhaustive run 43086209106; something on NTFS moves
+  // a folder's times during a plain reading, most likely the times of the file read inside it). It cannot see a swap undone before it asks, but no agent sandbox runs on Windows yet (no backend for
+  // win32), so nothing untrusted shares that machine's checkouts.
+  const readCheck = deps.options?.readCheck ?? (process.platform === "linux" ? "kernel" : process.platform === "win32" ? "path" : "walk");
 
   /**
    * The digest of a file below the checkout, walking each name without following links. Only the last name can be opened without following a link, so a directory on the way swapped for a link after it
@@ -273,7 +277,7 @@ export function createTargetVersions(deps: TargetVersionDeps): (target: { readon
         const opened = await handle.stat();
         if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) { if (walk) throw new WalkMoved(); refuse("the file changed while it was being opened"); }
         // What was opened must be where the walk was (see fileOf): on Linux the kernel says where the open file is; the walk check asks the real path too, and decides after the read.
-        const at = walk ? undefined : await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
+        const at = readCheck === "kernel" ? await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined) : undefined;
         if ((at ?? await realpath(next).catch(() => undefined)) !== next) { if (walk) throw new WalkMoved(); refuse("a directory on the way changed while the file was being opened"); }
         const hash = createHash("sha256");
         const chunk = Buffer.allocUnsafe(64 * 1024);

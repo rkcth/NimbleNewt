@@ -482,7 +482,8 @@ describe("the host's support check and the agent's view of its environment", () 
     assert.equal(hostEnvironmentsBase("/srv/nn/data/"), "/srv/nn/data.environments");
   });
 
-  test("the agent's sandbox gets its verified active packages read-only under /opt/environment, and nothing else", async () => {
+  // A real host on this machine: the product refuses one off Linux ("supported only on Linux so far", host.ts), so this runs on Linux only (the refusal itself is checked above).
+  test("the agent's sandbox gets its verified active packages read-only under /opt/environment, and nothing else", { skip: process.platform !== "linux" && "the local environment host is Linux only (environment/host.ts)" }, async () => {
     const data = fresh("data"); const root = hostEnvironmentsBase(data);
     const worker = new Worker(); const source = new Source();
     const host = localEnvironmentHost({ root, worker: hooks(worker), source, protectedPaths: [data] });
