@@ -458,6 +458,38 @@ for (const backend of backends) {
     assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["A", "A", "Q"]);
   });
 
+  suite("card L05d review: an admitted tool.invoke parked for review is not settled by its first answer: asked again with the same call ID after the approval it runs, once, through the real generation and effect ledger", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
+    c.svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, isLocalHost: () => true, facts: async () => hostFacts,
+      runner: { run: async (launch) => { c.runs.push(launch); return { text: '{"ok":true}', cpuMs: 5 }; } }, generations: c.generation,
+    });
+    const answers: JsonObject[] = [];
+    let effectId: string | undefined;
+    c.worker.script = c.session(async (s) => {
+      const name = await c.install(s, "check", "1.0.0");
+      const args = { tool: name, input: { url: "u" } };
+      // The model's reply holds the call; it is recorded as a complete call of the task's current generation.
+      const d = c.dispatcherPrincipal;
+      const run = await c.generation.begin(d, { commandId: "b1", taskId, contextRevision: 1 });
+      await c.generation.record(d, { commandId: "r1", runId: run.id, seq: 1, toolCall: { id: "inv-1", name: "nimblenewt__tool-invoke", argumentsDelta: JSON.stringify(args), done: true } });
+      await c.generation.complete(d, { commandId: "c1", runId: run.id });
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      const review = (await c.reviews.get(c.owner, answers[0]!["reviewId"] as string))!;
+      await c.reviews.decide(c.owner, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      answers.push(good(await s.send("tool.invoke", args, "inv-1")));
+      effectId = (await c.generation.view(c.owner, run.id))!.run.toolCalls[0]!.effectId;
+    });
+    await c.tick();
+    assert.deepEqual(answers.map((a) => a["state"]), ["awaiting-approval", "confirmed", "confirmed"], JSON.stringify(answers));
+    assert.equal(c.runs.length, 1, "the approved call ran once, and the repeat was not run again");
+    assert.ok(effectId !== undefined, "the call was admitted as an effect of its generation");
+    assert.equal((await c.storage.getEffect(effectId!))?.status, "confirmed");
+  });
+
   suite("an agent holds the grant for its own tool namespace from enrolment, so the tool path asks for approval instead of refusing the call; nothing runs before it", async (c) => {
     // Ann is enrolled with no grant for her own namespace given: she holds it all the same.
     const ann = await c.agent("ann", [...workGrants(c.project), { action: "desk.write", project: c.project }, { action: "desk.read", project: c.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }]);

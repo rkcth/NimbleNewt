@@ -96,6 +96,8 @@ export interface RemoteStartOptions {
   /** How long an attempt that waits for the owner keeps its lease (card H09b); the controller supplies the owner's setting when absent. */
   readonly patienceMs?: RemoteDeps["patienceMs"];
   readonly confirmWindowMs?: RemoteDeps["confirmWindowMs"];
+  /** How often a remote model call's output so far is reported to stall detection while it streams (see `RemoteDeps.monitorProgressMs`; default 15 s). */
+  readonly monitorProgressMs?: number;
   /** The remote hosts attempts may be placed on, with what each attempt asks of them and what it needs. */
   readonly hosts: readonly ({ readonly hostId: string } & RemoteWorkerHostOptions)[];
 }
@@ -645,6 +647,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         principal, hosts, artifacts,
         // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The route is not known here, so a remote call adds no reading of a route's speed.
         ...(monitorOf === undefined ? {} : { monitor: (a: { attemptId: string; taskId: string; generation: number }) => monitorOf({ ...a, route: "" } as unknown as WorkOrder) }),
+        ...(i.options.remote.monitorProgressMs === undefined ? {} : { monitorProgressMs: i.options.remote.monitorProgressMs }),
         streams: (a) => streamTapFor({ generation, principal, ...(i.streamSettings === undefined ? {} : { settings: () => i.streamSettings!.effective() }), onError: (error) => i.onError?.(error) }, a),
         dispatch: { gateway: (id) => d().gateway(id), get: (by, id) => d().get(by, id), relocate: (by, id, m) => d().relocate(by, id, m), quiesce: (by, id, r, o) => d().quiesce(by, id, r, o), release: (by, id) => d().release(by, id), liveAttempts: (by) => d().liveAttempts(by) },
         ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await i.workerPolicy!.recordLaunch(r as never); } }),

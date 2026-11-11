@@ -242,6 +242,8 @@ export interface RemoteDeps {
    * output, its end and the time the controller itself spends waiting on its store while it records the reply (not the model's time) are reported from the stream messages. Absent: nothing is reported (as before).
    */
   readonly monitor?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly generation: number }) => RelayMonitor;
+  /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
+  readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
   readonly recordLaunch?: (record: { readonly attemptId: string; readonly agentId: string; readonly outcome: "started" | "refused"; readonly requested: JsonObject; readonly bestEffort: boolean; readonly enforcement: readonly { readonly limit: string; readonly value: number; readonly enforced: "full" | "partial" | "none"; readonly by?: string; readonly detail: string }[]; readonly wallTimeMs: number; readonly failed?: readonly { readonly limit: string; readonly enforced: "partial" | "none"; readonly detail: string }[]; readonly reason?: string }) => Promise<void>;
 }
@@ -317,7 +319,7 @@ export class RemoteWorkerService {
   readonly #asks = new Map<string, WorkspaceAskState>();
   /** The recording taps of attempts and the model calls open on them (card L05c). In memory: a restart loses them, the worker's open call then fails on its next message and the generation stays as the store left it. */
   readonly #taps = new Map<string, ModelStreamTap>();
-  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; /** What stall detection is told about this call (card L05d). */ readonly watch?: CallMonitor | undefined; seenOutput?: boolean; last?: LastMessage | undefined }>();
+  readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; /** What stall detection is told about this call (card L05d). */ readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined }>();
   /** One monitor per attempt, like the local relay's: its reports are numbered in order. */
   readonly #monitors = new Map<string, RelayMonitor>();
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
@@ -1282,7 +1284,18 @@ export class RemoteWorkerService {
     if (n !== (entry.last?.n ?? 0) + 1) invalid("n", `must be ${(entry.last?.n ?? 0) + 1}, the next message of this call`);
     // Kept before it is awaited: a copy that overlaps the first gets the first's answer and is recorded once.
     const previous = entry.last;
-    if (entry.watch !== undefined && entry.seenOutput !== true && checked.some((e) => e.kind === "text" || e.kind === "tool")) { entry.seenOutput = true; try { entry.watch.firstOutput(); } catch { /* ignored */ } }
+    if (entry.watch !== undefined) {
+      // The first output, then (at most once in `monitorProgressMs`) how much has arrived: a reply that keeps streaming is not silent (review of card L05d; the local relay reports the same every 15 s).
+      const chars = checked.reduce((sum, e) => sum + (e.kind === "text" ? e.text.length : e.kind === "tool" ? e.argumentsDelta.length + 1 : 0), 0);
+      if (chars > 0) {
+        entry.outputChars = (entry.outputChars ?? 0) + chars;
+        const now = Date.now();
+        try {
+          if (entry.seenOutput !== true) { entry.seenOutput = true; entry.progressAt = now; entry.watch.firstOutput(); }
+          else if (now - (entry.progressAt ?? 0) >= (this.#deps.monitorProgressMs ?? 15_000)) { entry.progressAt = now; entry.watch.progress(entry.outputChars); }
+        } catch { /* the call is not affected */ }
+      }
+    }
     const answer = entry.call.events(checked);
     entry.last = { n: n as number, digest, answer };
     try { return await answer; } catch (error) { entry.last = previous; throw error; }
@@ -1305,7 +1318,7 @@ export class RemoteWorkerService {
     void c.call.ended({ ok: false }).catch(() => undefined);
   }
 
-  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; readonly watch?: CallMonitor | undefined; seenOutput?: boolean; last?: LastMessage | undefined } | undefined> {
+  async #openCall(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, streamId: unknown, tolerateClosed?: true): Promise<{ readonly call: ModelStreamCall; readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined } | undefined> {
     const b = await this.#running(host, sessionId, attemptId, placement);
     const entry = typeof streamId === "string" ? this.#calls.get(streamId) : undefined;
     if (entry === undefined && tolerateClosed === true && typeof streamId === "string" && /^rs-[0-9a-f-]{36}$/.test(streamId)) return undefined;

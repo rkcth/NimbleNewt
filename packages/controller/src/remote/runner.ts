@@ -113,7 +113,13 @@ export class RemoteOfferRunner {
           const confirmed = await attempt.confirmRestarts(messages, held, order.contract, this.#o.abilities);
           if (confirmed.refused !== undefined) { trouble("restart confirmation", new Error(confirmed.refused.join("; "))); await handle.stop().catch(() => undefined); return; }
           held = { digest: confirmed.digest, recipe: confirmed.recipe };
-        } catch (error) { trouble("restart confirmation", error); }
+        } catch (error) {
+          trouble("restart confirmation", error);
+          if (error instanceof WorkerRequestError && error.fenced) { await handle.stop().catch(() => undefined); return; }
+          // Not confirmed: nothing of this batch is applied (a restart would start a sandbox the controller has not agreed to). The same messages are read again at the next look; each confirmation is keyed by its message.
+          if (!over()) await new Promise((r) => setTimeout(r, this.#o.controlMs ?? 500));
+          continue;
+        }
       }
       for (const m of messages) {
         after = Math.max(after, m.seq);

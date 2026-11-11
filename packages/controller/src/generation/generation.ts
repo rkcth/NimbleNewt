@@ -666,8 +666,8 @@ export class GenerationService {
   /**
    * Finds the recorded call a tool bridge ID stands for, searching the task's newest `GENERATION_CHECK_RUNS` generations from `current` backwards (newest first, so a call withdrawn in an older generation is still found and refused).
    * The ID may be the call's own recorded ID, an alias (the ID the Pi extension makes of a provider ID it cannot send as it is, `h:...`, or a long one), or the extension's ID for a provider ID it was given a second time (`d:...`:
-   * the digest of the base ID and its number, see `reusedCallId`). A repeated provider ID is first read as the extension numbers it (the nth use in the window is the number n), then, failing that, as any number up to
-   * `GENERATION_REUSE_MAX`, newest generation first within a budget of `GENERATION_REUSE_HASHES` digests: a stale call whose number equals a newer use of the same provider ID is judged as that newer one (provisional).
+   * the digest of the base ID and its number, see `reusedCallId`). A repeated provider ID is read as any number up to `GENERATION_REUSE_MAX` of the newest recorded call with that base, within a budget of `GENERATION_REUSE_HASHES` digests:
+   * a stale request under an older number is judged as that newest call (and its name and arguments must still be the ones the model wrote for it).
    */
   async #locateCall(taskId: string, current: number, callId: string): Promise<{ row: Aggregate; run: RunBody; call: ToolCall } | undefined> {
     const rows: { row: Aggregate; run: RunBody }[] = [];
@@ -681,19 +681,13 @@ export class GenerationService {
     }
     if (!callId.startsWith("d:")) return undefined;
     const baseOf = (c: ToolCall): string => c.aliases?.[0] ?? c.id;
-    // As the extension numbers a repeated ID: the nth time the same base appears in the window, oldest first.
-    const seen = new Map<string, number>();
-    for (const r of [...rows].reverse()) for (const c of r.run.toolCalls) {
-      const base = baseOf(c);
-      const n = (seen.get(base) ?? 0) + 1;
-      seen.set(base, n);
-      if (n >= 2 && reusedCallId(base, n) === callId) return { ...r, call: c };
-    }
+    // A repeated provider ID stands for the newest recorded call with that base. The extension's number cannot be read off the window: it counts only the uses the process was given (a reply that broke off, a call dropped or held
+    // back, or a generation outside the window shifts it), so counting the window could pick an older generation's call and refuse the current one (review of card L05d). The process only ever runs the calls of the newest reply it
+    // received, so the newest generation holding the base is the one asked about; each distinct base is tried once, newest first.
+    const newest = new Map<string, { row: Aggregate; run: RunBody; call: ToolCall }>();
+    for (const r of rows) for (const c of r.run.toolCalls) { const base = baseOf(c); if (!newest.has(base)) newest.set(base, { ...r, call: c }); }
     let budget = GENERATION_REUSE_HASHES;
-    for (const r of rows) for (const c of r.run.toolCalls) {
-      const base = baseOf(c);
-      for (let n = 2; n <= GENERATION_REUSE_MAX && budget > 0; n++, budget--) if (reusedCallId(base, n) === callId) return { ...r, call: c };
-    }
+    for (const [base, found] of newest) for (let n = 2; n <= GENERATION_REUSE_MAX && budget > 0; n++, budget--) if (reusedCallId(base, n) === callId) return found;
     return undefined;
   }
 

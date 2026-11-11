@@ -198,9 +198,9 @@ test("a remote worker that never opens a model stream is noticed: the owner's ac
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("a remote worker's model calls are reported to stall detection: the start, the first output and the end of each call (card L05d)", async () => {
+test("a remote worker's model calls are reported to stall detection: the start, the first output, the output that keeps arriving, and the end of each call (card L05d)", async () => {
   const d = dir();
-  const w = await world(d, {} as never, { start: { tools: { runner: { run: async () => ({ text: "{}" }) }, isLocalHost: () => false } } });
+  const w = await world(d, {} as never, { monitorProgressMs: 0, start: { tools: { runner: { run: async () => ({ text: "{}" }) }, isLocalHost: () => false } } });
   try {
     const r1 = await w.host("r1");
     const t = await w.task("Order seeds");
@@ -209,18 +209,23 @@ test("a remote worker's model calls are reported to stall detection: the start, 
     const attempt = r1.client.attempt(t.attemptId, offer.placement);
     await attempt.accept();
     assert.deepEqual(await attempt.honorContract(offer.order, FULL_ABILITIES, w.now()), { ok: true });
-    const evidence = async () => (await w.c.storage.getAggregate({ kind: "stall-evidence", id: t.taskId }))?.body as { request?: { id: string; firstOutputAt?: string }; lastRequestMs?: number } | undefined;
+    const evidence = async () => (await w.c.storage.getAggregate({ kind: "stall-evidence", id: t.taskId }))?.body as { request?: { id: string; firstOutputAt?: string; outputTokens?: number }; lastRequestMs?: number } | undefined;
     const until = async (ok: () => Promise<boolean>, why: string): Promise<void> => { const end = Date.now() + 20_000; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await new Promise((r) => setTimeout(r, 25)); } };
     // The model's reply is held open after its first words.
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
-    const fetch: typeof globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({ async start(c) { c.enqueue(enc.encode(sse(chunk({ content: "Ordering " })))); await held; c.enqueue(enc.encode(sse(chunk({ content: "beans" }), chunk({}, "stop")) + "data: [DONE]\n\n")); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    let release2!: () => void;
+    const held2 = new Promise<void>((r) => { release2 = r; });
+    const fetch: typeof globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({ async start(c) { c.enqueue(enc.encode(sse(chunk({ content: "Ordering " })))); await held; c.enqueue(enc.encode(sse(chunk({ content: "beans ".repeat(20) })))); await held2; c.enqueue(enc.encode(sse(chunk({ content: "beans" }), chunk({}, "stop")) + "data: [DONE]\n\n")); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
     const relay = new ModelRelay({ fetch, endpoint: () => ({ url: "http://model.invalid/v1" }) }).forAttempt({ route: "localp/small", model: "local", stream: attempt.streamTap({ batchMs: 0 }) });
     const answer = await relay.relay(request as never);
     const reading = drain(answer.body);
     await until(async () => (await evidence())?.request?.firstOutputAt !== undefined, "the open call, with its first output, was never reported to stall detection");
     assert.ok((await evidence())!.request!.id.startsWith(`${t.attemptId}:`));
     release();
+    // More output while the reply still streams: reported as progress, so a long reply is not taken for silence.
+    await until(async () => ((await evidence())?.request?.outputTokens ?? 0) > 0, "the output that kept arriving was never reported to stall detection");
+    release2();
     await reading;
     await until(async () => (await evidence())?.request === undefined && (await evidence())?.lastRequestMs !== undefined, "the end of the call was never reported");
   } finally { await w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

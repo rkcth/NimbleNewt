@@ -74,6 +74,26 @@ test("the controller's control messages are followed while the turn runs: tell, 
   assert.deepEqual(told, ["beans"]);
 });
 
+test("a restart whose confirmation could not be sent is not applied: the batch is read again and the restart happens only once it is confirmed (card L05d review)", async () => {
+  const restartMsg = { seq: 1, kind: "restart", recipe: { mounts: ["changed"] } };
+  let polls = 0;
+  const f = fake({ control: async () => { polls++; return [restartMsg]; } });
+  let confirms = 0;
+  const attempt = (f.client as unknown as { attempt: (id: string, p: number) => Record<string, unknown> }).attempt("att-1", 3);
+  attempt["confirmRestarts"] = async () => { if (++confirms === 1) throw new Error("connection reset"); return { digest: "d2", recipe: restartMsg.recipe }; };
+  const restarted: number[] = [];
+  const release: { open?: () => void } = {};
+  const running = new Promise<void>((r) => { release.open = r; });
+  const runner = new RemoteOfferRunner({ ...base, client: f.client, host: { start: async () => handle({ restart: async () => { restarted.push(confirms); }, run: async () => { await running; return { status: "completed" } as never; } }) } });
+  const done = runner.run({ placement: 3, order: { ...order, contract: { digest: "d1" }, recipe: {} } as unknown as WorkOrder });
+  const end = Date.now() + 5000;
+  while (restarted.length === 0) { if (Date.now() > end) assert.fail("the restart was never applied"); await new Promise((r) => setTimeout(r, 5)); }
+  release.open!();
+  assert.equal(await done, "completed");
+  assert.equal(restarted[0], 2, "the restart waited for its confirmation");
+  assert.ok(polls >= 2);
+});
+
 test("the relay's stream tap records through the attempt's protocol tap while the attempt runs, with the worker's batching; an attempt that is not running gets its model call refused before it is sent (card L05d)", async () => {
   const f = fake();
   const release: { open?: () => void } = {};

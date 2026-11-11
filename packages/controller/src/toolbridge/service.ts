@@ -144,6 +144,14 @@ const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) =
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
 const STREAMING_WAIT_MS = 100;
 const STREAMING_WAIT_TOTAL_MS = 3000;
+/**
+ * The admitted operations that are the same operation when asked again with the same call ID (the dispatcher's operation and the job are keyed by the attempt and the call ID) and that may answer before they are done: a call parked
+ * for a review (`awaiting-approval`) or still running (`in-progress`) is asked again with the same call ID to go on (review of card L05d). Their effect bridge is idempotent, and an answer that is not final leaves the effect pending,
+ * so the next ask runs the operation again (which answers its current state) instead of being answered with the first, unfinished answer from the ledger.
+ */
+const ASKED_AGAIN: ReadonlySet<BridgeOperation> = new Set(["tool.invoke", "job.start"]);
+const NOT_FINAL: ReadonlySet<unknown> = new Set(["awaiting-approval", "in-progress"]);
+class NotFinal extends Error { constructor() { super("the operation is not finished; ask again with the same call ID"); } }
 /** The most of an admitted write's result kept in the effect ledger for a repeat of the call; a larger one is answered without it. */
 const ADMITTED_RESULT_CHARS = 20_000;
 /** The operations a model's tool call is not bound to by name and arguments: the extension's own declaration reads and the turn continuation. */
@@ -433,8 +441,9 @@ export class ToolExecutionService {
     let thrown: unknown;
     let ran = false;
     let performed: BridgeResponse | undefined;
+    const again = ASKED_AGAIN.has(request.op as BridgeOperation);
     const bridge: EffectBridge = {
-      idempotent: false,
+      idempotent: again,
       execute: async () => {
         ran = true;
         let response: BridgeResponse;
@@ -445,6 +454,7 @@ export class ToolExecutionService {
         }
         performed = response;
         if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
+        if (again && NOT_FINAL.has(response.result["state"])) throw new NotFinal();
         const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
         return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
       },
@@ -467,6 +477,8 @@ export class ToolExecutionService {
         // Asked again: the operation ran for the first request and is not run again.
         return evidence["truncated"] === true ? ok({ replayed: true, note: "this call already ran; its result was too large to keep" }) : ok(((evidence["result"] ?? {}) as JsonObject));
       }
+      // Parked for a review or still running: the answer the operation gave, and the effect waits for the next ask.
+      if (outcome.status === "pending" && ran && performed?.ok === true) return performed;
       if (outcome.status === "failed") return refusal(typeof evidence["code"] === "string" ? evidence["code"] : "refused", typeof evidence["message"] === "string" ? evidence["message"] : typeof evidence["reason"] === "string" ? evidence["reason"] : "the call did not run");
       return refusal("unavailable", `call ${request.callId.slice(0, 60)} may or may not have happened (${outcome.status}); it is not run again`);
     } catch (error) {

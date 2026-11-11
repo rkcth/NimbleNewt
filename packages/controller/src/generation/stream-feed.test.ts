@@ -448,6 +448,23 @@ for (const backend of backends) {
     await assert.rejects(ask("has space"), /is not a tool call ID/);
   });
 
+  suite("card L05d review: a repeated provider ID is the newest generation's call even when an earlier use never reached the process (a reply that broke off), so the extension's number and the window's count differ", async (c) => {
+    const { reusedCallId } = await import("./index.js");
+    const ask = (callId: string) => c.gen.checkCall(c.dispatcher, { taskId: c.task, callId });
+    // The first reply breaks off in the middle of call_0: the process never runs it, so the extension does not count it.
+    const partial = sse(chunk({ tool_calls: [{ index: 0, id: "call_0", type: "function", function: { name: "nimblenewt__desk-write", arguments: "{\"n\"" } }] }));
+    await assert.rejects(drain((await c.relayFor(endpoint([[partial, sleep(50), new Error("connection reset")]])).relay(request as never)).body));
+    await until(async () => (await run(c, 1)).state !== "streaming");
+    assert.equal((await run(c, 1)).toolCalls[0]!.state, "dropped");
+    const call = (args: string) => sse(chunk({ tool_calls: [{ index: 0, id: "call_0", type: "function", function: { name: "nimblenewt__desk-write", arguments: args } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    await drain((await c.relayFor(endpoint([[call("{\"n\":2}")]])).relay(request as never)).body);
+    await drain((await c.relayFor(endpoint([[call("{\"n\":3}")]])).relay(request as never)).body);
+    await until(async () => (await run(c, 3).catch(() => undefined))?.toolCalls[0]?.state === "complete");
+    // The process ran call_0 of the second reply as `call_0` and now runs the third reply's as its second use.
+    const v = await ask(reusedCallId("call_0", 2));
+    assert.ok(v.recorded && v.ok && v.number === 3 && v.args === "{\"n\":3}", `the current generation's call, not the second generation's: ${JSON.stringify(v)}`);
+  });
+
   suite("a generation is labelled sensitive", async (c) => {
     await drain((await c.relayFor(endpoint([[sse(chunk({ content: "x" }), chunk({}, "stop"))]])).relay(request as never)).body);
     assert.equal((await run(c, 1)).sensitive, true);

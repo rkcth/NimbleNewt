@@ -13,7 +13,7 @@ export const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", versio
 export const AGENT = "agt-abcdefghijklmnopqrst";
 
 /** A composed controller with two remote hosts, a clock the test moves and an agent with tasks to run. */
-export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number; /** More grants for the agent (for a test that writes through the bridge). */ grants?: { action: string; project?: string }[]; start?: Partial<Parameters<typeof startController>[0]> } = {}) {
+export async function world(d: string, policy: { dataHosts?: string[]; platforms?: { os: string; arch: string }[]; credentialHosts?: string[] }, options: { requirements?: () => Record<string, unknown>; checkpointWaitMs?: number; /** More grants for the agent (for a test that writes through the bridge). */ grants?: { action: string; project?: string }[]; /** How often a remote model call's progress is reported to stall detection (ms). */ monitorProgressMs?: number; start?: Partial<Parameters<typeof startController>[0]> } = {}) {
   let now = Date.now();
   const timer = new ManualTimer();
   const requirements = (options.requirements ?? (() => ({ data: "local-only" as const, harness: "pi" }))) as () => never;
@@ -23,7 +23,7 @@ export async function world(d: string, policy: { dataHosts?: string[]; platforms
       timer, manual: true, clock: () => new Date(now).toISOString(),
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),
       remote: {
-        blobDirectory: join(d, "blobs"), relocationPolicy: async () => policy, placementPolicy: async () => ({ dataHosts: ["host:r1", "host:r2"] }),
+        blobDirectory: join(d, "blobs"), ...(options.monitorProgressMs === undefined ? {} : { monitorProgressMs: options.monitorProgressMs }), relocationPolicy: async () => policy, placementPolicy: async () => ({ dataHosts: ["host:r1", "host:r2"] }),
         hosts: ["r1", "r2"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: options.checkpointWaitMs ?? 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements })),
       },
     },
