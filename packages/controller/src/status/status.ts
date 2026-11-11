@@ -818,7 +818,6 @@ export class StatusService {
     ];
   }
 
-  /** The retention values in force and which of them the owner set. Owner only. */
   /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */
   webAccessLines(by: Principal): { readonly observedAt: string; readonly lines: readonly Line[] } | undefined {
     const w = by.kind === "owner" ? this.#deps.webAccess?.() : undefined;
@@ -1073,6 +1072,7 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** The retention values in force and which of them the owner set. Owner only. */
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
     let got;

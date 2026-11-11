@@ -62,6 +62,8 @@ export interface WebChatOptions {
 
 /** The counter key of the ceiling over all addresses. */
 const GLOBAL_LOGIN = "global:login";
+/** The counter key of pairing-code attempts over all addresses: a valid code skips GLOBAL_LOGIN, but no code is ever tried past this one. */
+const GLOBAL_CODE = "global:code";
 
 export interface WebBrowser { readonly handle: string; readonly label: string; readonly current: boolean; readonly createdAt: string; readonly lastSeen: string }
 export interface WebSettings {
@@ -285,9 +287,9 @@ export class WebChatDoor {
 
   /**
    * Sign-in (card U07, U07b). The limiter is two-level: failures count against the client's own address (an IPv6 client against its /64) AND against a generous ceiling over all addresses, so one peer
-   * cannot hold the owner out and a flood from many addresses (or from behind a proxy that hides them) still cannot guess without bound. A pairing code that is valid is not a guess (50 bits, once, five
-   * minutes), so it signs in whatever the failure counters say: the owner's way in survives a flood. The owner's credential is the path that a full ceiling closes; the terminal chat is a different
-   * door and is never affected.
+   * cannot hold the owner out and a flood from many addresses (or from behind a proxy that hides them) still cannot guess without bound. A pairing code (50 bits, once, five minutes) is only looked at
+   * while its sender is inside its own allowance and code attempts over all addresses are under ten times the ceiling; inside those, a valid one signs in although wrong credentials have filled the
+   * ordinary ceiling: the owner's way in survives a flood of wrong credentials. The owner's credential is the path that a full ceiling closes; the terminal chat is a different door and is never affected.
    */
   async #login(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const client = this.#client(req);
@@ -305,15 +307,27 @@ export class WebChatDoor {
     let token: string | undefined;
     let free = false;
     if (typeof body["code"] === "string") {
+      // A code is looked at only inside the limits: the client's own allowance, and a hard ceiling on code attempts over all addresses (ten times the failure ceiling). Without this a client past
+      // every limit still had each guess tried (a wrong one answered 429, the right one signed in), so the limiter did nothing against guessing. A valid code skips only the ordinary ceiling, which
+      // a flood of wrong credentials fills; a code that is checked here is never used up by the refusal, so the owner can use it once the minute has passed.
+      const codeCeiling = this.#limits.failedLoginsGlobalPerMinute * 10;
+      this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
+      this.#over(GLOBAL_CODE, codeCeiling);
+      this.#count(addr); this.#count(GLOBAL_CODE);
       const paired = this.#sessions.redeem(body["code"]);
-      if (paired !== undefined) { token = paired.token; free = true; }
+      if (paired !== undefined) { token = paired.token; free = true; this.#refund(addr); this.#refund(GLOBAL_CODE); }
+      else {
+        // A wrong code is a failed sign-in like any other: it stays counted against the address and the code ceiling, and against the ordinary ceiling too.
+        this.#over(GLOBAL_LOGIN, this.#limits.failedLoginsGlobalPerMinute);
+        this.#count(GLOBAL_LOGIN);
+        throw new HttpError(401, "unauthenticated", "the code was not accepted");
+      }
     }
     if (!free) {
       this.#over(addr, this.#limits.failedLoginsPerAddressPerMinute);
       this.#over(GLOBAL_LOGIN, this.#limits.failedLoginsGlobalPerMinute);
       // The attempt is counted before anything is awaited and given back only when it succeeds.
       this.#count(addr); this.#count(GLOBAL_LOGIN);
-      if (typeof body["code"] === "string") throw new HttpError(401, "unauthenticated", "the code was not accepted");
       if (typeof body["token"] === "string") token = body["token"];
       else throw new HttpError(400, "invalid_command", "send a token or a pairing code");
     }
@@ -389,7 +403,7 @@ export class WebChatDoor {
     if (words.length === 0) throw new DomainError("invalid_command", "say which browser to sign out (a word from its name, such as iPhone), or all of them", { field: "browser" });
     const found = all.filter((b) => b.handle === want.browser!.trim() || b.label.toLowerCase().includes(words));
     if (found.length === 0) throw new DomainError("not_found", `no signed-in browser matches "${words.slice(0, 60)}"`, { field: "browser" });
-    if (found.length > 1) throw new DomainError("invalid_command", `${found.length} browsers match "${words.slice(0, 60)}": ${found.slice(0, 6).map((b) => `${b.label} (last used ${b.lastSeen})`).join("; ")}. Say which one, or sign them all out`, { field: "browser" });
+    if (found.length > 1) throw new DomainError("invalid_command", `${found.length} browsers match "${words.slice(0, 60)}": ${found.slice(0, 6).map((b) => `${b.label} ${b.handle} (last used ${b.lastSeen})`).join("; ")}. Say which one (its ws- name), or sign them all out`, { field: "browser" });
     this.#sessions.revokeHandle(ownerId, found[0]!.handle);
     return { revoked: 1, labels: [found[0]!.label] };
   }

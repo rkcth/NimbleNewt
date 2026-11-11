@@ -544,6 +544,39 @@ test("sign-in is limited per client AND over all addresses: a flood from many ad
   } finally { await ok.c.close(); }
 });
 
+test("a pairing code is tried only inside the limits: a client past its allowance, or code guesses past the code ceiling, gets no look at any code, so a right guess there signs nothing in and leaves the code usable", async () => {
+  // Per client: the attacker's address is out of allowance; its next attempt, with the RIGHT code, is refused unseen and the code still works for the owner elsewhere.
+  const w = await world({ trustedProxy: proxyOn, limits: { failedLoginsPerAddressPerMinute: 3, failedLoginsGlobalPerMinute: 100 } });
+  try {
+    const laptop = await w.signIn();
+    const code = (await w.call("POST", "/web/pairings", { cookie: laptop.cookie, csrf: laptop.csrf, body: {} })).body.code as string;
+    for (let i = 0; i < 3; i += 1) assert.equal((await w.call("POST", "/web/login", { body: { code: `WRONG${i}ABCD` }, headers: XFF("203.0.113.9") })).status, 401, `wrong code ${i} counts`);
+    assert.equal((await w.call("POST", "/web/login", { body: { code }, headers: XFF("203.0.113.9") })).status, 429, "a client past its allowance has no code looked at, even the right one");
+    assert.equal((await w.call("POST", "/web/login", { body: { code }, headers: XFF("198.51.100.7") })).status, 200, "the code was not used up by that refusal");
+  } finally { await w.c.close(); }
+  // Over all addresses: wrong codes from many addresses fill the code ceiling (10 x the failure ceiling); then no code is looked at from anywhere until the minute passes.
+  const g = await world({ trustedProxy: proxyOn, limits: { failedLoginsPerAddressPerMinute: 50, failedLoginsGlobalPerMinute: 2 } });
+  try {
+    const laptop = await g.signIn();
+    const code = (await g.call("POST", "/web/pairings", { cookie: laptop.cookie, csrf: laptop.csrf, body: {} })).body.code as string;
+    const statuses: number[] = [];
+    for (let i = 0; i < 20; i += 1) statuses.push((await g.call("POST", "/web/login", { body: { code: `WRONG${String(i).padStart(2, "0")}ABC` }, headers: XFF(`203.0.113.${i + 1}`) })).status);
+    assert.equal(statuses.filter((s) => s === 401).length, 2, "wrong codes are failed sign-ins: the ordinary ceiling (2) answers the rest 429");
+    assert.equal((await g.call("POST", "/web/login", { body: { code }, headers: XFF("198.51.100.7") })).status, 429, "20 code attempts in a minute: the code ceiling is full, the right code is not looked at");
+    g.now.t += 61_000;
+    assert.equal((await g.call("POST", "/web/login", { body: { code }, headers: XFF("198.51.100.7") })).status, 200, "the minute passes and the unused code still signs in");
+  } finally { await g.c.close(); }
+  // Below the code ceiling, a valid code still signs in after wrong credentials filled the ordinary ceiling (the owner's way in survives that flood).
+  const f = await world({ trustedProxy: proxyOn, limits: { failedLoginsPerAddressPerMinute: 50, failedLoginsGlobalPerMinute: 2 } });
+  try {
+    const laptop = await f.signIn();
+    const code = (await f.call("POST", "/web/pairings", { cookie: laptop.cookie, csrf: laptop.csrf, body: {} })).body.code as string;
+    for (let i = 0; i < 5; i += 1) await f.call("POST", "/web/login", { body: wrong(i), headers: XFF(`203.0.113.${i + 1}`) });
+    assert.equal((await f.call("POST", "/web/login", { body: { token: f.token }, headers: XFF("198.51.100.7") })).status, 429, "the ordinary ceiling is full");
+    assert.equal((await f.call("POST", "/web/login", { body: { code }, headers: XFF("198.51.100.7") })).status, 200, "a valid code is not held by it");
+  } finally { await f.c.close(); }
+});
+
 test("sign-in bodies are read a few at a time per address and overall, so a slow sender cannot hold every reader", async () => {
   const w = await world({ limits: { loginsReadingPerAddress: 2, loginsReadingGlobal: 3 } });
   try {
@@ -708,6 +741,15 @@ test("the owner signs browsers out by chat in free words: one by its name, all o
     const amb = await say("c-1", "sign my windows machine out");
     assert.equal(amb.body.outcomes[0].status, "refused", amb.text); assert.match(JSON.stringify(amb.body), /2 browsers match/);
     assert.equal((await w.call("GET", "/web/session", { cookie: pc2.cookie })).status, 200, "nothing was signed out by the ambiguous request");
+    // The refusal names each match by its handle, and that handle signs out exactly that one (the owner cannot otherwise tell two "Windows" browsers apart).
+    const named = /(ws-[0-9a-f]+) \(last used/.exec(String(amb.body.outcomes[0].message))?.[1];
+    assert.ok(named !== undefined, amb.text);
+    const pc2Handle = (await w.call("GET", "/web/session", { cookie: pc2.cookie })).body.handle as string;
+    const pc2Named = String(amb.body.outcomes[0].message).includes(pc2Handle);
+    assert.ok(pc2Named, "both matches are named by handle");
+    assert.equal(w.c.webChat!.revokeBrowsers("owner:rob", { browser: pc2Handle }).revoked, 1);
+    assert.equal((await w.call("GET", "/web/session", { cookie: pc2.cookie })).status, 401, "the one named by handle is out");
+    assert.equal((await w.call("GET", "/web/session", { cookie: pc1.cookie })).status, 200, "the other Windows browser is not");
     const none = await say("c-2", "sign the toaster out");
     assert.equal(none.body.outcomes[0].status, "refused"); assert.match(JSON.stringify(none.body), /no signed-in browser matches/);
     const one = await say("c-3", "log my iphone out");
