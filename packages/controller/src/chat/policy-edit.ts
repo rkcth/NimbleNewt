@@ -14,7 +14,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { GrantRecordBody, GrantService } from "../security/grants.js";
 import type { Principal } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { foreignValue } from "./commands.js";
+import { foreignValue, wholeWord } from "./commands.js";
 import { checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter } from "./interpreter.js";
 import type { PolicyEditChange } from "./policy-intent.js";
 
@@ -288,7 +288,7 @@ export class PolicyEditService {
     const { change, evidence, wording } = input;
     const conditions = input.conditions.slice(0, 5);
     // Every free text of the change must be the owner's own words (or a record, or a fixed choice): a model cannot add what the owner never said.
-    const foreign = foreignValue({ tool: "tool" in change ? change.tool : undefined, approveTool: "approve" in change ? change.approve.tool : undefined, projectName: "projectName" in change ? change.projectName : undefined, grantee: "grantee" in change ? change.grantee : undefined, audiences: "audiences" in change ? change.audiences : undefined, value: "value" in change ? change.value : undefined }, wording);
+    const foreign = foreignValue({ tool: "tool" in change ? change.tool : undefined, approveTool: "approve" in change ? change.approve.tool : undefined, projectName: "projectName" in change ? change.projectName : undefined, grantee: "grantee" in change ? change.grantee : undefined, audiences: "audiences" in change ? change.audiences : undefined, value: "value" in change ? await this.#ownPartOf(owner, change, wording) : undefined }, wording);
     if (foreign !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `What was given for ${foreign} is not in your message, so it was not done. What did you mean instead?` };
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
@@ -687,6 +687,20 @@ export class PolicyEditService {
     return { summary, explanation: [`${grants.length} grant${grants.length === 1 ? "" : "s"} end${grants.length === 1 ? "s" : ""} from the next snapshot, and anything derived from ${grants.length === 1 ? "it" : "them"} ends too. Their other approvals are unchanged.`], direction: "tighten", op: { kind: "revoke", grants } };
   }
 
+  /**
+   * The part of a change's value that must be the owner's own words (card H12s third review). A setting whose value is a list replaces the whole list, so the full new list keeps the entries already in force in that layer:
+   * those are a record, not text the model added, and only the entries that are new must be in the owner's message (adding one protected path does not need every other one retyped). A protected folder may be named
+   * without its trailing slash ("protect the docs folder" gives `docs/`), as a whole word of the message. Anything that cannot be read is checked in full.
+   */
+  async #ownPartOf(owner: Principal, change: PolicyEditChange, wording: string): Promise<unknown> {
+    const value = "value" in change ? change.value : undefined;
+    if (change.type !== "setting" || !Array.isArray(value)) return value;
+    const current = await this.#deps.configuration.layer(owner, change.layer, change.scopeId).then((l) => l?.applied[change.key]?.value, () => undefined);
+    const inForce = new Set(Array.isArray(current) ? current.map((x) => JSON.stringify(x)) : []);
+    const folderInWords = (x: unknown): boolean => change.key === "workspace.landing.protectedPaths" && typeof x === "string" && /[^/]\/+$/.test(x) && wholeWord(wording, x.replace(/\/+$/, ""));
+    return value.filter((x) => !inForce.has(JSON.stringify(x)) && !folderInWords(x));
+  }
+
   async #setting(owner: Principal, change: Extract<PolicyEditChange, { type: "setting" }>): Promise<Built> {
     if (change.layer === "installation" ? change.scopeId !== undefined : change.scopeId === undefined) throw new Refusal("invalid_command", change.layer === "installation" ? "the installation layer has no scope ID" : `a ${change.layer} setting needs the ID of the ${change.layer}`);
     const definitions: SettingDefinition[] = this.#deps.configuration.settings().map((d) => ({ ...d, check: (v: unknown) => v }));
@@ -701,6 +715,12 @@ export class PolicyEditService {
       const eff = await this.#deps.configuration.effective(owner);
       const now = eff?.values[change.key];
       if (now !== undefined) explanation.unshift(`It is ${JSON.stringify(now.value)} now (from ${now.source.layer}).`);
+      // A list value replaces the whole list (card H12s review): an entry the new value leaves out is named, so "also protect x/" that the model wrote as ["x/"] cannot quietly unprotect what was there.
+      if (now !== undefined && now.source.layer === "installation" && Array.isArray(now.value)) {
+        const next = change.remove === true ? [] : Array.isArray(change.value) ? change.value : undefined;
+        const dropped = next === undefined ? [] : now.value.filter((x) => !next.some((y) => JSON.stringify(y) === JSON.stringify(x)));
+        if (dropped.length > 0) explanation.splice(1, 0, `This replaces the whole list, so ${dropped.length === 1 ? "this entry is" : `these ${dropped.length} entries are`} no longer in it: ${dropped.slice(0, 20).map((x) => JSON.stringify(x)).join(", ")}${dropped.length > 20 ? ` and ${dropped.length - 20} more` : ""}.`);
+      }
     }
     return { summary, explanation, direction: "unknown", op: { kind: "setting", layer: change.layer, ...(change.scopeId === undefined ? {} : { scopeId: change.scopeId }), ...(layer === undefined ? {} : { expectedRevision: layer.revision }), key: change.key, ...(change.remove === true ? { remove: true as const } : { value: change.value }) } };
   }

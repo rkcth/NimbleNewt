@@ -257,6 +257,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
+  landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default; one policy for the whole installation" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -333,6 +334,7 @@ export type StatusRequest =
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "approval_load"; readonly days?: number }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "landing" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
@@ -429,6 +431,8 @@ export interface StatusDeps {
     /** The same answer as `retention.status` (card K06d): the disk and the reserve, quotas and their use, backups, the last deletions and runs. Absent: the view tells the values only. */
     status?(by: Principal): Promise<Readonly<Record<string, unknown>>>;
   };
+  /** The landing settings at the installation layer with whether the owner set each (card H12s, `ConfigurationService.installationSettings` over `LANDING_SETTING_KEYS`). Absent: the view is not offered. */
+  readonly landing?: () => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>;
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
@@ -744,6 +748,7 @@ export class StatusService {
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
+      case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
@@ -1269,6 +1274,27 @@ export class StatusService {
     if (s.due) lines.push(line(`You are due to be asked about the derived profile (${s.kind === "trial-ended" ? "your trial of it has ended" : `you have approved ${s.approvalsSince} asks since the last answer`}): ${s.answers?.map((x) => shown(x, 20)).join(", ")} (the first is the default).${s.preview === undefined || s.preview.notes.length === 0 ? "" : ` Switching would change this: ${s.preview.notes.slice(0, 5).map((n) => shown(n, 300)).join("; ")}.`}`, sc));
     else lines.push(line("The derived-profile question is not due.", sc));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The landing policy in force for the whole installation (card H12s), as the owner set it in the settings: the four `workspace.landing.*` values, each marked as set or the default. A task, agent or team layer can add
+   * protected paths and keep the permit required, which this view does not list (it is the installation's policy). A read that fails is said in one line, never guessed.
+   */
+  async landingLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.landing === undefined || by.kind !== "owner") return undefined;
+    const c = cite("config-layer", "installation");
+    let v: Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>;
+    try { v = await this.#deps.landing(); } catch { return { observedAt: this.#runner.now(), lines: [line("The landing settings cannot be read right now, so every landing is refused until they can.", c)] }; }
+    const mark = (k: string): string => (v[k]?.set === true ? "you set it" : "the default");
+    const branch = v["workspace.landing.branch"]?.value, permit = v["workspace.landing.requirePermit"]?.value, defaults = v["workspace.landing.protectDefaults"]?.value, paths = v["workspace.landing.protectedPaths"]?.value;
+    const listed = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === "string") : [];
+    return { observedAt: this.#runner.now(), lines: [
+      line("Where finished work lands: one policy for the whole installation (there is no per-project landing branch yet).", c),
+      line(typeof branch === "string" ? `Landing branch: ${shown(branch, 200)} (you set it). A landing is refused while the shared workspace is on another branch.` : "Landing branch: none set, so nothing lands until you name one.", c),
+      line(permit === false ? "Review permit: not required (you set it); commits land without the review gate's commit permit." : `Review permit: required (${mark("workspace.landing.requirePermit")}); only commits made through the review gate land.`, c),
+      line(defaults === false ? "Built-in protected files (CI configuration, hooks, ownership and package manager files): off (you set it)." : `Built-in protected files (CI configuration, hooks, ownership and package manager files): kept for your review (${mark("workspace.landing.protectDefaults")}).`, c),
+      line(listed.length === 0 ? "Your extra protected paths: none." : `Your extra protected paths, kept for your review: ${listed.slice(0, 50).map((p) => shown(p, 120)).join(", ")}${listed.length > 50 ? ` and ${listed.length - 50} more` : ""}.`, c),
+    ] };
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */

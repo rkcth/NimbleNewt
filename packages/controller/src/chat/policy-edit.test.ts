@@ -908,6 +908,36 @@ for (const backend of backends) {
     assert.match(JSON.stringify(permit.draft), /Only the owner, for the whole installation, can set it past its default/);
   });
 
+  suite("a chat setting that replaces a list names every entry the new list leaves out, so adding one protected path cannot quietly drop the others (card H12s third review)", async (c) => {
+    const key = "workspace.landing.protectedPaths";
+    const prep = (change: Record<string, unknown>, wording: string) => c.edits.prepare(c.w.owner, { change: { type: "setting", layer: "installation", key, ...change } as never, conditions: [], evidence: wording, wording, quoted: false, forwarded: false });
+    // A folder named in words without its slash is the owner's (the slash only says it is a folder); a path the owner never named is not.
+    const first = await prep({ value: ["docs/", "secrets/"] }, "Protect the docs folder and secrets/ please.");
+    assert.ok(first.ok, JSON.stringify(first));
+    assert.doesNotMatch(JSON.stringify(first.draft), /no longer in it/, "nothing was in the installation's list yet");
+    const invented = await prep({ value: ["docs/", "src/"] }, "Protect the docs folder please.");
+    assert.equal(invented.ok, false, "a path the owner never said is refused");
+    assert.match(JSON.stringify(invented), /is not in your message/);
+    assert.equal((await prep({ value: ["do/"] }, "Protect the docs folder please.")).ok, false, "a folder named without its slash must be a whole word of the message, not part of one");
+    const made = await c.edits.create(c.w.owner, { commandId: cid("pp"), turnId: "t", wording: "protect docs and secrets", draft: first.draft });
+    assert.equal((await c.edits.apply(c.w.owner, { commandId: cid("pa"), editId: made.id })).status, "applied");
+    // Adding one: the full new list keeps the paths already in force (a record) and only the new one must be in the owner's words.
+    const added = await prep({ value: ["ci/", "docs/", "secrets/"] }, "Also protect ci/ from landings.");
+    assert.ok(added.ok, JSON.stringify(added));
+    assert.doesNotMatch(added.draft.explanation.join(" "), /no longer in it/, "a list that keeps every entry names none");
+    const addedForeign = await prep({ value: ["docs/", "secrets/", "src/"] }, "Also protect ci/ from landings.");
+    assert.equal(addedForeign.ok, false, "a new path that is not in the owner's message is still refused when the rest is kept");
+    // A list that leaves entries out names each one, before the owner agrees.
+    const narrowed = await prep({ value: ["ci/"] }, "Also protect ci/ from landings.");
+    assert.ok(narrowed.ok, JSON.stringify(narrowed));
+    const text = narrowed.draft.explanation.join(" ");
+    assert.match(text, /It is \["docs\/","secrets\/"\] now/, text);
+    assert.match(text, /these 2 entries are no longer in it: "docs\/", "secrets\/"/, text);
+    const removed = await prep({ remove: true }, "Stop protecting extra paths.");
+    assert.ok(removed.ok);
+    assert.match(removed.draft.explanation.join(" "), /these 2 entries are no longer in it/, "removing the setting names what it drops too");
+  });
+
   suite("a grant with no end is a proposal that says it never ends; it is not applied unseen, a replay makes one grant, and only the owner can apply it", async (c, script) => {
     const ann = "agent:ann";
     script[`Let ${ann} commit in development permanently.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development permanently")];

@@ -405,6 +405,9 @@ test("a landing needs a clean shared tree on the named landing branch: another b
     assert.equal(w.sharedState(), before);
     const noPolicy = await world({ landing: () => undefined });
     try { assert.match(reasonOf(await noPolicy.host.run(call("landing"))), /no landing branch set/); } finally { await noPolicy.done(); }
+    // A policy that cannot be read refuses too, and says it could not be read (not that no branch is set).
+    const unreadable = await world({ landing: () => { throw new Error("settings store down"); } });
+    try { const r = reasonOf(await unreadable.host.run(call("landing"))); assert.match(r, /could not read the landing settings/); assert.doesNotMatch(r, /settings store down/, "the internal error is not passed on"); } finally { await unreadable.done(); }
     assert.equal(detailOf(await w.host.run(call("landing")))["landed"], true, "with everything in place it lands");
   } finally { await w.done(); }
 });
