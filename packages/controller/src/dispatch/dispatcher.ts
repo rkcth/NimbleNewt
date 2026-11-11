@@ -1804,7 +1804,7 @@ export class DispatcherService {
   /**
    * The checks before a claim, in their fixed order. `current` says the attempt is the task's active one at the current generation. Returns what the claim needs, or why the attempt is skipped or blocked.
    */
-  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit; resumeNote?: string }> {
+  async #checks(task: View<TaskBody>, current: boolean, attemptId: string, agentId: string): Promise<ClaimOutcome | { kind: "ok"; agentId: string; harness: string | undefined; route: Extract<RouteChoice, { route: string }>; host: WorkerHost & { hostId: string }; resume?: PendingResumeCommit; resumeNote?: string; passed?: { readonly from: string; readonly to: string; readonly why: string } }> {
     const taskId = task.id;
     const skip = (check: DispatchCheck, reason: string): ClaimOutcome => ({ kind: "skipped", check, reason });
     const block = async (check: DispatchCheck, type: "grant_needed" | "dispatch_blocked", reason: string, resolver = "owner"): Promise<ClaimOutcome> => {
@@ -1872,6 +1872,7 @@ export class DispatcherService {
     if ("none" in configured) return block("route", "dispatch_blocked", `no model route can be used: ${configured.reasons.join("; ")}`.slice(0, 800));
     // 5a. The owner's routing controls and the routes' health (card R04c): new work goes to the first route of the configured order that they leave open. All closed is a wait (a drain or an outage passes), not a blocker.
     let chosen = configured;
+    let passed: { readonly from: string; readonly to: string; readonly why: string } | undefined;
     if (this.#deps.modelCalls !== undefined) {
       const callKey = await this.#callKey(attemptId);
       const held: string[] = [];
@@ -1884,8 +1885,8 @@ export class DispatcherService {
       if (open === undefined) return skip("route", `every route allowed for the task is closed to new work: ${held.join(" | ")}`.slice(0, 800));
       if (open !== configured.route) {
         chosen = { ...configured, route: open };
-        // The task's routing decision names the configured route; the owner reads here why this attempt goes elsewhere (card G09: after a provider change, the views follow the route the attempt really takes). Once per attempt and move, so a reason whose words change between ticks is not repeated.
-        await this.#stepOf(attemptId, `route-closed:${createHash("sha256").update(`${configured.route}>${open}`).digest("hex").slice(0, 24)}`, "model-selected", `The task's configured route ${configured.route} is closed to new work, so attempt ${attemptId} goes to the next open route ${open} (${held.join(" | ")}).`, [{ kind: "dispatch", id: attemptId }]);
+        // Told when the attempt starts on that route (the advance, just before the start), not here: a later check (budget, grants, resume, context, host, place, allowance, the call itself) can still hold it, and the route may open again first.
+        passed = { from: configured.route, to: open, why: held.join(" | ") };
       }
     }
     const recovery = await this.#deps.contracts.recoveryOf(taskId);
@@ -1972,7 +1973,7 @@ export class DispatcherService {
     this.#refusedWaits.delete(attemptId);
     // The task is placed now, so the grants it needs were used (card A07h). Not earlier: a task that waits for a host, a route or a context rebuild uses nothing, and must not keep an unused grant open.
     await recordUse();
-    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }) };
+    return { kind: "ok", agentId, harness: chosen.harness, route: chosen, host: hostPick.host, ...(resumed?.commit === undefined ? {} : { resume: resumed.commit }), ...(resumed?.note === undefined ? {} : { resumeNote: resumed.note }), ...(passed === undefined ? {} : { passed }) };
   }
 
   /**
@@ -2189,6 +2190,9 @@ export class DispatcherService {
       if (why !== undefined) { await this.#giveBack(d); return { kind: "skipped", check: "route", reason: why }; }
       d = (await this.#load(b.attemptId)) ?? d;
     }
+    // The task's routing decision names the configured route; the owner reads here why this attempt goes elsewhere (card G09: after a provider change, the views follow the route the attempt really takes). Once per attempt and move
+    // (a reason whose words change between ticks is not repeated), and written only now that the attempt starts on that route, so an attempt that waited and then ran on its configured route is not said to have moved.
+    if (pre.passed !== undefined) await this.#stepOf(b.attemptId, `route-closed:${createHash("sha256").update(`${pre.passed.from}>${pre.passed.to}`).digest("hex").slice(0, 24)}`, "model-selected", `The task's configured route ${pre.passed.from} is closed to new work, so attempt ${b.attemptId} goes to the next open route ${pre.passed.to} (${pre.passed.why}).`, [{ kind: "dispatch", id: b.attemptId }]);
     return this.#start(d, pre.host, requestId, pre.resumeNote);
   }
 

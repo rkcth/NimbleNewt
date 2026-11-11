@@ -262,3 +262,38 @@ test("a call of an attempt that goes to another address than its previous call i
   assert.equal(r.status, 200);
   assert.equal(calls.at(-1), "http://third.internal/v1/chat/completions");
 });
+
+test("the address of an attempt's calls is compared as the server it names: another spelling of the same server (host case, default port, trailing slash, query only) tells nothing; a change of scheme names the schemes; a key in the path is redacted before the words are cut, so no piece of it is told (card G09)", async () => {
+  let url = "http://Old.Internal:80/v1/";
+  const fetch: typeof globalThis.fetch = async () => new Response("data: a\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  const relay = new ModelRelay({ endpoint: () => ({ url }), fetch });
+  const told: { from: string; to: string }[] = [];
+  const attempt = relay.forAttempt({ route: "llama/local", onEndpointChanged: (change) => { told.push(change); } });
+  const lastTold = (): { from: string; to: string } => (told as { from: string; to: string }[]).at(-1)!;
+  const call = (): Promise<unknown> => attempt.relay(req("http://relay.invalid/m0/chat/completions"));
+  await call();
+  for (const same of ["http://old.internal/v1", "http://OLD.internal:80/v1//", "http://old.internal/v1?api-version=2"]) { url = same; await call(); }
+  assert.deepEqual(told, [], "one server, several spellings");
+  url = "https://old.internal/v1";
+  await call();
+  assert.deepEqual(told, [{ from: "http://old.internal/v1", to: "https://old.internal/v1" }], "the scheme is named when only it changed");
+  url = "http://[::1]:8000/v1";
+  await call();
+  url = "http://[0:0:0:0:0:0:0:1]:8000/v1/";
+  await call();
+  assert.equal(told.length, 2, "two spellings of one IPv6 address are one address");
+  assert.equal((told as { from: string; to: string }[])[1]!.to, "[::1]:8000/v1");
+  // A key in the path, long enough that the words are cut inside it: redacted whole, first.
+  const key = `sk-${"A".repeat(400)}`;
+  // The words are cut at 200 characters: here 6 characters into the key, too few for the key shape to be seen in what is left.
+  url = `http://keyed.internal/${"p".repeat(175)}/${key}/v1`;
+  await call();
+  const last = lastTold();
+  assert.equal(/sk-|AAAA/.test(last.to), false, last.to);
+  assert.ok(last.to.length <= 200);
+  // Unicode and control characters never reach the words as they are: the parser gives the host as punycode and the path percent-encoded.
+  url = "http://bücher.internal/v1/‮\u0007x";
+  await call();
+  assert.equal(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/.test(lastTold().to), false, lastTold().to);
+  assert.match(lastTold().to, /^xn--/);
+});

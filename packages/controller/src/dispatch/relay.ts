@@ -68,9 +68,17 @@ const PATHS = new Set(["chat/completions", "messages", "messages/count_tokens"])
 const KEEP = new Set(["content-type", "retry-after", "retry-after-ms", "x-should-retry", "request-id", "x-request-id"]);
 const ALIAS = "m0";
 
-/** Host and path of an endpoint address, for the owner to read (no query, no fragment, no credentials). */
-function addressOf(url: string): string {
-  try { const u = new URL(url); return `${u.host}${u.pathname.replace(/\/+$/, "")}`.slice(0, 200); } catch { return "an address that cannot be read"; }
+/**
+ * An endpoint address as compared between calls (card G09): scheme, host and path as the URL parser normalises them (host case, default port, IDN), no trailing slash, no query, fragment or credentials. Two spellings of one server
+ * are one address; an address that cannot be read is compared as written.
+ */
+function serverOf(url: string): string {
+  try { const u = new URL(url); return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`; } catch { return url.replace(/\/+$/, ""); }
+}
+
+/** Host and path of an endpoint address, for the owner to read (no query, no fragment, no credentials; a key-shaped part redacted before it is cut, so no piece of a key is left). With `scheme`, the scheme too. */
+function addressOf(url: string, scheme = false): string {
+  try { const u = new URL(url); return redactText(`${scheme ? `${u.protocol}//` : ""}${u.host}${u.pathname.replace(/\/+$/, "")}`).slice(0, 200); } catch { return "an address that cannot be read"; }
 }
 
 export class ModelRelay {
@@ -202,8 +210,13 @@ export class ModelRelay {
           }
         }
         // A call that goes to another address than the attempt's previous one is told, so a running attempt is never moved to another server silently (card G09).
-        const base = endpoint!.url.replace(/\/+$/, "");
-        if (lastBase !== undefined && lastBase !== base) { const from = lastBase; tell(() => attempt.onEndpointChanged?.({ from: addressOf(from), to: addressOf(base) })); }
+        const base = endpoint!.url;
+        if (lastBase !== undefined && serverOf(lastBase) !== serverOf(base)) {
+          const from = lastBase;
+          // Only the scheme changed (http to https or back): the words name it, or both sides would read the same.
+          const scheme = addressOf(from) === addressOf(base);
+          tell(() => attempt.onEndpointChanged?.({ from: addressOf(from, scheme), to: addressOf(base, scheme) }));
+        }
         lastBase = base;
         let call: CallMonitor | undefined;
         if (monitor !== undefined) { try { call = monitor.started({ requestChars: body?.length ?? 0 }); } catch { /* the call is not affected */ } }

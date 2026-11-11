@@ -422,3 +422,39 @@ test("a cutover that lands while the worker is starting: the run does not go on,
     assert.notEqual((await c.services.assignments.getAssignment(one.taskId))!.activeAttemptId, one.attemptId, "a replacement was admitted");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("an attempt that waited while its configured route was closed and then ran on that route is not said to have moved; one placed past it is told once, however many ticks it waited (card G09)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-rwait-"));
+  const held = holdingWorker();
+  const c = await open(d, held.worker);
+  try {
+    const { token, owner, project } = await setUp(c);
+    const call = api(c, token);
+    const tick = async (): Promise<void> => { await c.dispatch!.dispatcher.tick(); };
+    const why = async (taskId: string): Promise<string[]> => (await c.services.activity.steps(owner, taskId)).steps.map((s) => ("summary" in s ? String(s.summary) : "")).filter((s) => /closed to new work/.test(s));
+    const admission = AdmissionService.withEpoch(c.storage, c.epoch);
+    // The host has room for nothing: the attempt passes the route step (strata is draining, gpu2 is open) and then waits for a host.
+    await admission.setCapacity({ commandId: "cap-small", actor: owner.id, host: "host:w1", capacity: { cpus: 1, memoryMb: 1 } });
+    assert.ok((await call("routing.drain", { level: "service", name: "strata-svc", reason: "swap the disk", drainSeconds: 3600 }, "dr1")).ok);
+    const one = await task(c, owner, project, 1);
+    for (let n = 0; n < 3; n++) await tick();
+    assert.notEqual((await c.dispatch!.dispatcher.get(owner, one.attemptId))!.state, "running", "no host could take it");
+    assert.deepEqual(await why(one.taskId), [], "nothing is said while it waits: it has gone nowhere");
+    // The drain is lifted and the host has room again: the attempt runs on its configured route, and nothing says it moved.
+    assert.ok((await call("routing.reenable", { level: "service", name: "strata-svc", reason: "the disk is in" }, "re1")).ok);
+    await admission.setCapacity({ commandId: "cap-big", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
+    await tick();
+    assert.equal(held.routes.get(one.attemptId), "strata/qwen");
+    assert.deepEqual(await why(one.taskId), [], "it ran on its configured route");
+    // A second attempt placed past a closed route after waiting several ticks: one step.
+    await admission.setCapacity({ commandId: "cap-small2", actor: owner.id, host: "host:w1", capacity: { cpus: 1, memoryMb: 1 } });
+    assert.ok((await call("routing.drain", { level: "service", name: "strata-svc", reason: "swap the disk", drainSeconds: 3600 }, "dr2")).ok);
+    const two = await task(c, owner, project, 2);
+    for (let n = 0; n < 3; n++) await tick();
+    assert.deepEqual(await why(two.taskId), []);
+    await admission.setCapacity({ commandId: "cap-big2", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
+    for (let n = 0; n < 3; n++) await tick();
+    assert.equal(held.routes.get(two.attemptId), "gpu2/qwen");
+    assert.equal((await why(two.taskId)).length, 1);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
