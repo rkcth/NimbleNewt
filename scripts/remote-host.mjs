@@ -26,6 +26,26 @@ async function abilitiesOf(worker) {
   return { formats: [1], features: ["limits", "wall-time"], enforces };
 }
 
+/**
+ * The landing policy a remote host works under (cards H12t, H12a). The host's configuration pins, per project, the one branch it will land that project's finished work on (`landing`); a project not pinned is never landed here.
+ * The owner's policy, read by the controller and carried in the landing request, can only HOLD that pin and make it stricter, never loosen it or move it:
+ *  - no carried policy (an older controller, one that could not read the settings), or one without a branch: refused, nothing guessed;
+ *  - a carried branch that is not the pinned one (the owner moved the landing branch): refused, with both names, until the host's operator changes the pin;
+ *  - the commit permit is required whatever is carried, and the built-in protected list always applies (a carried `false` for either is ignored, never obeyed: the owner can switch them off for a host of the controller's own, not for another machine);
+ *  - the owner's extra protected paths are added to the built-in list (a malformed list refuses the landing).
+ * Returns undefined for a project that is not pinned (the host then says no branch is set), a policy, or a `refuse` reason.
+ */
+export function remoteLandingPolicy(pins, call) {
+  const pinned = pins.get(call.projectId);
+  if (pinned === undefined) return undefined;
+  const carried = call.carried;
+  if (carried === null || typeof carried !== "object" || typeof carried.branch !== "string" || carried.branch.length === 0) return { refuse: "the controller did not send the owner's landing policy with this landing, so nothing was landed on this host" };
+  if (carried.branch !== pinned) return { refuse: `the owner's landing branch for this project is ${JSON.stringify(carried.branch.slice(0, 100))} but this host is set up to land it on ${JSON.stringify(pinned)}; nothing was landed (the host's operator changes its landing setting to follow)` };
+  const extra = carried.protectedPaths;
+  if (extra !== undefined && (!Array.isArray(extra) || extra.length > 200 || extra.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300))) return { refuse: "the owner's protected paths were not a list of paths, so nothing was landed on this host" };
+  return { branch: pinned, requirePermit: true, protectDefaults: true, ...(extra === undefined || extra.length === 0 ? {} : { protectedPaths: [...extra] }) };
+}
+
 /** The checks on a configuration; each problem is said in plain words and names the field, never a value that could be a secret. */
 export function checkRemoteConfig(config) {
   const problems = [];
@@ -93,10 +113,10 @@ export async function startRemoteWorker(setup, config) {
   const security = (event) => { void client.reportSecurity(event).catch((error) => log(`a security report could not be sent (${describe(error)})`)); };
   const shared = new Map(Object.entries(config.projects ?? {}).filter(([, folder]) => isFolder(folder)));
   let local;
-  // The landing policy (card H12t): the branch named for the project in this host's configuration (`landing`), with the commit permit required and the default protected paths kept. A project with no branch named
-  // here is not landed on this host (refused, never guessed). The owner's chat settings live in the controller and do not reach a remote host yet (the request does not carry them).
+  // The landing policy (cards H12t, H12a): the branch named for the project in this host's configuration (`landing`) is a pin; the owner's policy, carried in the landing request, must agree with it and can only add protected
+  // paths (see `remoteLandingPolicy`). A project with no branch named here is not landed on this host (refused, never guessed).
   const landingBranches = new Map(Object.entries(config.landing ?? {}).filter(([projectId, branch]) => shared.has(projectId) && typeof branch === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(branch) && !branch.includes("..")));
-  const workspaces = new worker.LocalWorkspaces({ root: join(base, "work"), git, shared: (projectId) => shared.get(projectId), busy: () => local?.busyAttempts() ?? [], landing: ({ projectId }) => (landingBranches.has(projectId) ? { branch: landingBranches.get(projectId), requirePermit: true, protectDefaults: true } : undefined), security });
+  const workspaces = new worker.LocalWorkspaces({ root: join(base, "work"), git, shared: (projectId) => shared.get(projectId), busy: () => local?.busyAttempts() ?? [], landing: (call) => remoteLandingPolicy(landingBranches, call), security });
   const relay = new controller.ModelRelay({ ...(config.fetch === undefined ? {} : { fetch: config.fetch }), endpoint: (route) => endpointOf(config, route) });
   let runner;
   const attempts = new Map();
@@ -131,15 +151,23 @@ export async function startRemoteWorker(setup, config) {
     // The recipe's limits (the owner's, from the dispatch contract) are applied at launch; a limit the sandbox cannot enforce in full refuses the launch unless the contract allowed best effort.
     requireEnforced: true,
   });
+  // The attempt ID names the sandbox the checks run in: only a real attempt ID is taken (a confused or hostile controller's path or `..` is not).
+  const doneCheck = worker.doneVerifier({ workspaces, checks: parts.checks });
+  const verifyDone = async (attemptId, scope, request) => {
+    if (!ATTEMPT.test(String(attemptId))) throw new Error("the attempt ID is not an attempt ID; nothing was checked");
+    return doneCheck(attemptId, scope, request);
+  };
   local = new controller.LocalWorker({
     hostId: `host:${hostId}`, resources: { cpus: Math.max(1, cpus().length), memoryMb: Math.max(256, Math.floor(totalmem() / 1048576)) }, version: config.workerVersion ?? "remote-host",
     schedule: (beat) => { const timer = setInterval(() => { void beat(); }, 1000); timer.unref?.(); return () => clearInterval(timer); },
     sandbox: parts.sandbox, runtimes: { open: (order, call, from) => parts.runtimes.open(order, call, from) },
     progress: (scope) => workspaces.progress(scope),
+    // The check of a done (cards W05, H12a): the state of the checkout this host's port made, and the contract's checks run in the attempt's sandbox here. The controller asks for it over the workspace channel (the responder's `verify`).
+    verify: verifyDone,
     capabilities: () => capabilitiesOf(piAdapter),
   });
   runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble: (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`) });
-  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
+  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), verify: verifyDone, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
 
   const abort = new AbortController();
   const poller = new controller.HostPoller({

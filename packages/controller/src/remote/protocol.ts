@@ -121,12 +121,16 @@ export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 /** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
-  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine";
+  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify";
   readonly taskId: string;
   readonly projectId: string;
   readonly reason: string;
   readonly quietAttempts: readonly string[];
   readonly assignee?: string;
+  /** A landing only (card H12a): the owner's landing policy as the controller read it, bounded and checked. A host holds it against its own configuration and can only be made stricter by it. */
+  readonly landing?: import("../workspace-ops/workspace-ops.js").CarriedLanding;
+  /** `verify` only (card H12a): the check of an attempt's done (card W05) asked of the host that holds the attempt. */
+  readonly verify?: { readonly attemptId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number };
   /** When the controller stops waiting (an ISO time). It frees the agent then, so a host must not start the work after it. */
   readonly expiresAt?: string;
 }

@@ -412,6 +412,24 @@ test("a landing needs a clean shared tree on the named landing branch: another b
   } finally { await w.done(); }
 });
 
+// Card H12a: a request may carry the owner's landing policy; the `landing` option is the only reader of it, and it can refuse in plain words.
+test("a landing request's carried policy reaches only the landing option, and a policy that says `refuse` stops the landing with that text and writes nothing (card H12a)", async () => {
+  const given: unknown[] = [];
+  const w = await world({ landing: (x) => { given.push(x); return x.carried?.branch === "main" ? { branch: "main", requirePermit: false } : { refuse: "the owner's branch is not the one this host lands on" }; } });
+  try {
+    await writeFile(join(w.where.checkout, "src", "a.ts"), "export const a = 2;\n");
+    commitCheckout(w, "agent work");
+    const before = w.sharedState();
+    const refused = await w.host.run(call("landing", { landing: { branch: "trunk" } }));
+    assert.match(reasonOf(refused), /the owner's branch is not the one this host lands on/);
+    assert.equal(w.sharedState(), before, "nothing written");
+    assert.deepEqual(given[0], { taskId: "tsk-one", projectId: "prj-one", carried: { branch: "trunk" } });
+    assert.equal(detailOf(await w.host.run(call("landing", { landing: { branch: "main" } })))["landed"], true, "an agreeing policy lands");
+    await w.host.run(call("refresh"));
+    assert.equal(given.length, 2, "only a landing reads the policy");
+  } finally { await w.done(); }
+});
+
 test("a checkout with an untracked file, or with a file an ignore rule hides, is not landed (card H12q review)", { skip }, async () => {
   // The ignore file is itself a protected path by default; this test is about the dirty check, so the project's list is empty here.
   const w = await world({ landing: () => ({ branch: "main", requirePermit: false, protectDefaults: false, protectedPaths: [] }) });

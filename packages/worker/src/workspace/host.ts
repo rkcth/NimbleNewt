@@ -38,6 +38,11 @@ export interface HostWorkspaceCall {
   readonly expiresAt?: string;
   /** The agent the task is assigned to, when the controller says (named as the author of what is carried into the shared workspace). */
   readonly assignee?: string;
+  /**
+   * The owner's landing policy as the controller read it for this request (card H12a, a landing asked of a REMOTE host over the worker protocol). Only the `landing` option reads it, as `carried`; the host never
+   * applies it by itself. A local host's request carries none.
+   */
+  readonly landing?: LandingPolicy;
 }
 export interface HostSecurityEvent {
   readonly kind: "protected-path-touched" | "sandbox-escape-attempt";
@@ -70,6 +75,8 @@ export interface LandingPolicy {
   readonly protectedPaths?: readonly string[];
   /** Whether the built-in list `DEFAULT_PROTECTED_PATHS` applies (default true). */
   readonly protectDefaults?: boolean;
+  /** A plain reason the host's `landing` option gives when it refuses to name a policy (for example the owner's branch is not the one this host is pinned to). The landing is refused with this text and nothing is written. */
+  readonly refuse?: string;
 }
 
 export interface WorkspaceHostOptions {
@@ -87,7 +94,7 @@ export interface WorkspaceHostOptions {
    * The landing policy of a task (the installation's settings, task layers can only tighten; a project's own landing branch, `project.branches.set`, replaces the installation's branch, card H12t), from this host's settings (chat-settable: `workspace.landing.branch`, `workspace.landing.requirePermit`, `workspace.landing.protectedPaths`). Without it, or without a `branch`, a landing is
    * refused: the landing branch is named, never guessed from what the shared tree happens to be on. `requirePermit` defaults to true.
    */
-  readonly landing?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<LandingPolicy | undefined> | LandingPolicy | undefined;
+  readonly landing?: (call: { readonly taskId: string; readonly projectId: string; /** What the request carried (card H12a): the owner's policy as the controller read it, for a remote host to hold against its own configuration. Absent for a local host's request. */ readonly carried?: LandingPolicy }) => Promise<LandingPolicy | undefined> | LandingPolicy | undefined;
   /** Test seams: called at fixed points of a landing. */
   readonly hooks?: { readonly afterCleanCheck?: () => Promise<void>; readonly afterWrite?: () => Promise<void> };
   /**
@@ -216,7 +223,8 @@ export class WorkspaceHost {
     const git = this.#options.git;
     let policy: LandingPolicy | undefined;
     // A policy that cannot be read refuses the landing (nothing is guessed), and says so: telling the owner "no branch is set" when one is set but unreadable would send them to set it again.
-    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was landed; a landing is refused until they can be read"); }
+    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId, ...(call.landing === undefined ? {} : { carried: call.landing }) }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was landed; a landing is refused until they can be read"); }
+    if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse));
     if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return no("this host has no landing branch set for the project (workspace.landing.branch), so nothing was landed");
     const nothing = (landed: boolean, extra: { [key: string]: HostJson } = {}): HostWorkspaceOutcome => ({ ok: true, summary: "the checkout holds no change from its base; nothing to land", detail: { written: 0, kept: 0, skipped: 0, changed: false, landed, ...extra } });
     const treeProblem = async (): Promise<{ problem: string; head?: string } | { head: string }> => {

@@ -147,6 +147,32 @@ for (const backend of backends) {
 }
 
 for (const backend of backends) {
+  test(`${backend.name}: review (H12a): a report that leaves out a check or an evidence path it was asked about is not a pass (a remote host's report may say less than it was asked) (W05)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("silent", ann);
+      await withContract(w, taskId, { requiredEvidence: ["test log"] });
+      const verdicts: DoneVerdict[] = [];
+      await turn(w, async (attemptId) => {
+        // Every figure is clean, but "unit tests" is not in the report at all.
+        w.worker.verify = async () => ({ ...CLEAN, evidence: [{ path: "logs/test.txt", present: true }], checks: [{ name: "lint", state: "passed", exitCode: 0 }] });
+        verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "s1", evidence: [{ item: "test log", path: "logs/test.txt" }] }));
+        // Every check passed, but the evidence path asked about is not in the report.
+        w.worker.verify = async () => ({ ...CLEAN, evidence: [] });
+        verdicts.push(await w.dispatcher.verifyDone(w.dispatcherPrincipal, attemptId, { key: "s2", evidence: [{ item: "test log", path: "logs/test.txt" }] }));
+      });
+      assert.deepEqual(verdicts.map((v) => v.state), ["unknown", "unknown"]);
+      assert.match((verdicts[0] as { message: string }).message, /Check "unit tests" was not run by the host/);
+      assert.match((verdicts[1] as { message: string }).message, /the host did not say whether "logs\/test\.txt" is there/);
+      const d = (await w.dispatcher.get(w.owner, verdictAttempt(w)))!;
+      assert.deepEqual(d.verifications?.[0]?.checks.map((c) => [c.name, c.state]), [["unit tests", "not-run"], ["lint", "passed"]]);
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
   test(`${backend.name}: a done that was not taken counts toward the W03 go-ons: after it one early stop is let go on, the next ends the attempt (W05)`, async () => {
     const store = await backend.open();
     try {

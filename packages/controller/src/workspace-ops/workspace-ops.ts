@@ -41,6 +41,18 @@ export interface WorkspaceCall {
   readonly quietAttempts: readonly string[];
   /** The agent the task is assigned to (the request is recorded against it, and what is carried into the shared workspace is attributed to it). Absent when nobody is assigned. */
   readonly assignee?: string;
+  /**
+   * The owner's landing policy as the controller read it for this landing (card H12a). Set only by the remote host's port, which reads it fresh from the same reader a local host uses and carries it in the request to a
+   * host that cannot read the controller's settings. A local host reads the policy itself and ignores this.
+   */
+  readonly landing?: CarriedLanding;
+}
+/** The owner's landing figures that travel to a remote host: the owner-set values only (branch, whether the commit permit is required, extra protected paths, whether the built-in protected list applies). */
+export interface CarriedLanding {
+  readonly branch?: string;
+  readonly requirePermit?: boolean;
+  readonly protectedPaths?: readonly string[];
+  readonly protectDefaults?: boolean;
 }
 export type WorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };
 /** The host side of the operations. A host that cannot do one answers `ok: false` with why (a typed refusal, not a fault). */

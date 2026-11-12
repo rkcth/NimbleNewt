@@ -6,8 +6,8 @@ import type { JsonObject } from "../storage/types.js";
 import type { Principal } from "../security/index.js";
 import { tightenLimits } from "../environments/launch-limits.js";
 import { sealContract } from "./contract.js";
-import type { ContractLimits, HostLocalWork, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
-import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
+import type { ContractLimits, DoneCheckReport, DoneCheckRequest, DoneCheckRun, HostLocalWork, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
+import type { CarriedLanding, WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { RemoteWorkerService, Requirements } from "./service.js";
 
 export interface RemoteWorkerHostOptions {
@@ -38,6 +38,11 @@ export interface RemoteWorkerHostOptions {
    * estimates the first call from what the controller knows (the order's text and the route's measured fixed part); the host's own process is not up yet. Absent: the order is offered as it is.
    */
   readonly context?: { readonly guards: NonNullable<RuntimeGuards["context"]>; readonly firstCall: (order: WorkOrder, text: string, storedTokens: number) => Promise<FirstCall> };
+  /**
+   * The owner's landing policy for a task, read fresh at each landing (the same reader a local host uses: the project's own landing branch, else `workspace.landing.branch`, with the permit and protected paths; card H12s) and carried in the
+   * landing request to this host (card H12a). A read that fails, or nothing, refuses the landing here and nothing is sent. The composed controller always gives it.
+   */
+  readonly landingPolicy?: (call: { readonly taskId: string; readonly projectId: string }) => Promise<CarriedLanding>;
   /** Told when the check fails or a stored conversation's size is not known (the order still goes, or is refused, as the check decided). */
   readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
 }
@@ -57,10 +62,37 @@ export class RemoteWorkerHost implements WorkerHost {
     this.ownerPolicy = options.ownerPolicy !== undefined;
     // A host whose port threw (the work may be half done) says so with `failed`: that is thrown here, as a local host's throw is, so the workspace service records `failed`, not a clean refusal.
     this.workspace = { run: async (call) => {
-      const answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 });
+      // A landing carries the owner's policy (card H12a): the host cannot read the controller's settings. Fail closed: nothing is sent when it cannot be read, and what a caller put in the request is never taken (only this reader's word).
+      if (call.operation === "landing") {
+        let policy: CarriedLanding | undefined;
+        try { policy = await this.options.landingPolicy?.({ taskId: call.taskId, projectId: call.projectId }); } catch { policy = undefined; }
+        if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return { ok: false, reason: `the owner's landing policy for this project could not be read here, or names no landing branch, so the landing was not sent to ${this.hostId} (nothing was changed)` };
+        call = { ...call, landing: policy };
+      } else if (call.landing !== undefined) call = { requestId: call.requestId, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: call.quietAttempts, ...(call.assignee === undefined ? {} : { assignee: call.assignee }) };
+      let answer;
+      try { answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }); } catch (error) {
+        // A landing whose carried policy the request check refuses (malformed, or beyond what a request carries) was never sent (that check runs before anything is listed for the host): a clean refusal, not a failure that
+        // may have changed the checkout.
+        if (call.operation === "landing" && error instanceof DomainError && error.code === "invalid_command") return { ok: false, reason: `the owner's landing policy could not be carried to ${this.hostId} (${String(error.message).slice(0, 200)}), so the landing was not sent (nothing was changed)` };
+        throw error;
+      }
       if (answer.ok === false && answer.failed === true) throw new DomainError("unavailable", answer.reason);
       return answer.ok ? answer : { ok: false, reason: answer.reason };
     } };
+  }
+
+  /**
+   * The check of an attempt's done on this host (card H12a, the remote form of card W05): the contract's checks run in the attempt's own sandbox there and the checkout's state is read there, over the same authenticated channel as a
+   * workspace request. Without this the dispatcher could not look at work done on a remote machine and a done of a task with a contract would never count. The answer is reshaped here (only the known fields, bounded, one entry per
+   * check asked); anything that does not fit, an unanswered or refused request, is thrown, so the dispatcher records "could not check" and the done does not count (fail closed, never a pass). The worker's report is the worker's word,
+   * as its work is: the controller cannot run the checks itself on another machine.
+   */
+  async verify(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): Promise<DoneCheckReport> {
+    const requestId = `wsr-${base32(randomBytes(20)).slice(0, 20)}`;
+    const waitMs = Math.min(3_600_000, request.checks.reduce((n, c) => n + c.timeoutMs, 0) + 60_000);
+    const answer = await this.remote.askVerify(this.by, this.hostId, requestId, attemptId, scope, request, { waitMs });
+    if (!answer.ok) throw new DomainError("unavailable", answer.reason);
+    return reportOf(answer.detail, request);
   }
 
   /**
@@ -191,4 +223,48 @@ export class RemoteWorkerHandle implements WorkerHandle {
   async restart(recipe: RecipeSummary, from: JsonObject): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "restart", recipe, checkpoint: from }, this.placement); }
   async tell(text: string): Promise<void> { await this.#current(); await this.remote.control(this.by, this.attemptId, { kind: "tell", text }, this.placement); }
   async stop(): Promise<void> { await this.remote.end(this.by, this.attemptId, "the dispatcher stopped the worker", this.placement); }
+}
+
+const B32 = "abcdefghijklmnopqrstuvwxyz234567";
+function base32(bytes: Buffer): string { let out = ""; for (const b of bytes) out += B32[b & 31]; return out; }
+
+/** A worker's check report as the dispatcher may read it: known fields only, bounded, one entry for each check asked and none other. Throws when it does not fit. */
+function reportOf(detail: unknown, request: DoneCheckRequest): DoneCheckReport {
+  const bad = (what: string): never => { throw new DomainError("unavailable", `the host's report of the check was not usable (${what})`); };
+  if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return bad("not an object");
+  const d = detail as Record<string, unknown>;
+  if (typeof d["checkout"] !== "boolean") return bad("it did not say whether the host holds a checkout");
+  const int = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+  let tree: DoneCheckReport["tree"];
+  if (d["tree"] !== undefined) {
+    const t = d["tree"];
+    if (t === null || typeof t !== "object" || Array.isArray(t)) return bad("the tree");
+    const o = t as Record<string, unknown>;
+    const uncommittedCount = int(o["uncommittedCount"]), ahead = int(o["ahead"]), changed = int(o["changed"]);
+    if (uncommittedCount === undefined || ahead === undefined || !Array.isArray(o["uncommitted"]) || o["uncommitted"].length > 20 || o["uncommitted"].some((f) => typeof f !== "string" || f.length > 300)) return bad("the tree figures");
+    tree = { uncommitted: [...(o["uncommitted"] as string[])], uncommittedCount, ahead, ...(changed === undefined ? {} : { changed }), ...(typeof o["agentCommits"] === "boolean" ? { agentCommits: o["agentCommits"] } : {}) };
+  }
+  let evidence: NonNullable<DoneCheckReport["evidence"]> | undefined;
+  if (d["evidence"] !== undefined) {
+    if (!Array.isArray(d["evidence"]) || d["evidence"].length > request.evidence.length) return bad("the evidence");
+    evidence = d["evidence"].map((e: unknown) => {
+      const o = e as Record<string, unknown> | null;
+      if (o === null || typeof o !== "object" || typeof o["path"] !== "string" || !request.evidence.includes(o["path"]) || typeof o["present"] !== "boolean") return bad("an evidence entry");
+      return { path: o["path"], present: o["present"], ...(typeof o["why"] === "string" ? { why: o["why"].slice(0, 200) } : {}) };
+    });
+  }
+  if (!Array.isArray(d["checks"]) || d["checks"].length > request.checks.length) return bad("the checks");
+  const seen = new Set<string>();
+  const checks = d["checks"].map((c: unknown): DoneCheckRun => {
+    const o = c as Record<string, unknown> | null;
+    if (o === null || typeof o !== "object" || typeof o["name"] !== "string" || !request.checks.some((r) => r.name === o["name"]) || seen.has(o["name"]) || (o["state"] !== "passed" && o["state"] !== "failed" && o["state"] !== "not-run")) return bad("a check entry");
+    seen.add(o["name"]);
+    return {
+      name: o["name"], state: o["state"],
+      ...(o["exitCode"] === null || typeof o["exitCode"] === "number" ? { exitCode: o["exitCode"] as number | null } : {}), ...(typeof o["signal"] === "string" || o["signal"] === null ? { signal: o["signal"] as string | null } : {}),
+      ...(o["timedOut"] === true ? { timedOut: true } : {}), ...(typeof o["output"] === "string" ? { output: o["output"].slice(-2000) } : {}), ...(typeof o["reason"] === "string" ? { reason: o["reason"].slice(0, 300) } : {}),
+      ...(typeof o["ms"] === "number" && Number.isFinite(o["ms"]) ? { ms: o["ms"] } : {}),
+    };
+  });
+  return { checkout: d["checkout"], ...(tree === undefined ? {} : { tree }), ...(evidence === undefined ? {} : { evidence }), checks };
 }
