@@ -79,12 +79,16 @@ for (const [index, backend] of backends.entries()) {
         assert.equal(got.digest, D("a"));
         assert.equal(got.installScripts, false);
         assert.match(String(got.installBehaviour), /no install scripts/);
-        assert.equal(got.rollback, "undo it");
+        assert.equal(got.rollback, "the requester's plan, not checked by the platform: undo it", "the rollback plan is shown as the requester's claim");
+        assert.deepEqual(got.requesterClaims, ["installScripts", "rollback"]);
+        assert.match(String(got.access), /runs with whatever access the agent itself has/, "installed code is not said to have no access");
+        assert.equal(got.warning, undefined);
+        assert.match(String(got.checked), /who made them is not checked/, "the name is not presented as proof of what the package is");
         assert.equal(got.reversible, true);
       }
       const s = (await w.m.get(w.owner, scripted.maintenanceId)).review as Record<string, unknown>;
       assert.equal(s.installScripts, true);
-      assert.match(String(s.installBehaviour), /only after approval of exactly this digest, inside the sandbox with no network/);
+      assert.match(String(s.installBehaviour), /only after approval of exactly this digest, and only inside the sandbox with no network \(in the disposable trial and again when the agent's environment is built\)/);
       assert.equal(s.digest, D("c"));
       assert.match(String(((await w.m.get(w.owner, mount.maintenanceId)).review as Record<string, unknown>).access), /read access to shared\.docs/);
       const b = (await w.m.get(w.owner, base.maintenanceId)).review as Record<string, unknown>;
@@ -125,6 +129,155 @@ for (const [index, backend] of backends.entries()) {
       // Deciding again is refused, and does not apply a second time.
       await refuses("invalid_transition", () => w.m.decide(w.owner, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: digest }));
       assert.equal(w.applier.calls.filter((c) => c.op === "apply").length, 1);
+    });
+  });
+
+  test(`the summary cleans what it shows: a direction-changing or invisible character and a secret-shaped value are left out or marked, with a warning; a source carrying one is refused at the door; nothing calls the change safe (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const rlo = "‮", zw = "​";
+      // A URL never needs an invisible character: one in the source is refused, for a request and for the owner's catalogue.
+      for (const bad of [`${SRC}/x${rlo}gpj.exe`, `${SRC}/a${zw}b`, `${SRC}/a\u0085b`]) {
+        await refuses("invalid_command", () => request(w, ann.principal, "package", pkg("hidden-src", { source: bad })));
+        await refuses("invalid_command", () => w.m.catalogue(w.owner, { commandId: cid("c"), add: true, name: "hidden-src", version: "1.2.3", digest: D("a"), source: bad }));
+      }
+      // Free text keeps its characters in the record, and the reviewer reads it cleaned and warned about.
+      const key = "gh" + "p_" + "Q7".repeat(18);
+      const tricky = await w.m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("tricky", { source: `${SRC}/tricky?access=${key}` }), reason: "needed", rollbackPlan: `remove it${rlo}${zw} and keep the data` });
+      const r = (await w.m.get(w.owner, tricky.maintenanceId)).review as Record<string, unknown>;
+      const all = JSON.stringify(r);
+      assert.equal([...all].some((ch) => ch === rlo || ch === zw), false, "no direction-changing or invisible character is shown");
+      assert.equal(all.includes(key), false, "the secret-shaped value in the source is not shown");
+      assert.match(String(r.source), /\[redacted\]/);
+      assert.match(String(r.rollback), /^the requester's plan, not checked by the platform: remove it and keep the data$/);
+      assert.match(String(r.warning), /invisible or direction-changing characters or a secret-shaped value/);
+      // An older record (stored before the source rule) is shown cleaned as well.
+      const rec = (await w.storage.getAggregate({ kind: "maintenance", id: tricky.maintenanceId }))!;
+      const body = rec.body as unknown as MaintenanceBody;
+      await w.storage.applyOperation({ operationId: cid("old-op"), epoch: await w.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-10-31T10:00:00.000Z", changes: [{ type: "update", ref: rec, expectedRevision: rec.revision, body: { ...body, spec: { ...body.spec, source: `${SRC}/old${rlo}exe.txt` } } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+      const old = (await w.m.get(ann.principal, tricky.maintenanceId)).review as Record<string, unknown>;
+      assert.equal(old.source, `${SRC}/oldexe.txt`);
+      assert.equal(typeof old.warning, "string");
+      // No summary of any kind judges the change: it never says safe.
+      const kinds: [string, unknown][] = [["package", pkg("p1")], ["extension", { ...pkg("e1"), installScripts: true }], ["mount", { mountPath: "/data/x", resource: "shared.x", mode: "write" }], ["network", { site: "n.example.net", port: 22 }], ["skill", { name: "s1", digest: D("b") }], ["host-policy", { setting: "cpu", change: "more" }], ["base", { change: "add a tool" }]];
+      for (const [kind, spec] of kinds) {
+        const made = await w.m.request(w.owner, { commandId: cid("r"), agentId: ann.principal.id, kind, spec, reason: "needed", ...(kind === "skill" ? {} : { rollbackPlan: "undo it" }) });
+        const text = JSON.stringify((await w.m.get(w.owner, made.maintenanceId)).review);
+        assert.doesNotMatch(text, /\bsafe(ly)?\b/i, `${kind}: ${text}`);
+      }
+    });
+  });
+
+  test(`nobody decides their own request, even where the record says the requester supervises itself (a record no command can write) (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+      await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["network", "package"] });
+      await settle(w);
+      const rec = (await w.storage.getAggregate({ kind: "agent", id: ann.id }))!;
+      await w.storage.applyOperation({ operationId: cid("self-op"), epoch: await w.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-10-31T10:00:00.000Z", changes: [{ type: "update", ref: { kind: "agent", id: ann.id }, expectedRevision: rec.revision, body: { ...(rec.body as Record<string, unknown>), supervisorId: ann.id, supervisorSetBy: w.owner.id } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+      for (const [kind, spec] of [["network", { site: "self.example.net" }], ["package", pkg("self-pkg")]] as const) {
+        const asked = await request(w, ann.principal, kind, spec);
+        assert.equal(asked.status, "pending");
+        const digestOf = await specOf(w, asked.maintenanceId);
+        await refuses("forbidden", () => w.m.decide(ann.principal, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: digestOf }));
+        await refuses("forbidden", () => w.m.decide(ann.principal, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "reject", specDigest: digestOf }));
+        assert.equal((await w.body(asked.maintenanceId)).status, "pending");
+        await w.m.revoke(ann.principal, { commandId: cid("v"), maintenanceId: asked.maintenanceId, reason: "mine" });
+        assert.equal((await w.body(asked.maintenanceId)).status, "withdrawn", "the requester may withdraw its own request, never approve it");
+      }
+      assert.equal(w.applier.calls.length, 0);
+      // A real supervisor decides a kind handed over, but never with the credential its worker holds for a task: a task credential never decides.
+      const boss = await w.make("Boss");
+      const bob = await w.make("Bob", w.owner, boss.id);
+      const asked = await request(w, bob.principal, "network", { site: "bob.example.net" });
+      const digest = await specOf(w, asked.maintenanceId);
+      const onTask = { ...boss.principal, taskScope: { taskId: "tsk-anything", projectId: "prj-anything" } } as Principal;
+      await refuses("forbidden", () => w.m.decide(onTask, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: digest }));
+      assert.equal((await w.body(asked.maintenanceId)).status, "pending");
+      assert.equal((await w.m.decide(boss.principal, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: digest })).status, "applied");
+    });
+  });
+
+  test(`a preapproved catalogue entry approves only its exact artifact: another digest, another source or install scripts it does not allow wait for a decider, and nothing is applied (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      await w.m.catalogue(w.owner, { commandId: cid("c"), add: true, name: "cat-pkg", version: "1.2.3", digest: D("a"), source: SRC });
+      await settle(w);
+      for (const [label, extra] of [["another digest", { digest: D("b") }], ["another source", { source: `${SRC}/elsewhere` }], ["install scripts", { installScripts: true }], ["another version", { version: "1.2.4" }]] as const) {
+        const asked = await request(w, ann.principal, "package", pkg("cat-pkg", extra));
+        await settle(w);
+        assert.equal(asked.status, "pending", label);
+        assert.equal((await w.body(asked.maintenanceId)).decision, undefined, label);
+      }
+      assert.equal(w.applier.calls.length, 0, "nothing outside the entry was applied");
+      const exact = await request(w, ann.principal, "package", pkg("cat-pkg"));
+      await settle(w);
+      assert.equal((await w.body(exact.maintenanceId)).decision?.rule, "catalogue");
+      assert.equal((await w.body(exact.maintenanceId)).status, "applied");
+    });
+  });
+
+  test(`a supervisor's approval is judged again when the application starts: one that waited and whose authority the owner took back meanwhile goes back to waiting and is never applied (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const boss = await w.make("Boss");
+      const bob = await w.make("Bob", w.owner, boss.id);
+      await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+      await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["package", "network"] });
+      await settle(w);
+      for (const takeBack of ["bosses off", "kind withdrawn"] as const) {
+        const asked = await request(w, bob.principal, "package", pkg(`boss-${takeBack.replace(" ", "-")}`));
+        w.applier.nextApply.push({ outcome: "unsupported", reason: "the host cannot take it now" });
+        const decided = await w.m.decide(boss.principal, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: await specOf(w, asked.maintenanceId) });
+        assert.equal(decided.status, "approved", "it waits for the host");
+        const before = w.applier.calls.filter((c) => c.op === "apply" && c.id === asked.maintenanceId).length;
+        if (takeBack === "bosses off") await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: false });
+        else await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["network"] });
+        await settle(w);
+        for (let i = 0; i < 2; i++) { await w.m.tick(); await w.m.resume(); }
+        await settle(w);
+        const b = await w.body(asked.maintenanceId);
+        assert.equal(b.status, "pending", `${takeBack}: ${b.status}`);
+        assert.equal(w.applier.calls.filter((c) => c.op === "apply" && c.id === asked.maintenanceId).length, before, `${takeBack}: the applier was not asked again`);
+        // Put the authority back for the next round.
+        await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+        await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["package", "network"] });
+        await settle(w);
+      }
+    });
+  });
+
+  test(`two decisions at the same moment, from two controllers' services on one storage: exactly one counts and the applier runs at most once; an approval racing the requester's withdrawal never applies a withdrawn request (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      for (let round = 0; round < 3; round++) {
+        const asked = await request(w, ann.principal, "package", pkg(`race-${round}`));
+        const digest = await specOf(w, asked.maintenanceId);
+        const a = w.service(), b = w.service();
+        const got = await Promise.allSettled([
+          a.decide(w.owner, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "approve", specDigest: digest }),
+          b.decide(w.owner, { commandId: cid("d"), maintenanceId: asked.maintenanceId, verdict: "reject", specDigest: digest }),
+        ]);
+        await a.idle(); await b.idle(); await settle(w);
+        assert.equal(got.filter((g) => g.status === "fulfilled").length, 1, JSON.stringify(got.map((g) => g.status === "rejected" ? String(g.reason) : g.value)));
+        const final = await w.body(asked.maintenanceId);
+        const applied = w.applier.calls.filter((c) => c.op === "apply" && c.id === asked.maintenanceId).length;
+        if (final.status === "rejected") assert.equal(applied, 0); else { assert.equal(final.status, "applied"); assert.equal(applied, 1); }
+        assert.equal(final.decision?.by, w.owner.id);
+
+        const second = await request(w, ann.principal, "package", pkg(`race-w-${round}`));
+        const d2 = await specOf(w, second.maintenanceId);
+        const both = await Promise.allSettled([
+          a.decide(w.owner, { commandId: cid("d"), maintenanceId: second.maintenanceId, verdict: "approve", specDigest: d2 }),
+          b.revoke(ann.principal, { commandId: cid("v"), maintenanceId: second.maintenanceId, reason: "not needed any more" }),
+        ]);
+        await a.idle(); await b.idle(); await settle(w);
+        const end = await w.body(second.maintenanceId);
+        const ran = w.applier.calls.filter((c) => c.op === "apply" && c.id === second.maintenanceId).length;
+        assert.ok(both.some((g) => g.status === "fulfilled"));
+        if (end.status === "withdrawn") assert.equal(ran, 0, "a withdrawn request is never applied");
+        else assert.ok(["applied", "revoked"].includes(end.status), end.status);
+      }
     });
   });
 }

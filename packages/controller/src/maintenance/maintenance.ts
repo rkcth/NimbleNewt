@@ -8,7 +8,9 @@ import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf, MAX_DEPTH, recordGrantUse, type GrantRecordBody } from "../security/grants.js";
 import { inWindow } from "../policy/engine.js";
 import type { NoActor, Principal } from "../security/principals.js";
+import { cleanUntrusted } from "../security/clean.js";
 import { redactText } from "../security/redact.js";
+import { isHidden } from "../security/secret-scan.js";
 import { canonicalJson } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
@@ -50,6 +52,8 @@ export function checkSource(v: unknown, field: string): string {
   let u: URL;
   try { u = new URL(s); } catch { return bad(field, "must be an https URL"); }
   if (u.protocol !== "https:" || /[\s"'<>\\]/.test(s) || u.hostname === "") return bad(field, "must be an https URL without spaces");
+  // An invisible or direction-changing character (a right-to-left override, a zero-width space, a C1 control) makes a reviewer read another address than the one fetched: a URL written as such never needs one.
+  if ([...s].some(isHidden)) return bad(field, "must not contain invisible or direction-changing characters");
   if (u.username !== "" || u.password !== "" || /^https:\/\/[^/?#]*@/i.test(s)) return bad(field, "must not carry a user name or password");
   return s;
 }
@@ -108,25 +112,39 @@ export function checkSpec(kind: MaintenanceKind, value: unknown): MaintenanceSpe
  */
 export function reviewSummary(b: MaintenanceBody): JsonObject {
   const s = b.spec as Record<string, unknown>;
-  const rollback = b.rollbackPlan ?? (b.class === "skill-draft" ? "a skill draft is only recorded; it is withdrawn by revoking the request" : "none given");
-  switch (b.kind) {
-    case "package": case "extension": {
-      const scripts = s["installScripts"] === true;
-      return {
-        change: `${b.kind} ${String(s["name"])}@${String(s["version"])}`, source: String(s["source"]), digest: String(s["digest"]),
-        access: "none beyond the package files: no network during install, no host paths", installScripts: scripts,
-        installBehaviour: scripts
-          ? "the package declares install scripts: they run once, only after approval of exactly this digest, inside the sandbox with no network, and the change is refused if the artifact does not match"
-          : "no install scripts: the applier installs with every script switched off and refuses an artifact that declares one",
-        rollback, reversible: true,
-      };
+  // Every word shown goes through the shared cleaning (redact, strip invisible and direction-changing characters, redact again) and is bounded: a record written before a rule was tightened, or free text the
+  // requester chose, must not make the reviewer read something else than what is stored. What the cleaning changed is said, so nothing is hidden silently.
+  let altered = false;
+  const shown = (v: unknown, max = 300): string => { const raw = String(v); const c = cleanUntrusted(raw, { lines: "fold" }); const t = c.text; if (c.redacted || [...raw].some(isHidden)) altered = true; return t.length > max ? `${t.slice(0, max)}...` : t; };
+  const claimed = b.rollbackPlan === undefined ? undefined : shown(b.rollbackPlan, MAINTENANCE_LIMITS.plan);
+  const rollback = claimed !== undefined ? `the requester's plan, not checked by the platform: ${claimed}` : b.class === "skill-draft" ? "a skill draft is only recorded; it is withdrawn by revoking the request" : "none given";
+  const out = ((): Record<string, unknown> => {
+    switch (b.kind) {
+      case "package": case "extension": {
+        const scripts = s["installScripts"] === true;
+        return {
+          change: `${b.kind} ${shown(s["name"])}@${shown(s["version"])}`, source: shown(s["source"]), digest: shown(s["digest"]),
+          access: "while installing: no network and no host paths; once installed, its code runs with whatever access the agent itself has whenever the agent uses it", installScripts: scripts,
+          installBehaviour: scripts
+            ? "the requester says the package has install scripts: they run only after approval of exactly this digest, and only inside the sandbox with no network (in the disposable trial and again when the agent's environment is built), and the change is refused if the fetched artifact does not match the digest"
+            : "the requester says the package has no install scripts: the platform installs it with every script switched off and refuses it if the fetched artifact declares one",
+          checked: "the fetched bytes must match this digest and name themselves this package and version, or nothing is installed; who made them is not checked: judge the source and the digest",
+          rollback, reversible: true,
+        };
+      }
+      case "mount": return { change: `mount ${shown(s["resource"])} at ${shown(s["mountPath"])}`, access: `${shown(s["mode"])} access to ${shown(s["resource"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
+      case "network": return { change: `network ${shown(s["site"])}:${shown(s["port"])}`, access: `outgoing connections to ${shown(s["site"])} port ${shown(s["port"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
+      case "skill": return { change: `skill ${shown(s["name"])}`, digest: shown(s["digest"]), access: "none", installBehaviour: "a skill draft is only recorded", rollback, reversible: true };
+      case "host-policy": return { change: `host policy ${shown(s["setting"])}: ${shown(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
+      case "base": return { change: `shared base: ${shown(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
     }
-    case "mount": return { change: `mount ${String(s["resource"])} at ${String(s["mountPath"])}`, access: `${String(s["mode"])} access to ${String(s["resource"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
-    case "network": return { change: `network ${String(s["site"])}:${String(s["port"])}`, access: `outgoing connections to ${String(s["site"])} port ${String(s["port"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
-    case "skill": return { change: `skill ${String(s["name"])}`, digest: String(s["digest"]), access: "none", installBehaviour: "a skill draft is only recorded", rollback, reversible: true };
-    case "host-policy": return { change: `host policy ${String(s["setting"])}: ${String(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
-    case "base": return { change: `shared base: ${String(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
-  }
+  })();
+  return {
+    ...out,
+    // What the platform only has the requester's word for. This summary describes a request; it is never a judgement that the change is safe.
+    requesterClaims: [...(b.kind === "package" || b.kind === "extension" ? ["installScripts"] : []), ...(claimed === undefined ? [] : ["rollback"])],
+    ...(altered ? { warning: "some text of this request carried invisible or direction-changing characters or a secret-shaped value; they are left out or marked [redacted] here, the stored request keeps them" } : {}),
+  } as JsonObject;
 }
 
 export interface MaintenanceDecision { readonly by: string; readonly verdict: "approve" | "reject"; readonly via: "owner" | "supervisor" | "rule"; readonly rule?: string; readonly specDigest: string; readonly at: string; readonly note?: string }
