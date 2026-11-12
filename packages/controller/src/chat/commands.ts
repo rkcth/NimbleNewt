@@ -150,6 +150,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
   // Marking the current release as the last known good decides where a failed start falls back to: shown first (card K02, second slice).
   "release.confirm": { verb: "Confirm the current release as the last known good", mode: "propose" },
+  // The trust root decides which signatures count (card K02b): trusting a key, withdrawing one and changing whether a signature is needed are shown first. Attaching a signature changes nothing that runs and only keeps one that verified against the root.
+  "release.trust.add": { verb: "Trust a release signing key", mode: "propose" },
+  "release.trust.remove": { verb: "Stop trusting a release signing key", mode: "propose" },
+  "release.trust.require": { verb: "Change whether releases must be signed", mode: "propose" },
+  "release.signature.attach": { verb: "Attach a signature to a release candidate", mode: "apply" },
   // The owner saying they have seen a failed start or fall-back only closes a notice: it changes no release and no setting (card K02f).
   "release.start.acknowledge": { verb: "Acknowledge that a release failed to start or fell back", mode: "apply" },
   "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
