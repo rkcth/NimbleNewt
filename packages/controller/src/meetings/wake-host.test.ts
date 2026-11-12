@@ -177,7 +177,7 @@ for (const backend of backends) {
     } finally { await t.close(); }
   });
 
-  test(`${backend.name}: a wake whose stop was lifted or replaced is left waiting, and nothing is started for an agent that is not at rest (card M04h)`, async () => {
+  test(`${backend.name}: a wake whose stop was lifted is left waiting, one whose stop was replaced is given up with the reason, and nothing is started for an agent that is not at rest (card M04h)`, async () => {
     const t = await world(backend);
     try {
       const a = agentOf(0);
@@ -187,6 +187,17 @@ for (const backend of backends) {
       assert.deepEqual(await t.host.attend(by, at.a), { attended: 0, waiting: 1, gaveUp: 0, settled: 0 });
       assert.deepEqual(at.calls, []);
       assert.equal(await t.host.availability(a), undefined);
+      // Review of card M04h: a stop made again after the wake (another request) is not the one it woke the agent from: the wake is given up with that reason rather than shown as waiting, and nothing is started.
+      const b = agentOf(1);
+      t.stopAgent(b, "stp-2"); await t.room(1, [b]); await t.wake(b, 1);
+      t.stopAgent(b, "stp-3");
+      const bt = attender();
+      assert.deepEqual(await t.host.attend(by, bt.a), { attended: 0, waiting: 1, gaveUp: 1, settled: 0 });
+      assert.deepEqual(bt.calls, []);
+      const given = (await t.host.list()).find((w) => w.agent === b)!;
+      assert.equal(given.state, "gave-up");
+      assert.match(given.reason!, /stopped, suspended or paused again after the wake/);
+      assert.deepEqual(await t.host.attend(by, bt.a), { attended: 0, waiting: 1, gaveUp: 0, settled: 0 }, "a wake given up is not counted again");
     } finally { await t.close(); }
   });
 }

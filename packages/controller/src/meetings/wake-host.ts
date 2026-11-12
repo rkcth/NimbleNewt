@@ -48,6 +48,8 @@ interface LeaseEntry {
   readonly stoppedBy?: string;
   /** The room has been made to agree with the stop (the agent left or its seat says why it is not coming). */
   readonly settledAt?: string;
+  /** Why an attended wake ended before its room did and without the owner's stop of the wake (the agent left the room, or the owner stopped, suspended or paused it again). */
+  readonly endedReason?: string;
 }
 interface LeaseBody { readonly agent: string; readonly leases: readonly LeaseEntry[] }
 interface RoomView { readonly state: string; readonly roster: readonly string[] }
@@ -132,8 +134,9 @@ export class MeetingWakeHost implements WakeControl {
       for (const e of lease.body.leases) {
         if (out.length >= WAKE_LIMITS.shown) return out;
         if (!(await this.#open(e.occurrenceId, lease.body.agent))) continue;
-        const state = e.stoppedAt !== undefined ? "stopped" : e.gaveUpAt !== undefined ? "gave-up" : e.attendedAt !== undefined ? "attending" : "waiting";
-        out.push({ agent: lease.body.agent, occurrenceId: e.occurrenceId, projectId: e.projectId, at: e.at, state, ...(e.meetingTaskId === undefined ? {} : { meetingTaskId: e.meetingTaskId }), tries: e.tries ?? 0, ...(e.lastError === undefined ? {} : { reason: e.lastError }), leaseId: lease.id, leaseRevision: lease.revision });
+        const state = e.stoppedAt !== undefined ? "stopped" : e.gaveUpAt !== undefined ? "gave-up" : e.endedReason !== undefined ? "ended" : e.attendedAt !== undefined ? "attending" : "waiting";
+        const reason = state === "ended" ? e.endedReason : e.lastError;
+        out.push({ agent: lease.body.agent, occurrenceId: e.occurrenceId, projectId: e.projectId, at: e.at, state, ...(e.meetingTaskId === undefined ? {} : { meetingTaskId: e.meetingTaskId }), tries: e.tries ?? 0, ...(reason === undefined ? {} : { reason }), leaseId: lease.id, leaseRevision: lease.revision });
       }
     }
     return out;
@@ -165,11 +168,16 @@ export class MeetingWakeHost implements WakeControl {
         if (e.stoppedAt !== undefined || e.attendedAt !== undefined) {
           try {
             const seat = await attender.seat(by, e.occurrenceId, agent);
-            const over = e.stoppedAt !== undefined || !open || seat?.left === true;
+            // The owner's later Stop, Suspend or pause of the agent ends the wake too: the stop it was woken from is no longer what holds it (a resumed agent, which reads as not at rest, simply attends on).
+            const again = e.stoppedAt === undefined && open && seat?.left !== true && (await this.#heldAgain(agent));
+            const over = e.stoppedAt !== undefined || !open || seat?.left === true || again;
             if (!over) { active++; continue; }
-            if (e.stoppedAt !== undefined) await attender.endWake(by, e.occurrenceId, agent);
+            if (e.stoppedAt !== undefined || again) await attender.endWake(by, e.occurrenceId, agent);
             const taskId = e.meetingTaskId ?? seat?.meetingTaskId;
-            if (taskId !== undefined) await attender.endAttempt(by, taskId, e.stoppedAt !== undefined ? "the owner stopped the wake of this agent" : "the meeting this agent was woken for is over");
+            const why = e.stoppedAt !== undefined ? "the owner stopped the wake of this agent" : again ? "the owner stopped, suspended or paused this agent again after the wake" : !open ? "the meeting this agent was woken for is over" : "the agent left the meeting room";
+            // The wake is over as soon as the room agrees (said at once, so the owner is not told it is attending while its attempt is being stopped); it is settled only once the dispatcher has stopped the attempt too.
+            if (e.stoppedAt === undefined && e.endedReason === undefined) await this.#amend(agent, e.occurrenceId, `mwl-end-${digestOf(e.key)}`, "end", (x) => x.endedReason === undefined && x.stoppedAt === undefined ? { ...x, endedReason: why } : x);
+            if (taskId !== undefined) await attender.endAttempt(by, taskId, why);
             await this.#amend(agent, e.occurrenceId, `mwl-settle-${digestOf(e.key)}`, "settle", (x) => x.settledAt === undefined ? { ...x, settledAt: this.#runner.now() } : x);
             settled++;
           } catch { /* tried again on the next pass */ }
@@ -181,8 +189,14 @@ export class MeetingWakeHost implements WakeControl {
     }
     for (const { agent, entry } of todo) {
       if (attended >= WAKE_LIMITS.perPass || active >= WAKE_LIMITS.active) { waiting++; continue; }
-      // A wake whose stop was lifted or replaced no longer counts; the agent is left as it is until the owner wakes it again.
-      if ((await this.availability(agent)) !== "available") { waiting++; continue; }
+      // A wake whose stop was replaced (the owner stopped, suspended or paused the agent again) no longer counts: it is given up with that reason, so the owner is not told it is waiting. A resumed agent (not at rest) needs no wake and is left as it is.
+      if ((await this.availability(agent)) !== "available") {
+        if (await this.#heldAgain(agent)) {
+          await this.#amend(agent, entry.occurrenceId, `mwl-again-${digestOf(entry.key)}`, "failed", (e) => e.attendedAt !== undefined || e.stoppedAt !== undefined || e.gaveUpAt !== undefined ? e : { ...e, lastError: "the agent was stopped, suspended or paused again after the wake; wake it again if it should attend", gaveUpAt: this.#runner.now() });
+          gaveUp++;
+        } else waiting++;
+        continue;
+      }
       const tag = digestOf(entry.key);
       const tries = entry.tries ?? 0;
       let problem: string | undefined;
@@ -241,6 +255,14 @@ export class MeetingWakeHost implements WakeControl {
         if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= 6) throw error;
       }
     }
+  }
+
+  /** Whether a pause still holds the agent and the wake no longer makes it available: the owner stopped, suspended or paused it again (a stop still under way reads as paused). False for an agent no pause holds (it was resumed and needs no wake). */
+  async #heldAgain(agent: string): Promise<boolean> {
+    const agentId = AGENT.exec(agent)?.[1];
+    if (agentId === undefined) return true;
+    if ((await this.#life.holds(agentId)).length === 0) return false;
+    return (await this.availability(agent)) !== "available";
   }
 
   async #woken(agent: string, intentId: string): Promise<boolean> {

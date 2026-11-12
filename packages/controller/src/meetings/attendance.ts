@@ -137,8 +137,8 @@ export interface WakeView {
   readonly occurrenceId: string;
   readonly projectId: string;
   readonly at: string;
-  /** `waiting` (woken, not yet in the room, or waiting for a place), `attending`, `gave-up` (the host could not bring it in; `reason` says why) or `stopped` (the owner ended the wake). */
-  readonly state: "waiting" | "attending" | "gave-up" | "stopped";
+  /** `waiting` (woken, not yet in the room, or waiting for a place), `attending`, `gave-up` (the host could not bring it in; `reason` says why), `stopped` (the owner ended the wake) or `ended` (it attended, then left the room or was stopped, suspended or paused again; `reason` says which). */
+  readonly state: "waiting" | "attending" | "gave-up" | "stopped" | "ended";
   readonly meetingTaskId?: string;
   readonly tries: number;
   readonly reason?: string;
@@ -407,7 +407,7 @@ export class AttendanceService {
       const agentId = AGENT.exec(who)?.[1];
       const holds = agentId === undefined ? [] : await this.#pauses.agentHolds(agentId);
       if (holds.length === 0 || holds.some((h) => h.scope.kind === "installation")) return { state: "preparing", bounded: false };
-      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId })) };
+      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId, stop: h.stop })) };
     }
     if (availability === "paused") {
       const out = (reason: string) => ({ state: "unavailable" as const, reason, bounded: false });
@@ -415,7 +415,7 @@ export class AttendanceService {
       const holds = await this.#pauses.agentHolds(agentIdOf(who));
       if (holds.some((h) => h.scope.kind === "installation")) return out("the whole installation is paused; an invitation never overrides that. Its saved brief is available");
       if (holds.some((h) => h.pausedAt > (seat.ownerInvitedAt as string))) return out("it was paused again after the owner's invitation; the owner invites it again if it should attend. Its saved brief is available");
-      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId })) };
+      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId, stop: h.stop })) };
     }
     return { state: "unavailable", reason: `${availability}: it stays ${availability} unless the owner authorizes waking or recovering it; its saved brief is available`, bounded: false };
   }

@@ -215,3 +215,53 @@ test("the owner wakes, sees and ends a wake in free words in chat: a wake follow
     assert.match(JSON.stringify(await turn("Who is awake now?")), /You stopped the wake of/);
   } finally { await f.close(); }
 });
+
+/** Review of card M04h: a Stop, Suspend or Force Stop the owner makes after the wake keeps the gate's pause (and so its request), and must still win over the meeting task's permission. */
+async function laterStop(storage: "sqlite" | { pg: TestServer }, later: "force" | "stop-after-suspend" | "before-join"): Promise<void> {
+  const f = await fixture(storage);
+  try {
+    const { call, ids } = f;
+    const cat = `agent:${ids["cat"]}`;
+    assert.ok((await call("lifecycle.stop", { scope: { kind: "agent", id: ids["cat"] }, mode: later === "stop-after-suspend" ? "suspend" : "stop", reason: "night" }, "st1")).ok);
+    const occurrenceId = await f.open();
+    assert.ok((await call("meeting.attend.wake", { occurrenceId, agent: cat }, "wk1")).ok);
+    const again = async () => {
+      const r = later === "stop-after-suspend" ? await call("lifecycle.stop", { scope: { kind: "agent", id: ids["cat"] }, mode: "stop", reason: "again" }, "st2") : await call("lifecycle.force", { scope: { kind: "agent", id: ids["cat"] }, reason: "again" }, "fs1");
+      assert.ok(r.ok, JSON.stringify(r));
+    };
+    if (later === "before-join") {
+      await again();
+      await f.pass(3);
+      const w = (await wakes(f))[0];
+      assert.equal(w.state, "gave-up", JSON.stringify(w));
+      assert.match(w.reason, /stopped, suspended or paused again after the wake/);
+      assert.notEqual((await f.seat(occurrenceId, "cat")).state, "present", "the agent was never brought in");
+      assert.equal(w.meetingTaskId, undefined);
+      return;
+    }
+    await f.pass(3);
+    const w = (await wakes(f))[0];
+    assert.equal(w.state, "attending", JSON.stringify(w));
+    assert.equal(await f.c.services.pauses.isPaused(w.meetingTaskId), false);
+    await again();
+    // The later stop holds the meeting task at once, before any pass of the host: the permission does not cover a stop made after it.
+    assert.equal(await f.c.services.pauses.isPaused(w.meetingTaskId), true, "the owner's later stop holds the meeting task");
+    await f.pass(2);
+    const after = (await wakes(f))[0];
+    assert.equal(after.state, "ended", JSON.stringify(after));
+    assert.match(after.reason, /stopped, suspended or paused this agent again/);
+    assert.notEqual((await f.seat(occurrenceId, "cat")).state, "present", "the agent left the room");
+    assert.equal(await f.c.services.pauses.isPaused(w.meetingTaskId), true);
+    const attempt = await attemptOf(f, w.meetingTaskId);
+    assert.ok(attempt === undefined || attempt.frozen !== undefined || attempt.state !== "running", `no attempt runs on: ${JSON.stringify(attempt)}`);
+    assert.match(JSON.stringify(await f.call("status.ask", { request: { kind: "wakes" } })), /its wake has ended/);
+  } finally { await f.close(); }
+}
+
+for (const later of ["force", "stop-after-suspend", "before-join"] as const) {
+  test(`a later ${later} of the woken agent wins over its meeting permission and the wake says so (card M04h review)`, async () => { await laterStop("sqlite", later); });
+}
+test("a later stop wins on PostgreSQL too (card M04h review)", async () => {
+  const pg = await startTestServer();
+  try { for (const later of ["force", "stop-after-suspend"] as const) await laterStop({ pg }, later); } finally { await pg.stop(); }
+});
