@@ -4,6 +4,7 @@ import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { NotificationService, UrgentWatch, type ChannelAdapter, type HostSource, type UrgentWatchOptions } from "./index.js";
 
 interface Backup { newest?: string; unreadable?: boolean; lastError?: { at: string; message: string } }
@@ -23,7 +24,7 @@ const cid = (label: string): string => `${label}-${n++}`;
 
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
-    svc: NotificationService; owner: Principal; sent: { text: string }[]; backup: Backup; hosts: Hosts;
+    svc: NotificationService; owner: Principal; sent: { text: string }[]; backup: Backup; hosts: Hosts; storage: ControllerStorage;
     watch: UrgentWatch; restart(extra?: Partial<UrgentWatchOptions>): UrgentWatch; flush(): Promise<unknown>; set(change: Record<string, unknown>): Promise<void>; open(): Promise<{ id: string; level: string; state: string; urgent: boolean; immediate: boolean; label: string; detail?: string; count: number; ref: { kind: string } }[]>;
   }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -47,7 +48,7 @@ for (const backend of backends) {
         const watch = make();
         const set = async (change: Record<string, unknown>): Promise<void> => { await svc.configure(owner, { commandId: cid("cfg"), expectedRevision: (await svc.settings(owner)).revision, ...change } as never); };
         await set({ channel: "external", channelName: "pager" });
-        await body({ flush: () => svc.runDue(), restart: make, svc, owner, sent, backup, hosts, watch, set, open: async () => (await svc.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled") as never });
+        await body({ storage: world.storage, flush: () => svc.runDue(), restart: make, svc, owner, sent, backup, hosts, watch, set, open: async () => (await svc.inbox(owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled") as never });
       } finally { await world.close(); }
     });
 
@@ -160,6 +161,150 @@ for (const backend of backends) {
     assert.equal(items.length, 1);
     assert.match(items[0]!.label, /refused 6 times/);
     assert.doesNotMatch(items[0]!.detail ?? "", /6 times within 10 minutes/, items[0]!.detail);
+  });
+
+  suite("denial counts survive a restart: the count goes on, a run that paged does not page again, and quiet counts are forgotten (card U11d)", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    await c.watch.reportDenial("agent:ann"); await c.watch.reportDenial("agent:ann");
+    await c.watch.reportDenial("agent:bob");
+    const restarted = c.restart();
+    assert.equal((await restarted.reportDenial("agent:ann")).raised, true, "the two before the restart count: the third pages");
+    assert.equal((await restarted.reportDenial("agent:bob")).raised, false, "another agent is counted on its own");
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1);
+    // The run already paged: a second restart does not page again and the item's count goes on.
+    const again = c.restart();
+    assert.equal((await again.reportDenial("agent:ann")).raised, false, "the same run does not page twice");
+    const items = (await c.open()).filter((i) => /ann/.test(i.label));
+    assert.equal(items.length, 1);
+    assert.match(items[0]!.label, /refused 4 times/);
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1, "nothing more was sent");
+    // Counts that have been quiet for a whole window are forgotten (and so is what was remembered), and a restart then starts from nothing.
+    now += 11 * MIN;
+    await again.sweep(c.owner);
+    assert.deepEqual(await c.storage.listAggregates("notification-denial", { limit: 10 }), [], "nothing is kept for quiet agents");
+    assert.equal((await c.restart().reportDenial("agent:bob")).raised, false);
+    // An unreadable remembered count is the same as none.
+    await c.svc.keepDenialCount("agent:zed", { t: "not a list" }, undefined);
+    assert.equal((await c.restart().reportDenial("agent:zed")).raised, false);
+  });
+
+  suite("review of U11d: refusals of one agent that arrive together page once, also right after a restart", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    await c.watch.reportDenial("agent:ann"); await c.watch.reportDenial("agent:ann");
+    const results = await Promise.all([c.watch.reportDenial("agent:ann"), c.watch.reportDenial("agent:ann"), c.watch.reportDenial("agent:ann")]);
+    assert.equal(results.filter((r) => r.raised).length, 1, "one of the three raises the item");
+    await c.watch.reportDenial("agent:bob"); await c.watch.reportDenial("agent:bob");
+    const restarted = c.restart();
+    const after = await Promise.all([restarted.reportDenial("agent:bob"), restarted.reportDenial("agent:bob"), restarted.reportDenial("agent:bob")]);
+    assert.equal(after.filter((r) => r.raised).length, 1, "after a restart too");
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 2, "one page per agent");
+    const items = (await c.open()).filter((i) => i.ref.kind === "agent");
+    assert.equal(items.length, 2);
+    assert.match(items.find((i) => /ann/.test(i.label))!.label, /refused 5 times/, "no refusal is lost");
+    assert.match(items.find((i) => /bob/.test(i.label))!.label, /refused 5 times/);
+  });
+
+  suite("review of U11d: a controller that stops between raising the item and saving the count neither pages twice nor misses the page", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    // A controller that dies right after the item is raised: everything after the raise fails.
+    const crashAfter = (when: (method: string, args: unknown[]) => boolean): UrgentWatch => {
+      let dead = false;
+      const svc = new Proxy(c.svc, { get(target, prop, receiver) {
+        const v = Reflect.get(target, prop, receiver) as unknown;
+        if (typeof v !== "function") return v;
+        return async (...args: unknown[]) => { if (dead) throw new Error("the controller stopped"); const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args); if (when(String(prop), args)) dead = true; return r; };
+      } });
+      return c.restart({ notifications: svc as NotificationService });
+    };
+    const raising = (m: string, a: unknown[]): boolean => m === "emitFromController" && (a[0] as { interrupt?: boolean }).interrupt === true;
+    await c.watch.reportDenial("agent:ann"); await c.watch.reportDenial("agent:ann");
+    await crashAfter(raising).reportDenial("agent:ann");
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1, "the item was raised and sent before the stop");
+    now += 1000;
+    const next = c.restart();
+    assert.equal((await next.reportDenial("agent:ann")).raised, false, "the same run does not page again");
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1, "nothing more was sent");
+    const items = (await c.open()).filter((i) => i.ref.kind === "agent");
+    assert.equal(items.length, 1, "the item raised before the stop stays the one item");
+    assert.match(items[0]!.label, /refused 4 times/);
+    // A controller that dies just before the item is raised: the page still goes out, from the next refusal or from the sweep.
+    await c.watch.reportDenial("agent:bob"); await c.watch.reportDenial("agent:bob");
+    let dying = true;
+    const svc = new Proxy(c.svc, { get(target, prop, receiver) {
+      const v = Reflect.get(target, prop, receiver) as unknown;
+      if (typeof v !== "function") return v;
+      return async (...args: unknown[]) => { if (dying && prop === "emitFromController") { dying = false; throw new Error("the controller stopped"); } return (v as (...a: unknown[]) => Promise<unknown>).apply(target, args); };
+    } });
+    await c.restart({ notifications: svc as NotificationService }).reportDenial("agent:bob");
+    await c.restart().sweep(c.owner);
+    await c.flush(); await c.flush();
+    assert.equal((await c.open()).filter((i) => i.ref.kind === "agent" && /bob/.test(i.label)).length, 1, "the item is raised although no refusal came after the stop");
+    assert.equal(c.sent.length, 2, "and sent once");
+  });
+
+  suite("review of U11d: refusals counted before the clock was set back, and remembered counts that make no sense, never page", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    now += HOUR;
+    await c.watch.reportDenial("agent:ann"); await c.watch.reportDenial("agent:ann");
+    now -= HOUR; // the clock is put back an hour and the controller restarts
+    assert.equal((await c.restart().reportDenial("agent:ann")).raised, false, "refusals 'in the future' do not count");
+    // The same without a restart (the clock is put back under a running controller).
+    now += HOUR;
+    await c.watch.reportDenial("agent:cy"); await c.watch.reportDenial("agent:cy");
+    now -= HOUR;
+    assert.equal((await c.watch.reportDenial("agent:cy")).raised, false, "nor in memory");
+    // Remembered counts with values that make no sense count as none: they never page, never throw, and are written over by the next refusal.
+    const plant = async (agent: string, body: Record<string, unknown>): Promise<void> => { await c.svc.keepDenialCount(agent, body as never, (await c.svc.denialCount(agent))?.revision); };
+    const t = [now - MIN, now - MIN];
+    const bad: Record<string, unknown>[] = [
+      { t, n: 2, r: 0, c: 0, s: 9e15 }, { t, n: -5, r: 0, c: 0, s: now - MIN }, { t, n: 2, r: 7, c: 0, s: now - MIN }, { t: [...t, "x"], n: 2, r: 0, c: 0, s: now - MIN },
+      { t, n: 2, r: 0, c: 0, s: now - MIN, p: 1 }, { t: [0.5, 1.5], n: 2, r: 0, c: 0, s: 0 }, { t: Array.from({ length: 1001 }, () => now - MIN), n: 2, r: 0, c: 0, s: now - MIN }, { t, n: 2, r: 0, c: 0, s: now - MIN, j: "../x" },
+    ];
+    for (const [i, body] of bad.entries()) {
+      await plant(`agent:bad${i}`, body);
+      assert.equal((await c.restart().reportDenial(`agent:bad${i}`)).raised, false, `record ${i} counts as none`);
+      assert.deepEqual((await c.svc.denialCount(`agent:bad${i}`))!.body["t"], [now], `record ${i} is written over`);
+    }
+    // A sensible record is used (the control for the cases above).
+    await plant("agent:good", { t, n: 2, r: 0, c: 0, s: now - MIN });
+    assert.equal((await c.restart().reportDenial("agent:good")).raised, true);
+    // Only the sensible record paged.
+    await c.watch.sweep(c.owner);
+    await c.flush();
+    assert.equal(c.sent.length, 1);
+  });
+
+  suite("review of U11d: a threshold changed later works with the counts remembered under the old one, and turning it off forgets them", async (c) => {
+    await c.set({ deniedThreshold: 5, deniedWindowMinutes: 10 });
+    for (let i = 0; i < 3; i++) await c.watch.reportDenial("agent:ann");
+    await c.set({ deniedThreshold: 4 });
+    assert.equal((await c.restart().reportDenial("agent:ann")).raised, true, "lowered to 4: the fourth pages");
+    await c.set({ deniedThreshold: 50 });
+    assert.equal((await c.restart().reportDenial("agent:ann")).raised, false, "raised later: the same run goes on and does not page again");
+    for (let i = 0; i < 2; i++) await c.watch.reportDenial("agent:bob");
+    await c.set({ deniedThreshold: null });
+    await c.restart().sweep(c.owner);
+    assert.deepEqual(await c.storage.listAggregates("notification-denial", { limit: 10 }), [], "off: every remembered count is forgotten");
+    await c.set({ deniedThreshold: 3 });
+    assert.equal((await c.restart().reportDenial("agent:bob")).raised, false, "on again: counted from nothing");
+  });
+
+  suite("review of U11d: counting refusals never rewrites the shared notification state, and nothing is written while no threshold is set", async (c) => {
+    const state = async (): Promise<number> => (await c.storage.getAggregate({ kind: "notification-state", id: "installation" }))?.revision ?? 0;
+    const before = await state();
+    for (let i = 0; i < 3; i++) await c.watch.reportDenial("agent:ann");
+    assert.deepEqual(await c.storage.listAggregates("notification-denial", { limit: 10 }), [], "no threshold: nothing written");
+    await c.set({ deniedThreshold: 5, deniedWindowMinutes: 10 });
+    const set = await state();
+    for (let i = 0; i < 4; i++) await c.watch.reportDenial("agent:ann");
+    assert.equal(await state(), set, "the shared notification state is not rewritten per refusal");
+    assert.ok(set >= before);
+    assert.equal((await c.storage.listAggregates("notification-denial", { limit: 10 })).length, 1, "one small record for the agent");
   });
 
   suite("a security event is always Urgent, once per key, and when the owner lets Urgent wait for the end of quiet hours it waits (card U11c)", async (c) => {
