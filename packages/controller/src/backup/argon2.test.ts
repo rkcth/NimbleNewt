@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import { argon2idAsync, argon2idSync, blake2b, checkArgon2Params } from "./argon2.js";
 import { ARGON2_CEIL_M, ARGON2_FLOOR_M, SealedFileBad, createKeyring, parseKeyring, unlockWithPasscode, UnlockFailed } from "./crypto.js";
@@ -46,4 +46,23 @@ test("K01b a new key's passcode wrapper is Argon2id at the default settings, unl
   await assert.rejects(unlockWithPasscode(keyring, "another long passcode!"), UnlockFailed);
   const tamper = (kdf: unknown) => ({ ...keyring, wrappers: keyring.wrappers.map((x) => x.kind === "passcode" ? { ...x, kdf } : x) });
   for (const bad of [{ name: "argon2id", m: 1024, t: 3, p: 1 }, { name: "argon2id", m: 65_536, t: 1, p: 1 }, { name: "argon2id", m: 4_000_000, t: 3, p: 1 }, { name: "argon2id", m: 65_536, t: 3, p: 4 }, { name: "argon2id", m: 65_536, t: 999, p: 1 }, { name: "md5" }]) assert.throws(() => parseKeyring(tamper(bad)), SealedFileBad, JSON.stringify(bad));
+});
+
+test("K01b Argon2id review: OpenSSL first reproduces the RFC 9106 Argon2id test vector, then agrees with ours across memory sizes (not multiples of 4 too), passes, tag lengths and passcode and salt lengths", { timeout: 300_000 }, (t) => {
+  const ossl = (args: string[]): Buffer => execFileSync("openssl", ["kdf", ...args, "-binary", "ARGON2ID"], { stdio: ["ignore", "pipe", "ignore"] });
+  // RFC 9106 section 5.3: four lanes, a secret and associated data (which ours does not take), so it anchors the reference rather than our code.
+  const rep = (byte: string, n: number): string => byte.repeat(n);
+  let rfc: string;
+  try { rfc = ossl(["-keylen", "32", "-kdfopt", `hexpass:${rep("01", 32)}`, "-kdfopt", `hexsalt:${rep("02", 16)}`, "-kdfopt", `hexsecret:${rep("03", 8)}`, "-kdfopt", `hexad:${rep("04", 12)}`, "-kdfopt", "iter:3", "-kdfopt", "memcost:32", "-kdfopt", "lanes:4", "-kdfopt", "threads:1"]).toString("hex"); } catch { t.skip("this host's openssl has no Argon2id"); return; }
+  assert.equal(rfc, "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659", "the reference itself is RFC 9106 Argon2id");
+  const cases: [number, number, number, number, number][] = []; // passcode bytes, salt bytes, m, t, tag bytes
+  for (const m of [8, 9, 11, 12, 17, 33, 127, 129, 257, 513, 1027]) cases.push([16, 16, m, 1 + (m % 4), 32]);
+  for (const len of [4, 16, 31, 33, 64, 65, 100, 129, 1024]) cases.push([12, 16, 40, 2, len]);
+  for (const pl of [0, 1, 64, 127, 128, 129, 1000]) cases.push([pl, 16, 24, 3, 32]);
+  for (const sl of [8, 9, 64, 200]) cases.push([12, sl, 24, 1, 32]);
+  for (const [pl, sl, m, passes, len] of cases) {
+    const pw = randomBytes(pl), salt = randomBytes(sl);
+    const want = ossl(["-keylen", String(len), "-kdfopt", `hexpass:${pw.toString("hex")}`, "-kdfopt", `hexsalt:${salt.toString("hex")}`, "-kdfopt", `iter:${passes}`, "-kdfopt", `memcost:${m}`, "-kdfopt", "lanes:1", "-kdfopt", "threads:1"]).toString("hex");
+    assert.equal(argon2idSync(pw, salt, { m, t: passes, p: 1 }, len).toString("hex"), want, JSON.stringify({ pl, sl, m, passes, len }));
+  }
 });

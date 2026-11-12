@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -181,4 +181,42 @@ test("command line: verify says the sealed part was not checked without a key; r
     assert.equal(await runBackupCli(["restore", path, "--sqlite", join(out, "r3.sqlite")], (l) => lines.push(l)), 0, lines.join("\n"));
     assert.match(lines.join("\n"), /secret values were left out/);
   } finally { await a.close(); rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
+});
+
+test("K01b review: a backup that carries the backup-signing key (one this product never makes) has it refused on restore, by the library, the controller's sink name and the command line; --secrets-out refuses a dangling link before the restore; --skip-secrets takes only yes", async () => {
+  const [a, b, c] = await Promise.all([backends[0]!.open(), backends[0]!.open(), backends[0]!.open()]);
+  const root = tmp(); const out = tmp();
+  try {
+    await populate(a.storage);
+    const { keyring } = await createKeyring({ passcode: PASS, scrypt: FAST });
+    const planted = ["planted", "signing", "value", String(process.pid)].join("-");
+    // Made WITHOUT the exclusion: what a forged backup (anyone with the public keyring can seal one) could carry.
+    const forged = store({ ...VALUES, [SIGNING_SECRET_NAME]: planted, "custom.signing.name": planted });
+    const { path } = await createBackup(a.storage, { root, kind: "manual", version: "t", now: () => new Date(AT), encryption: keyring, scope: "secrets", secrets: secretsSourceOf(forged, () => [...NAMES, "custom.signing.name"]) });
+    const sink = store({});
+    const r = await restoreBackup(path, b.storage, { unlock: await unlockWithPasscode(keyring, PASS), secrets: sink });
+    assert.equal(sink.values.has(SIGNING_SECRET_NAME), false, "the default signing key name is never put into the store");
+    assert.equal(r.secrets?.refused, 1);
+    // A store whose signing key has another name refuses that name too.
+    const sink2 = { ...store({}), refuses: (n: string) => n === "custom.signing.name" };
+    const r2 = await restoreBackup(path, c.storage, { unlock: await unlockWithPasscode(keyring, PASS), secrets: sink2 });
+    assert.equal(sink2.values.has("custom.signing.name"), false);
+    assert.equal(r2.secrets?.refused, 2);
+    const pf = join(out, "pass"); writeFileSync(pf, PASS, { mode: 0o600 });
+    const lines: string[] = [];
+    const sec = join(out, "secrets.json");
+    assert.equal(await runBackupCli(["restore", path, "--passcode-file", pf, "--secrets-out", sec, "--sqlite", join(out, "r1.sqlite")], (l) => lines.push(l)), 0, lines.join("\n"));
+    assert.equal(Object.keys(JSON.parse(readFileSync(sec, "utf8"))).includes(SIGNING_SECRET_NAME), false, "the command line's file never holds it either");
+    assert.match(lines.join("\n"), /named the backup-signing key/);
+    assert.doesNotMatch(lines.join("\n"), new RegExp(planted));
+    // A dangling link at the --secrets-out path: refused before any database is made.
+    const link = join(out, "link.json"); symlinkSync(join(out, "nowhere", "x.json"), link);
+    lines.length = 0;
+    assert.equal(await runBackupCli(["restore", path, "--passcode-file", pf, "--secrets-out", link, "--sqlite", join(out, "r2.sqlite")], (l) => lines.push(l)), 1);
+    assert.match(lines.join("\n"), /never overwritten/);
+    assert.equal(existsSync(join(out, "nowhere")), false);
+    lines.length = 0;
+    assert.equal(await runBackupCli(["restore", path, "--passcode-file", pf, "--skip-secrets", "no", "--sqlite", join(out, "r3.sqlite")], (l) => lines.push(l)), 1);
+    assert.match(lines.join("\n"), /--skip-secrets takes yes/);
+  } finally { await a.close(); await b.close(); await c.close(); rmSync(root, { recursive: true, force: true }); rmSync(out, { recursive: true, force: true }); }
 });

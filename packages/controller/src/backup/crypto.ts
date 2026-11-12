@@ -64,7 +64,11 @@ const checkArgon2 = (p: Argon2Params): void => {
   if (p === null || typeof p !== "object" || !Number.isInteger(p.m) || p.m < ARGON2_FLOOR_M || p.m > ARGON2_CEIL_M || !Number.isInteger(p.t) || p.t < 2 || p.t > 16 || p.p !== 1) throw new SealedFileBad("the key derivation settings are outside what this version accepts");
 };
 const checkKdf = (k: KdfRecord): void => { if (k?.name === "argon2id") checkArgon2(k); else if (k?.name === "scrypt") checkParams(k); else throw new SealedFileBad("a key wrapper is not valid"); };
-const kdfAny = (passcode: string, salt: Buffer, k: KdfRecord): Promise<Buffer> => k.name === "argon2id" ? argon2idAsync(Buffer.from(passcode, "utf8"), salt, { m: k.m, t: k.t, p: 1 }) : kdf(passcode, salt, k);
+const kdfAny = async (passcode: string, salt: Buffer, k: KdfRecord): Promise<Buffer> => {
+  if (k.name !== "argon2id") return kdf(passcode, salt, k);
+  const pw = Buffer.from(passcode, "utf8");
+  try { return await argon2idAsync(pw, salt, { m: k.m, t: k.t, p: 1 }); } finally { pw.fill(0); }
+};
 /** What a new passcode wrapper uses: Argon2id with these settings, unless scrypt settings are given (older keyrings, and tests that want a quick derivation). */
 export type NewKdf = { readonly argon2?: Argon2Params; readonly scrypt?: ScryptParams };
 const chooseKdf = (o: NewKdf): KdfRecord => o.scrypt !== undefined ? { name: "scrypt", ...o.scrypt } : { name: "argon2id", ...(o.argon2 ?? DEFAULT_ARGON2) };

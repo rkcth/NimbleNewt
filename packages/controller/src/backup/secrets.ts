@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { hasherFor, openSink, readPlain, type BackupCipher } from "./crypto.js";
 import { SECRETS_FILE, type BackupSecrets } from "./format.js";
+import { SIGNING_SECRET_NAME } from "./signing.js";
 
 /**
  * Secret values in a backup (card K01b). The secret store (F09) keeps the values; a backup carries only references UNLESS encrypted backup is on, and then the values go into one sealed file, `secrets.jsonl.enc`, under
@@ -14,7 +15,12 @@ export const MAX_SECRETS = 10_000;
 /** Where the values to put into a backup are read. A locked or unreadable store throws: a backup that was meant to carry the secrets is never written without them in silence. */
 export interface SecretsSource { read(): Promise<readonly { readonly name: string; readonly value: string }[] | { readonly entries: readonly { readonly name: string; readonly value: string }[]; readonly missing: number }> }
 /** Where restored values go (the new machine's secret store). */
-export interface SecretsSink { get(name: string): Promise<string | undefined>; set(name: string, value: string): Promise<void> }
+export interface SecretsSink {
+  get(name: string): Promise<string | undefined>;
+  set(name: string, value: string): Promise<void>;
+  /** Names this store never takes from a backup (the installation's backup-signing key under its configured name). `backup-signing-key` is always refused. */
+  readonly refuses?: (name: string) => boolean;
+}
 
 /** A source made from a secret store and the list of names the installation uses. Names in `exclude` (the backup-signing key: it must never leave the server, not even sealed) are never read. */
 export function secretsSourceOf(store: { resolve(name: string): Promise<string | undefined> }, names: () => Promise<readonly string[]> | readonly string[], exclude: readonly string[] = []): SecretsSource {
@@ -68,19 +74,20 @@ export async function readSecrets(path: string, entry: BackupSecrets, cipher: Ba
 }
 
 /** What a restore did with the secrets: values put into the store, values already there that are the same, and values already there that differ (kept unless the owner asked to overwrite: a secret rotated since the backup is not rolled back by a restore). Counts only. */
-export interface SecretsRestored { readonly restored: number; readonly same: number; readonly keptDifferent: number; readonly overwritten: number }
+export interface SecretsRestored { readonly restored: number; readonly same: number; readonly keptDifferent: number; readonly overwritten: number; /** Entries refused because they name the backup-signing key: a backup never carries it, so one that does was not made by this product, and taking it would let whoever made it sign backups this installation trusts. Present only when not zero. */ readonly refused?: number }
 
 export async function restoreSecrets(entries: readonly { name: string; value: string }[], sink: SecretsSink, options: { overwrite?: boolean } = {}): Promise<SecretsRestored> {
-  let restored = 0, same = 0, keptDifferent = 0, overwritten = 0;
+  let restored = 0, same = 0, keptDifferent = 0, overwritten = 0, refused = 0;
   for (const e of entries) {
+    if (e.name === SIGNING_SECRET_NAME || sink.refuses?.(e.name) === true) { refused += 1; continue; }
     const current = await sink.get(e.name);
     if (current === undefined || current === "") { await sink.set(e.name, e.value); restored += 1; }
     else if (current === e.value) same += 1;
     else if (options.overwrite === true) { await sink.set(e.name, e.value); overwritten += 1; }
     else keptDifferent += 1;
   }
-  return { restored, same, keptDifferent, overwritten };
+  return { restored, same, keptDifferent, overwritten, ...(refused === 0 ? {} : { refused }) };
 }
 
-export const secretsText = (r: SecretsRestored): string => `secrets: ${r.restored} put into the secret store${r.same > 0 ? `, ${r.same} already there and the same` : ""}${r.keptDifferent > 0 ? `, ${r.keptDifferent} already there and different (kept as they are: a secret changed since the backup is not rolled back; ask for an overwrite to take the backup's value)` : ""}${r.overwritten > 0 ? `, ${r.overwritten} overwritten with the backup's value` : ""}`;
+export const secretsText = (r: SecretsRestored): string => `secrets: ${r.restored} put into the secret store${r.same > 0 ? `, ${r.same} already there and the same` : ""}${r.keptDifferent > 0 ? `, ${r.keptDifferent} already there and different (kept as they are: a secret changed since the backup is not rolled back; ask for an overwrite to take the backup's value)` : ""}${r.overwritten > 0 ? `, ${r.overwritten} overwritten with the backup's value` : ""}${(r.refused ?? 0) > 0 ? `, ${r.refused} refused (named the backup-signing key, which a backup never carries: check where this backup came from)` : ""}`;
 

@@ -9,7 +9,7 @@ import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, create
 import { readKeyringFile } from "./encryption.js";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
 import { ENCRYPTION_MARKER } from "./format.js";
-import { access } from "node:fs/promises";
+import { access, lstat } from "node:fs/promises";
 import { readManifest } from "./verify.js";
 import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup } from "./restore.js";
@@ -89,12 +89,13 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (o.get("remove") === "yes") {
         const done = await pruneGenerations(folder, o.get("backups")!);
         for (const g of done.removed) print(removedText(g));
-        for (const g of done.kept) print(`generation ${g.generation} (key ${g.keyId}) is kept: ${g.backups > 0 ? `${g.backups} backup${g.backups === 1 ? "" : "s"} still use it` : "some backup folders could not be read, so it is not certain that none uses it"}`);
+        for (const g of done.kept) print(`generation ${g.generation} (key ${g.keyId}) is kept: ${g.backups > 0 ? `${g.backups} backup${g.backups === 1 ? "" : "s"} still use it` : done.folderUnconfirmed !== undefined ? `${done.folderUnconfirmed}, so it is not certain that no backup uses it` : "some backup folders could not be read, so it is not certain that none uses it"}`);
         if (done.removed.length === 0 && done.kept.length === 0) print("there are no archived key generations beside that keyring");
         return 0;
       }
       if (report.generations.length === 0) print("there are no archived key generations beside that keyring");
       for (const g of report.generations) print(`generation ${g.generation} (key ${g.keyId}): ${g.backups} backup${g.backups === 1 ? "" : "s"} still use it${g.removable ? "; no backup uses it: it can be removed (--remove yes)" : ""}`);
+      if (report.folderUnconfirmed !== undefined && report.generations.length > 0) print(`${report.folderUnconfirmed}: until it is, no generation is called removable`);
       if (report.unreadable > 0) print(`${report.unreadable} backup folder${report.unreadable === 1 ? "" : "s"} could not be read: until they can, no generation is called removable`);
       return 0;
     }
@@ -128,8 +129,10 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     try {
       // A file for the secret values, if the backup holds some and a key was given: it must not exist yet, and it is written only after the restore succeeded.
       const secretsOut = opts.get("secrets-out");
+      if (opts.get("skip-secrets") !== undefined && opts.get("skip-secrets") !== "yes") throw new RestoreRefused("--skip-secrets takes yes");
       if (secretsOut !== undefined && opts.get("skip-secrets") === "yes") throw new RestoreRefused("give --secrets-out or --skip-secrets yes, not both");
-      if (secretsOut !== undefined && await access(secretsOut).then(() => true, () => false)) throw new RestoreRefused("the secrets file already exists: it is never overwritten");
+      // lstat, not access: a link (even one pointing nowhere) at that path is refused here, before the restore, and not only when the file is finally written.
+      if (secretsOut !== undefined && await lstat(secretsOut).then(() => true, () => false)) throw new RestoreRefused("the secrets file already exists: it is never overwritten");
       const held = (await readManifest(folder)).manifest?.secrets;
       if (held !== undefined && held.count > 0 && unlocked.unlock !== undefined && secretsOut === undefined && opts.get("skip-secrets") !== "yes") throw new RestoreRefused("this backup holds secret values and nowhere was given to put them: give --secrets-out <new file>, or --skip-secrets yes to leave them out");
       const collected: Record<string, string> = {};
@@ -140,6 +143,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (Object.keys(collected).length > 0) {
         if (secretsOut !== undefined) { await writeNew(secretsOut, `${JSON.stringify(collected)}\n`); print(`${Object.keys(collected).length} secret values were written to ${secretsOut} (mode 600): load them into the secret store and delete the file.`); }
       }
+      if ((done.secrets?.refused ?? 0) > 0) print(`${done.secrets!.refused} entries of the backup named the backup-signing key, which a backup never carries: they were refused (check where this backup came from)`);
       if (done.secretsLeftOut !== undefined) print(`the secret values were left out: ${done.secretsLeftOut}`);
       for (const n of done.notes ?? []) print(n);
       if (done.signature !== undefined) print(done.signature.text);

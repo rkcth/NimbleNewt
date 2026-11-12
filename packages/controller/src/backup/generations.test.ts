@@ -49,8 +49,43 @@ test("old key generations are listed with how many backups use each, and removed
     assert.match(out.join("\n"), /can be removed/);
     out.length = 0;
     assert.equal(await runBackupCli(["encryption-generations", ring, "--backups", backups, "--remove", "yes"], say), 0);
-    assert.match(out.join("\n"), /recovery file made for it no longer opens anything/);
+    assert.match(out.join("\n"), /no backup left in this backups folder.*open only backups made under that key.*copy of such a backup anywhere else/s, "the owner is not told the old recovery file opens nothing: copies elsewhere still need it");
     assert.equal(existsSync(`${ring}.generation-1`), false);
     assert.equal(existsSync(ring), true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("K01b review: a mistyped, missing or never-encrypted backups folder makes no key archive removable (an empty folder would make every archive look unused)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-gen2-"));
+  try {
+    const out: string[] = []; const say = (l: string): void => { out.push(l); };
+    const w = (name: string, text: string): string => { const p = join(d, name); writeFileSync(p, text, { mode: 0o600 }); return p; };
+    const ring = join(d, "keyring.json");
+    const pass = ["review", "passcode", "built", "at", "run", "time"].join(" ");
+    assert.equal(await runBackupCli(["encryption-setup", ring, "--passcode-file", w("p1", pass), "--recovery-out", join(d, "rec1.json")], say), 0, out.join("\n"));
+    assert.equal(await runBackupCli(["encryption-rotate", ring, "--passcode-file", w("p1b", pass), "--new-passcode-file", w("p2", `${pass} two`), "--recovery-out", join(d, "rec2.json")], say), 0, out.join("\n"));
+    assert.ok(existsSync(`${ring}.generation-1`));
+    // The folder does not exist (a typo).
+    const missing = await generationReport(ring, join(d, "backupz"));
+    assert.deepEqual(missing.generations.map((g) => g.removable), [false]);
+    assert.match(missing.folderUnconfirmed ?? "", /cannot be listed/);
+    out.length = 0;
+    assert.equal(await runBackupCli(["encryption-generations", ring, "--backups", join(d, "backupz"), "--remove", "yes"], say), 0);
+    assert.ok(existsSync(`${ring}.generation-1`), "nothing removed on a folder that cannot be listed");
+    assert.match(out.join("\n"), /kept.*cannot be listed/);
+    // An empty folder that never held an encrypted backup (the wrong folder).
+    const empty = join(d, "empty"); mkdirSync(empty);
+    out.length = 0;
+    assert.equal(await runBackupCli(["encryption-generations", ring, "--backups", empty, "--remove", "yes"], say), 0);
+    assert.ok(existsSync(`${ring}.generation-1`), "nothing removed on a folder with no encryption marker");
+    assert.match(out.join("\n"), /never held an encrypted backup/);
+    out.length = 0;
+    assert.equal(await runBackupCli(["encryption-generations", ring, "--backups", empty], say), 0);
+    assert.doesNotMatch(out.join("\n"), /can be removed/);
+    // The real folder (it has held an encrypted backup) with no backup under generation 1: removable.
+    const real = join(d, "backups"); mkdirSync(real);
+    const s = new MemoryStorage(); await s.acquireEpoch({ holder: "c", at: "2026-11-01T00:00:00.000Z" });
+    await createBackup(s, { root: real, kind: "manual", version: "t", now: () => new Date("2026-11-02T01:00:00.000Z"), encryption: parseKeyring(JSON.parse(readFileSync(ring, "utf8"))) });
+    assert.deepEqual((await generationReport(ring, real)).generations.map((g) => g.removable), [true]);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

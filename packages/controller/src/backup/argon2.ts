@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { Worker } from "node:worker_threads";
 
 /**
- * Argon2id (RFC 9106, version 0x13) for the backup key's passcode wrappers (card K01b). node:crypto offers no Argon2 before Node 24, so this is the algorithm written out, one lane, and checked in the tests against
- * OpenSSL's own Argon2id and the RFC 9106 test vector. The memory fill is plain JavaScript on 32-bit halves (about a few seconds for 64 MiB), so `argon2idAsync` runs it in a worker thread and never blocks the controller.
+ * Argon2id (RFC 9106, version 0x13) for the backup key's passcode wrappers (card K01b). node:crypto offers no Argon2 before Node 24, so this is the algorithm written out, one lane, no secret and no associated data, and
+ * checked in the tests against OpenSSL's own Argon2id (a differential sweep over memory, passes, tag, passcode and salt lengths; OpenSSL is first checked against the RFC 9106 test vector, which needs four lanes, a
+ * secret and associated data and so cannot be run here directly). The memory fill is plain JavaScript on 32-bit halves (about a few seconds for 64 MiB), so `argon2idAsync` runs it in a worker thread and never blocks the controller.
  */
 export interface Argon2Params { readonly m: number; readonly t: number; readonly p: 1 }
 /** m is in KiB: 65536 is 64 MiB, the least the card allows. */
@@ -178,7 +179,11 @@ export function argon2idSync(password: Uint8Array, salt: Uint8Array, params: Arg
 export function argon2idAsync(password: Uint8Array, salt: Uint8Array, params: Argon2Params, tagLength = 32): Promise<Buffer> {
   checkArgon2Params(params);
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./argon2-worker.js", import.meta.url), { workerData: { password: Buffer.from(password), salt: Buffer.from(salt), params, tagLength }, resourceLimits: { maxOldGenerationSizeMb: 512 } });
+    // workerData is copied when the worker is made, so this copy of the passcode is wiped right after (best effort: the caller's own string cannot be).
+    const pw = Buffer.from(password);
+    let worker: Worker;
+    try { worker = new Worker(new URL("./argon2-worker.js", import.meta.url), { workerData: { password: pw, salt: Buffer.from(salt), params, tagLength }, resourceLimits: { maxOldGenerationSizeMb: 512 } }); } catch { pw.fill(0); reject(new Error("the Argon2id derivation failed")); return; }
+    pw.fill(0);
     let done = false;
     worker.once("message", (m: { ok: true; tag: Uint8Array } | { ok: false }) => { done = true; if (m.ok) resolve(Buffer.from(m.tag)); else reject(new Error("the Argon2id derivation failed")); });
     worker.once("error", () => { if (!done) { done = true; reject(new Error("the Argon2id derivation failed")); } });
