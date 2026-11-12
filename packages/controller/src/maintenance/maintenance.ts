@@ -102,6 +102,33 @@ export function checkSpec(kind: MaintenanceKind, value: unknown): MaintenanceSpe
   }
 }
 
+/**
+ * What a reviewer needs in one place, derived from the stored request and never stored (card A09): the exact artifact (name, version, source, digest), the access it asks for, how it installs and how the change is undone.
+ * `installBehaviour` says what the platform will do, not what the requester promised: scripts never run before an approval of this exact digest and then only inside the sandbox with no network.
+ */
+export function reviewSummary(b: MaintenanceBody): JsonObject {
+  const s = b.spec as Record<string, unknown>;
+  const rollback = b.rollbackPlan ?? (b.class === "skill-draft" ? "a skill draft is only recorded; it is withdrawn by revoking the request" : "none given");
+  switch (b.kind) {
+    case "package": case "extension": {
+      const scripts = s["installScripts"] === true;
+      return {
+        change: `${b.kind} ${String(s["name"])}@${String(s["version"])}`, source: String(s["source"]), digest: String(s["digest"]),
+        access: "none beyond the package files: no network during install, no host paths", installScripts: scripts,
+        installBehaviour: scripts
+          ? "the package declares install scripts: they run once, only after approval of exactly this digest, inside the sandbox with no network, and the change is refused if the artifact does not match"
+          : "no install scripts: the applier installs with every script switched off and refuses an artifact that declares one",
+        rollback, reversible: true,
+      };
+    }
+    case "mount": return { change: `mount ${String(s["resource"])} at ${String(s["mountPath"])}`, access: `${String(s["mode"])} access to ${String(s["resource"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
+    case "network": return { change: `network ${String(s["site"])}:${String(s["port"])}`, access: `outgoing connections to ${String(s["site"])} port ${String(s["port"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
+    case "skill": return { change: `skill ${String(s["name"])}`, digest: String(s["digest"]), access: "none", installBehaviour: "a skill draft is only recorded", rollback, reversible: true };
+    case "host-policy": return { change: `host policy ${String(s["setting"])}: ${String(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
+    case "base": return { change: `shared base: ${String(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
+  }
+}
+
 export interface MaintenanceDecision { readonly by: string; readonly verdict: "approve" | "reject"; readonly via: "owner" | "supervisor" | "rule"; readonly rule?: string; readonly specDigest: string; readonly at: string; readonly note?: string }
 export interface MaintenanceBody {
   readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly spec: MaintenanceSpec; readonly specDigest: string;
@@ -281,7 +308,7 @@ export class MaintenanceService {
 
   #view(id: string, b: MaintenanceBody): MaintenanceView { return { id, agentId: b.agentId, kind: b.kind, class: b.class, spec: b.spec, specDigest: b.specDigest, ...(b.rollbackPlan === undefined ? {} : { rollbackPlan: b.rollbackPlan }) }; }
   async #mayRead(by: Principal, b: MaintenanceBody): Promise<boolean> { return by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy || await this.#isSupervisorOf(by, b.agentId); }
-  #shown(id: string, a: Aggregate): JsonObject { return { id, revision: a.revision, ...(a.body as unknown as JsonObject) }; }
+  #shown(id: string, a: Aggregate): JsonObject { const b = a.body as unknown as MaintenanceBody; return { id, revision: a.revision, ...(b as unknown as JsonObject), review: reviewSummary(b) }; }
 
   /** One request, in full: exactly what a reviewer needs (package version, source, access, install behaviour, rollback plan). The requester, its supervisor and the owner may read it; anyone else sees nothing. */
   async get(by: Principal, maintenanceId: string): Promise<JsonObject> {

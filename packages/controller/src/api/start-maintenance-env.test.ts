@@ -97,3 +97,38 @@ test("an approved package request is carried out by the real applier through the
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("while no decision comes the approved environment keeps working: the request waits, the host is never asked, the agent is not held, and the owner's late approval then applies it once (card A09)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-a09o-"));
+  const host = new Host();
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], chat: { interpreter: new ScriptedInterpreter(() => []) }, maintenance: { environmentRuntime: host } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    const ann = await c.services.agents.create(rob, { commandId: "ag-o", friendlyName: "Ann", roles: ["author"] } as never);
+    const annToken = (await c.services.principals.issueCredential(rob, `agent:${ann.id}`)).token;
+    const agentId = `agent:${ann.id}`;
+    await c.services.environments.change(rob, { commandId: "env-o", agentId, manifest: { base: { name: "nimblenewt-base", version: "1.0.0", digest: D("1") }, packages: [], skills: [], capabilities: [], configuration: { installation: 1 }, limits: { cpus: 1, memoryMb: 1024, diskMb: 5000, processes: 100 }, protectedExtensions: [] }, reason: "first environment" });
+    await c.services.environments.activate(rob, { commandId: "act-o", agentId, revision: 1, observed: {} });
+    const asked = await call(annToken, "maintenance.request", { kind: "package", spec: pkg("ripgrep"), reason: "faster", rollbackPlan: "remove it" }, "o1");
+    const mid = asked.result.maintenanceId as string;
+    for (let i = 0; i < 3; i++) { await c.services.maintenance.tick(); await c.services.maintenance.enforce(); }
+    await c.services.maintenance.idle();
+    const item = (await call(boot.token, "maintenance.get", { maintenanceId: mid })).result.item;
+    assert.equal(item.status, "pending");
+    assert.match(item.review.change, /package ripgrep@1\.2\.3/);
+    assert.deepEqual(host.calls, []);
+    const env = (await call(annToken, "environment.get", { agentId })).result.item;
+    assert.equal(env.active.revision, 1, "the approved environment is still the active one");
+    const gate = await c.services.pauses.gate(rob, { kind: "agent", id: ann.id }); assert.ok(gate === undefined || gate.intent === "active", "and the agent is not held");
+    assert.equal((await call(annToken, "maintenance.decide", { maintenanceId: mid, verdict: "approve", specDigest: item.specDigest }, "o-self")).ok, false, "the agent cannot approve its own request");
+    assert.equal((await call(boot.token, "maintenance.decide", { maintenanceId: mid, verdict: "approve", specDigest: item.specDigest }, "o-ok")).ok, true);
+    await c.services.maintenance.idle();
+    assert.equal((await call(boot.token, "maintenance.get", { maintenanceId: mid })).result.item.status, "applied");
+    assert.deepEqual(host.calls, ["trial", "reload:2", "validate:2"]);
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
