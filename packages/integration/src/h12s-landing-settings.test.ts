@@ -163,8 +163,8 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const before = sharedState();
       const unset = await land(A);
       assert.equal(unset.ok, false, JSON.stringify(unset));
-      assert.equal(unset.error?.code, "invalid_command", "the controller refuses before the host is asked: with no landing branch there is no lease to show");
-      assert.match(unset.error!.message, /integrator lease/);
+      assert.equal(unset.error?.code, "forbidden", "the controller refuses before the host is asked: with no landing branch no lease covers a landing");
+      assert.match(unset.error!.message, /no landing branch/);
       assert.equal(sharedState(), before);
       assert.match(await lookAtLanding(), /Landing branch: none set, so nothing lands until you name one/);
 
