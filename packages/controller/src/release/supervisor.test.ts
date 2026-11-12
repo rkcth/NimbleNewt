@@ -483,6 +483,8 @@ test("one launcher per release root: a second one exits 5 and starts nothing whi
 /** The liveness tests run the heartbeat on a clock five times faster than real time: the 30 s minimum threshold is 6 s of real time, the writer still beats every real second. */
 const FAST = { monotonic: (): number => performance.now() * 5, pollMs: 50, staleAfterMs: 30_000, intervalMs: 1000 } as const;
 const runFiles = (w: World): string[] => { try { return readdirSync(join(w.root, "run")).sort(); } catch { return []; } };
+/** The heartbeat records only: the writer makes each beat as `<file>.<pid>.tmp` and renames it over the record (heartbeat.ts), so a look at the folder can catch that file between the two. */
+const records = (w: World): string[] => runFiles(w).filter((f) => !f.endsWith(".tmp"));
 
 test("a confirmed controller that beats and then blocks its event loop is found hung, stopped and started again; the owner is told; nothing is quarantined; a SIGTERM handler's exit 0 is not a stop on purpose (K02 heartbeat)", async () => {
   await world(async (w) => {
@@ -512,10 +514,8 @@ test("a confirmed controller that beats and then blocks its event loop is found 
     const files = envLines();
     assert.notEqual(files[0], files[1], "a new file and token per start");
     for (const f of files) assert.ok(f.startsWith(join(w.root, "run", "heartbeat-")), f);
-    // The writer makes each beat as `<file>.<pid>.tmp` and renames it over the record (heartbeat.ts), so a look at the folder can catch that file between the two: only the records count here.
-    const records = (): string[] => runFiles(w).filter((f) => !f.endsWith(".tmp"));
-    await w.waitFor("the new start's first beat", () => records().length === 1);
-    assert.deepEqual(records(), [files[1]!.slice(join(w.root, "run").length + 1)], JSON.stringify({ files, run: runFiles(w) }));
+    await w.waitFor("the new start's first beat", () => records(w).length === 1);
+    assert.deepEqual(records(w), [files[1]!.slice(join(w.root, "run").length + 1)], JSON.stringify({ files, run: runFiles(w) }));
     run.stop();
     assert.equal((await run.done).code, SUPERVISOR_EXIT.stopped);
     assert.deepEqual(runFiles(w), [], "removed when the child is gone");
@@ -538,8 +538,8 @@ test("a controller that beats normally, one that beats slowly under load, and on
     assert.deepEqual(runFiles(w), []);
   });
   await Promise.all([
-    one("beat", "beat", (w) => assert.equal(runFiles(w).length, 1, "it beats")),
-    one("slow", "slow-beat", (w) => assert.equal(runFiles(w).length, 1, "it beats")),
+    one("beat", "beat", (w) => assert.equal(records(w).length, 1, "it beats")),
+    one("slow", "slow-beat", (w) => assert.equal(records(w).length, 1, "it beats")),
     one("never", "confirm", (w) => assert.deepEqual(runFiles(w), [], "no beat: unsupported, left alone")),
   ]);
 });
