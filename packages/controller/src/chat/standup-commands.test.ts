@@ -228,6 +228,7 @@ for (const backend of backends) {
     const read = await briefsOf("What did the morning stand-up brief say?");
     assert.match(read, /A note from the owner \(note\): \\"look at the cache\\"/);
     assert.match(read, /brief:/);
+    assert.match(read, /A-Morning sync\\" \(agent:/, "the agent is told by its name, with its ID beside it");
     script["Show the evening agent's brief."] = [{ kind: "status", request: { kind: "standup_briefs", meetingTopic: "evening", agentName: "morning" }, evidence: "Show the evening agent's brief", basis: "owner" }];
     const wrong = await briefsOf("Show the evening agent's brief.");
     assert.match(wrong, /No brief has been prepared|no brief/i);

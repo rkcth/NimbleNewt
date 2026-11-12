@@ -1739,7 +1739,11 @@ export class StatusService {
     const lines: Line[] = [];
     const sections: readonly [string, "accomplishments" | "unfinished" | "blockers" | "advice" | "priorities"][] = [["Done", "accomplishments"], ["Unfinished", "unfinished"], ["Blocked", "blockers"], ["Advice needed", "advice"], ["Priorities", "priorities"]];
     for (const b of all) {
-      const who = shown(b.agent);
+      // The agent is told by its name as well as its ID (an agent's name is its own words, so quoted) to a reader who may read agent records (agent.read or agent.manage, as the agent list asks) and to the agent itself;
+      // anyone else who may read the brief is told the ID alone, as before (card M03h review). An agent the records no longer hold is told by its ID alone.
+      const mayName = by.id === b.agent || allows(by, "agent.read", undefined) || allows(by, "agent.manage", undefined);
+      const friendly = mayName ? ((await this.#runner.get("agent", b.agent.replace(/^agent:/, "")).catch(() => undefined))?.body as unknown as { friendlyName?: string } | undefined)?.friendlyName : undefined;
+      const who = typeof friendly === "string" && friendly !== "" ? `${quoted(friendly, 80)} (${shown(b.agent)})` : shown(b.agent);
       lines.push(line(`${who}'s brief: ${sections.map(([label, key]) => `${b[key].length} ${label.toLowerCase()}`).join(", ")}${b.partial ? ". Some records could not be read, so it may be incomplete" : ""}.`, cite("standup-brief", b.id, b.revision)));
       for (const [label, key] of sections) for (const e of b[key].slice(0, 5)) lines.push(line(`${who} - ${label}: ${quoted(e.text)}`, ...e.cites));
       for (const st of b.statements) lines.push(line(`${st.by === "owner" ? "A note from the owner" : `${who}'s own words`} (${st.section}): ${quoted(st.text)}`, cite("standup-brief", b.id, b.revision)));
