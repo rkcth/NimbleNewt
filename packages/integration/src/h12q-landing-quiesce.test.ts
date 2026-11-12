@@ -109,8 +109,14 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     busyInCall = await local!.busyAttempts();
     assert.deepEqual(busyInCall, [A.attempt], "the local worker reports the attempt with a call in flight as busy");
     const head = sh(shared, "rev-parse", "HEAD");
+    // A landing is made under the project's integrator lease on the owner's landing branch (card P10).
+    const named = await api(c, boot.token, "project.branches.change", { project: projectId, landing: "main" }, "branch-main");
+    assert.equal(named.ok, true, JSON.stringify(named));
+    const taken = await api(c, boot.token, "integrator.lease.acquire", { taskId: A.task, branch: "main", ttlMs: 3_600_000, holder: "agt-integrator" }, "lease-main");
+    assert.equal(taken.ok, true, JSON.stringify(taken));
+    const lease = { leaseId: taken.result.item.leaseId as string, fence: taken.result.item.fence as number };
 
-    const landing = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "reviewed and ready" }, "land-1");
+    const landing = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "reviewed and ready", ...lease }, "land-1");
     assert.equal(landing.ok, true, JSON.stringify(landing));
     assert.equal(landing.result.state, "done", JSON.stringify(landing));
     assert.equal(landing.result.detail.landed, true);
@@ -125,7 +131,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
 
     // ---- the landing branch moves: a second landing of work based on the old head is refused and writes nothing ---------------------
     // The landed file waits, uncommitted, in the shared tree: until the integrator commits it no landing is made (and the head has not moved, so the head alone would not have said so).
-    const waiting = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "too early" }, "land-1b");
+    const waiting = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "too early", ...lease }, "land-1b");
     assert.equal(waiting.result.state, "refused", JSON.stringify(waiting));
     assert.match(waiting.result.summary, /uncommitted file/);
     sh(shared, "add", "src/a.ts"); sh(shared, "commit", "-q", "-m", "integrator commits the landed file");
@@ -137,7 +143,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
     sh(made.checkout, ...inCheckout, "add", "-A"); sh(made.checkout, ...inCheckout, "commit", "-q", "-m", "more work");
     const sharedBefore = [sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1")].join("|");
-    const stale = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "again" }, "land-2");
+    const stale = await api(c, boot.token, "workspace.request", { operation: "landing", taskId: A.task, reason: "again", ...lease }, "land-2");
     assert.equal(stale.result.state, "refused", JSON.stringify(stale));
     assert.match(stale.result.summary, /refreshes onto the head first/);
     assert.equal([sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1")].join("|"), sharedBefore);
@@ -154,7 +160,7 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     const B2 = await attemptFor(B.task);
     let release!: () => void; gate = new Promise<void>((ok) => { release = ok; });
     const inHost = new Promise<void>((ok) => { entered = ok; });
-    const running = api(c, boot.token, "workspace.request", { operation: "landing", taskId: B.task, reason: "while it waits" }, "land-3");
+    const running = api(c, boot.token, "workspace.request", { operation: "landing", taskId: B.task, reason: "while it waits", ...lease }, "land-3");
     await inHost;
     const held = await c.dispatch.dispatcher.tick();
     assert.deepEqual(held.started, [], "the waiting attempt is not started while the landing runs");

@@ -120,7 +120,24 @@ for (const backend of ["sqlite", "postgres"] as const) {
         return task;
       };
       let k = 0;
-      const land = async (task: string) => api(c, boot.token, "workspace.request", { operation: "landing", taskId: task, reason: "reviewed and ready" }, `land-${k++}`);
+      // A landing is made under the project's integrator lease on the branch the owner's policy names (card P10): the integrator holds one for that branch, taken afresh when the owner moves the branch. Nothing is held while no branch is set.
+      const integrator = "agt-iiiiiiiiiiiiiiiiiiii";
+      let leased = 0;
+      const leaseNow = async (task: string): Promise<{ leaseId?: string; fence?: number }> => {
+        const key = "workspace.landing.branch";
+        const branch = (await c.services.configuration.installationValues([key]))[key];
+        if (typeof branch !== "string") return {};
+        const items = (await api(c, boot.token, "integrator.lease.list", { projectId })).result.items as { leaseId: string; fence: number; branch: string; live: boolean; holder: string }[];
+        let l = items.find((x) => x.branch === branch && x.live && x.holder === integrator);
+        if (l === undefined) {
+          if (items.some((x) => x.branch === branch && x.live)) await api(c, boot.token, "integrator.lease.release", { projectId, branch }, `unlease-${leased++}`);
+          const taken = await api(c, boot.token, "integrator.lease.acquire", { taskId: task, branch, ttlMs: 3_600_000, holder: integrator }, `lease-${leased++}`);
+          assert.equal(taken.ok, true, JSON.stringify(taken));
+          l = taken.result.item;
+        }
+        return { leaseId: l!.leaseId, fence: l!.fence };
+      };
+      const land = async (task: string, lease?: { leaseId?: string; fence?: number }) => api(c, boot.token, "workspace.request", { operation: "landing", taskId: task, reason: "reviewed and ready", ...(lease ?? (await leaseNow(task))) }, `land-${k++}`);
       const sharedState = (): string => [sh(shared, "rev-parse", "HEAD"), sh(shared, "status", "--porcelain=v1")].join("|");
       let m = 0;
       const say = async (text: string, meant: Meaning) => { meaning[text] = meant; return c.chat!.submit(boot.token, { messageId: `m${m++}`, text }) as unknown as Promise<{ outcomes: any[]; reply: string[] }>; };
@@ -143,9 +160,9 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const A = await running({ "src/a.ts": "export const a = 2; // the agent's work\n" });
       const before = sharedState();
       const unset = await land(A);
-      assert.equal(unset.ok, true, JSON.stringify(unset));
-      assert.equal(unset.result.state, "refused", JSON.stringify(unset));
-      assert.match(unset.result.summary, /no landing branch set/);
+      assert.equal(unset.ok, false, JSON.stringify(unset));
+      assert.equal(unset.error?.code, "invalid_command", "the controller refuses before the host is asked: with no landing branch there is no lease to show");
+      assert.match(unset.error!.message, /integrator lease/);
       assert.equal(sharedState(), before);
       assert.match(await lookAtLanding(), /Landing branch: none set, so nothing lands until you name one/);
 
@@ -201,14 +218,16 @@ for (const backend of ["sqlite", "postgres"] as const) {
       assert.match(moved.result.summary, /not on the landing branch "main"/);
 
       // ---- settings that cannot be read: the landing is refused (nothing guessed), and the view says so -------------------------------------------------
+      const leaseMain = await leaseNow(B);
       const cfg = c.services.configuration as unknown as Record<string, unknown>;
       const kept = { taskValues: cfg.taskValues, installationValues: cfg.installationValues, installationSettings: cfg.installationSettings };
       const broken = async () => { throw new Error("the settings store is unreadable"); };
       Object.assign(cfg, { taskValues: broken, installationValues: broken, installationSettings: broken });
       try {
-        const unreadable = await land(B);
-        assert.equal(unreadable.result.state, "refused", JSON.stringify(unreadable));
-        assert.match(unreadable.result.summary, /could not read the landing settings/, "an unreadable policy is said as such, not as an unset branch");
+        const unreadable = await land(B, leaseMain);
+        assert.equal(unreadable.ok, false, JSON.stringify(unreadable));
+        assert.equal(unreadable.error?.code, "unavailable", JSON.stringify(unreadable));
+        assert.match(unreadable.error!.message, /could not be read/, "an unreadable policy is said as such, not as an unset branch");
         assert.match(await lookAtLanding(), /cannot be read right now, so every landing is refused/);
       } finally { Object.assign(cfg, kept); }
       assert.match((await land(B)).result.summary, /not on the landing branch "main"/, "readable again: the owner's policy applies again");

@@ -661,7 +661,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases);
     const landingBranchOf = landingPolicyFrom(configuration, (projectId) => branchSettings.landingOf(projectId));
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
-      landingLease: async (by, call) => { await integratorLeaseOps.checkLanding(by, { ...call, branch: (await landingBranchOf(call)).branch }); },
+      landingLease: async (by, call) => {
+        let branch: string | undefined;
+        try { branch = (await landingBranchOf(call)).branch; } catch { throw new DomainError("unavailable", "the landing settings could not be read, so no lease can be matched to the landing branch; nothing was landed"); }
+        await integratorLeaseOps.checkLanding(by, { ...call, branch });
+      },
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); },
       quiesce: { around: (scope, operation, run, after, tag, status) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after, tag, status) },
       portOf: async (taskId) => workspacePort?.(taskId),
