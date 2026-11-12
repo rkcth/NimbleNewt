@@ -14,6 +14,7 @@
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "./nimblenewt.mjs";
+import { safeMessage } from "./safe-error.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lib = async (file) => import(pathToFileURL(join(repo, "packages", "controller", "dist", file)).href);
@@ -78,14 +79,14 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     opts.heartbeatOn = hbFlag === "on";
     if (opts.firstBeat !== undefined && opts.firstBeat < (opts.stale ?? 120_000)) throw new Error("--heartbeat-first-beat-seconds must be at least the stale limit (--heartbeat-stale-seconds, default 120)");
     if (!opts.heartbeatOn && (opts.stale ?? opts.interval ?? opts.firstBeat) !== undefined) throw new Error("--heartbeat off takes no other --heartbeat-* option");
-  } catch (error) { err(error.message); return 1; }
+  } catch (error) { err(safeMessage(error, 2000)); return 1; }
   const { Launcher } = await lib("release/launcher.js");
   const { PointerSwitcher, SymlinkSwitcher } = await lib("release/activation.js");
   const { Supervisor } = await lib("release/supervisor.js");
   const { WORKER_PROTOCOL } = await lib("remote/protocol.js");
   let workers = { min: WORKER_PROTOCOL.min, max: WORKER_PROTOCOL.max };
   if (args.flags["workers-min"] !== undefined || args.flags["workers-max"] !== undefined) {
-    try { workers = { min: intFlag(args.flags, "workers-min", workers.min, { min: 1 }), max: intFlag(args.flags, "workers-max", workers.max, { min: 1 }) }; } catch (error) { err(error.message); return 1; }
+    try { workers = { min: intFlag(args.flags, "workers-min", workers.min, { min: 1 }), max: intFlag(args.flags, "workers-max", workers.max, { min: 1 }) }; } catch (error) { err(safeMessage(error, 2000)); return 1; }
   }
   const switcher = kind === "symlink" ? new SymlinkSwitcher(root) : new PointerSwitcher(root);
   const launcher = new Launcher({ root, switcher, workers });
@@ -121,5 +122,5 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`launcher: ${String(error?.message ?? error)}\n`); process.exitCode = 1; });
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`launcher: ${safeMessage(error, 2000)}\n`); process.exitCode = 1; });
 }

@@ -10,6 +10,7 @@ import { mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { cpus, totalmem } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { safeMessage } from "./safe-error.mjs";
 
 const SYSTEM_ROOTS = new Set(["/usr", "/bin", "/lib", "/sbin", "/lib64", "/"]);
 const FALLBACK_WINDOW = 32_768;
@@ -226,7 +227,7 @@ function endpointOf(config, route) {
 /** A failure described without anything that could be a credential: its kind and code, and a short message with the host credential and any `Bearer` text cut out. */
 function describe(error) {
   const code = typeof error?.code === "string" ? `${error.code}: ` : "";
-  return `${code}${String(error?.message ?? error).replace(/Bearer\s+\S+/gi, "Bearer [removed]").slice(0, 200)}`;
+  return `${code}${safeMessage(error, 200)}`;
 }
 
 function isFolder(path) { try { return isAbsolute(path) && statSync(path).isDirectory(); } catch { return false; } }

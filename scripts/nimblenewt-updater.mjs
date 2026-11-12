@@ -8,6 +8,7 @@
 // launcher follows the next time it starts a controller. Exit codes: 0 done, 1 refused or failed (reason on stderr).
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { safeMessage } from "./safe-error.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lib = async (file) => import(pathToFileURL(join(repo, "packages", "controller", "dist", file)).href);
@@ -43,7 +44,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       if (k in flags) throw new Error(`--${k} was given twice`);
       flags[k] = v;
     }
-  } catch (error) { err(error.message); return 1; }
+  } catch (error) { err(safeMessage(error, 2000)); return 1; }
   if (flags.help === true || positional[0] === "help") { err(HELP); return 0; }
   if (positional[0] !== "stage" || positional.length > 1) { err(HELP); return 1; }
   const root = flags.root ?? io.env.NIMBLENEWT_RELEASE_ROOT;
@@ -63,11 +64,11 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     }
     return 0;
   } catch (error) {
-    if (error?.name === "UpdaterError") { err(`refused (${error.code}): ${error.message}`); return 1; }
+    if (error?.name === "UpdaterError") { err(`refused (${error.code}): ${safeMessage(error, 2000)}`); return 1; }
     throw error;
   }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`updater: ${String(error?.message ?? error)}\n`); process.exitCode = 1; });
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`updater: ${safeMessage(error, 2000)}\n`); process.exitCode = 1; });
 }

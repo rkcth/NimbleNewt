@@ -5,6 +5,7 @@
 //   node scripts/nimblenewt-service.mjs print --platform linux|darwin|win32 --root RELEASE_ROOT [options] [-- controller arguments]
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { safeMessage } from "./safe-error.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lib = async (file) => import(pathToFileURL(join(repo, "packages", "controller", "dist", file)).href);
@@ -58,7 +59,7 @@ function parse(argv) {
 export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr, env: process.env, uid: process.getuid?.(), platform: process.platform }) {
   const err = (t) => io.stderr.write(t.endsWith("\n") ? t : `${t}\n`);
   let parsed;
-  try { parsed = parse(argv); } catch (error) { err(error.message); return 1; }
+  try { parsed = parse(argv); } catch (error) { err(safeMessage(error, 2000)); return 1; }
   const { flags, positional, controllerArgs } = parsed;
   if (flags.help === true || positional[0] === "help" || positional.length === 0) { err(HELP); return flags.help === true || positional[0] === "help" ? 0 : 1; }
   if (positional[0] !== "print" || positional.length > 1) { err(`unknown command ${positional[0]}\n${HELP}`); return 1; }
@@ -105,11 +106,11 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     io.stdout.write(out.join("\n"));
     return 0;
   } catch (error) {
-    if (error?.name === "ServiceSpecError") { err(`refused: ${error.message}`); return 1; }
+    if (error?.name === "ServiceSpecError") { err(`refused: ${safeMessage(error, 2000)}`); return 1; }
     throw error;
   }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`service: ${String(error?.message ?? error)}\n`); process.exitCode = 1; });
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { process.stderr.write(`service: ${safeMessage(error, 2000)}\n`); process.exitCode = 1; });
 }

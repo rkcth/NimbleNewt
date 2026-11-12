@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { environmentsRequested, localHostBuilder } from "./local-host.mjs";
+import { safeMessage } from "./safe-error.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = async (pkg) => import(pathToFileURL(join(root, "packages", pkg, "dist", "index.js")).href);
@@ -145,7 +146,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     flags = parseControllerArgs(argv);
     if (flags.help === true) { io.stderr.write(HELP); return 0; }
     settings = controllerSettings(flags, io.env);
-  } catch (error) { err(`${error.message}\n${HELP}`.trimEnd()); return 1; }
+  } catch (error) { err(`${safeMessage(error, 2000)}\n${HELP}`.trimEnd()); return 1; }
   if (!existsSync(settings.configFile)) { err(`there is no configuration at ${settings.configFile}; create one with: node scripts/nimblenewt.mjs init --data ${settings.dataDir}`); return 1; }
 
   const stop = new AbortController();
@@ -195,7 +196,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     return await closeAndCode(launched, restartWanted, err, io.closeTimeoutMs ?? CLOSE_TIMEOUT_MS);
   } catch (error) {
     // The start-up check has already printed why (through `print`); it is not said twice.
-    if (error?.name !== "UnsupportedEnvironmentError") err(`could not start: ${String(error?.message ?? error)}`);
+    if (error?.name !== "UnsupportedEnvironmentError") err(`could not start: ${safeMessage(error, 2000)}`);
     if (launched !== undefined) await launched.close().catch(() => undefined);
     return 1;
   } finally {
@@ -206,7 +207,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
 async function closeAndCode(launched, restartWanted, err, timeoutMs) {
   let timer;
   const timedOut = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`it did not finish within ${Math.round(timeoutMs / 1000)} s`)), timeoutMs); });
-  try { await Promise.race([launched.close(), timedOut]); } catch (error) { err(`closing failed: ${String(error?.message ?? error).slice(0, 200)}`); return 1; } finally { clearTimeout(timer); }
+  try { await Promise.race([launched.close(), timedOut]); } catch (error) { err(`closing failed: ${safeMessage(error, 200)}`); return 1; } finally { clearTimeout(timer); }
   err(restartWanted ? "closed; exiting 75 so the launcher starts it again" : "closed; stopped on purpose");
   return restartWanted ? 75 : 0;
 }
@@ -215,5 +216,5 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   // The exit code is the contract, so it must not depend on every handle being let go: once main has returned, anything still holding the event loop (a close that timed out, a leaked socket) gets a few
   // seconds and then the process exits with that code anyway (the timer is unref'd, so a clean exit is not delayed).
   const exit = (code) => { process.exitCode = code; setTimeout(() => process.exit(code), 5_000).unref(); };
-  main(process.argv.slice(2)).then(exit, (error) => { process.stderr.write(`controller: ${String(error?.message ?? error)}\n`); exit(1); });
+  main(process.argv.slice(2)).then(exit, (error) => { process.stderr.write(`controller: ${safeMessage(error, 2000)}\n`); exit(1); });
 }

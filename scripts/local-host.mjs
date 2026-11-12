@@ -9,6 +9,7 @@ import { cpus, totalmem } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { safeMessage } from "./safe-error.mjs";
 
 /** The host's principal on this computer: `host:local`. */
 export const LOCAL_HOST_NAME = "local";
@@ -65,7 +66,7 @@ export function localHostBuilder(setup) {
     let scripts;
     try { scripts = await worker.hostScriptRunner({ launcher, base: worker.hostScriptBase(dataDir), protectedPaths: [dataDir], requireEnforced: true }); } catch (error) {
       await launcher.stop().catch(() => undefined);
-      return { problem: `the tool runner could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
+      return { problem: `the tool runner could not be made: ${safeMessage(error, 200)}` };
     }
     // The runner's own word on whether any tool can run here (no sandbox, no interpreter to offer): said before the host claims it can run agents' tools (card T02d follow-up).
     const toolProblem = scripts.problem();
@@ -93,7 +94,7 @@ export function localHostBuilder(setup) {
     try { git = await worker.GitBridge.create({ scratch: join(base, "git") }); } catch (error) {
       await scripts.stop().catch(() => undefined);
       await launcher.stop().catch(() => undefined);
-      return { problem: `the git bridge could not be made: ${String(error?.message ?? error).slice(0, 200)}` };
+      return { problem: `the git bridge could not be made: ${safeMessage(error, 200)}` };
     }
 
     // The shared repository of a project is the folder of its first repository that is a local folder (the project's records say where). Read when an attempt's workspace is made and before each workspace request.
@@ -214,9 +215,9 @@ export function localHostBuilder(setup) {
           notes.push("No difficulty profiles were set, so every task now uses the default routing profile (free and local models first). Change that with the difficulty operations.");
         }
       } catch (error) {
-        notes.push(`Tasks cannot be matched to a model yet (${String(error?.message ?? error).slice(0, 200)}); set up the model providers first, then tell the chat how to match task difficulty to them.`);
+        notes.push(`Tasks cannot be matched to a model yet (${safeMessage(error, 200)}); set up the model providers first, then tell the chat how to match task difficulty to them.`);
       }
-      heartbeat = setInterval(() => { local.beat(hosts, self).catch((error) => ctx.print(`The worker host on this computer could not report that it is alive: ${String(error?.message ?? error).slice(0, 200)}`)); }, BEAT_MS);
+      heartbeat = setInterval(() => { local.beat(hosts, self).catch((error) => ctx.print(`The worker host on this computer could not report that it is alive: ${safeMessage(error, 200)}`)); }, BEAT_MS);
       heartbeat.unref?.();
       notes.unshift(`The worker host on this computer (${LOCAL_HOST_ID}) is running agents in a sandbox, on the model providers you set up. Tasks assigned to an agent start here.`);
       return notes;
