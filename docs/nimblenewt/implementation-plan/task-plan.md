@@ -1457,7 +1457,6 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### H07b — Choose hosts by candidates, fall back on refusal and run the host poller in the worker process
 
 - **Parent:** N10 / AII-260.
-- **Progress note:** Host choice is an ordered candidate list; a host that refuses at its start is passed over (never chosen twice per attempt, at most three refusals, reasons on the record and in the plan); the candidate order from the remote service, the worker-process poller and the poll, delivery and index leftovers stay planned.
 - **Blockers:** H07, H12a.
 - **Deliverable:** Split from H07 (2026-10-27): the dispatcher picks among hosts with the placement candidates (the refusal fallback is H07e); the worker process runs the host poller; a poll ends when its client disconnects; the placement policy is checked again at delivery; the platform index drops revoked hosts and is filled at a controller restart.
 - **Acceptance and verification:** An attempt whose first host is refused by policy starts on another eligible host and says why in the plan; a worker process polls with one held request and exits cleanly on stop; a revoked host leaves the index; a policy change before delivery withholds the offer.
