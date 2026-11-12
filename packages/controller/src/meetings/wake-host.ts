@@ -279,7 +279,7 @@ export class MeetingWakeHost implements WakeControl {
 
   async #woken(agent: string, intentId: string): Promise<boolean> {
     const lease = (await this.#runner.get(WAKE_LEASE_KIND, derivedId("mwl", agent)))?.body as unknown as LeaseBody | undefined;
-    for (const l of lease?.leases ?? []) if (l.intentId === intentId && l.stoppedAt === undefined && l.gaveUpAt === undefined && (await this.#open(l.occurrenceId, agent))) return true;
+    for (const l of lease?.leases ?? []) if (l.intentId === intentId && l.stoppedAt === undefined && l.gaveUpAt === undefined && l.endedReason === undefined && (await this.#open(l.occurrenceId, agent))) return true;
     return false;
   }
 

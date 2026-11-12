@@ -108,6 +108,11 @@ for (const backend of backends) {
       assert.equal(at.count("endAttempt"), 1);
       assert.deepEqual(await t.host.attend(by, at.a), { attended: 0, waiting: 0, gaveUp: 0, settled: 0 });
       assert.equal(at.count("endAttempt"), 1, "settled once");
+      // Review of card M04h: the leaver's wake is over (said so to the owner) and it reports at rest again, although its room is still open.
+      const ended = (await t.host.list()).find((w) => w.agent === leaver.agent)!;
+      assert.equal(ended.state, "ended");
+      assert.match(ended.reason!, /left the meeting room/);
+      assert.equal(await t.host.availability(leaver.agent), "stopped");
     } finally { await t.close(); }
   });
 
