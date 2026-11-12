@@ -10,6 +10,9 @@ import type { ArtifactSource } from "./sources.js";
 import { ContentStore } from "./store.js";
 import { fixture } from "./testing/tar.js";
 
+/** The tests below that build real revisions run where the runtime does: it is Linux only (host.ts), and on Windows its store's links, locks and renames behave otherwise. */
+const POSIX_STORE = process.platform === "win32" && "the environment runtime is Linux only (host.ts refuses it elsewhere); its store's links, locks and renames are POSIX";
+
 // Clean-context review of the A09 fourth slice: each test here failed on the reviewed code.
 const top = realpathSync(mkdtempSync(join(tmpdir(), "nn-a09rv-")));
 after(() => rmSync(top, { recursive: true, force: true }));
@@ -47,7 +50,7 @@ describe("review: a worker that cannot take a revision leaves the links exactly 
     assert.equal(await w.runtime.activePackages(AGENT), undefined, "and no agent is given its packages");
   });
 
-  test("the previous revision is put back even when it no longer verifies, and `previous` keeps what it named", async () => {
+  test("the previous revision is put back even when it no longer verifies, and `previous` keeps what it named", { skip: POSIX_STORE }, async () => {
     const w = world(); const a = w.add("a"); const b = w.add("b"); const c = w.add("c");
     assert.equal((await w.reload(1, [ref(a)], a)).ok, true);
     assert.equal((await w.reload(2, [ref(a), ref(b)], b)).ok, true);
@@ -62,7 +65,7 @@ describe("review: a worker that cannot take a revision leaves the links exactly 
 });
 
 describe("review: the agent lock across processes", () => {
-  test("two writers that both find a dead owner's lock never both hold it", async () => {
+  test("two writers that both find a dead owner's lock never both hold it", { skip: POSIX_STORE }, async () => {
     for (let round = 0; round < 40; round++) {
       const root = fresh("lock");
       const store = new ContentStore({ root });
@@ -77,7 +80,7 @@ describe("review: the agent lock across processes", () => {
     }
   });
 
-  test("a lock directory whose owner was never written (a crash right after making it) does not block the agent for ever", async () => {
+  test("a lock directory whose owner was never written (a crash right after making it) does not block the agent for ever", { skip: POSIX_STORE }, async () => {
     const root = fresh("lock");
     const envs = new AgentEnvironments({ root, store: new ContentStore({ root }), lockWaitMs: 300 });
     const lock = join(envs.agentDir(AGENT), "lock");
@@ -88,7 +91,7 @@ describe("review: the agent lock across processes", () => {
 });
 
 describe("review: what an install script built is carried into later revisions and trials", () => {
-  test("from any earlier revision of the agent, not only the active and previous ones; and the trial builds the other packages as the agent has them", async () => {
+  test("from any earlier revision of the agent, not only the active and previous ones; and the trial builds the other packages as the agent has them", { skip: POSIX_STORE }, async () => {
     const port = new Scripts(); const w = world(port);
     const a = w.add("native", { scripts: { install: "setup.js" }, files: { "setup.js": "1" } }, true); const b = w.add("b"); const c = w.add("c"); const d = w.add("d");
     assert.equal((await w.reload(1, [ref(a)], a)).ok, true);
@@ -108,7 +111,7 @@ describe("review: what an install script built is carried into later revisions a
 });
 
 describe("review: a tree with a second name for a file", () => {
-  test("an install script that leaves a hard link fails the change, and the agent keeps what it had", async () => {
+  test("an install script that leaves a hard link fails the change, and the agent keeps what it had", { skip: POSIX_STORE }, async () => {
     const port: InstallScriptPort = { async run(r) { linkSync(join(r.dir, "setup.js"), join(r.dir, "alias.js")); } };
     const w = world(port); const plain = w.add("plain");
     assert.equal((await w.reload(1, [ref(plain)], plain)).ok, true);
