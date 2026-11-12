@@ -112,7 +112,9 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     // A landing is made under the project's integrator lease on the owner's landing branch (card P10).
     const named = await api(c, boot.token, "project.branches.change", { project: projectId, landing: "main" }, "branch-main");
     assert.equal(named.ok, true, JSON.stringify(named));
-    const taken = await api(c, boot.token, "integrator.lease.acquire", { taskId: A.task, branch: "main", ttlMs: 3_600_000, holder: "agt-integrator" }, "lease-main");
+    // The holder is a real, active agent (the owner can name only one of those).
+    await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "enroll-integrator", kind: "agent", name: "integrator", grants: [] });
+    const taken = await api(c, boot.token, "integrator.lease.acquire", { taskId: A.task, branch: "main", ttlMs: 3_600_000, holder: "integrator" }, "lease-main");
     assert.equal(taken.ok, true, JSON.stringify(taken));
     const lease = { leaseId: taken.result.item.leaseId as string, fence: taken.result.item.fence as number };
 

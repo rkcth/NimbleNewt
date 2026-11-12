@@ -121,7 +121,9 @@ for (const backend of ["sqlite", "postgres"] as const) {
       };
       let k = 0;
       // A landing is made under the project's integrator lease on the branch the owner's policy names (card P10): the integrator holds one for that branch, taken afresh when the owner moves the branch. Nothing is held while no branch is set.
-      const integrator = "agt-iiiiiiiiiiiiiiiiiiii";
+      // The holder is a real, active agent (the owner can name only one of those).
+      const integrator = "integrator";
+      await c.services.principals.enroll(await c.services.principals.authenticate(boot.token), { commandId: "enroll-integrator", kind: "agent", name: integrator, grants: [] });
       let leased = 0;
       const leaseNow = async (task: string): Promise<{ leaseId?: string; fence?: number }> => {
         const key = "workspace.landing.branch";

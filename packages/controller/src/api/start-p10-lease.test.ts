@@ -51,13 +51,30 @@ test("the integrator lease through the state API and chat, and a landing that mu
     assert.equal((await land(ann, "w4", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "the project names no landing branch, so no lease covers a landing");
     assert.ok((await call(O, "project.branches.change", { project, landing: "main" }, "lb1")).ok);
     assert.equal((await land(ann, "w2", { leaseId: lease.leaseId, fence: 4 })).error?.code, "fenced");
-    assert.equal((await land(bob, "w3", { leaseId: lease.leaseId, fence: 1 })).error?.code, "fenced", "a lease is its holder's: the right fence in another agent's hands is refused");
+    assert.equal((await land(bob, "w3", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "a lease is its holder's: another agent (here without the right at all) is refused");
     const past = await land(ann, "w5", { leaseId: lease.leaseId, fence: 1 });
     assert.equal(past.error?.code, undefined, JSON.stringify(past));
     assert.equal(past.result.state, "refused", "the lease passed; with no host on this controller the landing is refused for that reason, not for the lease");
     assert.match(past.result.summary, /no host/);
     assert.equal(past.result.lease.fence, 1);
     assert.equal((await call(ann, "workspace.request", { operation: "refresh", taskId: task, reason: "x", leaseId: lease.leaseId, fence: 1 }, "w6")).error?.code, "invalid_command");
+
+    // P10 review. The owner may leave the lease out (a lease ID is never the owner's own words, so this is how a landing asked in chat can pass): the live lease of the landing branch is used and recorded.
+    const byOwner = await land(O, "wo1");
+    assert.equal(byOwner.error?.code, undefined, JSON.stringify(byOwner));
+    assert.deepEqual(byOwner.result.lease, { leaseId: lease.leaseId, fence: 1 });
+    assert.match(byOwner.result.summary, /no host/);
+    // The owner names only an active agent as holder (a typo or the principal form would block the branch for nobody).
+    assert.equal((await call(O, "integrator.lease.acquire", { taskId: task, branch: "dev", ttlMs: 600_000, holder: "agent:ann" }, "oa1")).error?.code, "invalid_command");
+    assert.equal((await call(O, "integrator.lease.acquire", { taskId: task, branch: "dev", ttlMs: 600_000, holder: "nobody-by-that-name" }, "oa2")).error?.code, "invalid_command");
+    await c.services.principals.enroll(rob, { commandId: "e-gone", kind: "agent", name: "gone", grants });
+    await c.services.principals.disable(rob, { commandId: "d-gone", principalId: "agent:gone", expectedRevision: (await c.services.principals.get("agent:gone"))!.revision });
+    assert.equal((await call(O, "integrator.lease.acquire", { taskId: task, branch: "dev", ttlMs: 600_000, holder: "gone" }, "oa3")).error?.code, "invalid_command", "a disabled agent cannot be named");
+    // Taking the right away stops the holder's landings at once, not when its hold runs out.
+    const annRev = async () => (await c.services.principals.get("agent:ann"))!.revision;
+    await c.services.principals.setGrants(rob, { commandId: "sg1", principalId: "agent:ann", expectedRevision: await annRev(), grants: [{ action: "workspace.manage", project }] });
+    assert.equal((await land(ann, "w5r", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "the right was taken away");
+    await c.services.principals.setGrants(rob, { commandId: "sg2", principalId: "agent:ann", expectedRevision: await annRev(), grants });
 
     // Giving it back: a stranger's release is refused, the holder's works; the owner can end one without a fence.
     assert.equal((await call(bob, "integrator.lease.release", { leaseId: lease.leaseId, fence: 1 }, "r1")).error?.code, "not_found");

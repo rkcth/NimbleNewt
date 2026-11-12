@@ -15,9 +15,15 @@ import { IntegratorLeaseService, type IntegratorLease } from "./integrator-lease
 const holderOf = (by: Principal): string | undefined => (by.kind === "agent" && by.id.startsWith("agent:") && by.id.length > "agent:".length ? by.id.slice("agent:".length) : undefined);
 const refused = (what: string): DomainError => new DomainError("not_found", `${what} does not exist or is not yours to manage`);
 
+export interface IntegratorLeaseOpsOptions {
+  /** Whether an agent ID names an active agent (P10 review): the owner can only name one of those as the holder. Absent (unit rigs), any name is taken. */
+  readonly activeAgent?: (agentId: string) => Promise<boolean>;
+}
+
 export class IntegratorLeaseOps {
   readonly #leases: IntegratorLeaseService;
-  constructor(leases: IntegratorLeaseService) { this.#leases = leases; }
+  readonly #options: IntegratorLeaseOpsOptions;
+  constructor(leases: IntegratorLeaseService, options: IntegratorLeaseOpsOptions = {}) { this.#leases = leases; this.#options = options; }
 
   #allowed(by: Principal, projectId: string): boolean {
     return by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
@@ -47,6 +53,8 @@ export class IntegratorLeaseOps {
     if (by.kind === "owner") {
       if (command.holder === undefined) throw new DomainError("invalid_command", "holder: the owner names the agent that will hold the lease", { field: "holder" });
       holder = text(command.holder, "holder", { min: 1, max: 100 });
+      // The holder must be an active agent (P10 review): a lease named for nobody (a typo, `agent:` written in, a retired agent) would block the branch until it expires and no one could renew or land with it.
+      if (this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("invalid_command", `holder: ${holder} is not an active agent (name the agent by its ID, without "agent:")`, { field: "holder" });
     } else if (holder === undefined) {
       throw new DomainError("forbidden", `${by.id} is not an agent, so it cannot hold an integrator lease`);
     } else if (command.holder !== undefined && command.holder !== holder) {
@@ -83,16 +91,29 @@ export class IntegratorLeaseOps {
 
   /**
    * What a landing shows before it writes (the workspace service calls this twice: when the request is made and again right before the host is asked). The lease must be the live hold, with this fence, of the caller itself
-   * (an agent; the owner acts for whoever holds it), on exactly the branch the landing goes to, and of the task's own project. `fenced` for a hold that changed, expired or is someone else's; `forbidden` for another project or branch.
+   * (an agent that still has the right `integration.lease` on the project; the owner acts for whoever holds it), on exactly the branch the landing goes to, and of the task's own project. `fenced` for a hold that changed,
+   * expired, is someone else's, does not exist or is another project's (one answer for those last two, so a landing never tells whether another project has a lease); `forbidden` for another branch or a right taken away.
+   *
+   * The owner may leave the lease out: the live lease of the landing branch is used (the owner acts for its holder; with no live holder nothing lands), and the lease used is answered so the second showing checks that same
+   * hold (P10 review: without this the owner could not land through chat at all, since a lease ID is never the owner's own words).
    */
-  async checkLanding(by: Principal, call: { taskId: string; projectId: string; branch: string | undefined; leaseId: unknown; fence: unknown }): Promise<void> {
-    if (typeof call.leaseId !== "string" || typeof call.fence !== "number" || !Number.isInteger(call.fence)) throw new DomainError("invalid_command", "a landing is made under the project's integrator lease: give leaseId and fence", { field: "leaseId" });
-    const found = await this.#leases.get(call.leaseId);
-    if (found === undefined) throw new DomainError("fenced", `no lease ${call.leaseId}`);
-    if (found.projectId !== call.projectId) throw new DomainError("forbidden", `lease ${call.leaseId} is not a lease of this task's project`);
+  async checkLanding(by: Principal, call: { taskId: string; projectId: string; branch: string | undefined; leaseId: unknown; fence: unknown }): Promise<{ leaseId: string; fence: number }> {
+    let leaseId = call.leaseId, fence = call.fence;
+    if (by.kind === "owner" && leaseId === undefined && fence === undefined) {
+      if (call.branch === undefined) throw new DomainError("forbidden", "the project has no landing branch, so no lease covers a landing");
+      const current = await this.#leases.get(IntegratorLeaseService.leaseIdOf(call.projectId, call.branch));
+      if (current === undefined || !current.live) throw new DomainError("fenced", `no integrator holds the lease of branch ${call.branch} now, so nothing can land; take it for an agent first (integrator.lease.acquire)`);
+      leaseId = current.leaseId; fence = current.fence;
+    }
+    if (typeof leaseId !== "string" || typeof fence !== "number" || !Number.isInteger(fence)) throw new DomainError("invalid_command", "a landing is made under the project's integrator lease: give leaseId and fence", { field: "leaseId" });
+    const found = await this.#leases.get(leaseId);
+    if (found === undefined || found.projectId !== call.projectId) throw new DomainError("fenced", `lease ${leaseId} is not a lease of this task's project`);
     if (call.branch === undefined) throw new DomainError("forbidden", "the project has no landing branch, so no lease covers a landing");
-    if (found.branch !== call.branch) throw new DomainError("forbidden", `lease ${call.leaseId} is for branch ${found.branch}, not the landing branch ${call.branch}`);
+    if (found.branch !== call.branch) throw new DomainError("forbidden", `lease ${leaseId} is for branch ${found.branch}, not the landing branch ${call.branch}`);
+    // An agent lands only while it still has the right (P10 review): taking the right away stops its landings at once, not when its hold runs out (up to a day later).
+    if (by.kind !== "owner" && !this.#allowed(by, found.projectId)) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
     const holder = by.kind === "owner" ? found.holder : holderOf(by);
-    if (holder === undefined || !(await this.#leases.valid(call.leaseId, call.fence, holder))) throw new DomainError("fenced", `lease ${call.leaseId} is not held with fence ${call.fence} by the caller (it expired, was released, or changed hands)`);
+    if (holder === undefined || !(await this.#leases.valid(leaseId, fence, holder))) throw new DomainError("fenced", `lease ${leaseId} is not held with fence ${fence} by the caller (it expired, was released, or changed hands)`);
+    return { leaseId, fence };
   }
 }

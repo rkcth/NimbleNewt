@@ -99,7 +99,9 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     const owner = await s.principals.authenticate(l.ownerToken);
     const api = (op: string, args: Record<string, unknown>, id?: string) => c.api.handle(l.ownerToken, { v: 1, op, ...(id === undefined ? {} : { commandId: id }), args } as never) as Promise<any>;
     // A landing is made under the project's integrator lease on the branch the owner's policy names (card P10): the integrator holds one for that branch, taken afresh when the branch changes.
-    const integrator = "agt-iiiiiiiiiiiiiiiiiiii";
+    // The holder is a real, active agent (the owner can name only one of those).
+    const integrator = "integrator";
+    await s.principals.enroll(owner, { commandId: "enroll-integrator", kind: "agent", name: integrator, grants: [] });
     let leased = 0;
     const leaseFor = async (taskId: string): Promise<{ leaseId?: string; fence?: number }> => {
       const project = (await s.projects.getTask(taskId))!.projectId;

@@ -658,13 +658,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     let workspacePort: ((taskId: string) => Promise<WorkspacePort | undefined>) | undefined;
     // The integrator leases of landing (card P10), on the controller's own clock (the one the meetings and the dispatcher read). A landing is made only under the project's lease on the landing branch the owner's policy names.
     const integratorLeases = IntegratorLeaseService.withEpoch(storage, epoch, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) });
-    const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases);
+    const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases, { activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; } });
     const landingBranchOf = landingPolicyFrom(configuration, (projectId) => branchSettings.landingOf(projectId));
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
       landingLease: async (by, call) => {
         let branch: string | undefined;
         try { branch = (await landingBranchOf(call)).branch; } catch { throw new DomainError("unavailable", "the landing settings could not be read, so no lease can be matched to the landing branch; nothing was landed"); }
-        await integratorLeaseOps.checkLanding(by, { ...call, branch });
+        return integratorLeaseOps.checkLanding(by, { ...call, branch });
       },
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); },
       quiesce: { around: (scope, operation, run, after, tag, status) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after, tag, status) },

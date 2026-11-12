@@ -146,7 +146,7 @@ for (const backend of backends) {
       const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
         quiesce: stub(),
         portOf: async () => port,
-        landingLease: async (by, call) => { await r.ops.checkLanding(by, { ...call, branch }); },
+        landingLease: async (by, call) => r.ops.checkLanding(by, { ...call, branch }),
       }, { clock: r.w.clock.now });
       const grants = [{ action: "workspace.manage", project: r.w.project }, { action: "integration.lease", project: r.w.project }];
       const ann = await r.person("ann", grants);
@@ -168,7 +168,10 @@ for (const backend of backends) {
       const other = (await r.w.projects.createProject({ commandId: "p2", actor: r.w.owner.id, name: "Other" })).id;
       const ot = await r.task("theirs", other);
       const foreign = await r.leases.acquire({ commandId: "f1", projectId: other, branch: "main", holder: "ann", taskId: ot, ttlMs: 10 * MIN });
-      await refuses("forbidden", () => land(ann, "m6", { leaseId: foreign.leaseId, fence: 1 }));
+      await refuses("fenced", () => land(ann, "m6", { leaseId: foreign.leaseId, fence: 1 }), );
+      // ...answered exactly as a lease that does not exist, so a landing never tells whether another project holds a lease (P10 review).
+      const answerOf = async (leaseId: string) => { try { await land(ann, `probe-${leaseId}`, { leaseId, fence: 1 }); return "landed"; } catch (e) { return `${(e as DomainError).code}:${(e as Error).message.replace(leaseId, "L")}`; } };
+      assert.equal(await answerOf(foreign.leaseId), await answerOf(IntegratorLeaseService.leaseIdOf(other, "nothing-here")));
       // Only a landing is made under a lease.
       await refuses("invalid_command", () => svc.request(ann, { commandId: "m7", operation: "refresh", taskId: t, reason: "x", leaseId: lease.leaseId, fence: 1 }));
       assert.equal(asked, 0, "the host was never asked");
@@ -185,13 +188,30 @@ for (const backend of backends) {
       const quiet = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
         quiesce: stub(() => r.w.clock.advance(11 * MIN)),
         portOf: async () => port,
-        landingLease: async (by, call) => { await r.ops.checkLanding(by, { ...call, branch }); },
+        landingLease: async (by, call) => r.ops.checkLanding(by, { ...call, branch }),
       }, { clock: r.w.clock.now });
       const late = await r.ops.renew(ann, { commandId: "l2", leaseId: lease.leaseId, fence: 1 });
       const answer = await quiet.request(ann, { commandId: "late", operation: "landing", taskId: t, reason: "land it", leaseId: late.leaseId, fence: late.fence });
       assert.equal(answer.state, "refused");
       assert.match(answer.summary ?? "", /no longer holds/);
       assert.equal(asked, 0);
+      // P10 review: the owner may leave the lease out; with no live holder nothing lands.
+      await refuses("fenced", () => land(r.w.owner, "own0"));
+      assert.equal(asked, 0);
+      // The owner's landing is pinned to the hold it was checked against: if the lease changes hands during the quiesce (released, taken by bob), the second showing refuses even though a live lease exists again.
+      const again = await r.ops.acquire(ann, { commandId: "l3", taskId: t, branch: "main", ttlMs: 10 * MIN });
+      const swap = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
+        quiesce: { around: async (_s: unknown, _o: unknown, run: (q: { attempts: never[] }) => Promise<unknown>) => { await r.ops.release(ann, { commandId: "l4", leaseId: again.leaseId, fence: again.fence }); await r.ops.acquire(bob, { commandId: "l5", taskId: t, branch: "main", ttlMs: 10 * MIN }); return run({ attempts: [] }); } } as never,
+        portOf: async () => port,
+        landingLease: async (by, call) => r.ops.checkLanding(by, { ...call, branch }),
+      }, { clock: r.w.clock.now });
+      const swapped = await swap.request(r.w.owner, { commandId: "own1", operation: "landing", taskId: t, reason: "land it" });
+      assert.equal(swapped.state, "refused", JSON.stringify(swapped));
+      assert.deepEqual(swapped.lease, { leaseId: again.leaseId, fence: again.fence }, "the hold checked first is the one recorded");
+      assert.equal(asked, 0, "the host was not asked under a hold that changed hands");
+      // With bob's live hold the owner's landing goes ahead under it.
+      assert.equal((await land(r.w.owner, "own2")).lease?.fence, again.fence + 1);
+      assert.equal(asked, 1);
     } finally { await r.close(); }
   });
 }

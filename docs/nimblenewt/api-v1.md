@@ -4616,7 +4616,7 @@ Arguments:
 - `operation`: `integration`, `landing`, `refresh`, `release` or `quarantine`
 - `taskId`: the task
 - `reason`: why
-- `leaseId` (optional): a landing only, when the installation gates landings by lease (it does): the integrator lease of the task's project on the landing branch (`integrator.lease.acquire`)
+- `leaseId` (optional): a landing only, when the installation gates landings by lease (it does): the integrator lease of the task's project on the landing branch (`integrator.lease.acquire`); the caller must be its holder and still have the right `integration.lease`. The owner may leave it and `fence` out: the live lease of the landing branch is then used (refused when no integrator holds it)
 - `fence` (optional): a landing only: the fence of that lease, as the acquire or renew answered it
 
 Result: `{ id, state, lease?, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, replayed }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID; for a landing `landed` is true only when every file was written and the checkout marked, so `state` `done` can mean not landed: look at `detail.landed`, `kept` and `partial`, and `waitingToCommit` says the landed files wait to be committed); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
@@ -4632,7 +4632,7 @@ Arguments:
 - `taskId`: the task the integrator works the landing under (its project is the lease's project)
 - `branch`: the landing branch, such as `main`
 - `ttlMs`: how long the hold lasts without a renewal, 60000 to 86400000 milliseconds
-- `holder` (optional): owner only: the agent that will hold it
+- `holder` (optional): owner only: the ID of the active agent that will hold it
 - `commandId`: required
 
 Result: `{ item: { leaseId, projectId, branch, holder, taskId, fence, ttlMs, acquiredAt, expiresAt, state, live, revision } }`; keep `leaseId` and `fence`: a landing (`workspace.request` with `operation: landing`) must show both.

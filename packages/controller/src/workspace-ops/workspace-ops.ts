@@ -87,7 +87,7 @@ export interface WorkspaceDeps {
    * The integrator lease check of a landing (card P10). When given, a `landing` is made only under the project's lease: `request` must name `leaseId` and `fence`, and this is asked when the request is made and again right
    * before the host is asked (a long quiesce may outlast the lease); it throws when the lease is not the caller's live hold on the landing branch. When absent (no lease service composed), landings are not gated here.
    */
-  readonly landingLease?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<void>;
+  readonly landingLease?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<{ readonly leaseId: string; readonly fence: number } | void>;
 }
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -141,8 +141,9 @@ export class WorkspaceOpService {
       return { ...(await this.#get(id))!.body, id, replayed: true };
     }
     // A landing is made only under the project's integrator lease (card P10): checked before anything is recorded or frozen, and again right before the host is asked.
-    const leased = operation === "landing" && this.#deps.landingLease !== undefined ? { leaseId: command.leaseId, fence: command.fence } : undefined;
-    if (leased !== undefined) await this.#deps.landingLease!(by, { taskId, projectId, ...leased });
+    // The check may answer the lease it used (the owner may leave it out); the second showing checks that same hold, never a lease taken in between.
+    let leased: { leaseId: unknown; fence: unknown } | undefined = operation === "landing" && this.#deps.landingLease !== undefined ? { leaseId: command.leaseId, fence: command.fence } : undefined;
+    if (leased !== undefined) { const shown = await this.#deps.landingLease!(by, { taskId, projectId, ...leased }); if (shown !== undefined) leased = { leaseId: shown.leaseId, fence: shown.fence }; }
     else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing is made under an integrator lease");
     // One operation per task: two would race on the same checkout and one's release would lift the other's freeze.
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
@@ -156,7 +157,8 @@ export class WorkspaceOpService {
       const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }) };
       await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }) }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
-      const outcome = await this.#run(id, started.body, leased === undefined ? undefined : async () => this.#deps.landingLease!(by, { taskId, projectId, ...leased }));
+      const pinned = leased;
+      const outcome = await this.#run(id, started.body, pinned === undefined ? undefined : async () => { await this.#deps.landingLease!(by, { taskId, projectId, ...pinned }); });
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
   }
