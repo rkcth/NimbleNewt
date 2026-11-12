@@ -4387,7 +4387,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `backup.restore.apply`
 
-Owner only, a dangerous action: restores a backup. `confirm` must be the token of the preview the owner approved; the call prepares the restore beside the live data, takes a snapshot of the current state, raises the maintenance barrier (every other command is refused) and waits for the controller to be restarted, which swaps the data in (the old data is kept beside). Refused while agent work is running, unless `stopAttempts` is true: then all agent work is stopped first (every running attempt is checkpointed and ended, the owner's own graceful Stop of the whole installation; the work stays paused until the owner resumes it) and the restore is prepared once it has settled; work that will not settle refuses the restore and stays paused. For an encrypted backup the passcode or recovery file is read from the host file (never an argument); `method` says which. The chat only proposes this; it is never applied from an interpreter's words.
+Owner only, a dangerous action: restores a backup. `confirm` must be the token of the preview the owner approved; the call prepares the restore beside the live data, takes a snapshot of the current state, raises the maintenance barrier (every other command is refused) and waits for the controller to be restarted, which swaps the data in (the old data is kept beside). Refused while agent work is running, unless `stopAttempts` is true: then all agent work is stopped first (every running attempt is checkpointed and ended, the owner's own graceful Stop of the whole installation) and the restore is prepared once it has settled; work that will not settle refuses the restore. If the restore is not applied (refused, failed or cancelled) the work stays stopped until the owner resumes it with the lifecycle controls; once the restart applies it, the work is as the backup recorded it. For an encrypted backup the passcode or recovery file is read from the host file (never an argument); `method` says which. The chat only proposes this; it is never applied from an interpreter's words.
 
 Arguments:
 
@@ -4400,7 +4400,7 @@ Result: `{ item: { name, restartRequired: true, restart: { automatic, instructio
 
 #### `backup.restore.cancel`
 
-Owner only: withdraws a prepared restore that the restart has not applied yet. The staged copy is removed, the maintenance barrier comes down and the live data is exactly as it was.
+Owner only: withdraws a prepared restore that the restart has not applied yet. The staged copy is removed, the maintenance barrier comes down and the live data is exactly as it was. Agent work stopped for the restore (`stopAttempts`) stays stopped until the owner resumes it.
 
 Arguments:
 

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { access, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { PI_FOLDER, PI_INDEX } from "../backup/format.js";
 import { JOURNAL_FILE, PENDING_FILE } from "../backup/staged-restore.js";
@@ -196,9 +196,12 @@ export class RemotePiState implements PiStateSource {
 
   async list(): Promise<readonly PiStateStore[]> {
     // One listing at a time: its staged stores are removed by its own release.
+    // The release function is taken over only once the lock is held: a second listing queued behind this one must not replace it (the first release would then free the queue's tail and never the second's wait).
     const before = this.#lock;
-    this.#lock = new Promise<void>((ok) => { this.#unlock = ok; });
+    let unlock!: () => void;
+    this.#lock = new Promise<void>((ok) => { unlock = ok; });
     await before;
+    this.#unlock = unlock;
     this.#problems = []; this.#listed = [];
     try { return await this.#list(); } catch (error) { await this.release(); throw error; }
   }
@@ -320,6 +323,16 @@ export class RemotePiRestore {
     return false;
   }
 
+  /**
+   * Whether the store of `attemptId` waits here for `hostId` (card K01i review): the dispatcher does not offer the attempt to the host meanwhile, so the agent never runs on the conversation from before the restore and then has
+   * its newest turns replaced by the delivery.
+   */
+  async waits(hostId: string, attemptId: string): Promise<boolean> {
+    const id = remoteStoreId(hostId, attemptId);
+    if (id === undefined) return false;
+    return lstat(join(this.#o.dataDirectory, RESTORED, id)).then((i) => i.isDirectory(), (e: NodeJS.ErrnoException) => (e.code === "ENOENT" ? false : Promise.reject(e)));
+  }
+
   async state(): Promise<RemotePiRestoreState> {
     const waiting = await this.#waiting();
     return { waiting: [...waiting].sort(([a], [b]) => (a < b ? -1 : 1)).map(([hostId, ids]) => ({ hostId, stores: ids.length, ...(this.#reasons.has(hostId) ? { reason: this.#reasons.get(hostId)! } : {}) })), delivered: this.#delivered };
@@ -362,6 +375,9 @@ export class RemotePiRestore {
     return this.state();
   }
 }
+
+/** The most an index of conversation stores may be on a host's disk (a line per file, at most `PI_LIMITS.files` lines of a few hundred bytes). */
+const INDEX_MAX_BYTES = 128 * 1024 * 1024;
 
 // ---- the host's side ---------------------------------------------------------------------------------------------------------
 
@@ -427,6 +443,8 @@ export class PiStateHost {
   }
 
   async #fetch(transferId: string, name: string, to: string, expect?: { size: number; sha256: string }): Promise<void> {
+    // Never more than the index says (or, for the index itself, than an index can be): a controller that keeps sending cannot fill this host's disk.
+    const most = expect?.size ?? INDEX_MAX_BYTES;
     await mkdir(dirname(to), { recursive: true, mode: 0o700 });
     const h = await open(to, "w", 0o600);
     const hash = createHash("sha256");
@@ -435,6 +453,7 @@ export class PiStateHost {
       for (;;) {
         const c = await this.#o.client.piStateGet(transferId, name, at);
         if (c.offset !== at) throw new Error(`${name} came out of order`);
+        if (at + c.data.length > most) throw new Error(`${name} is longer than it may be`);
         if (c.data.length > 0) { await h.write(c.data); hash.update(c.data); at += c.data.length; }
         if (c.eof) {
           const got = hash.digest("hex");
@@ -476,11 +495,17 @@ export class PiStateHost {
         staged.push({ store: id, staged: at, target });
         await writePiState(tmp, parsed.lines.filter((l) => l.store === id).map((l) => ({ ...l })), undefined, () => at);
       }
+      // Asked again right before anything is moved: an agent that started while the files were fetched and staged (which can take minutes) keeps its store.
+      const busyNow = await this.#o.busy();
+      const liveNow = stores.filter((id) => busyNow.includes(id));
+      if (liveNow.length > 0) return { ok: false, reason: `the agent of ${liveNow.slice(0, 3).join(", ")} started on this host while its store was being fetched, so its store was not replaced; ask again when it is not` };
+      // The places are judged again too: a home or `pi` folder that became a link meanwhile is not moved through.
+      for (const id of stores) if (this.#o.final(id) !== targets.get(id)) return { ok: false, reason: `the place of ${id} on this host changed while its store was being fetched; nothing was changed` };
       const done: { target: string; aside?: string }[] = [];
       try {
         for (const s of staged) {
           const aside = `${s.target}.before-restore-${stamp}`;
-          const had = await stat(s.target).then(() => true, (e: NodeJS.ErrnoException) => (e.code === "ENOENT" ? false : Promise.reject(e)));
+          const had = await lstat(s.target).then(() => true, (e: NodeJS.ErrnoException) => (e.code === "ENOENT" ? false : Promise.reject(e)));
           if (had) await rename(s.target, aside);
           done.push({ target: s.target, ...(had ? { aside } : {}) });
           await rename(s.staged, s.target);

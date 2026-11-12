@@ -1,6 +1,6 @@
 import type { Principal } from "../security/principals.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { link, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants, createReadStream } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -158,6 +158,30 @@ const STAGED = ".nn-staged-";
 const inside = (root: string, p: string): boolean => { const r = relative(resolve(root), resolve(p)); return r !== "" && !r.startsWith("..") && !isAbsolute(r); };
 
 async function exists(p: string): Promise<boolean> { return stat(p).then(() => true, () => false); }
+
+/**
+ * After a restore is applied (card K01i review): the stores an EARLIER restore left for remote hosts (`restored-pi-state/rh.<host>.<key>`) and that were never delivered are moved to `restored-pi-state-superseded/`, unless this
+ * restore put a store of the same name there itself. Otherwise the 30 s delivery would later put an older backup's conversation on a host, behind the data the controller now runs on. Nothing is deleted; run again after a crash
+ * it finds nothing more to move. Returns how many were moved.
+ */
+export async function retireSupersededRemoteStores(data: string, j: { readonly stamp: string; readonly moves: readonly { readonly to: string }[] }): Promise<number> {
+  const folder = join(data, "restored-pi-state");
+  const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
+  const restored = new Set(j.moves.map((m) => resolve(m.to)));
+  let moved = 0;
+  for (const e of entries) {
+    if (!e.isDirectory() || !e.name.startsWith("rh.") || /\.(nn-staged-|before-restore-|nn-restoring)/.test(e.name) || restored.has(resolve(folder, e.name))) continue;
+    await mkdir(join(data, "restored-pi-state-superseded"), { recursive: true, mode: 0o700 });
+    await rename(join(folder, e.name), join(data, "restored-pi-state-superseded", `${e.name}-${j.stamp}`));
+    moved += 1;
+  }
+  return moved;
+}
+const retireNote = async (data: string, j: { readonly stamp: string; readonly moves: readonly { readonly to: string }[] }, print: (line: string) => void): Promise<void> => {
+  try { const n = await retireSupersededRemoteStores(data, j); if (n > 0) print(`${n} conversation store(s) an earlier restore left for remote hosts were not delivered and are older than this restore; they were moved to restored-pi-state-superseded and will not be delivered.`); } catch (error) {
+    print(`Warning: conversation stores an earlier restore left for remote hosts could not be set aside (${(error as NodeJS.ErrnoException).code ?? "error"}); remove the rh.* folders in restored-pi-state that this restore did not put there, or they may be delivered to their hosts.`);
+  }
+};
 
 async function countRows(file: string, test: (row: Record<string, unknown>) => boolean): Promise<number> {
   let n = 0;
@@ -385,6 +409,7 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
       if (journal.mode === "done") {
         // The swap already happened: the clean-up is finished whether or not the marker can still be read (a marker that fails to authenticate must not leave the data directory looking half-done).
         pending = await readMarkerRaw(data).catch(() => undefined);
+        await retireNote(data, journal, print);
         await remove(join(data, PENDING_FILE));
         await remove(join(data, JOURNAL_FILE));
         print(`The restore${pending === undefined ? "" : ` of ${pending.name}`} was applied: the previous database and conversation folders are kept beside, named .before-restore-${journal.stamp}.`);
@@ -427,6 +452,7 @@ export async function applyPendingRestore(dataDirectory: string, db: RestoreData
       if (failure === undefined) {
         // Recorded as done before anything is removed: a crash from here on finishes the clean-up, it is never planned again.
         await writeJournal(data, k, { stamp: journal.stamp, mode: "done", moves: journal.moves, at: journal.moves.length });
+        await retireNote(data, journal, print);
         await remove(join(data, PENDING_FILE));
         await remove(join(data, JOURNAL_FILE));
         print(`The restore of ${pending.name} was applied: the previous ${live.pg === undefined ? "database" : `database (schema ${asideSchemaOf(live.pg.schema, pending.stamp)})`} and conversation folders are kept beside, named .before-restore-${pending.stamp}.`);
@@ -676,6 +702,7 @@ export class StagedRestore {
     let stamp = "";
     let stagedDb = "";
     let markerPath: string | undefined;
+    let workStopped = false;
     const leftovers = (): { stagedDb: string; pi: { staged: string }[] } => ({ stagedDb, pi: [...targets.values()].map((t) => ({ staged: stagedOf(t, stamp) })) });
     try {
       const data = await canon(this.#o.dataDirectory);
@@ -735,7 +762,7 @@ export class StagedRestore {
       }
       // The owner asked for the work to be stopped first (card K01i): all agent work is stopped and has settled before the barrier is raised, which would otherwise refuse (an attempt is still running). The stop is not undone if
       // a later step fails: the owner asked for the work to stop, and says when it goes on again (the lifecycle controls).
-      if (options.stopAttempts === true) { if (options.by === undefined) throw new DomainError("invalid_command", "stopAttempts: the owner who asks must be known", { field: "stopAttempts" }); await this.#o.stopAttempts!(options.by, `restoring ${manifest.name}`); }
+      if (options.stopAttempts === true) { if (options.by === undefined) throw new DomainError("invalid_command", "stopAttempts: the owner who asks must be known", { field: "stopAttempts" }); await this.#o.stopAttempts!(options.by, `restoring ${manifest.name}`); workStopped = true; }
       const release = await this.#o.barrier.raise(`restoring ${manifest.name}`);
       try {
         const safety = await this.#o.backups.safetyCopy();
@@ -763,6 +790,12 @@ export class StagedRestore {
       }
     } catch (error) {
       if (stagedDb !== "") await this.#rmStaged(leftovers()).catch(() => undefined);
+      // The owner asked for the work to be stopped and it was: the restore failing after that does not start it again, and the answer says so (card K01i review).
+      if (workStopped) {
+        const note = " Agent work was stopped for this restore and stays stopped; resume it with the lifecycle controls when you want it to go on.";
+        if (error instanceof DomainError) throw new DomainError(error.code, `${error.message}${note}`, { ...(error.field === undefined ? {} : { field: error.field }), ...(error.currentRevision === undefined ? {} : { currentRevision: error.currentRevision }), cause: error });
+        throw new DomainError("unavailable", `the restore could not be prepared (${(error instanceof Error ? error.message : String(error)).slice(0, 300)}).${note}`, { cause: error });
+      }
       throw error;
     } finally { this.#busy = false; }
   }

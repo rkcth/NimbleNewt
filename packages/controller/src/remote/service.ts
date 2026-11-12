@@ -289,6 +289,11 @@ export interface RemoteDeps {
   readonly relocationPolicy?: RelocationPolicyFor;
   /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
   readonly placementPolicy?: PlacementPolicyFor;
+  /**
+   * Whether a restore left this attempt's conversation store for this host and it has not been delivered yet (card K01i review). While it waits the host is not offered the attempt (a reason that passes): the agent would
+   * otherwise run on the conversation that was there before the restore, and the delivery between two turns would then take its newest turns away. Absent: not judged.
+   */
+  readonly restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean>;
   /** Whether a worker that reconnected may take its still-owned attempt up again by itself (`auto`) or only once the owner approves (`owner`), card H09b. Absent or failing: `owner`. Read at every decision. */
   readonly reaccept?: () => Promise<"auto" | "owner">;
   /** How long the controller keeps the lease of an attempt that waits for the owner's decision alive, in ms, from the moment the waiting was recorded; `undefined`: it does not (off). Absent: 24 hours. */
@@ -771,6 +776,12 @@ export class RemoteWorkerService {
     if (!((by.kind === "owner" || dispatcher) && by.taskScope === undefined)) throw new DomainError("forbidden", `${by.id} may not do that; remote placements are the owner's and the dispatcher's`);
   }
 
+  /** A store check that cannot be read holds the attempt back too (fail closed): it is judged again at the next try. */
+  async #restoreWaits(hostId: string, attemptId: string): Promise<boolean> {
+    if (this.#deps.restoreWaits === undefined) return false;
+    try { return await this.#deps.restoreWaits(hostId, attemptId); } catch (error) { this.#reportError(error); return true; }
+  }
+
   async #connected(hostId: string): Promise<SessionBody | undefined> {
     const body = (await this.#runner.get(SESSION_KIND, hostId))?.body as unknown as SessionBody | undefined;
     return body !== undefined && body.sessionEpoch >= 1 && body.protocol !== undefined ? body : undefined;
@@ -788,6 +799,8 @@ export class RemoteWorkerService {
     const reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
     if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements })));
+    // Judged here, where the dispatcher passes the host over and the attempt waits (never at `place`, whose refusal can end an attempt that has no other host).
+    if (await this.#restoreWaits(hostId, attemptId)) reasons.push(RESTORE_WAIT(hostId, attemptId));
     // A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it.
     return { reasons, lasting: lastingReasons(reasons) };
   }
@@ -2307,6 +2320,9 @@ export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
 }
 
 /** A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it (cards H07e, H07b). */
+/** The reason a host is not offered an attempt while its restored conversation store waits for delivery there (card K01i review); it passes once the store is delivered. */
+const RESTORE_WAIT = (hostId: string, attemptId: string): string => `${hostId} has not received the restored conversation store of ${attemptId} yet`;
+
 export function lastingReasons(reasons: readonly string[]): boolean {
-  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted/.test(r));
+  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted|has not received the restored conversation store/.test(r));
 }
