@@ -1,7 +1,7 @@
 // Card K02 follow-up: the updater program, end to end against temporary directories. No network, database or controller.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -79,5 +79,34 @@ test("run as a real process with the root from the environment (K02 updater prog
     const p = spawnSync(process.execPath, [join(here, "nimblenewt-updater.mjs"), "stage", "--source", f.source, "--digest", f.digest, "--announce"], { encoding: "utf8", env: { ...process.env, NIMBLENEWT_RELEASE_ROOT: f.root } });
     assert.equal(p.status, 0, p.stderr);
     assert.match(p.stdout, /announced/);
+  } finally { f.done(); }
+});
+
+test("--trusted-keys and --signature-file: installed only when a listed key signed the digest; the flags go together; files are plain and small (K02b updater program)", async () => {
+  const f = fixture();
+  try {
+    const a = generateKeyPairSync("ed25519"), b = generateKeyPairSync("ed25519");
+    const der = (k) => k.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const signed = (k, d) => sign(null, Buffer.from(`nimblenewt-release-digest-v1\n${d}\n`), k.privateKey).toString("base64");
+    const keys = join(f.base, "keys.txt"), good = join(f.base, "good.sig"), bad = join(f.base, "bad.sig");
+    writeFileSync(keys, `# trusted publishers\n${der(b)}\n\n${der(a)}\n`);
+    writeFileSync(good, `${signed(a, f.digest)}\n`);
+    writeFileSync(bad, signed(a, sha("something else")));
+    const base = ["stage", "--root", f.root, "--source", f.source, "--digest", f.digest];
+    let r = await run([...base, "--trusted-keys", keys]);
+    assert.deepEqual([r.code, /go together/.test(r.err)], [1, true]);
+    r = await run([...base, "--signature-file", good]);
+    assert.deepEqual([r.code, /go together/.test(r.err)], [1, true]);
+    r = await run([...base, "--trusted-keys", keys, "--signature-file", bad]);
+    assert.deepEqual([r.code, /refused \(signature\)/.test(r.err)], [1, true], r.err);
+    r = await run([...base, "--trusted-keys", join(f.base, "missing"), "--signature-file", good]);
+    assert.equal(r.code, 1);
+    writeFileSync(join(f.base, "big"), "A".repeat(20_000));
+    r = await run([...base, "--trusted-keys", join(f.base, "big"), "--signature-file", good]);
+    assert.deepEqual([r.code, /16 KiB/.test(r.err)], [1, true]);
+    assert.equal(existsSync(join(f.root, "releases")), false, "nothing installed by a refusal");
+    r = await run([...base, "--trusted-keys", keys, "--signature-file", good]);
+    assert.equal(r.code, 0, r.err);
+    assert.ok(existsSync(join(f.root, "releases", ID)));
   } finally { f.done(); }
 });

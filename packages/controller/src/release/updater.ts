@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { ACTIVATION_LIMITS, PROCESS_TOKEN, PointerSwitcher, SimulatedCrash, SymlinkSwitcher, verifyReleaseDirectory, type StagedManifest } from "./activation.js";
 import { Launcher, parseCompat } from "./launcher.js";
 import type { VersionRange } from "../remote/protocol.js";
+import { checkDigestSignature } from "./trust.js";
 
 /**
  * The updater (card K02, follow-up): installs a release that is already built and verified, from a SOURCE DIRECTORY on this machine, into the release root, and tells the launcher about it. It is a library plus the
@@ -26,7 +27,7 @@ import type { VersionRange } from "../remote/protocol.js";
  * a running launcher does not change its release until its controller exits or restarts, and a pointer moved without the controller's activation record leaves that record `diverged`, which `release.status` reports.
  * The updater never starts or stops anything.
  */
-export type UpdaterErrorCode = "invalid_input" | "source_invalid" | "digest_mismatch" | "exists" | "unsafe" | "failed";
+export type UpdaterErrorCode = "invalid_input" | "signature" | "source_invalid" | "digest_mismatch" | "exists" | "unsafe" | "failed";
 export class UpdaterError extends Error {
   constructor(readonly code: UpdaterErrorCode, message: string) { super(message); this.name = "UpdaterError"; }
 }
@@ -54,6 +55,11 @@ export interface StageReleaseOptions {
   readonly hook?: (point: UpdaterPoint) => void | Promise<void>;
   readonly maxFiles?: number;
   readonly maxFileBytes?: number;
+  /**
+   * Signed artifact sets (K02b): when given, the release is installed only if `signature` (base64 Ed25519) is a trusted key's signature over `signedDigestText(digest)`, checked before anything is copied. `keys` are base64 DER
+   * public keys the installer trusts, supplied by the caller (the updater has no database; the CLI reads them from a file). An empty list refuses everything.
+   */
+  readonly trust?: { readonly keys: readonly string[]; readonly signature: string };
 }
 export interface InstalledRelease {
   readonly id: string;
@@ -192,6 +198,7 @@ export async function stageRelease(o: StageReleaseOptions): Promise<InstalledRel
   const manifestBytes = await readFile(manifestPath);
   const manifestText = manifestBytes.toString("utf8");
   if (sha256(manifestBytes) !== o.digest) fail("digest_mismatch", `${MANIFEST_FILE} is not the one the release was authorised with`);
+  if (o.trust !== undefined && checkDigestSignature(o.trust.keys, o.digest, o.trust.signature) === undefined) fail("signature", "the release has no valid signature over its digest from a trusted key");
   const manifest = parseManifest(manifestText, maxFiles, maxFileBytes);
   const id = manifest.candidateId;
   const problems = await verifyReleaseDirectory(source, o.digest);
