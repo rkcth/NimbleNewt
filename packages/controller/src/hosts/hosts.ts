@@ -210,7 +210,8 @@ export class HostService {
 
   /** Announced hosts with freshness, for the owner, one page at a time (`next` is where to continue). */
   async list(owner: Principal, page: { afterId?: string; limit?: number } = {}): Promise<{ items: HostStatus[]; next?: string }> {
-    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner`);
+    // The owner, and the dispatcher's own service principal (card H07b: it fills the platform index at a controller restart).
+    if (owner.kind !== "owner" && !(owner.kind === "service" && owner.id === DISPATCHER_PRINCIPAL && owner.taskScope === undefined)) throw new DomainError("forbidden", `${owner.id} is not the owner`);
     const limit = page.limit ?? 100;
     const records = await this.#runner.list("host-record", { ...(page.afterId === undefined ? {} : { afterId: page.afterId }), limit });
     const now = this.#runner.now();

@@ -105,6 +105,8 @@ export interface WorkerTurnResult {
   readonly nudges?: number;
   readonly text?: string;
   readonly error?: string;
+  /** Card H07b: set only by the controller's own remote service when an offer was put back before the host read it (the policy refused it meanwhile). The turn never ran, so the dispatcher ends the attempt and admits the task again. A worker cannot send it (the wire result refuses unknown fields). */
+  readonly withdrawn?: true;
   /** The conversation checkpoint at the end of the turn (opaque to the controller). */
   readonly checkpoint?: JsonObject;
   /** Model usage of the turn, for budget accounting. */
