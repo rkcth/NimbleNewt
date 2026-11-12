@@ -128,6 +128,12 @@ export function highEntropy(run: string): boolean {
   if (s.length < 32 || DIGEST_LABEL.test(s) || SSH_PUBLIC.test(s)) return false;
   if (/^[0-9a-f]+$/.test(s) || /^[0-9A-F]+$/.test(s)) return /\d/.test(s) && /[a-f]/i.test(s) && !HEX_SHOWN.has(s.length);
   if (!/[A-Z]/.test(s) || !/[a-z]/.test(s) || !/\d/.test(s)) return false;
+  // An absolute path from the root of a file system, such as macOS's per-user temporary folder (`/var/folders/0t/k_8g3pzs4gn5b0g8l2h6xw8m0000gn/T/nn-tv-AbC123`, whose generated names are not words): it
+  // starts with "/" and a word (`var`, `Users`, `private`, `home`), has three or more names, and none of its names is a key by itself. A key that sits in a path as one name is still found.
+  if (s.startsWith("/")) {
+    const names = s.slice(1).split("/");
+    if (names.length >= 3 && WORDLIKE.test(names[0]!) && names.every((n) => !highEntropy(n))) return false;
+  }
   // A path, a URL's path or a name made of words (`backup-20261028T100000Z-scheduled`): most of its pieces are words.
   const pieces = s.split(/[/_-]+/).filter((p) => p.length > 0);
   if (pieces.length >= 3 && pieces.filter((p) => WORDLIKE.test(p)).length * 2 >= pieces.length) return false;

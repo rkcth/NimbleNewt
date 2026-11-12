@@ -92,7 +92,7 @@ test("a restore swap whose COMMIT is never answered, on a server that then freez
   }
 });
 
-test("a swap the server still holds open (its COMMIT unread by a frozen backend) is never taken as not made: the start stops, and after the server runs it the next start puts it back", async () => {
+test("a swap the server still holds open (its COMMIT unread by a frozen backend) is never taken as not made: the start stops, and after the server runs it the next start puts it back", { skip: process.platform === "win32" && "the backend is paused with SIGSTOP (storage/postgres/testing/held-swap.ts), which Windows does not have; there the failed pause left the swap's locks held and the file waited until its time limit" }, async () => {
   const s = await pg();
   if (s.kind !== "embedded") return; // the backend process is paused with a signal: a local, disposable server only
   const url = s.url();
