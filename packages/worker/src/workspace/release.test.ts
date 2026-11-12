@@ -279,11 +279,12 @@ test("a file swapped for a link while git stages it cannot carry a file from out
     await writeFile(outside, "HOST-ONLY-CONTENT\n");
     const target = join(w.made.checkout, "src", "a.ts");
     await writeFile(target, "export const a = 2;\n");
-    const ws = await wrapped(w, `case " $* " in *" add -A"*) cp '${target}' '${target}.keep'; cp '${outside}' '${target}'; '${realGit()}' "$@" || exit 1; mv '${target}.keep' '${target}'; exit 0;; esac`);
+    const keep = join(w.dir, "agent-keep");
+    const ws = await wrapped(w, `case " $* " in *" add -A"*) cp '${target}' '${keep}'; cp '${outside}' '${target}'; '${realGit()}' "$@" || exit 1; mv '${keep}' '${target}'; exit 0;; esac`);
     const head = w.head();
     const r = await ws.port.run(call("release"));
     assert.equal(r.ok, false, JSON.stringify(r));
-    assert.match(reasonOf(r), /changed or was replaced by a link while it was being staged/);
+    assert.match(reasonOf(r), /^"src\/a\.ts" changed or was replaced by a link while it was being staged/);
     assert.equal(w.head(), head, "nothing was committed");
     assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false);
     // An honest release afterwards commits the agent's own file.
