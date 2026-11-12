@@ -8,6 +8,7 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { request as httpRequest } from "node:http";
+import { connect as netConnect, type Socket } from "node:net";
 import { RemoteAttempt, RemoteWorkerClient } from "../remote/index.js";
 import { startController } from "./index.js";
 
@@ -270,4 +271,55 @@ test("a held offers poll ends when its client disconnects, and frees its place, 
     assert.deepEqual(await clients.get("host:r1")!.offers({ waitMs: 50 }), []);
     assert.equal(remote.pollStats(rob).disconnected, 1);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a held poll on a raw socket that is dropped, before or just after its offer is made, loses no offer: the host is handed it on its next poll and no other host is (card H07b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-choice-"));
+  const { c, rob, clients, tokens, attempt } = await twoHosts(d);
+  const sockets: Socket[] = [];
+  try {
+    const remote = c.dispatch!.remote!;
+    const url = new URL(c.dispatch!.workerUrl!);
+    const session = clients.get("host:r1")!.session!;
+    // A plain TCP connection that sends one held poll by hand, so the test controls exactly when the connection goes.
+    const rawPoll = async (): Promise<Socket> => {
+      const s = netConnect({ host: url.hostname, port: Number(url.port) });
+      sockets.push(s);
+      s.on("error", () => undefined);
+      await new Promise<void>((resolve) => s.once("connect", () => resolve()));
+      s.write([`GET /worker/session/offers?wait=20000 HTTP/1.1`, `host: ${url.host}`, `authorization: Bearer ${tokens.get("host:r1")}`, `x-newt-session: ${session.sessionId}`, `x-newt-protocol: ${String(session.protocol)}`, "connection: keep-alive", "", ""].join("\r\n"));
+      return s;
+    };
+    const until = async (ok: () => boolean, what: string): Promise<void> => {
+      for (let i = 0; i < 500 && !ok(); i++) await new Promise((r) => setTimeout(r, 10));
+      assert.ok(ok(), what);
+    };
+    // 1. Dropped before any offer: the poll ends at once and is counted as a disconnect, not as timed out.
+    const before = remote.pollStats(rob);
+    const s1 = await rawPoll();
+    await until(() => remote.pollStats(rob).open === 1, "the raw poll is held");
+    s1.destroy();
+    await until(() => remote.pollStats(rob).open === 0, "the held poll ended when its connection went");
+    assert.equal(remote.pollStats(rob).disconnected - before.disconnected, 1);
+    assert.equal(remote.pollStats(rob).timedOut, before.timedOut);
+    const a1 = await attempt(AGENTS[0]!);
+    assert.deepEqual((await c.dispatch!.dispatcher.tick()).started, [a1]);
+    assert.equal((await remote.placement(rob, a1))?.hostId, "host:r1");
+    assert.deepEqual((await clients.get("host:r1")!.offers()).map((o) => o.order.attemptId), [a1], "the offer made after the drop waits for r1's next poll");
+    // 2. Dropped just as its offer is made: whether or not the answer reached the dead connection, the offer is still r1's on its next poll, once, and r2 is never handed it.
+    await new RemoteAttempt(clients.get("host:r1")!, a1, (await remote.placement(rob, a1))!.placement).accept();
+    const s2 = await rawPoll();
+    await until(() => remote.pollStats(rob).open === 1, "the second raw poll is held");
+    const a2 = await attempt(AGENTS[1]!);
+    const tick = c.dispatch!.dispatcher.tick();
+    s2.destroy();
+    assert.deepEqual((await tick).started, [a2]);
+    await until(() => remote.pollStats(rob).open === 0, "no poll is left held for the dead connection");
+    const placed = await remote.placement(rob, a2);
+    assert.equal(placed?.hostId, "host:r1", "r1 had no unaccepted offer and is listed first");
+    assert.deepEqual((await clients.get("host:r1")!.offers()).map((o) => o.order.attemptId), [a2], "the offer is handed again, exactly once");
+    assert.deepEqual(await clients.get("host:r2")!.offers(), [], "the other host is not handed it");
+    await new RemoteAttempt(clients.get("host:r1")!, a2, placed!.placement).accept();
+    assert.equal(remote.offerLoad(rob, "host:r1"), 0, "accepted after the drop: nothing is left counted against r1");
+  } finally { for (const s of sockets) s.destroy(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

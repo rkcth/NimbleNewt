@@ -2040,7 +2040,8 @@ export class DispatcherService {
     const loads = new Map<string, number>();
     for (const w of hosts) {
       let n = 0;
-      if (w.load !== undefined) { try { const got = await w.load(); n = Number.isFinite(got) && got > 0 ? got : 0; } catch (error) { this.#options.onError?.(error); } }
+      // A figure that is not a positive number counts as none; an endless one (Infinity) is the heaviest load there is, not none, so a host that says it is overwhelmed is asked last rather than first.
+      if (w.load !== undefined) { try { const got = await w.load(); n = typeof got === "number" && got > 0 ? Math.min(got, Number.MAX_SAFE_INTEGER) : 0; } catch (error) { this.#options.onError?.(error); } }
       loads.set(w.hostId, n);
     }
     return hosts.map((w, i) => ({ w, i })).sort((a, b) => (loads.get(a.w.hostId)! - loads.get(b.w.hostId)!) || a.i - b.i).map((x) => x.w);

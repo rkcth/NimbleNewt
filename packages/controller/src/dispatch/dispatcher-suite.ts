@@ -2301,6 +2301,27 @@ for (const backend of backendsNamed(backendName)) {
     assert.equal(await run("w2 has no figure"), "host:w2", "no figure counts as none; w1 holds five");
   });
 
+  suite("a load figure that is not a plain count is read safely: an endless load is the heaviest (asked last), a negative one or NaN counts as none, ties stay in configuration order (card H07b)", async (c) => {
+    const { w2, d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const loads: { w1: () => number; w2: () => number } = { w1: () => 0, w2: () => 0 };
+    (c.worker as unknown as { load: () => Promise<number> }).load = async () => loads.w1();
+    (w2 as unknown as { load: () => Promise<number> }).load = async () => loads.w2();
+    const run = async (title: string): Promise<string | undefined> => {
+      const { attemptId } = await c.task(title, ann);
+      const r = await d.tick();
+      assert.ok(r.started.includes(attemptId!), JSON.stringify(r.skipped));
+      await d.idle();
+      return (await d.get(c.owner, attemptId!))!.hostId;
+    };
+    loads.w1 = () => Number.POSITIVE_INFINITY; loads.w2 = () => 4;
+    assert.equal(await run("w1 overwhelmed"), "host:w2", "an endless load is not read as none");
+    loads.w1 = () => -7; loads.w2 = () => Number.NaN;
+    assert.equal(await run("both say nothing usable"), "host:w1", "negative and NaN both count as none: configuration order");
+    loads.w1 = () => Number.POSITIVE_INFINITY; loads.w2 = () => Number.POSITIVE_INFINITY;
+    assert.equal(await run("both endless"), "host:w1", "two endless loads are a tie");
+  });
+
   suite("refusals at the start are bounded: when every host has refused the attempt it fails with each host's reason, and with startTries 1 the first refusal fails it at once (card H07b)", async (c) => {
     const { w2, d } = await secondWorker(c);
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
