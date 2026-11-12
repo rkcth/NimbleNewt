@@ -112,6 +112,8 @@ export interface PlacementBody {
   /** The command that made the latest move (scoped to its issuer): the same command asked again is answered, not done again. */
   readonly lastRelocation?: { readonly commandId: string; readonly at: string };
   /** The earlier holders, newest last (bounded): a worker that held the attempt once is told it was fenced, anyone else is told nothing exists. */
+  /** Card H07b: the offer was put back before the host read it (the policy refused it meanwhile); the reason is the last history entry. Dropped when the attempt is placed again. */
+  readonly withdrawn?: true;
   readonly history: readonly { readonly hostId: string; readonly placement: number; readonly at: string; readonly reason: string; /** For a move: the command that made it. */ readonly commandId?: string }[];
 }
 
@@ -261,9 +263,11 @@ export interface RemoteDeps {
   readonly detect?: (source: string, event: { readonly kind: SecurityEvent; readonly key: string; readonly subject?: string }) => void;
   /** Where a host's own security report goes (`UrgentWatch.reportSecurityFrom`): the report is the host's, so its allowance, once-per-key rule and collected item apply. Absent: reports are refused as unavailable. */
   readonly reportSecurity?: (by: Principal, event: { readonly kind: string; readonly key: string; readonly projectId?: string }) => Promise<{ readonly itemId: string; readonly held: boolean }>;
+  /** Where a fault that must not stop the work is reported (card H07b: a policy that could not be read at delivery). Never throws is expected; a throw here is ignored. */
+  readonly onError?: (error: unknown) => void;
   /** The dispatcher's own service principal (`service:dispatcher`): it places attempts, reads host status and moves attempts. */
   readonly principal: Principal;
-  readonly hosts: Pick<HostService, "announce" | "heartbeat" | "status">;
+  readonly hosts: Pick<HostService, "announce" | "heartbeat" | "status"> & Partial<Pick<HostService, "list">>;
   readonly artifacts: Pick<ArtifactService, "publish" | "get" | "readFile" | "assertResumable">;
   readonly dispatch: Pick<DispatcherService, "gateway" | "get" | "relocate" | "quiesce" | "release"> & Partial<Pick<DispatcherService, "liveAttempts">>;
   /** The policy for moving an attempt; the default is conservative (see `RelocationPolicy`). Always the controller's, never the caller's. */
@@ -374,7 +378,7 @@ export class RemoteWorkerService {
   readonly #waiters = new Map<string, Set<(result: StoredResult) => void>>();
   /** The one open offers poll of each host (card H07): a new poll ends the earlier one, an offer or a new session ends it at once. */
   readonly #polls = new Map<string, { readonly end: () => void }>();
-  readonly #pollStats = { polls: 0, held: 0, woken: 0, superseded: 0, timedOut: 0, disconnected: 0 };
+  readonly #pollStats = { polls: 0, held: 0, woken: 0, superseded: 0, timedOut: 0, disconnected: 0, withdrawn: 0 };
   /** Connected hosts by platform (`os/arch`), so a placement looks only at hosts that can run it (card H07). */
   readonly #byPlatform = new Map<string, Set<string>>();
   readonly #platformOf = new Map<string, string>();
@@ -471,6 +475,48 @@ export class RemoteWorkerService {
     let set = this.#byPlatform.get(key);
     if (set === undefined) { set = new Set(); this.#byPlatform.set(key, set); }
     set.add(hostId);
+  }
+
+  #reportError(error: unknown): void { try { this.#deps.onError?.(error); } catch { /* ignored */ } }
+
+  /** Takes a host out of the platform index (card H07b): a revoked host is no longer a candidate for any platform. */
+  #unindex(hostId: string): void {
+    const old = this.#platformOf.get(hostId);
+    if (old === undefined) return;
+    this.#platformOf.delete(hostId);
+    const set = this.#byPlatform.get(old);
+    set?.delete(hostId);
+    if (set?.size === 0) this.#byPlatform.delete(old);
+  }
+
+  /**
+   * Fills the platform index from the hosts the controller knows (card H07b), so a controller that restarted does not wait for each host to connect or poll before `candidates` can see it. Only active hosts that
+   * announced a platform are indexed; a revoked one is left out. Being indexed is not being connected: `candidates` still refuses a host with no session of this run, saying so. Returns how many hosts were indexed.
+   * Needs the host service's `list` (absent: nothing is indexed).
+   */
+  async rebuildIndex(by: Principal, pageSize = 100): Promise<number> {
+    this.#staff(by);
+    const list = this.#deps.hosts.list;
+    if (list === undefined) return 0;
+    let after: string | undefined; let n = 0;
+    for (let page = 0; page < 1000; page++) {
+      const got = await list.call(this.#deps.hosts, this.#deps.principal, { limit: Math.max(1, Math.min(100, Math.floor(pageSize))), ...(after === undefined ? {} : { afterId: after }) });
+      for (const h of got.items) {
+        if (h.identity !== "active") { this.#unindex(h.hostId); continue; }
+        if (this.#platformOf.has(h.hostId)) continue;
+        this.#index(h.hostId, h.capabilities);
+        if (this.#platformOf.has(h.hostId)) n++;
+      }
+      if (got.next === undefined) break;
+      after = got.next;
+    }
+    return n;
+  }
+
+  /** The platforms the index holds and their hosts, in order (card H07b); for the owner's and the dispatcher's view and for tests. */
+  platformIndex(by: Principal): { readonly [platform: string]: readonly string[] } {
+    this.#staff(by);
+    return Object.fromEntries([...this.#byPlatform].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, [...v].sort()]));
   }
 
   /** Counts the offers made to each host, so a poll can tell that one arrived between its read and its wait. */
@@ -587,7 +633,7 @@ export class RemoteWorkerService {
   }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
-  pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number; /** Held polls (or polls about to be held) whose client had gone (card H07b). */ readonly disconnected: number } {
+  pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number; /** Held polls (or polls about to be held) whose client had gone (card H07b). */ readonly disconnected: number; /** Offers put back at delivery because the policy now refused them (card H07b). */ readonly withdrawn: number } {
     this.#staff(by);
     return { open: this.#polls.size, ...this.#pollStats };
   }
@@ -732,7 +778,7 @@ export class RemoteWorkerService {
         if (b.generation !== order.generation) throw new DomainError("fenced", `the placement of attempt ${attemptId} belongs to generation ${b.generation}`, { field: "order" });
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
-        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, ...rest } = b; void _s; void _a; void _r; void _c; void _p;
+        const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, withdrawn: _w, ...rest } = b; void _s; void _a; void _r; void _c; void _p; void _w;
         next = { ...rest, ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
@@ -773,6 +819,8 @@ export class RemoteWorkerService {
     for (const hostId of pool) {
       const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
       const reasons = capabilityReasons(hostId, status, requirements);
+      // A revoked host is refused this once, with its reason, and leaves the index: it is not looked at again until it connects anew (card H07b).
+      if (status?.identity === "revoked") this.#unindex(hostId);
       if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
       reasons.push(...policyReasons(hostId, requirements, policy));
       if (reasons.length === 0) eligible.push(hostId); else refused.push({ hostId, reasons });
@@ -856,6 +904,11 @@ export class RemoteWorkerService {
    */
   async end(by: Principal, attemptId: string, reason: string, placement?: number): Promise<void> {
     this.#staff(by);
+    return this.#endPlacement(attemptId, reason, placement, false);
+  }
+
+  /** Ends the placement; `withdrawn` marks an offer put back at delivery (card H07b), which the waiting turn is told so the dispatcher admits the task again. */
+  async #endPlacement(attemptId: string, reason: string, placement: number | undefined, withdrawn: boolean): Promise<void> {
     attemptIdOf(attemptId);
     const why = text(reason, "reason", { min: 1, max: 300 });
     if (placement !== undefined && (!Number.isSafeInteger(placement) || placement < 1)) invalid("placement", "must be a whole number of at least 1");
@@ -865,12 +918,12 @@ export class RemoteWorkerService {
         if (current === undefined || !LIVE.has(current.body.state) || (placement !== undefined && current.body.placement !== placement)) { ended = undefined; return undefined; }
         this.#offers.delete(attemptId);
         const now = this.#runner.now();
-        const next: PlacementBody = { ...current.body, state: "ended", history: pushHistory(current.body.history, { hostId: current.body.hostId, placement: current.body.placement, at: now, reason: why }) };
+        const next: PlacementBody = { ...current.body, state: "ended", ...(withdrawn ? { withdrawn: true as const } : {}), history: pushHistory(current.body.history, { hostId: current.body.hostId, placement: current.body.placement, at: now, reason: why }) };
         return { next, extra: await this.#releaseStore(current.body) };
       }, "end");
       if (done.previous !== undefined && LIVE.has(done.previous.state) && done.body.state === "ended") ended = done.body;
     } catch (error) { if (!isDomainError(error, "not_found")) throw error; }
-    if (ended !== undefined) this.#wake(attemptId, ended.placement, why);
+    if (ended !== undefined) this.#wake(attemptId, ended.placement, why, withdrawn ? { status: "cancelled", error: why.slice(0, 300), withdrawn: true } : undefined);
   }
 
   async #releaseStore(b: PlacementBody): Promise<Change[]> {
@@ -936,6 +989,7 @@ export class RemoteWorkerService {
         const b = found?.body as unknown as PlacementBody | undefined;
         if (b === undefined) return;
         if (b.placement === placement && b.state === "completed" && b.result !== undefined) done(b.result);
+        else if (b.placement === placement && b.state === "ended" && b.withdrawn === true) done({ status: "cancelled", error: (b.history.at(-1)?.reason ?? "the offer was withdrawn").slice(0, 300), withdrawn: true });
         else if (b.placement !== placement || b.state === "ended") done({ status: "cancelled", error: "the placement ended or was replaced" });
       }, () => undefined);
     });
@@ -1011,9 +1065,32 @@ export class RemoteWorkerService {
       if (live === undefined) continue;
       if (live !== offer) { if (b !== undefined && b.hostId === host.id && b.placement === live.placement && b.state === "offered") out.push({ placement: live.placement, order: live.order }); continue; }
       if (b === undefined || b.hostId !== host.id || b.placement !== offer.placement || b.state !== "offered") { this.#offers.delete(attemptId); continue; }
+      // Card H07b: the placement policy is judged again as the host reads its offer. An offer the policy has since refused for a reason that lasts is put back, not delivered.
+      if (await this.#withdrawIfRefused(host.id, attemptId, offer, b)) continue;
       out.push({ placement: offer.placement, order: offer.order });
     }
     return out;
+  }
+
+  /**
+   * Judges an offer again at delivery (card H07b): what the host announced and the placement policy, read now. If the host would now refuse it for a reason that lasts (the policy no longer lists it, it cannot do what the
+   * attempt needs), the offer is not delivered: it is withdrawn, the placement ends with the reasons in its history, and the attempt's waiting turn ends as cancelled with the same words, so the dispatcher ends that attempt
+   * and the task is admitted again and placed by the policy as it is now. A reason that passes (not heard from lately, not connected) does not withdraw: the host is reading the offer, so it is connected, and the host judges the rest.
+   * A policy that cannot be read does not withdraw (the failure goes to `onError` and the offer is delivered as before). Returns whether the offer was withdrawn.
+   */
+  async #withdrawIfRefused(hostId: string, attemptId: string, offer: { readonly placement: number; readonly order: WorkOrder }, b: PlacementBody): Promise<boolean> {
+    if (this.#deps.placementPolicy === undefined) return false;
+    let reasons: string[];
+    try {
+      const requirements = checkRequirements(b.requirements);
+      reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
+      reasons.push(...policyReasons(hostId, requirements, await this.#deps.placementPolicy({ attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, requirements })));
+    } catch (error) { this.#reportError(error); return false; }
+    if (reasons.length === 0 || !lastingReasons(reasons)) return false;
+    this.#pollStats.withdrawn++;
+    const why = `withdrawn before it was delivered, ${hostId} would now refuse it: ${reasons.join("; ")}`.slice(0, 300);
+    try { await this.#endPlacement(attemptId, why, offer.placement, true); } catch (error) { this.#reportError(error); return false; }
+    return true;
   }
 
   /**
