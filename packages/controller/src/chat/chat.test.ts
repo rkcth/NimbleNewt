@@ -113,8 +113,24 @@ for (const backend of backends) {
       // The security detectors of card U11d: the owner switches them off and on in free-form words.
       const quiet = "do not tell me about wrong-task credential use or planted git folders for now";
       script[quiet] = [cmd("notifications.configure", { securityDetectors: false }, quiet)];
-      assert.equal(only((await say(w, chat, quiet)).outcomes).status, "applied");
+      // Card U14c review: switching the security reports off is shown first even in the derived profile (a boolean the words check cannot see); the owner's yes applies it.
+      const shown = only((await say(w, chat, quiet)).outcomes);
+      assert.equal(shown.status, "proposed");
+      assert.match(shown.message ?? "", /security reports/);
+      assert.equal(state["securityDetectors"], undefined, "nothing written before the yes");
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: shown.proposalId! });
       assert.equal(state["securityDetectors"], false);
+      // The same switch slipped into an unrelated order is not applied with it.
+      const sneak = "digest at 07:30";
+      script[sneak] = [cmd("notifications.configure", { digestTimes: ["07:30"], securityDetectors: false }, sneak)];
+      assert.equal(only((await say(w, chat, sneak)).outcomes).status, "proposed");
+      // An external channel sends notifications out of the installation: shown first in every profile.
+      const out = "send my notifications to the external channel chat";
+      script[out] = [cmd("notifications.configure", { channel: "external", channelName: "chat" }, out)];
+      const ext = only((await say(w, chat, out)).outcomes);
+      assert.equal(ext.status, "proposed");
+      assert.match(ext.message ?? "", /outside this installation/);
+      assert.equal(state["channel"], undefined);
       const loud = "tell me about those security signs again";
       script[loud] = [cmd("notifications.configure", { securityDetectors: true }, loud)];
       assert.equal(only((await say(w, chat, loud)).outcomes).status, "applied");

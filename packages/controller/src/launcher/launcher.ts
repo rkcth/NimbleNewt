@@ -134,7 +134,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   if (config.controller.storage.kind === "sqlite") storage = { kind: "sqlite", path: resolve(dataDir, config.controller.storage.path) };
   else {
     const url = await named(config.controller.storage.url.secret);
-    if (url === undefined) throw new Error(`the configuration chooses PostgreSQL and names the secret "${config.controller.storage.url.secret}" for its address, but the secret store has none by that name; put it there first (nimblenewt secret set ${config.controller.storage.url.secret})`);
+    if (url === undefined) throw new Error(`the configuration chooses PostgreSQL and names the secret "${config.controller.storage.url.secret}" for its address, but the secret store has none by that name; put it there first (node scripts/nimblenewt.mjs secret set ${config.controller.storage.url.secret})`);
     storage = { kind: "postgres", url, maxConnections: config.controller.storage.maxConnections, ...(config.controller.storage.schema === undefined ? {} : { schema: config.controller.storage.schema }) };
   }
 
@@ -274,7 +274,7 @@ export async function ensureOwner(controller: Controller, secrets: LauncherSecre
     return { token: issued.token, created: true };
   }
   const token = await secrets.resolve(secretName);
-  if (token === undefined) throw new Error(`this installation has an owner, but the secret store has no credential named "${secretName}" for it (the name follows the data directory; a moved data directory looks for a new name). The credential is shown once and cannot be derived again: put it back under that name (nimblenewt secret set ${secretName}), or restore the installation's backup.`);
+  if (token === undefined) throw new Error(`this installation has an owner, but the secret store has no credential named "${secretName}" for it (the name follows the data directory; a moved data directory looks for a new name). The credential is shown once and cannot be derived again: put it back under that name (node scripts/nimblenewt.mjs secret set ${secretName}), or restore the installation's backup.`);
   try { await controller.services.principals.authenticate(token); } catch { throw new Error(`the credential "${secretName}" in the secret store is not the owner's current credential; restore the right one`); }
   return { token, created: false };
 }

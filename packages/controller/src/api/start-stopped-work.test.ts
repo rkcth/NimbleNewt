@@ -15,10 +15,10 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 const MIN = 60_000;
 const TITLE = "Rotate the payroll signing key";
 
-const open = async (d: string, clock: () => number, sent: { text: string }[]) => {
+const open = async (d: string, clock: () => number, sent: { text: string }[], shareClock = false) => {
   const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, notifications: { channels, clock: () => new Date(clock()).toISOString() } });
+    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000, ...(shareClock ? { clock: () => new Date(clock()).toISOString() } : {}) }, notifications: { channels, clock: () => new Date(clock()).toISOString() } });
   assert.ok(c.dispatch !== undefined, c.dispatchProblem);
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const owner = (await c.services.principals.authenticate(boot.token))!;
@@ -71,9 +71,11 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
   const d = mkdtempSync(join(tmpdir(), "nn-dig-"));
   let clock = Date.parse("2026-11-11T07:00:00.000Z");
   const sent: { text: string }[] = [];
-  const { c, owner, call, notifications, set } = await open(d, () => clock, sent);
+  // The dispatcher's own notices (stall detection off, for one) are stamped with the same test clock, never the real one: before, they carried the real time, so the test passed only while the real
+  // date fell between the two test days (a notice with no project reached the second digest by accident). The stopped-work rule is off here, so the blocker stays a queued Needs-you item for the digest.
+  const { c, owner, call, notifications, set } = await open(d, () => clock, sent, true);
   try {
-    await set({ channel: "external", channelName: "chat", escalateAfterHours: null }, "s1");
+    await set({ channel: "external", channelName: "chat", escalateAfterHours: null, stoppedWorkAfterMinutes: null }, "s1");
     const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
     const agent = (await c.services.agents.create(owner, { commandId: "ag-a", friendlyName: "A" })).id;
     const made = await call("standup.configure", { projectId: project, title: "Morning", roster: [`agent:${agent}`], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "UTC", recurrence: { kind: "daily" } }, "su1");
@@ -91,5 +93,7 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
     assert.ok(ended.ok, JSON.stringify(ended));
     await tick("2026-11-12T09:05:00.000Z");
     assert.equal(await digests(), 1, "no stand-up: the digest is sent");
+    const item = (await notifications.inbox(owner)).items.find((i) => i.ref.kind === "blocker" && i.ref.id === blocker)!;
+    assert.ok((await notifications.inbox(owner)).digests[0]!.itemIds.includes(item.id), "the digest carries the project's blocker, not only the controller's own notices");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -449,6 +449,10 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (draft) return "you asked for a draft";
   if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
+  // Card U14c review: a notification change follows the profile, except two moves that are more than how the owner is told. An external channel sends notifications out of the installation (where data
+  // goes), and switching the security detectors off silences the security reports; a boolean is not a word the owner's-words check can see, so a model could add it to an unrelated order. Both are shown first in every profile.
+  if (op === "notifications.configure" && (args["channel"] === "external" || args["channelName"] !== undefined)) return "it sends your notifications outside this installation, so it is shown first";
+  if (op === "notifications.configure" && args["securityDetectors"] === false) return "it stops the controller's security reports, so it is shown first";
   // A gate holds work (or lifts a hold) for the whole project until the owner decides otherwise: it is shown first whatever the profile, so the gate and its kind are seen before they bind.
   if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.

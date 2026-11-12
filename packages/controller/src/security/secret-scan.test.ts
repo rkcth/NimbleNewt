@@ -14,7 +14,7 @@ import { quoted, shown } from "../status/explain.js";
 import { cleanUntrusted } from "./clean.js";
 import { findCredentialShapes } from "./credential-patterns.js";
 import { redactText } from "./redact.js";
-import { ENTROPY_MAX_WORDS, ENTROPY_MIN_BITS, ENTROPY_MIN_TRANSITIONS, highEntropy, scanSecrets } from "./secret-scan.js";
+import { ENTROPY_MAX_WORDS, ENTROPY_MIN_BITS, ENTROPY_MIN_TRANSITIONS, highEntropy, labelledSecret, scanSecrets } from "./secret-scan.js";
 
 // The credential-redaction follow-up (U09b / W13 limits): one folded matching view (NFKC, invisible characters left out, line-split prefixed tokens, orphan key END, long high-entropy runs)
 // behind redactText and findCredentialShapes, and one cleaning pipeline (cleanUntrusted) behind the anchor, task.recall and the thinking store.
@@ -256,4 +256,29 @@ test("review: inputs that took quadratic time are linear (a base64 dump with no 
   const body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
   assert.equal(redactText(`ok\n${body}\n${body}\n-----END PRIVATE KEY-----\nnext step\n-----END PRIVATE KEY-----`), "ok\n[redacted]\n[redacted]\n-----END PRIVATE KEY-----\nnext step\n-----END PRIVATE KEY-----", "orphan END lines: only the key lines just above each END");
   for (const v of [undefined, null, 5, {}]) assert.equal(typeof redactText(v as unknown as string), "string");
+});
+
+// Card U14c review: a key or password a person writes in plain words has no prefix the shapes know, so the chat refuses it by its label; the words around a secret's NAME, and ordinary sentences, pass.
+test("a key or password given in plain words is refused by the chat; a secret's name and ordinary words are not (card U14c review)", () => {
+  const hex = ["9f8e7d6c", "5b4a3928", "1706f5e4", "d3c2b1a0"].join("");
+  const refused = [
+    "my password is Tr0ub4dor&3xyz",
+    "the gitea password is hunter2hunter2",
+    `api key is ${hex}`,
+    `the api key for openrouter is ${hex}.`,
+    "here is the key: abcdEFGH1234ijklMNOP5678qrst",
+    "Token = q8Zr2LmP0vX",
+    "my pass​word is Tr0ub4dor&3xyz",
+    "my ｐａｓｓｗｏｒｄ is Tr0ub4dor&3xyz",
+    `my openrouter key is or-v1-${hex}`,
+  ];
+  for (const text of refused) {
+    assert.equal(labelledSecret(text), true, text);
+    assert.throws(() => refuseCredentials(text, "text"), /secret set NAME/, text);
+  }
+  const passed = ["the token is expired", "my api key is in the secret store as openrouter", "the key is named backup-key2", "my key is backup-key2", "password is in the store as gitea-pass2", "use the secret backup-key2 for the free route", "my key is 2 days old", "Garden is version 2 of the key project", "rotate the payroll signing key by 2026-12-01"];
+  for (const text of passed) {
+    assert.equal(labelledSecret(text), false, text);
+    assert.doesNotThrow(() => refuseCredentials(text, "text"), text);
+  }
 });

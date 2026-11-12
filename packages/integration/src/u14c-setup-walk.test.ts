@@ -114,13 +114,24 @@ test("every first-run step is shown first and needs the owner's yes, in the stri
 
     // A key typed into the chat is not sent to the model, and the refusal names the supported path.
     const before = server.seen.length;
-    const typed = "my key is sk-abcdefghijklmnopqrstuvwxyz123456 please use it";
-    await assert.rejects(say(typed), (e: Error) => /secret set/.test(e.message) && !e.message.includes("sk-abcdef"));
+    // Built at run time: no key-shaped literal is written in the source.
+    const key = ["s", "k-", "abcdefghijklmnop", "qrstuvwxyz123456"].join("");
+    const password = ["Tr0ub", "4dor&3xyz"].join("");
+    const typed = `my key is ${key} please use it`;
+    const prose = `the gitea password is ${password}`;
+    // The refusal names the command that exists (the launcher's, run with node), never a bare `nimblenewt` no installation puts on the PATH.
+    for (const t of [typed, prose]) await assert.rejects(say(t), (e: Error) => /node scripts\/nimblenewt\.mjs secret set NAME/.test(e.message) && !e.message.includes(key) && !e.message.includes(password));
     const out: string[] = [];
-    await runTerminalChat({ controller: l.controller, ownerToken: l.ownerToken, input: lines([typed]), write: (t) => out.push(t) });
-    assert.match(out.join(""), /secret set/);
-    assert.ok(!out.join("").includes("sk-abcdef"), "the key is not echoed");
+    await runTerminalChat({ controller: l.controller, ownerToken: l.ownerToken, input: lines([typed, prose]), write: (t) => out.push(t) });
+    assert.equal(out.join("").match(/node scripts\/nimblenewt\.mjs secret set NAME/g)?.length, 2, out.join(""));
+    assert.ok(!out.join("").includes(key) && !out.join("").includes(password), "the key is not echoed");
     assert.equal(server.seen.length, before, "the model never saw it");
+    // Naming a secret is what the owner is asked to do: that is not refused and reaches the model.
+    await say("use the free route; its key is backup-key2");
+    assert.equal(server.seen.length, before + 1);
     await l.close();
+    // Nothing the owner typed is kept: no file of the installation (the database and its journal) holds the key or the password.
+    const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : [join(d, n)]));
+    for (const f of files(dir)) { const bytes = readFileSync(f); assert.ok(!bytes.includes(key) && !bytes.includes(password), `${f} holds what was typed`); }
   } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

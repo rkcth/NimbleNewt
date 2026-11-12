@@ -1,5 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { redactText } from "../security/redact.js";
+import { labelledSecret } from "../security/secret-scan.js";
 import { checkConditions, checkPolicyChange, type PolicyEditChange } from "./policy-intent.js";
 
 /**
@@ -165,8 +166,8 @@ export const evidenceInText = (evidence: string, text: string): boolean => {
 /** Evidence must be a phrase (at least two words and six characters), not a token that any message contains. */
 export const evidenceStrong = (evidence: string): boolean => evidence.trim().length >= 6 && evidence.trim().split(/\s+/).length >= 2;
 
-/** A credential-shaped text is never sent to a model or stored. */
-export const refuseCredentials = (value: string, field: string): void => { if (redactText(value) !== value) invalid(field, field === "text" ? "looks like a credential or key; it was not read, sent to any model or recorded. Keep keys out of the chat: put one in the secret store with `nimblenewt secret set NAME` (a prompt that does not echo) and give the chat only the NAME" : "looks like a credential or key; it was not read or recorded"); };
+/** A credential-shaped text, or a key or password given in plain words ("my password is ..."), is never sent to a model or stored. The command named is the launcher's, as the launcher itself prints it. */
+export const refuseCredentials = (value: string, field: string): void => { if (redactText(value) !== value || labelledSecret(value)) invalid(field, field === "text" ? "looks like a credential or key; it was not read, sent to any model or recorded. Keep keys out of the chat: put one in the secret store with `node scripts/nimblenewt.mjs secret set NAME` (it does not show what you type) and give the chat only the NAME" : "looks like a credential or key; it was not read or recorded"); };
 
 /**
  * The scripted interpreter for tests: the output for an exact owner text, or a function of the whole input. Unscripted text yields no intents, which the service answers by asking. It records
