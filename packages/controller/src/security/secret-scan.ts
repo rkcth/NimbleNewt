@@ -192,6 +192,26 @@ export function scanSecrets(text: string): SecretSpan[] {
   return out;
 }
 
+/**
+ * A key or password given in plain words by a person (card U14c review): "my password is Tr0ub4dor&3", "the api key for openrouter is 9f8e…", "here is the key: abcdEFGH1234…". No shape of
+ * `CREDENTIAL_PATTERNS` catches these (they have no prefix, and a short or hex value is not a high-entropy run). Read in the same folded view as `scanSecrets` (zero-width characters left out, fullwidth
+ * letters folded). The value must be one piece of eight or more characters with a letter and a digit, so "the token is expired" and "my key is in the secret store" are not keys, and a value written
+ * like a secret's NAME (lower-case pieces joined by `-`, `_` or `.`, none longer than 15 characters: `backup-key2`) is the name the owner is asked to give, not a key. Only the chat refuses with it; it
+ * is not a redaction rule, because a person's words are the one place a label like "password is" is reliably about a value that follows.
+ */
+const LABELLED = /(?<![a-z0-9])(?:pass(?:word|wd|phrase|code)|api[-_ ]?key|access[-_ ]?(?:key|token)|secret(?:[-_ ]?key)?|private[-_ ]?key|auth[-_ ]?token|token|key)s?(?:\s+(?:for|of|to|on|at)\s+[^\s.,;:!?]+){0,2}\s*(?:(?:is|was|=|:=|:)\s*)+["'`]?([^\s"'`]{8,})/giu;
+const SECRET_NAME = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+$/;
+export function labelledSecret(text: string): boolean {
+  if (typeof text !== "string") return false;
+  for (const m of fold(text).text.matchAll(LABELLED)) {
+    const value = m[1]!.replace(/[.,;:!?)\]]+$/, "");
+    if (value.length < 8 || !/\p{L}/u.test(value) || !/\d/.test(value)) continue;
+    if (SECRET_NAME.test(value) && value.split(/[-_.]/).every((p) => p.length <= 15)) continue;
+    return true;
+  }
+  return false;
+}
+
 /** `text` with each span replaced by `mark`, line by line (a span over a line break leaves the break and marks each line's part), and a span that is already only `mark` left alone. */
 export function replaceSpans(text: string, spans: readonly SecretSpan[], mark: string): string {
   if (spans.length === 0) return text;

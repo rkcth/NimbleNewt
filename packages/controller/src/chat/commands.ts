@@ -24,7 +24,7 @@ export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["project.branche
 export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "project.create": { verb: "Create project", mode: "propose" },
   "project.update": { verb: "Change project", mode: "apply", revision: "project", needsProject: true },
-  "task.create": { verb: "Create task", mode: "apply", needsProject: true },
+  "task.create": { verb: "Create task", mode: "profile", needsProject: true },
   "task.update": { verb: "Change task", mode: "apply", revision: "task" },
   "task.transition": { verb: "Move task", mode: "apply", revision: "task" },
   "task.assign": { verb: "Assign task", mode: "profile", revision: "assignment", dispatch: true },
@@ -224,7 +224,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // How notifications reach the owner (card U11b): digest times, quiet hours, the hours before an unanswered item is escalated, and the channel. It only changes how the owner is told, can be set back by saying so, and applies from the next notification, so an explicit order applies at once. The settings revision is read, not quoted.
   // The critical path (card U11d, "U11f"): what the owner marks decides what is listed first and what pages them, so marking or unmarking is always shown first. The task is named by its title (taskTitle) and the project by its name (projectName).
   "critical.mark": { verb: "Mark or unmark the critical path (kind task, goal or project; marked false takes the mark off)", mode: "propose" },
-  "notifications.configure": { verb: "Change how notifications reach you", mode: "apply", revision: "notifications" },
+  "notifications.configure": { verb: "Change how notifications reach you", mode: "profile", revision: "notifications" },
   // Money (card chat-gaps). Spending more, opening or ending a budget, and a cap on all spending are decisions about money: shown first in every profile. The aggregate cap is optional and off until set; turning it off is also shown first (it lifts a limit).
   "budget.decide": { verb: "Decide a request for more budget", mode: "propose" },
   "budget.open": { verb: "Open a budget for task", mode: "propose", needsProject: true },
@@ -452,6 +452,10 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (draft) return "you asked for a draft";
   if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
+  // Card U14c review: a notification change follows the profile, except two moves that are more than how the owner is told. An external channel sends notifications out of the installation (where data
+  // goes), and switching the security detectors off silences the security reports; a boolean is not a word the owner's-words check can see, so a model could add it to an unrelated order. Both are shown first in every profile.
+  if (op === "notifications.configure" && (args["channel"] === "external" || args["channelName"] !== undefined)) return "it sends your notifications outside this installation, so it is shown first";
+  if (op === "notifications.configure" && args["securityDetectors"] === false) return "it stops the controller's security reports, so it is shown first";
   // A gate holds work (or lifts a hold) for the whole project until the owner decides otherwise: it is shown first whatever the profile, so the gate and its kind are seen before they bind.
   if (op === "decision.record" && args["category"] === "gate") return "a gate holds or releases work until you say otherwise, so it is shown first";
   // The request type is authority: an instruction or a decision left to the team is shown to the owner before it is recorded, whatever the profile, so a paraphrase cannot slip one in.

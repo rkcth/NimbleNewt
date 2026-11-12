@@ -82,6 +82,11 @@ for (const backend of backends) {
     try {
       const chat = w.chat();
       const a = "escalate after 48 hours, digest at 08:00 and 17:00";
+      // Card U14c: in the strict profile a notification change is shown first and nothing is written; the rest of this test uses the derived profile, where an explicit order applies.
+      script[a] = [cmd("notifications.configure", { escalateAfterHours: 48, digestTimes: ["08:00", "17:00"] }, a)];
+      assert.equal(only((await say(w, chat, a)).outcomes).status, "proposed");
+      assert.equal(calls.length, 0, "strict: nothing written before the owner says yes");
+      w.profile.value = "derived";
       const b = "quiet hours 22:00 to 07:00";
       script[a] = [cmd("notifications.configure", { escalateAfterHours: 48, digestTimes: ["08:00", "17:00"] }, a)];
       script[b] = [cmd("notifications.configure", { quietHours: { start: "22:00", end: "07:00" } }, b)];
@@ -108,8 +113,24 @@ for (const backend of backends) {
       // The security detectors of card U11d: the owner switches them off and on in free-form words.
       const quiet = "do not tell me about wrong-task credential use or planted git folders for now";
       script[quiet] = [cmd("notifications.configure", { securityDetectors: false }, quiet)];
-      assert.equal(only((await say(w, chat, quiet)).outcomes).status, "applied");
+      // Card U14c review: switching the security reports off is shown first even in the derived profile (a boolean the words check cannot see); the owner's yes applies it.
+      const shown = only((await say(w, chat, quiet)).outcomes);
+      assert.equal(shown.status, "proposed");
+      assert.match(shown.message ?? "", /security reports/);
+      assert.equal(state["securityDetectors"], undefined, "nothing written before the yes");
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: shown.proposalId! });
       assert.equal(state["securityDetectors"], false);
+      // The same switch slipped into an unrelated order is not applied with it.
+      const sneak = "digest at 07:30";
+      script[sneak] = [cmd("notifications.configure", { digestTimes: ["07:30"], securityDetectors: false }, sneak)];
+      assert.equal(only((await say(w, chat, sneak)).outcomes).status, "proposed");
+      // An external channel sends notifications out of the installation: shown first in every profile.
+      const out = "send my notifications to the external channel chat";
+      script[out] = [cmd("notifications.configure", { channel: "external", channelName: "chat" }, out)];
+      const ext = only((await say(w, chat, out)).outcomes);
+      assert.equal(ext.status, "proposed");
+      assert.match(ext.message ?? "", /outside this installation/);
+      assert.equal(state["channel"], undefined);
       const loud = "tell me about those security signs again";
       script[loud] = [cmd("notifications.configure", { securityDetectors: true }, loud)];
       assert.equal(only((await say(w, chat, loud)).outcomes).status, "applied");
@@ -175,6 +196,9 @@ for (const backend of backends) {
     script["add task X to Alpha"] = [cmd("task.create", { title: "X", projectName: "alpha" }, "add task X to Alpha")];
     const chat = w.chat();
     assert.equal(only((await say(w, chat, "add task X")).outcomes).status, "asked");
+    // Card U14c: strict shows the task first; the derived profile applies an explicit order.
+    assert.equal(only((await say(w, chat, "add task X to Alpha")).outcomes).status, "proposed");
+    w.profile.value = "derived";
     const o = only((await say(w, chat, "add task X to Alpha")).outcomes);
     assert.equal(o.status, "applied");
     assert.equal((await get(w, "task.get", { taskId: o.id! }))["projectId"], a);
