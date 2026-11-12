@@ -471,18 +471,20 @@ export class StopService {
    * The scopes whose stop reaches this one, besides the scope itself: those above it (a task's assignee agent and the teams above that, an agent's teams, a team's parent teams) and, for a task, its swarm parents, whose
    * Stop ends the children's work (card L02e). The whole installation comes last, since it covers everything and explains least. Cycles and over-long chains end the walks; nothing is listed twice.
    */
-  async #covering(scope: PauseScope): Promise<PauseScope[]> {
+  async #covering(scope: PauseScope): Promise<(PauseScope & { readonly via?: string })[]> {
     const here = scopeKey(scope);
-    const near: PauseScope[] = [];
-    const whole: PauseScope[] = [];
+    const near: (PauseScope & { via?: string })[] = [];
+    const whole: (PauseScope & { via?: string })[] = [];
     const seen = new Set<string>([here]);
-    const add = (s: PauseScope): void => { const k = scopeKey(s); if (k === here || seen.has(k)) return; seen.add(k); (s.kind === "installation" ? whole : near).push(s); };
+    const add = (s: PauseScope, via?: string): void => { const k = scopeKey(s); if (k === here || seen.has(k)) return; seen.add(k); (s.kind === "installation" ? whole : near).push(via === undefined ? s : { ...s, via }); };
     for (const s of await this.#pauses.chain(scope)) add(s);
     for (let at = scope.kind === "task" ? scope.id : undefined, hops = 0; at !== undefined && hops < PAUSE_LIMITS.chain; hops++) {
       const up = ((await this.#runner.get("swarm-link", at))?.body as unknown as { parentTaskId?: string } | undefined)?.parentTaskId;
       if (typeof up !== "string") break;
       if (seen.has(scopeKey({ kind: "task", id: up }))) break;
       add({ kind: "task", id: up });
+      // A Stop of the parent task's agent, or of a team above that agent, also ends this child (card L02e: the walk below a scope), so it covers the child too; `via` names the ancestor task whose assignment it reached.
+      for (const s of await this.#pauses.chain({ kind: "task", id: up })) add(s, up);
       at = up;
     }
     return [...near, ...whole];
@@ -495,12 +497,14 @@ export class StopService {
     // (review of card L02e): such a request is not this scope's answer.
     const createdAt = async (kind: string, id: string): Promise<number | undefined> => { const at = (await this.#runner.get(kind, id))?.createdAt; return at === undefined ? undefined : Date.parse(at); };
     const born = scope.kind === "installation" ? undefined : await createdAt(scope.kind, scope.id);
-    let given: number | undefined;
-    if (scope.kind === "task") {
-      const asg = (await this.#runner.get("assignment", assignmentIdOf(scope.id)))?.body as unknown as AssignmentBody | undefined;
-      if (asg !== undefined && asg.generation > 0) given = await createdAt("assignment-generation", generationIdOf(scope.id, asg.generation));
-    }
-    for (const s of await this.#covering(scope)) {
+    // When a task was given to its current agent: a request of an agent or team made before then did not reach it. For a request that reached the asked task through a swarm ancestor it is the ancestor's assignment that counts.
+    const givenOf = async (taskId: string): Promise<number | undefined> => {
+      const asg = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as unknown as AssignmentBody | undefined;
+      return asg !== undefined && asg.generation > 0 ? createdAt("assignment-generation", generationIdOf(taskId, asg.generation)) : undefined;
+    };
+    for (const cover of await this.#covering(scope)) {
+      const s: PauseScope = { kind: cover.kind, id: cover.id };
+      const given = scope.kind === "task" ? await givenOf(cover.via ?? scope.id) : undefined;
       const id = await this.#activeId(s);
       if (id === undefined) continue;
       const rec = await this.#runner.get(KIND, id);

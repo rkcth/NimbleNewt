@@ -18,7 +18,7 @@ export interface RemoteOfferRunnerOptions {
    * What starts an order in this machine's sandbox: a host that runs the agent's process confined (the worker package's launcher and Pi, behind `LocalWorker`). The model relay it is built with takes this runner's `tap(attemptId)` as the
    * `stream` of each attempt's relay, so every model call the process makes is recorded by the controller through the protocol (card L05d).
    */
-  readonly host: Pick<WorkerHost, "start"> & Partial<Pick<WorkerHost, "localWork">>;
+  readonly host: Pick<WorkerHost, "start"> & Partial<Pick<WorkerHost, "localWork" | "endLocalWork">>;
   /** What the worker enforces itself, for the dispatch contract's confirmation. */
   readonly abilities: WorkerAbilities;
   /** The time put on the confirmation (default now). */
@@ -157,33 +157,38 @@ export class RemoteOfferRunner {
    * The worker's report of the processes it holds for an attempt (card L02e): the host's own look at its sandboxes (`localWork`), sent to the controller when it differs from what was sent last, and once more, marked final, after the sandbox was
    * stopped. A host that cannot look reports nothing (the controller then reads a live placement as unknown, as it always did). The sequence rises with every report; a report the controller already has a newer one for is ignored there.
    */
-  #reporter(attempt: RemoteAttempt, attemptId: string, trouble: (what: string, error: unknown) => void): { change(): Promise<void>; final(): Promise<void> } {
+  #reporter(attempt: RemoteAttempt, attemptId: string, trouble: (what: string, error: unknown) => void): { change(fresh?: boolean): Promise<void>; final(): Promise<void> } {
     const look = this.#o.host.localWork?.bind(this.#o.host);
     let seq = 0;
     let sent: string | undefined;
+    let compute: number | undefined;
     const held = async (): Promise<Held | undefined> => {
       if (look === undefined) return undefined;
       const found = await look([attemptId]);
+      // What winding the sandbox down has cost in compute so far (the running total; the controller charges only what it has not charged). Never more than a report may say.
+      const spent = found.costs?.find((c) => c.attemptId === attemptId)?.computeMs;
+      compute = typeof spent === "number" && Number.isSafeInteger(spent) && spent >= 0 ? Math.min(spent, REMOTE_LIMITS.cleanupMs) : undefined;
       const own = found.processes.filter((p) => p.attemptId === undefined || p.attemptId === attemptId);
       // Each reference is redacted while whole, cleaned and cut here (`cleanProcessRef`); the controller does it again on what it is sent.
       const items: Entry[] = own.slice(0, REMOTE_LIMITS.processes).map((p) => ({ ref: cleanProcessRef(String(p.ref)), kind: p.kind, state: p.state }));
       // More than a report holds, or more than fits the controller's body limit (review of L02e: 50 long command lines were over it, so every report was refused whole): the rest is said as one more entry, never dropped silently.
-      const fits = (list: Held): boolean => Buffer.byteLength(JSON.stringify({ placement: Number.MAX_SAFE_INTEGER, seq: Number.MAX_SAFE_INTEGER, final: false, processes: list }), "utf8") <= REMOTE_LIMITS.processBytes;
+      const fits = (list: Held): boolean => Buffer.byteLength(JSON.stringify({ placement: Number.MAX_SAFE_INTEGER, seq: Number.MAX_SAFE_INTEGER, final: false, canLook: true, computeMs: REMOTE_LIMITS.cleanupMs, processes: list }), "utf8") <= REMOTE_LIMITS.processBytes;
       const upTo = (n: number): Held => (n >= own.length ? items.slice(0, n) : [...items.slice(0, n), { ref: `${own.length - n} more processes are not listed`, kind: "process", state: "unknown" }]);
       let shown = own.length > REMOTE_LIMITS.processes ? REMOTE_LIMITS.processes - 1 : own.length;
       while (shown > 0 && !fits(upTo(shown))) shown -= 1;
       return upTo(shown);
     };
     return {
-      change: async () => {
+      // `fresh`: the controller asked for a look (or Force Stop killed what the sandbox held), so the report goes out again even when nothing changed, under the next number.
+      change: async (fresh = false) => {
         try {
           const items = await held();
           if (items === undefined) return;
-          const key = JSON.stringify(items);
-          if (key === sent) return;
+          const key = JSON.stringify({ items, compute });
+          if (key === sent && !fresh) return;
           // The number is taken before the report goes out (review of L02e): a report whose answer was lost may have arrived, and its number must never carry other figures, or the controller refuses every later report, the final one too.
           seq += 1;
-          await attempt.reportProcesses({ seq, final: false, processes: items });
+          await attempt.reportProcesses({ seq, final: false, canLook: true, ...(compute === undefined ? {} : { computeMs: compute }), processes: items });
           sent = key;
         } catch (error) { if (error instanceof WorkerRequestError && error.fenced) throw error; trouble("process report", error); }
       },
@@ -194,7 +199,7 @@ export class RemoteOfferRunner {
           seq += 1;
           // The last word is tried three times under one number (the same report again is the same answer there): one lost connection would otherwise leave the earlier report standing, unconfirmed, for good.
           for (let tries = 1; ; tries += 1) {
-            try { await attempt.reportProcesses({ seq, final: true, processes: items }); return; } catch (error) {
+            try { await attempt.reportProcesses({ seq, final: true, canLook: true, ...(compute === undefined ? {} : { computeMs: compute }), processes: items }); return; } catch (error) {
               if (tries >= 3 || (error instanceof WorkerRequestError && (error.fenced || error.status < 500))) throw error;
               await new Promise((r) => setTimeout(r, this.#o.controlMs ?? 500));
             }
@@ -205,7 +210,7 @@ export class RemoteOfferRunner {
   }
 
   /** Reads the controller's control messages while the turn runs and acts on them in order. Ends when the turn is over. */
-  async #follow(attempt: RemoteAttempt, order: WorkOrder, handle: WorkerHandle, over: () => boolean, trouble: (what: string, error: unknown) => void, reporter: { change(): Promise<void> }): Promise<void> {
+  async #follow(attempt: RemoteAttempt, order: WorkOrder, handle: WorkerHandle, over: () => boolean, trouble: (what: string, error: unknown) => void, reporter: { change(fresh?: boolean): Promise<void> }): Promise<void> {
     let after = 0;
     let checkpoints = 0;
     // A restart that changes what the sandbox reaches or the limits it runs under is confirmed to the controller again before the new sandbox starts (card H12a).
@@ -229,7 +234,7 @@ export class RemoteOfferRunner {
           continue;
         }
       }
-      try { await reporter.change(); } catch (error) { if (error instanceof WorkerRequestError && error.fenced) { await handle.stop().catch(() => undefined); return; } trouble("process report", error); }
+      let fresh = false;
       for (const m of messages) {
         after = Math.max(after, m.seq);
         try {
@@ -237,8 +242,13 @@ export class RemoteOfferRunner {
           else if (m.kind === "stop") { await handle.stop(); return; }
           else if (m.kind === "checkpoint") await attempt.putCheckpoint(++checkpoints, await handle.checkpoint() as never, `checkpoint-${m.seq}`);
           else if (m.kind === "restart") await handle.restart(m.recipe, m.checkpoint);
+          // Force Stop (card L02e): what the sandbox holds is killed here, then looked at again and reported whether or not it changed. A look is answered the same way.
+          else if (m.kind === "kill") { fresh = true; await this.#o.host.endLocalWork?.([order.attemptId]); }
+          else if (m.kind === "look") fresh = true;
         } catch (error) { trouble(`control ${m.kind}`, error); }
       }
+      // The look comes after the messages were handled: a look asked in the same batch as a kill reports what is left after the kill.
+      try { await reporter.change(fresh); } catch (error) { if (error instanceof WorkerRequestError && error.fenced) { await handle.stop().catch(() => undefined); return; } trouble("process report", error); }
       if (!over()) await new Promise((r) => setTimeout(r, this.#o.controlMs ?? 500));
     }
   }

@@ -8,7 +8,7 @@ import { tightenLimits } from "../environments/launch-limits.js";
 import { sealContract } from "./contract.js";
 import type { ContractLimits, DoneCheckReport, DoneCheckRequest, DoneCheckRun, HostLocalWork, HostProbe, RecipeSummary, ToolGateway, WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import type { CarriedLanding, WorkspacePort } from "../workspace-ops/workspace-ops.js";
-import type { RemoteWorkerService, Requirements } from "./service.js";
+import type { PlacementBody, RemoteWorkerService, Requirements } from "./service.js";
 
 export interface RemoteWorkerHostOptions {
   /** What one attempt asks of the host, for admission. */
@@ -21,6 +21,8 @@ export interface RemoteWorkerHostOptions {
   readonly checkpointWaitMs?: number;
   /** Wait between looks for the checkpoint, in milliseconds. Default 100. */
   readonly pollMs?: number;
+  /** How long Stop waits for a worker's fresh look before it reads the last report as it stands (card L02e), in ms. Default 3000. */
+  readonly lookWaitMs?: number;
   /** How long a workspace request (integration, landing, refresh, quarantine) waits for the host's answer, in ms. Default 300 000 (five minutes); a host that is slower leaves the request recorded as failed, with the operation possibly done there. */
   readonly workspaceWaitMs?: number;
   /**
@@ -97,26 +99,79 @@ export class RemoteWorkerHost implements WorkerHost {
 
   /**
    * What this host holds for Stop (card L02d, L02e). The controller cannot look into a remote machine, so it goes by the worker's own report of the processes it holds for the placement (`reportProcesses`, kept on the placement):
-   * - a live placement with a report: the entries reported, as the worker gave them (running, asked to stop and not stopped, or unknown);
+   * - a live placement with a report: the entries reported, as the worker gave them (running, asked to stop and not stopped, or unknown). When the worker said it answers a fresh look (`canLook`), it is asked for one first and the report
+   *   read is the one it sent in answer; a worker that does not answer within `lookWaitMs` (default 3 s) leaves its last report standing and one unknown item beside it, since that report may be old;
    * - a live placement with no report (a worker that does not report, or has not yet): one unknown item, as before;
    * - a placement that is over, whose worker said it stopped the sandbox and looked (a final report): what that report lists (normally nothing), so a Stop is clean on the worker's word;
    * - a placement that is over whose worker last listed something and never confirmed (no final report): those entries as unknown, since nobody has said they are gone;
-   * - a placement that is over and never reported: nothing, as before. A report of another placement (an older holder) is never read.
-   * Bounded to 500 attempts.
+   * - a placement that is over and never reported: nothing, as before. A report of another placement (an older holder) is never read as the current one's;
+   * - an earlier placement of the attempt on this host (the attempt was moved away or placed again): what its worker last listed, as the worker gave it when it was final and as unknown when it was not. An earlier placement that listed nothing, or never reported, adds nothing.
+   * Costs: the cleanup compute the workers reported (the running total over the placements). Bounded to 500 attempts.
    */
   async localWork(attemptIds: readonly string[]): Promise<HostLocalWork> {
+    const ids = attemptIds.slice(0, 500);
+    const waiting = new Map<string, NonNullable<PlacementBody["processReport"]>>();
+    for (const attemptId of ids) {
+      const p = await this.remote.placement(this.by, attemptId);
+      if (p === undefined || p.hostId !== this.hostId || !["offered", "accepted", "relocating"].includes(p.state)) continue;
+      const r = p.processReport;
+      if (r === undefined || r.placement !== p.placement || r.canLook !== true || r.final) continue;
+      try { await this.remote.control(this.by, attemptId, { kind: "look" }, p.placement); waiting.set(attemptId, r); } catch { /* no longer live: read as it stands */ }
+    }
+    const stale = new Set<string>();
+    const until = Date.now() + (this.options.lookWaitMs ?? 3000);
+    while (waiting.size > 0) {
+      for (const [attemptId, before] of [...waiting]) {
+        const p = await this.remote.placement(this.by, attemptId);
+        const now = p?.processReport;
+        if (p === undefined || p.hostId !== this.hostId || !["offered", "accepted", "relocating"].includes(p.state) || now === undefined || now.placement !== p.placement || now.final || now.seq !== before.seq || now.sessionId !== before.sessionId || now.at !== before.at) waiting.delete(attemptId);
+      }
+      if (waiting.size === 0 || Date.now() >= until) break;
+      await new Promise((r) => setTimeout(r, this.options.pollMs ?? 100));
+    }
+    for (const attemptId of waiting.keys()) stale.add(attemptId);
     const processes: { attemptId: string; ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] = [];
+    const costs: { attemptId: string; computeMs: number }[] = [];
+    for (const attemptId of ids) {
+      const placement = await this.remote.placement(this.by, attemptId);
+      if (placement === undefined) continue;
+      let compute: number | undefined;
+      for (const e of placement.earlier ?? []) {
+        if (e.hostId !== this.hostId || e.report === undefined || e.report.placement !== e.placement) continue;
+        for (const p of e.report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: e.report.final ? p.state : "unknown" });
+        if (e.report.computeMs !== undefined) compute = (compute ?? 0) + e.report.computeMs;
+      }
+      if (placement.hostId === this.hostId) {
+        const live = ["offered", "accepted", "relocating"].includes(placement.state);
+        const report = placement.processReport !== undefined && placement.processReport.placement === placement.placement ? placement.processReport : undefined;
+        if (live && report === undefined) processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" });
+        else if (report !== undefined) {
+          if (!live && report.final) { for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state }); }
+          else for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: live ? p.state : "unknown" });
+          if (stale.has(attemptId)) processes.push({ attemptId, ref: `remote:${attemptId} (no fresh report from the worker)`, kind: "process", state: "unknown" });
+          if (report.computeMs !== undefined) compute = (compute ?? 0) + report.computeMs;
+        }
+      }
+      if (compute !== undefined) costs.push({ attemptId, computeMs: compute });
+    }
+    return { processes, costs, known: ids };
+  }
+
+  /**
+   * Force Stop's step on this host (card L02e): a worker that holds a live placement of the attempt is told to kill what its sandbox still holds (the control message `kill`; a worker that does not know it ignores it and the Stop's next look
+   * still shows what is left). A placement that is already over cannot be told anything (nobody reads its control messages): what its worker listed last stays listed. A placement that went over meanwhile is not a failure.
+   */
+  async endLocalWork(attemptIds: readonly string[]): Promise<void> {
+    const failures: string[] = [];
     for (const attemptId of attemptIds.slice(0, 500)) {
       const placement = await this.remote.placement(this.by, attemptId);
-      if (placement === undefined || placement.hostId !== this.hostId) continue;
-      const live = ["offered", "accepted", "relocating"].includes(placement.state);
-      const report = placement.processReport !== undefined && placement.processReport.placement === placement.placement ? placement.processReport : undefined;
-      if (live && report === undefined) { processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" }); continue; }
-      if (report === undefined) continue;
-      if (!live && report.final) { for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: p.state }); continue; }
-      for (const p of report.processes) processes.push({ attemptId, ref: p.ref, kind: p.kind, state: live ? p.state : "unknown" });
+      if (placement === undefined || placement.hostId !== this.hostId || !["offered", "accepted", "relocating"].includes(placement.state)) continue;
+      try { await this.remote.control(this.by, attemptId, { kind: "kill" }, placement.placement); } catch (error) {
+        if (error instanceof DomainError && (error.code === "fenced" || error.code === "not_found")) continue;
+        failures.push(`${attemptId}: ${String((error as Error)?.message ?? error).slice(0, 150)}`);
+      }
     }
-    return { processes, costs: [], known: attemptIds.slice(0, 500) };
+    if (failures.length > 0) throw new Error(`the worker could not be told to end what it holds: ${failures.join("; ").slice(0, 500)}`);
   }
 
   /** Why this host would refuse the attempt (card H07e), judged by the same rules as the placement. The order is not built yet, so the requirements are asked of a preview of it that carries no credential. */

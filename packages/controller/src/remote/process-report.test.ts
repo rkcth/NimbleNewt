@@ -83,7 +83,9 @@ for (const backend of backends) {
     const moved = await c.remote.placement(c.dispatcherPrincipal, attemptId);
     assert.equal(moved!.processReport, undefined, "the new placement does not inherit the old holder's report");
     assert.deepEqual((await hostOf(c, r2.id).localWork([attemptId])).processes.map((p) => p.ref), [`remote:${attemptId}`], "the new host's placement has reported nothing yet: unknown");
-    assert.deepEqual((await hostOf(c, r1.id).localWork([attemptId])).processes, [], "and the old host holds no placement of it");
+    // What the old host last listed is not forgotten (card L02e): it is shown as unknown until that host's final report says what is left.
+    assert.deepEqual((await hostOf(c, r1.id).localWork([attemptId])).processes, [{ attemptId, ref: "before the move", kind: "process", state: "unknown" }], "the old host's last list stays, as unknown");
+    assert.deepEqual((await hostOf(c, r2.id).localWork([attemptId])).processes.map((p) => p.ref), [`remote:${attemptId}`], "and it is the old host's, not the new one's");
   }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
 
   suite("a report from a newer session of the same host that has not taken the attempt up again is fenced, and the older session's report is kept as it was (card L02e)", async (c) => {
@@ -153,6 +155,134 @@ for (const backend of backends) {
     assert.ok(cleaned.length <= REMOTE_LIMITS.processRef);
   });
 
+}
+
+for (const backend of backends) {
+  const suite = remoteSuite(backend);
+  const hostOf = (c: { remote: ConstructorParameters<typeof RemoteWorkerHost>[1]; dispatcherPrincipal: ConstructorParameters<typeof RemoteWorkerHost>[2] }, id: string, extra: { lookWaitMs?: number; pollMs?: number } = {}) => new RemoteWorkerHost(id, c.remote, c.dispatcherPrincipal, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never, ...extra });
+
+  suite("the host that held an attempt before it moved is read too: its last list stays as unknown, its final report (in the session that accepted it) says what is left, nothing else of it is taken (card L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const r2 = await c.host("r2");
+    const { attemptId, placement, attempt } = await c.started(r1);
+    await attempt.reportProcesses({ seq: 1, final: false, processes: [P("old server"), P("old child", "uncooperative", "child")], computeMs: 700 });
+    await c.remote.relocate(c.owner, { commandId: "mv-1", attemptId, toHostId: r2.id, reason: "retired" });
+    const now = await c.remote.placement(c.dispatcherPrincipal, attemptId);
+    assert.equal(now!.earlier!.length, 1);
+    assert.equal(now!.earlier![0]!.hostId, r1.id);
+    const old = await hostOf(c, r1.id).localWork([attemptId]);
+    assert.deepEqual(old.processes.map((p) => [p.ref, p.state]), [["old server", "unknown"], ["old child", "unknown"]], "nobody said the old host cleaned up: unknown, whatever it listed");
+    assert.deepEqual(old.costs, [{ attemptId, computeMs: 700 }], "the cleanup compute the old host counted is its own cost");
+    // Only a final report is taken from it, and only for the placement it held.
+    await wireRefuses("fenced", () => attempt.reportProcesses({ seq: 2, final: false, processes: [] }), 409);
+    await wireRefuses("fenced", () => r1.client.attempt(attemptId, placement + 1).reportProcesses({ seq: 2, final: true, processes: [] }), 409);
+    // A host that never held it, and another session of the same host that did not accept it, are refused.
+    await wireRefuses("not_found", () => (c.host("r3") as Promise<typeof r1>).then((r3) => r3.client.attempt(attemptId, placement).reportProcesses({ seq: 2, final: true, processes: [] })), 404);
+    assert.equal((await hostOf(c, r1.id).localWork([attemptId])).processes.length, 2, "nothing of those was kept");
+    // Its last word.
+    assert.deepEqual(await attempt.reportProcesses({ seq: 2, final: true, processes: [P("old child", "uncooperative", "child")], computeMs: 900 }), { kept: true });
+    const after = await hostOf(c, r1.id).localWork([attemptId]);
+    assert.deepEqual(after.processes.map((p) => [p.ref, p.state]), [["old child", "uncooperative"]], "its final word is what is left, as it gave it");
+    assert.deepEqual(after.costs, [{ attemptId, computeMs: 900 }]);
+    assert.deepEqual(await attempt.reportProcesses({ seq: 2, final: true, processes: [P("old child", "uncooperative", "child")], computeMs: 900 }), { kept: true }, "the same word again is the same answer");
+    await wireRefuses("payload_changed", () => attempt.reportProcesses({ seq: 2, final: true, processes: [] }), 409);
+    assert.deepEqual(await attempt.reportProcesses({ seq: 3, final: true, processes: [] }), { kept: false }, "nothing follows a final report");
+    // A newer session of the old host, which has not taken that placement up, cannot speak for it.
+    const fresh = new RemoteWorkerClient({ url: c.transport.url, token: r1.token, workerVersion: "w" });
+    await fresh.connect({ ...REMOTE_CAPS }, "re-old");
+    await wireRefuses("fenced", () => fresh.attempt(attemptId, placement).reportProcesses({ seq: 1, final: true, processes: [] }), 409);
+    // The new host's own placement is untouched.
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.processReport, undefined);
+  }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2", "host:r3"] }) });
+
+  suite("a worker that said it can look is asked for a fresh look before its report is read; one that does not answer leaves its last report standing with an unknown item beside it; one that never said so is not asked (card L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, placement, attempt } = await c.started(r1);
+    const host = hostOf(c, r1.id, { lookWaitMs: 400, pollMs: 20 });
+    const controls = async () => (await c.remote.placement(c.dispatcherPrincipal, attemptId))!.control.map((m) => m.kind);
+    await attempt.reportProcesses({ seq: 1, final: false, processes: [P("old")] });
+    assert.deepEqual((await host.localWork([attemptId])).processes.map((p) => p.ref), ["old"], "a worker that never said it can look is read as before");
+    assert.deepEqual(await controls(), [], "and is sent nothing");
+    // A worker that says it can look, and answers.
+    await attempt.reportProcesses({ seq: 2, final: false, canLook: true, processes: [P("old")] });
+    let answered = 0;
+    const responder = (async () => {
+      for (let after = 0, i = 0; i < 100 && answered === 0; i += 1) {
+        const got = await attempt.pollControl(after);
+        for (const m of got) { after = Math.max(after, m.seq); if (m.kind === "look") { answered += 1; await attempt.reportProcesses({ seq: 3, final: false, canLook: true, processes: [P("new one")] }); } }
+        await new Promise((ok) => setTimeout(ok, 20));
+      }
+    })();
+    const fresh = await host.localWork([attemptId]);
+    await responder;
+    assert.deepEqual(fresh.processes.map((p) => p.ref), ["new one"], "the report read is the one sent in answer to the look");
+    assert.deepEqual(await controls(), ["look"]);
+    // A worker that does not answer: its last report and one unknown item saying it is not fresh.
+    const quiet = await host.localWork([attemptId]);
+    assert.deepEqual(quiet.processes.map((p) => [p.ref, p.state]), [["new one", "running"], [`remote:${attemptId} (no fresh report from the worker)`, "unknown"]]);
+    // A final report is never asked again.
+    await attempt.complete({ status: "completed", text: "done", endKind: "normal" });
+    await attempt.reportProcesses({ seq: 4, final: true, canLook: true, processes: [] });
+    const before = await controls();
+    assert.deepEqual((await host.localWork([attemptId])).processes, []);
+    assert.deepEqual(await controls(), before);
+    void placement;
+  });
+
+  suite("Force Stop tells a worker that holds a live placement to kill what it holds; an over placement or one that moved meanwhile is not an error; the message is exactly kill or look (card L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, placement, attempt } = await c.started(r1);
+    const host = hostOf(c, r1.id);
+    await host.endLocalWork([attemptId, "att-aaaaaaaaaaaaaaaaaaaa"]);
+    const msgs = (await attempt.pollControl(0));
+    assert.deepEqual(msgs.map((m) => m.kind), ["kill"]);
+    await assert.rejects(c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "kill", extra: 1 } as never), /extra/);
+    await assert.rejects(c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "look", x: 1 } as never), /x/);
+    // Another host's endLocalWork leaves it alone.
+    const r2 = await c.host("r2");
+    await hostOf(c, r2.id).endLocalWork([attemptId]);
+    assert.equal((await attempt.pollControl(0)).length, 1);
+    // An over placement: nobody reads its messages, so nothing is sent and nothing fails.
+    await attempt.complete({ status: "completed", text: "done", endKind: "normal" });
+    await host.release(attemptId, "ended");
+    await host.endLocalWork([attemptId]);
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.control.length, 1);
+    void placement;
+  });
+
+  suite("a report's cleanup compute is checked (a whole number of ms up to a day), kept, and read as the attempt's cleanup cost; a report that says canLook false is refused (card L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, placement } = await c.started(r1);
+    const post = (body: object) => r1.client.send("POST", `/worker/attempts/${attemptId}/processes`, { body: { placement, ...body } as never, session: true, key: "k" });
+    for (const computeMs of [-1, 1.5, "5", REMOTE_LIMITS.cleanupMs + 1, null]) await wireRefuses("invalid_command", () => post({ seq: 1, final: false, processes: [], computeMs }), 400, (e) => assert.match(e.message, /computeMs/));
+    await wireRefuses("invalid_command", () => post({ seq: 1, final: false, processes: [], canLook: false }), 400, (e) => assert.match(e.message, /canLook/));
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, attemptId))!.processReport, undefined);
+    await post({ seq: 1, final: false, processes: [], computeMs: REMOTE_LIMITS.cleanupMs, canLook: true });
+    assert.deepEqual((await hostOf(c, r1.id).localWork([attemptId])).costs, [{ attemptId, computeMs: REMOTE_LIMITS.cleanupMs }]);
+    // The same figures under the same number are the same answer; other compute under it is a conflict.
+    assert.deepEqual((await post({ seq: 1, final: false, processes: [], computeMs: REMOTE_LIMITS.cleanupMs, canLook: true })).body, { kept: true });
+    await wireRefuses("payload_changed", () => post({ seq: 1, final: false, processes: [], computeMs: 5, canLook: true }), 409);
+  });
+
+  suite("placing the attempt again on the same host keeps the first run's last list as an earlier placement, whose worker may still give its final word; the new run starts with no report (card L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const first = await c.started(r1);
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, first.attemptId))!.earlier, undefined, "nothing earlier yet");
+    await first.attempt.reportProcesses({ seq: 1, final: false, processes: [P("first run")] });
+    const second = await c.remote.place(c.dispatcherPrincipal, { hostId: r1.id, order: r1.worker.starts[0]!, requirements: { data: "cloud-allowed", harness: "pi" } });
+    assert.equal(second.placement, first.placement + 1);
+    const body = (await c.remote.placement(c.dispatcherPrincipal, first.attemptId))!;
+    assert.equal(body.processReport, undefined);
+    assert.deepEqual(body.earlier!.map((e) => [e.hostId, e.placement, e.report?.processes.map((p) => p.ref)]), [[r1.id, first.placement, ["first run"]]]);
+    // The new placement was not yet accepted, so a second placement now adds no earlier entry.
+    await c.remote.place(c.dispatcherPrincipal, { hostId: r1.id, order: r1.worker.starts[0]!, requirements: { data: "cloud-allowed", harness: "pi" } }).catch(() => undefined);
+    assert.equal((await c.remote.placement(c.dispatcherPrincipal, first.attemptId))!.earlier!.length, 1, "an offer nobody accepted ran nothing: it is not an earlier holder");
+    const host = hostOf(c, r1.id);
+    assert.deepEqual((await host.localWork([first.attemptId])).processes.map((p) => [p.ref, p.state]), [["first run", "unknown"], [`remote:${first.attemptId}`, "unknown"]], "the first run's list, and the new placement not yet reporting");
+    // The first run's worker (same host, its own session) says it is clean: a final report for the placement it held.
+    assert.deepEqual(await first.attempt.reportProcesses({ seq: 2, final: true, processes: [] }), { kept: true });
+    assert.deepEqual((await host.localWork([first.attemptId])).processes.map((p) => p.ref), [`remote:${first.attemptId}`]);
+  });
 }
 
 // The worker's side, without a controller: a runner over a stub attempt and a stub host.
@@ -275,4 +405,60 @@ test("a report always fits the controller's body limit: references are redacted 
     }
     assert.match(String((r.processes.at(-1) as { ref: string }).ref), /more processes are not listed/);
   }
+});
+
+test("the runner answers the controller's look with a report even when nothing changed, kills what the sandbox holds on a kill and reports what is left, says it can look, and counts the cleanup compute (card L02e)", async () => {
+  type Sent = { seq: number; final: boolean; canLook?: boolean; computeMs?: number; processes: readonly { ref: string }[] };
+  const sent: Sent[] = [];
+  const killed: string[][] = [];
+  let held: Held[] = [{ attemptId: "att-aaaaaaaaaaaaaaaaaaaa", ref: "node dev.js", kind: "process", state: "uncooperative" }];
+  let compute = 40;
+  let script: { seq: number; kind: string }[][] = [[], [{ seq: 1, kind: "look" }], [], [{ seq: 2, kind: "kill" }], [{ seq: 3, kind: "kill" }, { seq: 4, kind: "unknown-kind" }]];
+  const attempt = {
+    accept: async () => ({}), honorContract: async () => ({ ok: true }), complete: async () => ({}),
+    pollControl: async () => script.shift() ?? [],
+    reportProcesses: async (r: Sent) => { sent.push(r); return { kept: true }; },
+  };
+  const handle = { run: async () => { await new Promise((ok) => setTimeout(ok, 700)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
+  const host = {
+    start: async () => handle,
+    localWork: async () => ({ processes: held, costs: [{ attemptId: "att-other", computeMs: 99999 }, { attemptId: "att-aaaaaaaaaaaaaaaaaaaa", computeMs: compute }], known: [] }),
+    endLocalWork: async (ids: readonly string[]) => { killed.push([...ids]); held = []; compute += 25; },
+  };
+  const trouble: string[] = [];
+  const runner = new RemoteOfferRunner({ client: { attempt: () => attempt } as never, host: host as never, abilities: FULL_ABILITIES, controlMs: 40, onTrouble: (_id, what) => trouble.push(what) });
+  const offer = stubRun({ list: () => [] }).offer;
+  assert.equal(await runner.run(offer), "completed");
+  assert.deepEqual(killed, [["att-aaaaaaaaaaaaaaaaaaaa"], ["att-aaaaaaaaaaaaaaaaaaaa"]], "the kill is the attempt's own, not another's");
+  const live = sent.filter((r) => !r.final);
+  assert.ok(live.every((r) => r.canLook === true), "every report says the worker can look");
+  assert.equal(live[0]!.computeMs, 40, "the compute is this attempt's, not another attempt's");
+  assert.deepEqual(live.map((r) => r.seq), live.map((_, i) => i + 1));
+  // The look repeated the unchanged list under a new number; the kill reported what was left after it.
+  assert.deepEqual(live.slice(0, 2).map((r) => r.processes.map((p) => p.ref)), [["node dev.js"], ["node dev.js"]]);
+  const afterKill = live.find((r) => r.processes.length === 0)!;
+  assert.equal(afterKill.computeMs, 65, "the kill's own cost is counted");
+  assert.equal(sent.at(-1)!.final, true);
+  assert.deepEqual(trouble, [], "a message kind the worker does not know is ignored, not a trouble");
+  script = [];
+});
+
+test("a runner whose host cannot end local work ignores a kill without failing, and one whose kill throws reports the trouble and still reports what is left (card L02e)", async () => {
+  const sent: { final: boolean; processes: readonly unknown[] }[] = [];
+  let polled = 0;
+  const attempt = {
+    accept: async () => ({}), honorContract: async () => ({ ok: true }), complete: async () => ({}),
+    pollControl: async () => (polled++ === 0 ? [{ seq: 1, kind: "kill" }] : polled === 3 ? [{ seq: 2, kind: "kill" }] : []),
+    reportProcesses: async (r: { final: boolean; processes: readonly unknown[] }) => { sent.push(r); return { kept: true }; },
+  };
+  const handle = { run: async () => { await new Promise((ok) => setTimeout(ok, 400)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
+  const trouble: string[] = [];
+  const mk = (host: object) => new RemoteOfferRunner({ client: { attempt: () => attempt } as never, host: host as never, abilities: FULL_ABILITIES, controlMs: 30, onTrouble: (_id, what) => trouble.push(what) });
+  const offer = stubRun({ list: () => [] }).offer;
+  assert.equal(await mk({ start: async () => handle, localWork: async () => ({ processes: [], known: [] }) }).run(offer), "completed");
+  assert.equal(trouble.length, 0);
+  polled = 0;
+  assert.equal(await mk({ start: async () => handle, localWork: async () => ({ processes: [{ ref: "stuck", kind: "process", state: "uncooperative" }], known: [] }), endLocalWork: async () => { throw new Error("the sandbox would not end it"); } }).run(offer), "completed");
+  assert.ok(trouble.includes("control kill"));
+  assert.deepEqual(sent.at(-1)!.processes, [{ ref: "stuck", kind: "process", state: "uncooperative" }]);
 });

@@ -284,7 +284,7 @@ export class WorkerTransport {
       allowed("POST");
       const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : c === "thinking" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.thinkingBytes) : c === "processes" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.processBytes) : undefined);
       const p = placementOf(body);
-      this.#only(body, { tool: ["placement", "token", "request"], thinking: ["placement", "blocks"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], processes: ["placement", "seq", "final", "processes"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
+      this.#only(body, { tool: ["placement", "token", "request"], thinking: ["placement", "blocks"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], processes: ["placement", "seq", "final", "canLook", "computeMs", "processes"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "tool": this.#key(req); return { status: 200, body: await svc.toolBridge(host, session, attempt, p, body["token"], body["request"]) };
@@ -300,7 +300,7 @@ export class WorkerTransport {
         case "stream-start": return { status: 200, body: await svc.streamStart(host, session, attempt, p, body["call"] as never, this.#key(req)) };
         case "stream-events": return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
         case "stream-end": await svc.streamEnd(host, session, attempt, p, body["streamId"], { ok: body["ok"] }); return { status: 204 };
-        case "processes": return { status: 200, body: await svc.reportProcesses(host, session, attempt, p, { seq: body["seq"], final: body["final"], processes: body["processes"] }) };
+        case "processes": return { status: 200, body: await svc.reportProcesses(host, session, attempt, p, { seq: body["seq"], final: body["final"], canLook: body["canLook"], computeMs: body["computeMs"], processes: body["processes"] }) };
         case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };
         default: throw new HttpError(404, "not_found", "no such route");
       }

@@ -54,9 +54,13 @@ async function world(d: string, held: { work: () => HostLocalWork; asked: string
   await hosts.announce(hostP, { commandId: "an1", capabilities: CAPS as never });
   await hosts.heartbeat(hostP, { commandId: "hb1", sequence: 1 });
   await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap-w1", actor: owner.id, host: "host:w1", capacity: { cpus: 32, memoryMb: 65_536 } });
-  const task = async (n: number, parent?: string) => {
-    const agent = `agt-${String.fromCharCode(96 + n).repeat(20)}`;
-    await c.services.principals.enroll(owner, { commandId: `e-${n}`, kind: "agent", name: agent, grants: workGrants(project, ["read-file"]) });
+  /** `registered`: the agent is a registered agent (a Stop of its scope needs one), made with the grants a worker needs; by default a bare enrolled name, as before. */
+  const task = async (n: number, parent?: string, registered = false) => {
+    let agent = `agt-${String.fromCharCode(96 + n).repeat(20)}`;
+    if (registered) {
+      agent = (await c.services.agents.create(owner, { commandId: `ag-${n}`, friendlyName: `agent ${n}` })).id;
+      for (const g of [{ action: "task.read" }, ...workGrants(project, ["read-file"]), { action: "history.read" }]) await c.services.grants.grant(owner, { commandId: `g-${n}-${g.action}`, grantee: `agent:${agent}`, action: g.action, project, source: "direct", basis: "test" } as never);
+    } else await c.services.principals.enroll(owner, { commandId: `e-${n}`, kind: "agent", name: agent, grants: workGrants(project, ["read-file"]) });
     const id = (await c.services.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
     await c.services.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId: id, expectedRevision: 1, to: "ready" });
     await c.services.assignments.assignTask({ commandId: `as${n}`, actor: owner.id, taskId: id, owner: { kind: "agent", id: agent } });
@@ -225,5 +229,62 @@ test("a stopped parent keeps its swarm children from starting again: after the S
     assert.ok((await call(c, boot.token, "lifecycle.resume", { scope: { kind: "task", id: parent.id }, reason: "morning" }, "rs1")).ok);
     const free = await c.dispatch!.dispatcher.tick();
     assert.ok(free.started.includes(again), JSON.stringify(free));
+  } finally { await c.close(); cleanup(d); }
+});
+
+test("a Stop of an AGENT, and of the whole installation, ends the swarm children of the tasks it covers on a real dispatcher: their attempts end, their jobs are asked to stop, the hold keeps them from starting again, and the cleanup view of the child names the wider Stop (card L02e)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l02e-"));
+  const w = await world(d, { asked: [], work: () => ({ processes: [] }) });
+  const { c, boot, owner } = w;
+  try {
+    // Two families: agent a's task has a child (run by agent b) and a grandchild (agent c); agent d's task has a child (agent e).
+    const parent = await w.task(1, undefined, true);
+    const child = await w.task(2, parent.id, true);
+    const grand = await w.task(3, child.id, true);
+    const other = await w.task(4, undefined, true);
+    const otherChild = await w.task(5, other.id, true);
+    await c.dispatch!.dispatcher.tick();
+    for (const t of [parent, child, grand, other, otherChild]) assert.equal((await w.state(t.attempt)).state !== "finished", true, `${t.id} is live`);
+    const jobOf = async (taskId: string, n: number) => (await c.services.jobs.admit(owner, { commandId: `j${n}`, taskId, kind: "tool", label: `build ${n}`, operationId: `op-${n}`, background: true })).id;
+    const childJob = await jobOf(child.id, 1);
+    const grandJob = await jobOf(grand.id, 2);
+    const otherJob = await jobOf(otherChild.id, 3);
+
+    // Stop of agent a: its task, the child and the grandchild end; the other family is left alone.
+    const stop = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "agent", id: parent.agent }, mode: "stop", reason: "agent night" }, "st-agent");
+    assert.ok(stop.ok, JSON.stringify(stop));
+    for (const t of [parent, child, grand]) assert.equal((await w.state(t.attempt)).state, "finished", `${t.id} was ended by its ancestor's agent's Stop`);
+    for (const t of [other, otherChild]) assert.equal((await w.state(t.attempt)).state !== "finished", true, `${t.id} is another agent's family and keeps running`);
+    assert.equal((await c.services.jobs.get(owner, childJob))?.state, "cancellation_requested");
+    assert.equal((await c.services.jobs.get(owner, grandJob))?.state, "cancellation_requested");
+    assert.equal((await c.services.jobs.get(owner, otherJob))?.state, "admitted", "another family's job is untouched");
+
+    // The child's own cleanup view finds the Stop that reached it through its swarm parent's agent, and says so.
+    const seen = await call(c, boot.token, "status.ask", { request: { kind: "stop_cleanup", taskId: child.id } });
+    assert.ok(seen.ok, JSON.stringify(seen));
+    const said = (seen.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
+    assert.match(said, new RegExp(`this is the stop of agent ${parent.agent}`), said);
+    // Someone who may control the child but not its parent's agent is told nothing of that Stop.
+    const gone = await call(c, boot.token, "status.ask", { request: { kind: "stop_cleanup", taskId: other.id } });
+    assert.ok(gone.ok);
+    assert.match((gone.result.item.lines as { text: string }[]).map((l) => l.text).join("\n"), /No Suspend or Stop was requested/, "the other family was not covered by that Stop");
+
+    // A new attempt for the child is not started while the agent's Stop holds; resuming the agent lets go.
+    const a = (await c.services.assignments.getAssignment(child.id))!;
+    const again = (await c.services.assignments.admitAttempt({ commandId: "ad-again", actor: "inbox", taskId: child.id, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: child.agent }, harness: "pi" })).id;
+    const held = await c.dispatch!.dispatcher.tick();
+    assert.ok(!held.started.includes(again), JSON.stringify(held));
+    assert.ok(held.skipped.some((s) => s.attemptId === again && /is stopped/.test(s.reason)), JSON.stringify(held.skipped));
+    assert.ok((await call(c, boot.token, "lifecycle.resume", { scope: { kind: "agent", id: parent.agent }, reason: "morning" }, "rs-agent")).ok);
+    // The hold is let go (what is left for the child is its own delegated budget, which the grandchild took: it is blocked on that, no longer skipped for the Stop).
+    const freed = await c.dispatch!.dispatcher.tick();
+    assert.ok(!freed.skipped.some((s) => s.attemptId === again), JSON.stringify(freed.skipped));
+
+    // The whole installation: the jobs that were asked to stop and have not (nothing settles them in this fixture) hold a Stop back, so the owner's Force Stop ends every remaining family, children included.
+    const all = await call(c, boot.token, "lifecycle.stop", { scope: { kind: "installation", id: "installation" }, mode: "stop", reason: "everything off" }, "st-all");
+    assert.ok(all.ok, JSON.stringify(all));
+    const forced = await call(c, boot.token, "lifecycle.force", { scope: { kind: "installation", id: "installation" }, reason: "it will not settle" }, "f-all");
+    assert.ok(forced.ok, JSON.stringify(forced));
+    for (const t of [other, otherChild]) assert.equal((await w.state(t.attempt)).state, "finished", `${t.id} was ended by the installation's Force Stop`);
   } finally { await c.close(); cleanup(d); }
 });

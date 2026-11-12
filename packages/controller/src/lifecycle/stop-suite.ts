@@ -566,6 +566,42 @@ export function defineStopTests(backendName: string): void {
       assert.deepEqual([byParentSeen?.intentId, byParentSeen?.through], [byParent.intentId, { kind: "task", id: parent }], "the newest request that reaches the task is the answer");
     });
 
+    suite("a Stop of the agent or team that runs a swarm PARENT answers for the child too, since it ends the child's work (the walk), and the parent's own assignment date is what counts, not the child's (card L02e)", async (c) => {
+      const agentB = (await c.agents.create(c.owner, { commandId: cid("agb"), friendlyName: "B" })).id;
+      const parent = (await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "parent of the child" })).id;
+      await swarmLink(c.runner, c.task, parent, c.project);
+      // A Stop of B made before the parent was given to B did not reach it, nor therefore the child.
+      c.rt.seenAttempts = ["att-early"];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-early", costMicros: 5, computeMs: 1 }] }];
+      const early = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "agent", id: agentB }, mode: "stop", reason: "before" });
+      await c.stops.advance(c.owner, { intentId: early.intentId });
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: { kind: "agent", id: agentB }, reason: "back" });
+      now += 60_000;
+      await c.projects.transitionTask({ commandId: cid("r"), actor: c.owner.id, taskId: parent, expectedRevision: 1, to: "ready" });
+      await c.assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: parent, owner: { kind: "agent", id: agentB } });
+      assert.equal(await c.stops.cleanupSpend(c.owner, scopeOf(c.task)), undefined, "the child's own agent was never stopped, and B's old Stop did not reach the parent");
+      now += 60_000;
+      c.rt.seenAttempts = ["att-b"];
+      c.rt.items = [{ kind: "foreground", ref: "att-b/c1", state: "running" }];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-b", costMicros: 70, computeMs: 3 }] }];
+      const byB = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "agent", id: agentB }, mode: "stop", reason: "the parent's agent" });
+      await c.stops.advance(c.owner, { intentId: byB.intentId });
+      const seen = await c.stops.cleanupSpend(c.owner, scopeOf(c.task));
+      assert.deepEqual([seen?.intentId, seen?.through, seen?.spent], [byB.intentId, { kind: "agent", id: agentB }, 70], "the child's view finds the Stop of its swarm parent's agent");
+      // A team above the parent's agent, stopped later, answers instead.
+      now += 60_000;
+      const team = (await c.agents.createTeam(c.owner, { commandId: cid("team"), name: "Team B" })).id;
+      const b = await c.agents.get(c.owner, agentB);
+      await c.agents.update(c.owner, { commandId: cid("mv"), agentId: agentB, expectedRevision: b!.revision, teamId: team });
+      c.rt.seenAttempts = ["att-tb"];
+      c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-tb", costMicros: 9, computeMs: 1 }] }];
+      const byTeam = await c.stops.request(c.owner, { commandId: cid("s"), scope: { kind: "team", id: team }, mode: "stop", reason: "team B" });
+      await c.stops.advance(c.owner, { intentId: byTeam.intentId });
+      assert.deepEqual([(await c.stops.cleanupSpend(c.owner, scopeOf(c.task)))?.through], [{ kind: "team", id: team }]);
+      // Someone who may control the child but not the parent's agent is told nothing of those Stops, exactly as if they did not exist.
+      assert.equal(await c.stops.cleanupSpend(c.mgr, scopeOf(c.task)), undefined);
+    });
+
     suite("a wider scope's stop made before the task existed, or before the task was given to that agent, is not the task's answer (review of card L02e)", async (c) => {
       c.rt.seenAttempts = ["att-old"];
       c.rt.cleanups = [{ remaining: [], costs: [{ attemptId: "att-old", costMicros: 10, computeMs: 1 }] }];
