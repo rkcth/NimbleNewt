@@ -91,7 +91,7 @@ const CONFUSABLES: ReadonlyMap<number, string> = (() => {
   const m = new Map<number, string>();
   const add = (latin: string, cps: readonly number[]): void => { for (const cp of cps) m.set(cp, latin); };
   // Cyrillic lower case
-  add("a", [0x430]); add("c", [0x441, 0x1d04]); add("e", [0x435, 0x4bd]); add("i", [0x456, 0x131, 0x1fbe, 0x3b9]); add("l", [0x4cf, 0x29f]); add("j", [0x458]); add("o", [0x43e, 0x3bf, 0x585, 0x1d0f]);
+  add("a", [0x430]); add("c", [0x441, 0x1d04, 0x3f2]); add("e", [0x435, 0x4bd]); add("i", [0x456, 0x131, 0x1fbe, 0x3b9]); add("l", [0x4cf, 0x29f]); add("j", [0x458]); add("o", [0x43e, 0x3bf, 0x585, 0x1d0f]);
   add("p", [0x440, 0x3c1]); add("s", [0x455, 0x17f]); add("x", [0x445, 0x3c7]); add("y", [0x443, 0x3b3, 0x28f]); add("h", [0x4bb, 0x29c]); add("d", [0x501, 0x1d05]); add("q", [0x51b]); add("w", [0x51d, 0x1d21]);
   add("v", [0x3bd, 0x475, 0x1d20]); add("k", [0x43a, 0x3ba, 0x1d0b]); add("n", [0x578, 0x57c, 0x274]); add("u", [0x57d, 0x3c5, 0x1d1c]); add("g", [0x261, 0x581]); add("b", [0x299]); add("t", [0x1d1b]); add("m", [0x1d0d]); add("r", [0x280]); add("z", [0x1d22]); add("f", [0xa730]);
   // Cyrillic and Greek capitals
@@ -120,7 +120,8 @@ function fold(src: string): View {
     i += ch.length;
     if (isHidden(ch) || MARK.test(ch)) continue;
     const cp = ch.codePointAt(0)!;
-    let n = DASHES.has(cp) ? "-" : cp < 0x80 ? ch : ch.normalize("NFKC");
+    // A look-alike is looked up as written first: NFKC turns some into another letter that is not on the list (a capital lunate sigma becomes a plain capital sigma), which would hide it.
+    let n = DASHES.has(cp) ? "-" : cp < 0x80 ? ch : CONFUSABLES.get(cp) ?? ch.normalize("NFKC");
     if (n.length === 1 && n.charCodeAt(0) >= 0x80) n = CONFUSABLES.get(n.charCodeAt(0)) ?? n;
     for (let k = 0; k < n.length; k++) { start.push(at); end.push(i); }
     text += n;
@@ -311,7 +312,8 @@ export function keyContextHex(text: string, at: number, run: string): boolean {
  * (`…sk-live-…1234⏎step 011`). The token is redacted from the plain view; the word is the next line's own. (A key whose wrapped tail happens to be a plain word keeps that tail: see the notes.)
  */
 function runsOnIntoWord(text: string, start: number, end: number, pattern: RegExp): boolean {
-  const piece = text.slice(start, end);
+  // Seen through the same fold as the match (a fullwidth or look-alike letter in the token would otherwise fail the ASCII pattern, and the next line's word would be redacted with the token).
+  const piece = fold(text.slice(start, end)).text;
   const brk = piece.search(/\r\n?|\n/);
   if (brk < 0) return false;
   const tail = piece.slice(Math.max(piece.lastIndexOf("\n"), piece.lastIndexOf("\r")) + 1).trim();

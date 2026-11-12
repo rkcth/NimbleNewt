@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { fallbackClean, safeMessage, usesSharedScanner } from "./safe-error.mjs";
 
 // The launcher and host scripts print errors through safeMessage (the shared scanner of the built contracts package) instead of stripping only `Bearer ...`. Every key is built at run time
@@ -65,4 +67,34 @@ test("the entry scripts print a key in their own error text cleaned", () => {
     assert.ok(text.length > 0, `${script} printed nothing`);
     assert.ok(!text.includes(KEY.slice(4, 20)), `${script} printed the key: ${text.slice(0, 200)}`);
   }
+});
+
+test("a checkout in a folder with a space or a non-ASCII letter still finds the shared scanner", async () => {
+  // Review of the scanner slice: the root was read from the URL's pathname, which keeps percent escapes (`John%20Smith`), so such a checkout always used the weaker fallback.
+  const base = mkdtempSync(join(tmpdir(), "nn-safe-"));
+  try {
+    for (const name of ["John Smith", "R\u00e9sum\u00e9"]) {
+      const repo = join(base, name);
+      mkdirSync(join(repo, "scripts"), { recursive: true });
+      cpSync(here("safe-error.mjs"), join(repo, "scripts", "safe-error.mjs"));
+      symlinkSync(here("../packages"), join(repo, "packages"), "junction");
+      const copy = await import(pathToFileURL(join(repo, "scripts", "safe-error.mjs")).href);
+      assert.equal(copy.usesSharedScanner(), true, `${name}: the shared scanner is used`);
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("the fallback also removes a password in an address, short key prefixes, a web token and a key split by an accent", () => {
+  const forms = [
+    ["postgres://admin:" + body(10, 9) + "@db.local/app", body(10, 9)],
+    ["s" + "k-" + body(16, 10), body(16, 10)],
+    ["xo" + "xb-" + body(10, 11), body(10, 11)],
+    ["eyJ" + body(6, 12) + ".eyJ" + body(6, 13) + "." + body(6, 14), body(6, 13)],
+    [KEY.slice(0, 9) + cyr(0x301) + KEY.slice(9), KEY.slice(12, 22)],
+  ];
+  for (const [form, secret] of forms) {
+    const out = fallbackClean(`oops ${form} end`);
+    assert.ok(out.includes("[removed]") && !out.includes(secret), out);
+  }
+  assert.equal(fallbackClean("could not reach https://example.com/api: ECONNREFUSED"), "could not reach https://example.com/api: ECONNREFUSED");
 });
