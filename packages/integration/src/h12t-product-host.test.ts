@@ -98,8 +98,29 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     const s = c.services;
     const owner = await s.principals.authenticate(l.ownerToken);
     const api = (op: string, args: Record<string, unknown>, id?: string) => c.api.handle(l.ownerToken, { v: 1, op, ...(id === undefined ? {} : { commandId: id }), args } as never) as Promise<any>;
+    // A landing is made under the project's integrator lease on the branch the owner's policy names (card P10): the integrator holds one for that branch, taken afresh when the branch changes.
+    // The holder is a real, active agent (the owner can name only one of those).
+    const integrator = "integrator";
+    await s.principals.enroll(owner, { commandId: "enroll-integrator", kind: "agent", name: integrator, grants: [] });
+    let leased = 0;
+    const leaseFor = async (taskId: string): Promise<{ leaseId?: string; fence?: number }> => {
+      const project = (await s.projects.getTask(taskId))!.projectId;
+      const own = (await api("project.branches.get", { project })).result.item.landing as string | undefined;
+      const inst = (await s.configuration.installationValues(["workspace.landing.branch"]))["workspace.landing.branch"];
+      const branch = own ?? inst;
+      if (typeof branch !== "string") return {};
+      const items = (await api("integrator.lease.list", { projectId: project })).result.items as { leaseId: string; fence: number; branch: string; live: boolean; holder: string }[];
+      let l = items.find((x) => x.branch === branch && x.live && x.holder === integrator);
+      if (l === undefined) {
+        if (items.some((x) => x.branch === branch && x.live)) await api("integrator.lease.release", { projectId: project, branch }, `unlease-${leased++}`);
+        const taken = await api("integrator.lease.acquire", { taskId, branch, ttlMs: 3_600_000, holder: integrator }, `lease-${leased++}`);
+        assert.equal(taken.ok, true, JSON.stringify(taken));
+        l = taken.result.item;
+      }
+      return { leaseId: l!.leaseId, fence: l!.fence };
+    };
     const ask = async (operation: string, taskId: string, id: string) => {
-      const r = await api("workspace.request", { operation, taskId, reason: `h12t ${operation}` }, id);
+      const r = await api("workspace.request", { operation, taskId, reason: `h12t ${operation}`, ...(operation === "landing" ? await leaseFor(taskId) : {}) }, id);
       assert.equal(r.ok, true, JSON.stringify(r));
       return r.result as { state: string; reason?: string; summary?: string; detail?: Record<string, unknown> };
     };
@@ -156,9 +177,9 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.equal(sh(checkoutA, "--git-dir", gitA, "--work-tree", checkoutA, "status", "--porcelain"), "", "the checkout holds nothing uncommitted");
 
     // ---- the owner's landing policy: nothing named, nothing landed (no hard-coded branch) ----
-    const unnamed = await ask("landing", ta.taskId, "land-a-0");
-    assert.notEqual(unnamed.state, "done", JSON.stringify(unnamed));
-    assert.match(JSON.stringify(unnamed), /no landing branch set/, JSON.stringify(unnamed));
+    const unnamed = await api("workspace.request", { operation: "landing", taskId: ta.taskId, reason: "h12t landing" }, "land-a-0");
+    assert.equal(unnamed.ok, false, JSON.stringify(unnamed));
+    assert.match(JSON.stringify(unnamed), /lease|landing branch/, "no landing without a lease, and no lease covers a project with no landing branch");
     assert.ok(!existsSync(join(garden, "src", "b.ts")));
 
     // The owner names the installation's landing branch. The commit permit is left at its default (required): the release commit above is the platform's and carries no review-gate permit, so the product host refuses the landing.
