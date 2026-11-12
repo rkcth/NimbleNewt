@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assignedTaskIn, projectIds, type RouteProbes } from "../dispatch/loops.js";
 import { createTargetVersions, type TargetVersionOptions } from "../dispatch/target-versions.js";
-import { allows, allowsExactly } from "../security/access.js";
+import { allows } from "../security/access.js";
 import { WORKER_PROTOCOL } from "../remote/protocol.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
@@ -666,14 +666,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases, {
       activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
       landingBranch: async (call) => (await landingBranchOf(call)).branch,
-      // The holder's right, from its effective grants now (P10 second slice review): a holder whose right was taken away can neither be named, nor landed for, nor keep the branch against the next integrator.
-      holderMayLand: async (agentId, projectId) => {
-        const p = await principals.get(`agent:${agentId}`);
-        if (p === undefined || p.kind !== "agent" || p.state !== "active") return false;
-        const effective = await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants } as Principal, (options.dispatch?.clock ?? (() => new Date().toISOString()))());
-        return allowsExactly(effective, "integration.lease", projectId);
-      },
-      onForcedRelease: async (_by, l, why) => { await activity.record({ id: "service:integrator-leases", kind: "service", name: "integrator-leases", grants: [] } as Principal, { commandId: `lease-force:${l.leaseId}:${l.fence}`, taskId: l.taskId, kind: "ownership", summary: why === "owner" ? `The owner took the integrator lease of branch ${l.branch} away from ${l.holder} (fence ${l.fence}).` : `The integrator lease of branch ${l.branch} held by ${l.holder} (fence ${l.fence}) was ended because ${l.holder} is no longer an active agent with the right to land.`, manifest: { refs: [{ kind: "task", id: l.taskId }] } } as never); },
+      onForcedRelease: async (_by, l, why) => { await activity.record({ id: "service:integrator-leases", kind: "service", name: "integrator-leases", grants: [] } as Principal, { commandId: `lease-force:${l.leaseId}:${l.fence}`, taskId: l.taskId, kind: "ownership", summary: why === "owner" ? `The owner took the integrator lease of branch ${l.branch} away from ${l.holder} (fence ${l.fence}).` : `The integrator lease of branch ${l.branch} held by ${l.holder} (fence ${l.fence}) was ended because ${l.holder} is no longer an active agent.`, manifest: { refs: [{ kind: "task", id: l.taskId }] } } as never); },
     });
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
       landingLease: async (by, call) => {

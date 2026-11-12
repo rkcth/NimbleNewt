@@ -19,12 +19,11 @@ for (const backend of backends) {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     const leases = IntegratorLeaseService.withEpoch(w.storage, w.epoch, { clock: w.clock.now, pause: async () => undefined });
-    const retired = new Set<string>(), noRight = new Set<string>();
+    const retired = new Set<string>();
     const told: { holder: string; why: string; fence: number }[] = [];
     let branch: string | undefined = landing, unreadable = false;
     const ops = new IntegratorLeaseOps(leases, {
       activeAgent: async (id) => !retired.has(id),
-      holderMayLand: async (id) => !noRight.has(id),
       landingBranch: async () => { if (unreadable) throw new Error("settings down"); return branch; },
       onForcedRelease: async (_by: Principal, l: IntegratorLease, why) => { told.push({ holder: l.holder, why, fence: l.fence }); },
     });
@@ -33,7 +32,7 @@ for (const backend of backends) {
       return w.principals.authenticate((await w.principals.issueCredential(w.owner, `agent:${name}`)).token);
     };
     const task = async (title: string): Promise<string> => (await w.projects.createTask({ commandId: `task-${title}`, actor: w.owner.id, projectId: w.project, title })).id;
-    return { store, w, leases, ops, person, task, retired, noRight, told, setBranch: (b: string | undefined) => { branch = b; }, unreadable: () => { unreadable = true; }, close: () => store.close() };
+    return { store, w, leases, ops, person, task, retired, told, setBranch: (b: string | undefined) => { branch = b; }, unreadable: () => { unreadable = true; }, close: () => store.close() };
   };
 
   test(`${backend.name}: a lease is taken only on the project's landing branch (card P10, second slice)`, async () => {
@@ -99,43 +98,30 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
-  test(`${backend.name}: a holder that lost the right is treated like a retired one; a long command ID still takes over (card P10, second slice review)`, async () => {
+  test(`${backend.name}: a long command ID still takes a retired holder's branch; a repeat tells nothing more; two takers race and exactly one wins (card P10, second slice review)`, async () => {
     const r = await rig();
     try {
-      const ann = await r.person("ann"), bob = await r.person("bob");
-      const cy = await r.person("cy");
+      const ann = await r.person("ann"), bob = await r.person("bob"), cy = await r.person("cy");
       const t = await r.task("one");
       const first = await r.ops.acquire(ann, { commandId: "a1", taskId: t, branch: "main", ttlMs: 10 * MIN });
-      r.noRight.add("ann");
-      // The owner acting for it lands nothing (`forbidden`, as for the holder itself), with or without the numbers.
-      await refuses("forbidden", () => r.ops.checkLanding(r.w.owner, { taskId: t, projectId: r.w.project, branch: "main", leaseId: first.leaseId, fence: first.fence }));
-      await refuses("forbidden", () => r.ops.checkLanding(r.w.owner, { taskId: t, projectId: r.w.project, branch: "main", leaseId: undefined, fence: undefined }));
-      // The owner cannot name it as a holder (it could neither renew nor land).
-      await r.ops.release(r.w.owner, { commandId: "o0", projectId: r.w.project, branch: "main" });
-      await refuses("invalid_command", () => r.ops.acquire(r.w.owner, { commandId: "o1", taskId: t, branch: "main", ttlMs: 10 * MIN, holder: "ann" }));
-      r.noRight.delete("ann");
-      const again = await r.ops.acquire(r.w.owner, { commandId: "o2", taskId: t, branch: "main", ttlMs: 10 * MIN, holder: "ann" });
-      assert.equal(again.fence, 2);
-      r.noRight.add("ann");
-      // The next taker ends it at once, with a command ID of the longest allowed length (the release it makes is its own valid command).
+      r.retired.add("ann");
+      // The longest allowed command ID: the release the takeover makes is its own valid command.
       const long = "b".repeat(120);
       const second = await r.ops.acquire(bob, { commandId: long, taskId: t, branch: "main", ttlMs: 10 * MIN });
-      assert.deepEqual([second.holder, second.fence], ["bob", 3]);
-      assert.deepEqual(r.told.at(-1), { holder: "ann", why: "retired", fence: 2 });
-      // The same ask again answers what it did and tells nothing more; the released hold stays released.
-      const toldBefore = r.told.length;
-      assert.equal((await r.ops.acquire(bob, { commandId: long, taskId: t, branch: "main", ttlMs: 10 * MIN })).fence, 3);
-      assert.equal(r.told.length, toldBefore);
-      // Two agents taking the branch from a retired holder at the same moment: exactly one wins with the next fence, the other is refused honestly.
-      r.retired.add("bob");
-      r.noRight.delete("ann"); r.retired.delete("ann");
+      assert.deepEqual([second.holder, second.fence], ["bob", first.fence + 1]);
+      assert.deepEqual(r.told, [{ holder: "ann", why: "retired", fence: first.fence }]);
+      // The same ask again answers what it did and tells nothing more.
+      assert.equal((await r.ops.acquire(bob, { commandId: long, taskId: t, branch: "main", ttlMs: 10 * MIN })).fence, second.fence);
+      assert.equal(r.told.length, 1);
+      // Two agents taking the branch from a retired holder at the same moment: exactly one wins with the next fence, the other is refused honestly, and the release is told once.
+      r.retired.add("bob"); r.retired.delete("ann");
       const both = await Promise.allSettled([r.ops.acquire(ann, { commandId: "race-a", taskId: t, branch: "main", ttlMs: 10 * MIN }), r.ops.acquire(cy, { commandId: "race-c", taskId: t, branch: "main", ttlMs: 10 * MIN })]);
       const won = both.filter((x): x is PromiseFulfilledResult<IntegratorLease> => x.status === "fulfilled");
       assert.equal(won.length, 1, JSON.stringify(both.map((x) => x.status === "rejected" ? String(x.reason) : x.value.holder)));
-      assert.equal(won[0]!.value.fence, 4);
+      assert.equal(won[0]!.value.fence, second.fence + 1);
       const lost = both.find((x) => x.status === "rejected") as PromiseRejectedResult;
       assert.ok(lost.reason instanceof DomainError && lost.reason.code === "unavailable", String(lost.reason));
-      assert.equal(r.told.filter((x) => x.holder === "bob").length, 1, "the retired holder's release is told once");
+      assert.equal(r.told.filter((x) => x.holder === "bob").length, 1);
     } finally { await r.close(); }
   });
 }

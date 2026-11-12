@@ -76,7 +76,6 @@ test("the integrator lease through the state API and chat, and a landing that mu
     const annRev = async () => (await c.services.principals.get("agent:ann"))!.revision;
     await c.services.principals.setGrants(rob, { commandId: "sg1", principalId: "agent:ann", expectedRevision: await annRev(), grants: [{ action: "workspace.manage", project }] });
     assert.equal((await land(ann, "w5r", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "the right was taken away");
-    assert.equal((await land(O, "w5o")).error?.code, "forbidden", "nor can the owner land for a holder whose right was taken away (P10 second slice review)");
     await c.services.principals.setGrants(rob, { commandId: "sg2", principalId: "agent:ann", expectedRevision: await annRev(), grants });
 
     // Giving it back: a stranger's release is refused, the holder's works; the owner can end one without a fence.
