@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, realpathSync, chmodSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, chmodSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep, basename } from "node:path";
 import { ArchiveError, DEFAULT_ARCHIVE_LIMITS, digestOf, validPackageName, validPackageVersion, type ArchiveLimits } from "./archive.js";
@@ -177,6 +177,22 @@ export class LocalEnvironmentRuntime {
       const seen = await this.#opts.worker.session({ agentId: input.agentId, revision: input.revision, checkpointId: input.checkpointId });
       return { ok: true, sessionIntact: seen.sessionIntact === true, compactionIntact: seen.compactionIntact === true };
     } catch (error) { return { ok: false, reason: this.#why(error) }; }
+  }
+
+  /**
+   * The real path of one named revision's packages directory (the revision an attempt was pinned to), for a read-only mount. A revision on disk is whole and is not rebuilt, so the attempt keeps seeing it after the agent's active revision moves on.
+   * Undefined when this host has no environment for the agent at all (as before); a host that has some but not this revision, or whose copy no longer matches its record, throws (the attempt then does not start).
+   */
+  async packagesOf(agentId: string, revision: number): Promise<string | undefined> {
+    const dir = this.environments.revisionDir(agentId, revision);
+    if (!existsSync(dir)) {
+      if ((await this.environments.active(agentId)) === undefined) return undefined;
+      throw new Error(`revision ${revision} of the environment is not on this host`);
+    }
+    const real = realpathSync(join(dir, "packages"));
+    if (!real.startsWith(this.#root + sep)) throw new Error("the pinned environment is not inside the environments directory");
+    await this.environments.verify(agentId, revision);
+    return real;
   }
 
   /** The real path of the agent's active packages directory, for a read-only mount into the agent's sandbox; undefined when it has no active revision. Never follows a link out of the environments directory. */

@@ -74,8 +74,9 @@ test("an approved package is installed into the agent's environment directory by
     assert.equal((await call(boot.token, "environment.get", { agentId })).result.item.active.revision, 2);
     assert.equal((await c.services.pauses.gate(rob, { kind: "agent", id: ann.id }))?.intent, "active", "the agent works again");
     assert.deepEqual(fetched, ["https://registry.example.org/ripgrep.tgz"], "fetched once, for the trial; the reload used the verified copy");
-    const grant = await host.reach("environment", { agentId });
+    const grant = await host.reach("environment", { agentId, environmentRevision: 2 });
     assert.equal(grant!.readOnly![0]!.guest, "/opt/environment");
+    assert.deepEqual(await host.reach("environment", { agentId }), {}, "an attempt pinned to no environment gets none (card A09 sixth slice)");
 
     // ---- the bytes served are not the bytes approved: nothing is installed and the request fails with the reason
     const wrong = pack("fd", "9.0.0", { "bin/fd.js": "evil\n" });
