@@ -727,7 +727,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       const artifacts = ArtifactService.withEpoch(storage, epoch, blobs, { ...ro, onPublished: async (e) => { await ActivityService.withEpoch(storage, epoch, ro).record(principal, { commandId: `artv:${e.artifactId}`, taskId: e.taskId, kind: "artifact-version", summary: `Recorded artifact ${e.name} (${e.files} file${e.files === 1 ? "" : "s"}).`, manifest: { refs: [{ kind: "artifact", id: e.artifactId }] } } as never); } });
       const d = (): DispatcherService => holder.dispatcher!;
       remote = RemoteWorkerService.withEpoch(storage, epoch, {
-        principal, hosts, artifacts,
+        principal, hosts, artifacts, onError: (error) => i.onError?.(error),
         ...(i.securityReport === undefined ? {} : { reportSecurity: i.securityReport }),
         ...(i.detect === undefined ? {} : { detect: i.detect }),
         // What stall detection is told about a remote worker's model calls (card L05d): the controller does not carry them, so the stream messages are the report. The placement kept the order's route and the host (card L05e), so a remote call adds its reading of the route's speed on that host.
@@ -755,6 +755,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         // A reconnected worker that waits for the owner is a Needs-you notice (the notice kind is "maintenance"; the owner may change its level like any kind's).
         notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "reconnect", id: n.attemptId }, detail: n.detail }); },
       }, { ...ro, ...(i.options.remote.protocol === undefined ? {} : { protocol: i.options.remote.protocol }), ...(i.options.remote.fileBytes === undefined ? {} : { fileBytes: i.options.remote.fileBytes }), ...(i.options.remote.settleMs === undefined ? {} : { settleMs: i.options.remote.settleMs }) });
+      // Card H07b: the platform index is filled from the hosts on record, so a restarted controller does not wait for each host to connect before it can choose among them. A failure is reported and the index fills as hosts connect.
+      try { await remote.rebuildIndex(principal); } catch (error) { i.onError?.(error); }
       // The owner's limits and best-effort setting reach a remote worker in the dispatch contract, read afresh at every start (card H12a).
       const ownerPolicy = { limits: async () => (i.workerLimits === undefined ? checkLocalWorkerLimits(i.options.local?.limits) : i.workerLimits()), bestEffort: async () => (i.workerPolicy === undefined ? false : i.workerPolicy.bestEffortAllowed()) };
       for (const h of i.options.remote.hosts) {

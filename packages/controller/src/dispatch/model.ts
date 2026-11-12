@@ -24,6 +24,8 @@ export interface DispatchRevisions {
   readonly decisions: number;
   /** The agent's environment revision pinned for the attempt (A08). Absent when the agent has no environment. */
   readonly environment?: number;
+  /** Set when the attempt was first started while its agent had no environment: a restart of the attempt then runs without one too, even if an environment was made since (an environment made or changed while an attempt runs affects only later attempts). */
+  readonly noEnvironment?: true;
   /** The task contract's version. */
   readonly contract: number;
 }

@@ -21,7 +21,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface World {
   readonly m: MaintenanceService; readonly applier: FakeApplier; readonly owner: Principal; readonly agents: AgentService; readonly grants: GrantService; readonly principals: PrincipalService;
   readonly time: { ms: number };
-  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number }): MaintenanceService;
+  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean> }): MaintenanceService;
   make(name: string, by?: Principal, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
@@ -41,7 +41,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     const grants = GrantService.withEpoch(open.storage, projects.epoch, options);
     const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
     const applier = new FakeApplier();
-    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
+    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean> } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     const m = service();
     const make: World["make"] = async (friendlyName, by = owner, supervisorId) => {
       const created = await agents.create(by, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
@@ -143,12 +143,11 @@ for (const [index, backend] of backends.entries()) {
       }
       // Free text keeps its characters in the record, and the reviewer reads it cleaned and warned about.
       const key = "gh" + "p_" + "Q7".repeat(18);
-      const tricky = await w.m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("tricky", { source: `${SRC}/tricky?access=${key}` }), reason: "needed", rollbackPlan: `remove it${rlo}${zw} and keep the data` });
+      const tricky = await w.m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("tricky", { source: `${SRC}/tricky` }), reason: "needed", rollbackPlan: `remove it${rlo}${zw} and keep the data` });
       const r = (await w.m.get(w.owner, tricky.maintenanceId)).review as Record<string, unknown>;
       const all = JSON.stringify(r);
       assert.equal([...all].some((ch) => ch === rlo || ch === zw), false, "no direction-changing or invisible character is shown");
-      assert.equal(all.includes(key), false, "the secret-shaped value in the source is not shown");
-      assert.match(String(r.source), /\[redacted\]/);
+      assert.equal(all.includes(key), false, "the secret-shaped value is not shown");
       assert.match(String(r.rollback), /^the requester's plan, not checked by the platform: remove it and keep the data$/);
       assert.match(String(r.warning), /invisible or direction-changing characters or a secret-shaped value/);
       // An older record (stored before the source rule) is shown cleaned as well.
@@ -158,6 +157,11 @@ for (const [index, backend] of backends.entries()) {
       const old = (await w.m.get(ann.principal, tricky.maintenanceId)).review as Record<string, unknown>;
       assert.equal(old.source, `${SRC}/oldexe.txt`);
       assert.equal(typeof old.warning, "string");
+      // A source stored before the query-string rule (the request is refused today, see the sixth slice) is still shown without its secret.
+      await w.storage.applyOperation({ operationId: cid("old-op"), epoch: await w.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-10-31T10:00:00.000Z", changes: [{ type: "update", ref: { kind: "maintenance", id: tricky.maintenanceId }, expectedRevision: (await w.storage.getAggregate({ kind: "maintenance", id: tricky.maintenanceId }))!.revision, body: { ...body, spec: { ...body.spec, source: `${SRC}/tricky?access=${key}` } } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+      const older = (await w.m.get(ann.principal, tricky.maintenanceId)).review as Record<string, unknown>;
+      assert.equal(JSON.stringify(older).includes(key), false, "the secret-shaped value in an older source is not shown");
+      assert.match(String(older.source), /\[redacted\]/);
       // No summary of any kind judges the change: it never says safe.
       const kinds: [string, unknown][] = [["package", pkg("p1")], ["extension", { ...pkg("e1"), installScripts: true }], ["mount", { mountPath: "/data/x", resource: "shared.x", mode: "write" }], ["network", { site: "n.example.net", port: 22 }], ["skill", { name: "s1", digest: D("b") }], ["host-policy", { setting: "cpu", change: "more" }], ["base", { change: "add a tool" }]];
       for (const [kind, spec] of kinds) {
@@ -278,6 +282,102 @@ for (const [index, backend] of backends.entries()) {
         if (end.status === "withdrawn") assert.equal(ran, 0, "a withdrawn request is never applied");
         else assert.ok(["applied", "revoked"].includes(end.status), end.status);
       }
+    });
+  });
+}
+
+// ---- A09 sixth slice: secrets in a source's query string, and a supervisor that is held (2026-11-12) ---------------------------------------------
+
+// Secret-shaped values are built at run time, never written whole.
+const ghKey = "gh" + "p_" + "Q7".repeat(18);
+const skKey = "s" + "k-" + "Zx3".repeat(12);
+
+for (const [index, backend] of backends.entries()) {
+  test(`a source whose query string or fragment carries a secret is refused at the door, for a request and for the catalogue, without repeating it; ordinary query strings and the same text in the path are accepted (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const secret = [
+        `${SRC}?token=abc123`, `${SRC}?access_token=abc123`, `${SRC}?api_key=abc123`, `${SRC}?api%5Fkey=abc123`, `${SRC}?API-KEY=abc123`, `${SRC}?X-Amz-Signature=0123abcd`, `${SRC}?sig=abc`, `${SRC}?key=abc`, `${SRC}?password=hunter2`,
+        `${SRC}?download=1&secret=abc`, `${SRC}?download=1;auth=abc`, `${SRC}#token=abc`, `${SRC}?a=1#access_key=abc`, `${SRC}?%74oken=abc`, `${SRC}?t=${ghKey}`, `${SRC}?t=${skKey}`, `${SRC}?t=${encodeURIComponent(ghKey)}`, `${SRC}#${ghKey}`, `${SRC}?${ghKey}`,
+        `${SRC}?authorization=Bearer%20abcdef`, `${SRC}?sessionid=abc`,
+      ];
+      for (const bad of secret) {
+        for (const run of [() => request(w, ann.principal, "package", pkg("q-pkg", { source: bad })), () => w.m.catalogue(w.owner, { commandId: cid("c"), add: true, name: "q-pkg", version: "1.2.3", digest: D("a"), source: bad })]) {
+          await assert.rejects(run, (e: unknown) => {
+            assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, "invalid_command", bad);
+            assert.equal(e.message.includes(ghKey) || e.message.includes(skKey) || e.message.includes("abc123"), false, "the refusal never repeats the secret");
+            assert.match(e.message, /secret in its query string or fragment/);
+            return true;
+          });
+        }
+      }
+      const fine = [`${SRC}?download=1`, `${SRC}?v=1.2.3&format=tgz`, `${SRC}#readme`, `${SRC}?author=bob`, `${SRC}?token=`, `${SRC}/token/abc`, `${SRC}/access_token`, `${SRC}?mirror=eu-west&arch=x86_64`];
+      for (const ok of fine) {
+        const made = await request(w, ann.principal, "package", pkg(`q-ok-${n}`, { source: ok }));
+        assert.equal((await w.body(made.maintenanceId)).status, "pending", ok);
+      }
+      // Review fix: a parameter named pass or pw is a password too; a token in the PATH (as some private registries put it) is refused like one in the query string, also encoded twice.
+      for (const bad of [`${SRC}?pass=abc123`, `${SRC}?pw=abc123`]) await assert.rejects(() => request(w, ann.principal, "package", pkg("q-pkg", { source: bad })), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /secret in its query string/.test(e.message) && !e.message.includes("abc123"));
+      for (const bad of [`${SRC}/${ghKey}/simple/x.tgz`, `${SRC}/r/${skKey}/x.tgz`, `${SRC}/${encodeURIComponent(encodeURIComponent(ghKey))}/x.tgz`]) {
+        for (const run of [() => request(w, ann.principal, "package", pkg("q-pkg", { source: bad })), () => w.m.catalogue(w.owner, { commandId: cid("c"), add: true, name: "q-pkg", version: "1.2.3", digest: D("a"), source: bad })]) {
+          await assert.rejects(run, (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /value shaped like a secret/.test(e.message) && !e.message.includes(ghKey) && !e.message.includes(skKey), bad);
+        }
+      }
+      // Content-addressed paths and digests are not secrets: a registry file path with a long hex segment, an IPFS-style name, a pip `#sha256=` link.
+      const hex = "d4dc8cbf4b79a37c8ef04c2e1361cfa027182c0e450b5f4a1c2e3d9b7a6f";
+      for (const ok of [`https://files.example.org/packages/3f/2a/${hex}/requests-2.31.0-py3-none-any.whl`, `https://files.example.org/dl/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/file.tgz`, `https://files.example.org/p/requests-2.31.0.tar.gz#sha256=${hex}0a1b`]) {
+        const made = await request(w, ann.principal, "package", pkg(`q-ok-${n}`, { source: ok }));
+        assert.equal((await w.body(made.maintenanceId)).status, "pending", ok);
+      }
+      // Nothing was stored for a refusal.
+      assert.equal((await w.m.list(w.owner, {})).items.every((i) => !JSON.stringify(i).includes("abc123")), true);
+    });
+  });
+
+  test(`a supervisor that a pause, suspend or stop gate holds does not decide: refused while held, also when the gate cannot be read; an approval that waited is judged again at the claim; the owner is never held; once released the supervisor decides (${backend.name})`, async () => {
+    const held = new Set<string>();
+    let broken = false;
+    await world(index, async (w) => {
+      const mm = w.service({ held: async (id) => { if (broken) throw new Error("the pause gates cannot be read"); return held.has(id); } });
+      const boss = await w.make("Boss");
+      const bob = await w.make("Bob", w.owner, boss.id);
+      await mm.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+      await mm.change(w.owner, { commandId: cid("s"), bossKinds: ["package"] });
+      await mm.idle();
+      const ask = (name: string) => mm.request(bob.principal, { commandId: cid("r"), kind: "package", spec: pkg(name), reason: "needed", rollbackPlan: "undo it" });
+      const decide = async (by: Principal, id: string, verdict: "approve" | "reject" = "approve") => mm.decide(by, { commandId: cid("d"), maintenanceId: id, verdict, specDigest: await specOf(w, id) });
+      // Held: refused, nothing changes, the request still waits.
+      const one = await ask("held-1");
+      held.add(boss.id);
+      await refuses("forbidden", () => decide(boss.principal, one.maintenanceId));
+      await refuses("forbidden", () => decide(boss.principal, one.maintenanceId, "reject"));
+      assert.equal((await w.body(one.maintenanceId)).status, "pending");
+      assert.equal(w.applier.calls.filter((c) => c.id === one.maintenanceId).length, 0);
+      // Reading is not deciding: the held supervisor still reads its report's request.
+      assert.equal((await mm.get(boss.principal, one.maintenanceId)).status, "pending");
+      // The gate cannot be read: also refused (fail closed).
+      held.delete(boss.id); broken = true;
+      await refuses("forbidden", () => decide(boss.principal, one.maintenanceId));
+      broken = false;
+      // The owner is not held by anything.
+      held.add(boss.id);
+      assert.equal((await decide(w.owner, one.maintenanceId)).status === "pending", false);
+      await mm.idle();
+      // Released: the supervisor decides again.
+      held.clear();
+      const two = await ask("held-2");
+      assert.notEqual((await decide(boss.principal, two.maintenanceId)).status, "pending");
+      await mm.idle();
+      // An approval made while free that waited for the host is judged again at the claim: held meanwhile, it goes back to waiting and the applier is not asked.
+      const three = await ask("held-3");
+      w.applier.nextApply.push({ outcome: "unsupported", reason: "the host cannot take it now" });
+      assert.equal((await decide(boss.principal, three.maintenanceId)).status, "approved");
+      const before = w.applier.calls.filter((c) => c.op === "apply" && c.id === three.maintenanceId).length;
+      held.add(boss.id);
+      for (let i = 0; i < 2; i++) { await mm.tick(); await mm.resume(); }
+      await mm.idle();
+      assert.equal((await w.body(three.maintenanceId)).status, "pending");
+      assert.equal(w.applier.calls.filter((c) => c.op === "apply" && c.id === three.maintenanceId).length, before);
     });
   });
 }

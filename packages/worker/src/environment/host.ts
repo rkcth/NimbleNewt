@@ -29,7 +29,7 @@ export interface LocalEnvironmentHost {
    * What a named reach of the recipe stands for (`LocalHostOptions.reach`): `environment` mounts the agent's verified active packages read-only at /opt/environment and names it in `NN_ENVIRONMENT`; any other name is not this
    * function's to answer (`undefined`). An agent with no active revision gets an empty grant.
    */
-  readonly reach: (name: string, order: { readonly agentId: string }) => Promise<{ readonly readOnly?: readonly { readonly host: string; readonly guest: string }[]; readonly env?: Readonly<Record<string, string>> } | undefined>;
+  readonly reach: (name: string, order: { readonly agentId: string; readonly environmentRevision?: number }) => Promise<{ readonly readOnly?: readonly { readonly host: string; readonly guest: string }[]; readonly env?: Readonly<Record<string, string>> } | undefined>;
 }
 
 /**
@@ -61,7 +61,8 @@ export function localEnvironmentHost(options: LocalEnvironmentHostOptions): Loca
     runtime, problem: undefined,
     async reach(name, order) {
       if (name !== "environment") return undefined;
-      const packages = await runtime.activePackages(order.agentId);
+      // Exactly the revision the controller pinned to the attempt, whatever is active now; an attempt pinned to none gets no environment.
+      const packages = order.environmentRevision === undefined ? undefined : await runtime.packagesOf(order.agentId, order.environmentRevision);
       return packages === undefined ? {} : { readOnly: [{ host: packages, guest: "/opt/environment" }], env: { NN_ENVIRONMENT: "/opt/environment" } };
     },
   };
