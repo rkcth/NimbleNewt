@@ -75,6 +75,7 @@ import type { ResumeSettingsService } from "../continuation/resume-settings.js";
 import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
 import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
+import type { IntegratorLeaseOps } from "../landing/lease-ops.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
@@ -136,6 +137,8 @@ export interface StateApiDeps {
   readonly meetings?: MeetingService;
   /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get">;
+  /** The authorised door to the integrator leases of landing (card P10). */
+  readonly integratorLeases?: Pick<IntegratorLeaseOps, "acquire" | "renew" | "release" | "list">;
   /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
   readonly status?: Pick<StatusService, "ask" | "attention">;
   readonly invitations?: InvitationInbox;
@@ -327,6 +330,7 @@ export class StateApi {
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
+        ...(this.#deps.integratorLeases === undefined ? {} : { integratorLeases: this.#deps.integratorLeases }),
         ...(this.#deps.status === undefined ? {} : { status: this.#deps.status }),
         ...(this.#deps.invitations === undefined ? {} : { invitations: this.#deps.invitations }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),

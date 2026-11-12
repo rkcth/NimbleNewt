@@ -161,6 +161,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Kept short: the proposal line the owner confirms is this verb followed by the operation, the task and the reason, and it is cut at CHAT_LIMITS.line.
   "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release is refused for now; reason: the owner's words)", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
+  // Ending an integrator lease by force (card P10): the owner names the project's branch; shown first because it stops the integrator's landing at once.
+  "integrator.lease.release": { verb: "End the integrator lease of a landing branch by force (the holder's landing stops; branch: the branch's name)", mode: "propose", needsProject: true },
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },
   "integration.default.set": { verb: "Change how new projects land finished work", mode: "propose" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
