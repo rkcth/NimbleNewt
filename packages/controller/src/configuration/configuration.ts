@@ -40,7 +40,7 @@ export interface LayerBody {
   readonly history: readonly HistoryEntry[];
 }
 
-export interface Scope { readonly agentId?: string; readonly taskId?: string }
+export interface Scope { readonly agentId?: string; readonly taskId?: string; /** A project (card H12u): the installation and that project's layer. With a task, it must be the task's own project. */ readonly projectId?: string }
 
 export interface ResolvedSetting {
   readonly value: unknown;
@@ -70,6 +70,7 @@ export interface ConfigurationOptions extends RunnerOptions {
 }
 
 export const CONFIG_LIMITS = { keysPerLayer: 200, history: 40, problems: 20, scan: 1000 } as const;
+const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const TEAM_ID = /^team-[a-z2-7]{20}$/;
 const AGENT_ID = /^agt-[a-z2-7]{20}$/;
 const TASK_ID = /^task-[a-z2-7]{20}$/;
@@ -80,13 +81,13 @@ const layerIdOf = (layer: LayerKind, scopeId: string): string => (layer === "ins
 interface Link { readonly layer: LayerKind; readonly id: string; readonly applied: Readonly<Record<string, SettingEntry>>; readonly aggregate: Aggregate | undefined }
 
 /**
- * Layered configuration (card U10). Settings live in layers (installation, team, agent, task); each setting says whether a more specific layer simply overrides (`default`) or may only narrow
+ * Layered configuration (card U10). Settings live in layers (installation, project (card H12u), team, agent, task); each setting says whether a more specific layer simply overrides (`default`) or may only narrow
  * (`restriction`), and a layer can lock a setting so the layers below it cannot change it. Changes are staged as a draft and applied as a whole after the combination of values is checked;
  * a refused apply leaves what is in force untouched and says why. Every value can be asked for with where it comes from, whether it is locked, and when a change to it starts to count. Applying
  * configuration touches nothing but configuration: assignments, pauses and decisions are not read or written.
  *
- * Who may write: the owner, any layer; anyone else holding `config.write` may stage and apply team, agent and task layers, but never the installation layer, never a lock, and never a
- * value wider than the layers above allow.
+ * Who may write: the owner, any layer; anyone else holding `config.write` may stage and apply team, agent and task layers, but never the installation or a project layer, never a lock, and never a
+ * value wider than the layers above allow. A task reads the layer of its own project between the installation and its team.
  */
 export class ConfigurationService {
   readonly #runner: CommandRunner;
@@ -346,7 +347,8 @@ export class ConfigurationService {
    * that do not count and why. `problems` lists anything wrong with the combination.
    */
   async effective(by: Principal, scope: Scope = {}): Promise<EffectiveConfiguration | undefined> {
-    onlyKnown(scope, ["agentId", "taskId"]);
+    onlyKnown(scope, ["agentId", "taskId", "projectId"]);
+    if (scope.projectId !== undefined && !PROJECT_ID.test(scope.projectId)) invalid("projectId", "is not a project ID");
     if (scope.agentId !== undefined && !AGENT_ID.test(scope.agentId)) invalid("agentId", "is not an agent ID");
     if (scope.taskId !== undefined && !TASK_ID.test(scope.taskId)) invalid("taskId", "is not a task ID");
     const fresh = await this.#fresh(by.id, by.taskScope);
@@ -361,6 +363,19 @@ export class ConfigurationService {
   /** The layers that apply to an agent and/or a task, widest first; `undefined` when the agent or task does not exist. */
   async #chainOf(scope: Scope): Promise<{ chain: Link[]; complete: boolean } | undefined> {
     const chain: Link[] = [await this.#link("installation", "installation")];
+    // The project layer sits between the installation and the team: the task's own project, or the one asked about.
+    let projectId = scope.projectId;
+    if (scope.taskId !== undefined) {
+      const task = await this.#runner.get("task", scope.taskId);
+      if (task === undefined) return undefined;
+      const own = (task.body as unknown as { projectId?: string }).projectId;
+      if (projectId !== undefined && projectId !== own) invalid("projectId", `${scope.taskId} is not a task of ${projectId}`);
+      projectId = own;
+    }
+    if (projectId !== undefined) {
+      if ((await this.#runner.get("project", projectId)) === undefined && scope.taskId === undefined) return undefined;
+      chain.push(await this.#link("project", projectId));
+    }
     // A task asked about without an agent is read for the agent now working it, if there is one.
     const agentId = scope.agentId ?? (scope.taskId === undefined ? undefined : await this.#agentOfTask(scope.taskId));
     const complete = scope.taskId === undefined || agentId !== undefined;
@@ -372,7 +387,6 @@ export class ConfigurationService {
       chain.push(await this.#link("agent", agentId));
     }
     if (scope.taskId !== undefined) {
-      if ((await this.#runner.get("task", scope.taskId)) === undefined) return undefined;
       chain.push(await this.#link("task", scope.taskId));
     }
     return { chain, complete };
@@ -387,14 +401,53 @@ export class ConfigurationService {
 
   /**
    * Several settings as they apply to a task, from ONE combination of the layers (so they cannot come from different revisions), for the controller's own reading; no rights check. The team and agent layers apply only when an agent
-   * owns the task (otherwise only the installation and the task layers do). `undefined` when the task is missing or the ID is malformed.
+   * owns the task (otherwise only the installation, the project and the task layers do). The project layer is the task's own project's (card H12u); `projectId`, when given, is the project the caller believes the
+   * task is in, and a task of another project throws (nothing is guessed). `undefined` when the task is missing or the ID is malformed.
    */
-  async taskValues(keys: readonly string[], taskId: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+  async taskValues(keys: readonly string[], taskId: string, projectId?: string): Promise<Readonly<Record<string, unknown>> | undefined> {
     if (!TASK_ID.test(taskId)) return undefined;
-    const built = await this.#chainOf({ taskId });
+    const built = await this.#chainOf({ taskId, ...(projectId === undefined ? {} : { projectId }) });
     if (built === undefined) return undefined;
     const values = (await this.#combined(built.chain)).values;
     return Object.fromEntries(keys.map((k) => [k, values[k]?.value]));
+  }
+
+  /**
+   * Several settings as they apply to a project (card H12u): the installation and that project's layer, from ONE combination, for the controller's own reading; no rights check. A project with no layer (or a malformed ID)
+   * is read at the installation layer, which is the least a project could be under.
+   */
+  async projectValues(keys: readonly string[], projectId: string): Promise<Readonly<Record<string, unknown>>> {
+    const chain = [await this.#link("installation", "installation")];
+    if (PROJECT_ID.test(projectId)) chain.push(await this.#link("project", projectId));
+    const values = (await this.#combined(chain)).values;
+    return Object.fromEntries(keys.map((k) => [k, values[k]?.value]));
+  }
+
+  /**
+   * The projects that have values of their own for any of `keys` (a project layer, card H12u), plus `alsoProjects` (for example those that name their own landing branch), with each key as that project gets it (the installation, then the
+   * project's layer): the value in force, the layer it comes from, and the project layer's own value. For the controller's own view (the owner's `landing` status); no rights check. At most `limit` projects, in ID order; `truncated` says more exist.
+   */
+  async projectSettings(keys: readonly string[], alsoProjects: readonly string[] = [], limit = 50): Promise<{ readonly projects: readonly { readonly projectId: string; readonly values: Readonly<Record<string, { readonly value: unknown; readonly source: ResolvedSetting["source"]; readonly own?: unknown }>> }[]; readonly truncated: boolean }> {
+    const ids = new Set<string>(alsoProjects.filter((id) => PROJECT_ID.test(id)));
+    let after: string | undefined;
+    for (let page = 0; page < CONFIG_LIMITS.scan; page++) {
+      const chunk = await this.#runner.list("config-layer", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of chunk) {
+        after = a.id;
+        const body = a.body as unknown as LayerBody;
+        if (body.layer === "project" && PROJECT_ID.test(body.scopeId) && keys.some((k) => body.applied[k] !== undefined)) ids.add(body.scopeId);
+      }
+      if (chunk.length < 200) break;
+    }
+    const sorted = [...ids].sort();
+    const installation = await this.#link("installation", "installation");
+    const projects = [];
+    for (const projectId of sorted.slice(0, limit)) {
+      const link = await this.#link("project", projectId);
+      const values = (await this.#combined([installation, link])).values;
+      projects.push({ projectId, values: Object.fromEntries(keys.flatMap((k) => (values[k] === undefined ? [] : [[k, { value: values[k]!.value, source: values[k]!.source, ...(link.applied[k] === undefined ? {} : { own: link.applied[k]!.value }) }]]))) });
+    }
+    return { projects, truncated: sorted.length > limit };
   }
 
   /** Several installation-level values from one combination (see `taskValues`). */
@@ -449,10 +502,10 @@ export class ConfigurationService {
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   #target(layer: unknown, scopeId: unknown): { layer: LayerKind; scopeId: string } {
-    if (typeof layer !== "string" || !LAYER_ORDER.includes(layer as LayerKind)) return invalid("layer", "must be installation, team, agent or task");
+    if (typeof layer !== "string" || !LAYER_ORDER.includes(layer as LayerKind)) return invalid("layer", "must be installation, project, team, agent or task");
     const kind = layer as LayerKind;
     if (kind === "installation") { if (scopeId !== undefined) invalid("scopeId", "the installation layer has none"); return { layer: kind, scopeId: "installation" }; }
-    const pattern = kind === "team" ? TEAM_ID : kind === "agent" ? AGENT_ID : TASK_ID;
+    const pattern = kind === "project" ? PROJECT_ID : kind === "team" ? TEAM_ID : kind === "agent" ? AGENT_ID : TASK_ID;
     return typeof scopeId === "string" && pattern.test(scopeId) ? { layer: kind, scopeId } : invalid("scopeId", `is not a ${kind} ID`);
   }
 
@@ -469,6 +522,7 @@ export class ConfigurationService {
     if (by.kind === "owner") return;
     if (fresh === undefined || !allowsExactly(fresh, "config.write", "*")) throw new DomainError("forbidden", `${by.id} may not change configuration; it takes a grant that names config.write`);
     if (layer === "installation") throw new DomainError("forbidden", `${by.id} may not change the installation layer; only the owner does`);
+    if (layer === "project") throw new DomainError("forbidden", `${by.id} may not change a project layer; only the owner does`);
     if (locking) throw new DomainError("forbidden", `${by.id} may not lock or unlock settings; only the owner does`);
   }
 
@@ -496,6 +550,11 @@ export class ConfigurationService {
   async #parents(layer: LayerKind, scopeId: string): Promise<Link[]> {
     const chain: Link[] = [];
     if (layer !== "installation") chain.push(await this.#link("installation", "installation"));
+    // A task's project layer sits between the installation and the team; a project layer has only the installation above it.
+    if (layer === "task") {
+      const projectId = ((await this.#runner.get("task", scopeId))?.body as unknown as { projectId?: string } | undefined)?.projectId;
+      if (projectId !== undefined && PROJECT_ID.test(projectId)) chain.push(await this.#link("project", projectId));
+    }
     const agentId = layer === "agent" ? undefined : layer === "task" ? await this.#agentOfTask(scopeId) : undefined;
     const forAgent = layer === "agent" ? scopeId : agentId;
     if (forAgent !== undefined) {
