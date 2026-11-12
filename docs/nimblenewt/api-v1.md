@@ -4647,7 +4647,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `integrator.lease.acquire`
 
-Takes the integrator lease of a project's landing branch for an agent: the one right to land finished work on that branch. One holder per branch at a time; whoever asks while another holds a live lease is refused `unavailable`. A hold has a fence number that grows each time the lease changes hands and expires unless the holder renews it (the controller's clock); a lost integrator frees the branch at expiry. Needs the right `integration.lease` on the task's project (the owner always has it); an agent holds the lease as itself, only the owner may name another agent as `holder`. The task must belong to the project.
+Takes the integrator lease of a project's landing branch for an agent: the one right to land finished work on that branch. One holder per branch at a time; whoever asks while another holds a live lease is refused `unavailable`. A hold has a fence number that grows each time the lease changes hands and expires unless the holder renews it (the controller's clock); a lost integrator frees the branch at expiry. Needs the right `integration.lease` on the task's project (the owner always has it); an agent holds the lease as itself, only the owner may name another agent as `holder`. The task must belong to the project. Only the branch the owner's policy names as the project's landing branch can be taken (`forbidden` for any other name, or while the project names none; `unavailable` when the landing settings cannot be read). A live hold whose holder was retired or disabled is ended when the next agent asks (a line in the task's activity), so the branch is not kept until it expires.
 
 Arguments:
 
@@ -4677,7 +4677,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `integrator.lease.release`
 
-Lets an integrator lease go. The holder gives its fence; the owner may name the lease by `projectId` and `branch` and omit the fence, which ends the hold whoever has it. A release for an old fence is refused `fenced` and never touches the current hold.
+Lets an integrator lease go. The holder gives its fence; the owner may name the lease by `projectId` and `branch` and omit the fence, which ends the hold whoever has it. A release for an old fence is refused `fenced` and never touches the current hold. The owner ending a live hold puts a line in the activity of the task the lease was held for.
 
 Arguments:
 
