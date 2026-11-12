@@ -130,7 +130,10 @@ export class WorkerTransport {
       const host = await this.#authenticate(req);
       this.#limit(`principal:${host.id}`, this.#limits.perPrincipalPerMinute);
       this.#conns.login(req.socket, host.id);
-      this.#send(res, await this.#route(req, host));
+      // A held poll is ended when the client's connection closes before the answer is sent (card H07b).
+      const gone = new AbortController();
+      res.once("close", () => { if (!res.writableEnded) gone.abort(); });
+      this.#send(res, await this.#route(req, host, gone.signal));
     } catch (error) {
       this.#fail(res, error);
     }
@@ -219,7 +222,7 @@ export class WorkerTransport {
     return Number(value);
   }
 
-  async #route(req: IncomingMessage, host: Principal): Promise<Reply> {
+  async #route(req: IncomingMessage, host: Principal, gone?: AbortSignal): Promise<Reply> {
     const url = new URL(req.url ?? "/", "http://listener");
     const method = req.method ?? "GET";
     const parts = url.pathname.split("/").filter(Boolean);
@@ -250,7 +253,7 @@ export class WorkerTransport {
       const wait = url.searchParams.get("wait");
       for (const key of url.searchParams.keys()) if (key !== "wait") throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
       const waitMs = wait === null ? 0 : /^\d{1,6}$/.test(wait) ? Number(wait) : -1;
-      return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host), waitMs) } };
+      return { status: 200, body: { offers: await svc.offers(host, await this.#session(req, host), waitMs, gone) } };
     }
     if (a === "release" && b === "jobs") return this.#releaseRoute(req, host, parts, url, method);
     if (a === "session" && b === "workspace" && parts.length === 3) {

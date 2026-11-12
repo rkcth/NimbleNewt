@@ -374,7 +374,7 @@ export class RemoteWorkerService {
   readonly #waiters = new Map<string, Set<(result: StoredResult) => void>>();
   /** The one open offers poll of each host (card H07): a new poll ends the earlier one, an offer or a new session ends it at once. */
   readonly #polls = new Map<string, { readonly end: () => void }>();
-  readonly #pollStats = { polls: 0, held: 0, woken: 0, superseded: 0, timedOut: 0 };
+  readonly #pollStats = { polls: 0, held: 0, woken: 0, superseded: 0, timedOut: 0, disconnected: 0 };
   /** Connected hosts by platform (`os/arch`), so a placement looks only at hosts that can run it (card H07). */
   readonly #byPlatform = new Map<string, Set<string>>();
   readonly #platformOf = new Map<string, string>();
@@ -587,7 +587,7 @@ export class RemoteWorkerService {
   }
 
   /** How many polls are held open and how they ended, for the owner and for tests (card H07). */
-  pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number } {
+  pollStats(by: Principal): { readonly open: number; readonly polls: number; readonly held: number; readonly woken: number; readonly superseded: number; readonly timedOut: number; /** Held polls (or polls about to be held) whose client had gone (card H07b). */ readonly disconnected: number } {
     this.#staff(by);
     return { open: this.#polls.size, ...this.#pollStats };
   }
@@ -746,6 +746,14 @@ export class RemoteWorkerService {
     // The host's open poll, if it has one, is answered now.
     this.#endPoll(hostId);
     return { placement: result.body.placement, state: "offered" };
+  }
+
+  /** How many offers made to a host are not accepted yet (card H07b); the figure `candidates` orders by, for the dispatcher's own choice among hosts. */
+  offerLoad(by: Principal, hostId: string): number {
+    this.#staff(by);
+    let n = 0;
+    for (const o of this.#offers.values()) if (o.hostId === hostId) n++;
+    return n;
   }
 
   /**
@@ -957,7 +965,7 @@ export class RemoteWorkerService {
    * offer is made to this host, its session is replaced, a newer poll of its own takes over, the controller stops or the time is up (card H07): a host asks once, not once per agent, and an idle host costs the controller
    * one open request. A host has at most one held poll.
    */
-  async offers(host: Principal, sessionId: unknown, asked: unknown = 0): Promise<Offer[]> {
+  async offers(host: Principal, sessionId: unknown, asked: unknown = 0, signal?: AbortSignal): Promise<Offer[]> {
     if (typeof asked !== "number" || !Number.isSafeInteger(asked) || asked < 0 || asked > REMOTE_LIMITS.pollMs) invalid("wait", `must be a whole number of milliseconds from 0 to ${REMOTE_LIMITS.pollMs}`);
     const waitMs = asked as number;
     const session = await this.#session(host, sessionId);
@@ -970,16 +978,23 @@ export class RemoteWorkerService {
       // An offer made while the read was under way is read again, not waited for.
     } while (first.length === 0 && waitMs > 0 && (this.#made.get(host.id) ?? 0) !== seen);
     if (first.length > 0 || waitMs === 0 || this.#closed) return first;
+    // A client that has already gone is not held for (card H07b).
+    if (signal?.aborted === true) { this.#pollStats.disconnected++; return []; }
     const earlier = this.#polls.get(host.id);
     if (earlier !== undefined) { this.#pollStats.superseded++; earlier.end(); }
     this.#pollStats.held++;
+    let left = false as boolean;
     const how = await new Promise<"woken" | "timeout">((resolve) => {
       const timer = setTimeout(() => finish("timeout"), waitMs);
       timer.unref?.();
       const entry = { end: () => finish("woken") };
-      const finish = (result: "woken" | "timeout"): void => { clearTimeout(timer); if (this.#polls.get(host.id) === entry) this.#polls.delete(host.id); resolve(result); };
+      const finish = (result: "woken" | "timeout"): void => { clearTimeout(timer); signal?.removeEventListener("abort", gone); if (this.#polls.get(host.id) === entry) this.#polls.delete(host.id); resolve(result); };
+      // The client's connection closed while the poll was held: the poll ends now and frees its place, so a dead connection does not hold a poll for the rest of the wait (card H07b).
+      const gone = (): void => { left = true; finish("woken"); };
+      signal?.addEventListener("abort", gone, { once: true });
       this.#polls.set(host.id, entry);
     });
+    if (left) { this.#pollStats.disconnected++; return []; }
     if (how === "timeout") this.#pollStats.timedOut++; else this.#pollStats.woken++;
     // The session may have been replaced while the poll was held: the answer is then `fenced`, not offers for a session that no longer exists.
     await this.#session(host, session.sessionId);

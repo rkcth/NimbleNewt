@@ -2034,9 +2034,24 @@ export class DispatcherService {
     } catch (error) { this.#options.onError?.(error); return ""; }
   }
 
+  /** The hosts with the fewest unaccepted offers first; hosts that cannot say count as none, and the sort is stable so ties keep the configuration order. One host (or a pinned attempt) is not asked anything. */
+  async #byLoad(hosts: readonly (WorkerHost & { hostId: string })[]): Promise<readonly (WorkerHost & { hostId: string })[]> {
+    if (hosts.length < 2) return hosts;
+    const loads = new Map<string, number>();
+    for (const w of hosts) {
+      let n = 0;
+      // A figure that is not a positive number counts as none; an endless one (Infinity) is the heaviest load there is, not none, so a host that says it is overwhelmed is asked last rather than first.
+      if (w.load !== undefined) { try { const got = await w.load(); n = typeof got === "number" && got > 0 ? Math.min(got, Number.MAX_SAFE_INTEGER) : 0; } catch (error) { this.#options.onError?.(error); } }
+      loads.set(w.hostId, n);
+    }
+    return hosts.map((w, i) => ({ w, i })).sort((a, b) => (loads.get(a.w.hostId)! - loads.get(b.w.hostId)!) || a.i - b.i).map((x) => x.w);
+  }
+
   async #pickHost(harness: string | undefined, pinned: string | undefined, probe: HostProbe, tried: NonNullable<DispatchBody["startRefusals"]>): Promise<{ kind: "ok"; host: WorkerHost & { hostId: string }; passedOver: readonly { readonly hostId: string; readonly reason: string }[] } | { kind: "none"; reason: string; blocked: boolean; refused?: true }> {
     // An attempt pinned to a host (it was relocated there, or it parked on it and the host owns its store) goes nowhere else: it waits for that host, and the owner can move it.
-    const candidates = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
+    const listed = pinned === undefined ? this.#deps.workers : this.#deps.workers.filter((w) => w.hostId === pinned);
+    // The less loaded host is asked first (card H07b); equal loads keep the configuration order, so the choice is the same on every tick and every backend.
+    const candidates = await this.#byLoad(listed);
     if (pinned !== undefined && candidates.length === 0) return { kind: "none", reason: `${pinned} is not a worker host of this dispatcher, and the attempt may run only there`, blocked: false };
     const choice = await chooseHost(candidates, async (worker): Promise<HostVerdict> => {
       // A host that already refused this attempt at its start is not chosen again for it (card H07b): its refusal was its answer, and asking again would only offer it the same attempt once more.
