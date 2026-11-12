@@ -8,7 +8,7 @@ import { AdmissionService } from "../admission/service.js";
 import { BlockerService } from "../domain/blockers.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
-import { RemoteWorkerClient } from "../remote/index.js";
+import { RemoteWorkerClient, WorkspaceResponder } from "../remote/index.js";
 import { FULL_ABILITIES } from "../remote/testing/suite.js";
 import { startController } from "./index.js";
 
@@ -299,7 +299,12 @@ test("with landing but no stage the submit still ends plainly as submit_unavaila
 
 test("work.end done of a task with a contract, through the controller: a host that cannot check work never makes it a success; each refusal is counted once and the third ends the attempt blocked with a done_unverified blocker (card W05)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
-  const { c, owner, project, state } = await world(d);
+  const { c, owner, project, client, state } = await world(d);
+  // The remote host answers its workspace requests but was started without a check of a done (card H12a): it says so at once, and the done is never taken. (A host that does not answer at all keeps work.end waiting for the
+  // checks' time; this test must not.)
+  const responder = new WorkspaceResponder({ client, busy: () => [], port: { run: async () => ({ ok: false, reason: "not a workspace request" }) } });
+  let pumping = true;
+  const pump = (async () => { while (pumping) { try { responder.handle(await client.workspaceRequests()); } catch { /* the controller is closing */ } await new Promise((r) => setTimeout(r, 20)); } })();
   try {
     const one = await attemptFor(c, owner, project, 1);
     await c.services.contracts.setContract(owner, { commandId: "ct1", taskId: one.task, expectedVersion: 0, checks: [{ name: "unit tests", run: ["npm", "test"] }] } as never);
@@ -307,7 +312,7 @@ test("work.end done of a task with a contract, through the controller: a host th
     const refused = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done", note: "all green" }, "e1");
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "invalid_command");
-    assert.match(refused.error.message, /^work\.end done was not accepted: the controller could not check your work against the task contract \(1 item\(s\)\)\.\n1\. The host this attempt runs on \(host:pc\) cannot check work/);
+    assert.match(refused.error.message, /^work\.end done was not accepted: the controller could not check your work against the task contract \(1 item\(s\)\)\.\n1\. The host could not check the work: "this host cannot check work/);
     assert.equal(await c.services.workEnd.get(one.attempt), undefined, "nothing recorded: the attempt goes on");
     assert.equal((await state(one.attempt)).frozen, undefined, "not frozen");
     // The same call again is the same answer and is not counted twice.
@@ -318,7 +323,7 @@ test("work.end done of a task with a contract, through the controller: a host th
     const last = await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, result: "done", note: "all green" }, "e3");
     assert.ok(last.ok, JSON.stringify(last));
     assert.equal(last.result.item.state, "requested");
-    assert.match(last.result.item.unverified.summary, /go-ons are used up: 1\. The host this attempt runs on \(host:pc\) cannot check work/);
+    assert.match(last.result.item.unverified.summary, /go-ons are used up: 1\. The host could not check the work: "this host cannot check work/);
     await c.dispatch!.dispatcher.tick();
     const after = await state(one.attempt);
     assert.equal(after.state, "finished");
@@ -335,5 +340,5 @@ test("work.end done of a task with a contract, through the controller: a host th
     const plain = await call(c, two.token, "work.end", { report: "the report", attemptId: two.attempt, result: "done" }, "p1");
     assert.ok(plain.ok, JSON.stringify(plain));
     assert.equal(plain.result.item.verified, "skipped");
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { pumping = false; await pump; await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
