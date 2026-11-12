@@ -260,3 +260,62 @@ test("ignored files stay out of the commit and are counted, so the answer says a
     assert.equal(sh(w.dir, "--git-dir", w.made.gitDir, "ls-tree", "-r", "--name-only", "HEAD").includes("debug.log"), false);
   } finally { await w.done(); }
 });
+
+// H12o review: a git wrapper stands in for a hostile agent that acts while the host's git runs (a seam the bridge already has: `GitBridge.create({ git })`).
+const posix = !hasGit ? "git is not installed" : process.platform === "win32" ? "POSIX shell wrapper" : false;
+const realGit = (): string => execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+async function wrapped(w: Awaited<ReturnType<typeof world>>, script: string): Promise<LocalWorkspaces> {
+  const file = join(w.dir, "git-wrapper");
+  await writeFile(file, `#!/bin/sh\n${script}\nexec '${realGit()}' "$@"\n`); await chmod(file, 0o755);
+  const git = await GitBridge.create({ scratch: join(w.dir, "scratch2"), git: file });
+  return new LocalWorkspaces({ root: w.root, git, shared: (p) => (p === "prj-one" ? w.shared : undefined), busy: () => [], landing: () => ({ branch: "main", requirePermit: true }), clock: () => "2026-11-12T10:00:00.000Z" });
+}
+
+test("a file swapped for a link while git stages it cannot carry a file from outside the checkout into the commit: the staged content is checked against a no-follow read", { skip: posix }, async () => {
+  const w = await world();
+  try {
+    // What the race leaves behind (shown deterministically): git read the outside file through the swapped name, and the agent then put its own file back.
+    const outside = join(w.dir, "host-secret");
+    await writeFile(outside, "HOST-ONLY-CONTENT\n");
+    const target = join(w.made.checkout, "src", "a.ts");
+    await writeFile(target, "export const a = 2;\n");
+    const ws = await wrapped(w, `case " $* " in *" add -A"*) cp '${target}' '${target}.keep'; cp '${outside}' '${target}'; '${realGit()}' "$@" || exit 1; mv '${target}.keep' '${target}'; exit 0;; esac`);
+    const head = w.head();
+    const r = await ws.port.run(call("release"));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /changed or was replaced by a link while it was being staged/);
+    assert.equal(w.head(), head, "nothing was committed");
+    assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false);
+    // An honest release afterwards commits the agent's own file.
+    const ok = await w.ws.port.run(call("release"));
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal(sh(w.dir, "--git-dir", w.made.gitDir, "show", "HEAD:src/a.ts"), "export const a = 2;");
+  } finally { await w.done(); }
+});
+
+test("the head moves only from the head the release staged on: a head that moved meanwhile is not overwritten (compare-and-swap)", { skip: posix }, async () => {
+  const w = await world();
+  try {
+    const base = w.head();
+    const tree = execFileSync("git", ["--git-dir", w.made.gitDir, "rev-parse", `${base}^{tree}`], { encoding: "utf8" }).trim();
+    const other = execFileSync("git", ["--git-dir", w.made.gitDir, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-p", base, "-m", "moved meanwhile"], { encoding: "utf8" }).trim();
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const ws = await wrapped(w, `case " $* " in *" commit-tree "*) '${realGit()}' --git-dir '${w.made.gitDir}' update-ref HEAD ${other} || exit 1;; esac`);
+    await assert.rejects(ws.port.run(call("release")), /update-ref/);
+    assert.equal(w.head(), other, "the head that moved meanwhile was kept");
+  } finally { await w.done(); }
+});
+
+test("a FIFO or a socket in the checkout does not hang or enter the release, and line endings are committed as written whatever the checkout's attributes say", { skip: posix }, async () => {
+  const w = await world();
+  try {
+    execFileSync("mkfifo", [join(w.made.checkout, "pipe")]);
+    await writeFile(join(w.made.checkout, ".gitattributes"), "* text=auto eol=lf ident\n");
+    await writeFile(join(w.made.checkout, "src", "crlf.txt"), "one\r\n$Id$\r\n");
+    const r = await w.ws.port.run(call("release"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const names = sh(w.dir, "--git-dir", w.made.gitDir, "ls-tree", "-r", "--name-only", "HEAD").split("\n");
+    assert.equal(names.includes("pipe"), false);
+    assert.equal(execFileSync("git", ["--git-dir", w.made.gitDir, "cat-file", "blob", "HEAD:src/crlf.txt"], { encoding: "utf8" }), "one\r\n$Id$\r\n");
+  } finally { await w.done(); }
+});

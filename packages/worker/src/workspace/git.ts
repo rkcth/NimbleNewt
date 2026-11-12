@@ -436,13 +436,16 @@ export class GitBridge {
    * reviewer approves and what `commit` will insist on.
    */
   async stage(options: { gitDir: string; checkout: string }): Promise<{ base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+    await this.#neutralAttributes(options.gitDir);
     await this.#refuseGitData(options.checkout);
     await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout });
     const listing = (await this.#run(["ls-files", "-s", "-z"], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const blobs = new Map<string, string>();
     for (const line of listing) {
       const mode = line.slice(0, 6);
       const path = line.slice(line.indexOf("\t") + 1);
       if (mode === "120000" || mode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} is a link or a submodule entry, which a commit through the bridge does not carry`);
+      blobs.set(path, line.slice(7, line.indexOf(" ", 7)));
     }
     // A commit builds on the checkout's own head (an earlier commit of its own, or the base the checkout started from).
     const base = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
@@ -451,8 +454,28 @@ export class GitBridge {
     const files: { path: string; op: "write" | "delete" }[] = [];
     for (let i = 0; i + 1 < diff.length; i += 2) files.push({ path: diff[i + 1]!, op: diff[i] === "D" ? "delete" : "write" });
     if (files.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files are staged`);
+    // Git reads a file it saw as plain by opening its path, which follows a link: a file swapped for a link (or a directory on the way swapped for one) between git's look and its read would put the content of a
+    // file outside the checkout, read with the host's rights, into the commit. So every written file is read again here without following any link and must be exactly what was staged (H12o review).
+    for (const f of files) if (f.op === "write") await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path));
     const status = await this.status(options);
     return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
+  }
+
+  /** Refuses unless the file at `path` in the checkout, opened without following a link at any name and without blocking, is a plain file whose Git blob ID is `staged`. */
+  async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<void> {
+    const changed = (): WorkspaceError => new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed or was replaced by a link while it was being staged; nothing was committed`, { tamper: true });
+    if (staged === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(staged)) throw changed();
+    const safe = await resolveSafe(checkout, path).catch(() => { throw changed(); });
+    if (safe.exists !== "file") throw changed();
+    const handle = await open(safe.absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw changed(); });
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw changed();
+      const hash = createHash(staged.length === 64 ? "sha256" : "sha1").update(`blob ${info.size}\0`);
+      let read = 0;
+      for await (const chunk of handle.createReadStream({ autoClose: false, highWaterMark: 1 << 20 }) as AsyncIterable<Buffer>) { read += chunk.length; hash.update(chunk); }
+      if (read !== info.size || hash.digest("hex") !== staged) throw changed();
+    } finally { await handle.close(); }
   }
 
   /**
@@ -489,7 +512,6 @@ export class GitBridge {
   async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
     if (!/^wsr-[a-z2-7]{20}$/.test(options.requestId)) throw new WorkspaceError("invalid_path", "a release names a request ID of the controller's form");
     if (!/^[A-Za-z0-9._:-]{1,120}$/.test(options.taskId) || (options.attemptId !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(options.attemptId))) throw new WorkspaceError("invalid_path", "a release names a plain task and attempt");
-    await this.#neutralAttributes(options.gitDir);
     const staged = await this.stage(options);
     if (staged.files.length === 0) return { parent: staged.base, tree: staged.tree, files: [], ignored: staged.ignored };
     const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`])];
