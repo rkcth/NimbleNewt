@@ -31,6 +31,25 @@ export function isHidden(ch: string): boolean {
 /** Dashes NFKC leaves as they are, read as a hyphen. */
 const DASHES = new Set([0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0x2e3a, 0x2e3b, 0xfe58, 0xfe63, 0xff0d]);
 
+/**
+ * Letters of other scripts that look like a Latin letter, read as that letter in the matching VIEW only (never in the text): Cyrillic, Greek, Armenian and Latin-extended look-alikes (a Cyrillic `er` in a key's
+ * `ghp_` prefix, a Cyrillic `o` in `token=`, a dotless i) and the Latin small capitals. A small, fixed, one-to-one list (so view offsets stay exact), written as code points so this source holds no look-alike letters.
+ * A text of another script is not harmed: the folded letters only matter where a credential shape, a key name or a long mixed-case run follows, and a word of that script never has all three.
+ */
+const CONFUSABLES: ReadonlyMap<number, string> = (() => {
+  const m = new Map<number, string>();
+  const add = (latin: string, cps: readonly number[]): void => { for (const cp of cps) m.set(cp, latin); };
+  // Cyrillic lower case
+  add("a", [0x430]); add("c", [0x441, 0x1d04, 0x3f2]); add("e", [0x435, 0x4bd]); add("i", [0x456, 0x131, 0x1fbe, 0x3b9]); add("l", [0x4cf, 0x29f]); add("j", [0x458]); add("o", [0x43e, 0x3bf, 0x585, 0x1d0f]);
+  add("p", [0x440, 0x3c1]); add("s", [0x455, 0x17f]); add("x", [0x445, 0x3c7]); add("y", [0x443, 0x3b3, 0x28f]); add("h", [0x4bb, 0x29c]); add("d", [0x501, 0x1d05]); add("q", [0x51b]); add("w", [0x51d, 0x1d21]);
+  add("v", [0x3bd, 0x475, 0x1d20]); add("k", [0x43a, 0x3ba, 0x1d0b]); add("n", [0x578, 0x57c, 0x274]); add("u", [0x57d, 0x3c5, 0x1d1c]); add("g", [0x261, 0x581]); add("b", [0x299]); add("t", [0x1d1b]); add("m", [0x1d0d]); add("r", [0x280]); add("z", [0x1d22]); add("f", [0xa730]);
+  // Cyrillic and Greek capitals
+  add("A", [0x410, 0x391]); add("B", [0x412, 0x392]); add("C", [0x421, 0x3f9]); add("E", [0x415, 0x395]); add("H", [0x41d, 0x397]); add("I", [0x406, 0x399, 0x4c0]); add("J", [0x408]);
+  add("K", [0x41a, 0x39a]); add("M", [0x41c, 0x39c]); add("N", [0x39d]); add("O", [0x41e, 0x39f]); add("P", [0x420, 0x3a1]); add("S", [0x405]); add("T", [0x422, 0x3a4]); add("X", [0x425, 0x3a7]);
+  add("Y", [0x423, 0x3a5, 0x4ae]); add("Z", [0x396]); add("D", [0x500]); add("Q", [0x51a]); add("W", [0x51c]);
+  return m;
+})();
+
 /** The matching view: `start`/`end` give the original code point a view unit came from (absent for a plain ASCII text, which is its own view). */
 interface View { readonly text: string; readonly start?: readonly number[]; readonly end?: readonly number[] }
 const startOf = (v: View, k: number): number => (v.start === undefined ? k : v.start[k]!);
@@ -50,7 +69,9 @@ function fold(src: string): View {
     i += ch.length;
     if (isHidden(ch) || MARK.test(ch)) continue;
     const cp = ch.codePointAt(0)!;
-    const n = DASHES.has(cp) ? "-" : cp < 0x80 ? ch : ch.normalize("NFKC");
+    // A look-alike is looked up as written first: NFKC turns some into another letter that is not on the list (a capital lunate sigma becomes a plain capital sigma), which would hide it.
+    let n = DASHES.has(cp) ? "-" : cp < 0x80 ? ch : CONFUSABLES.get(cp) ?? ch.normalize("NFKC");
+    if (n.length === 1 && n.charCodeAt(0) >= 0x80) n = CONFUSABLES.get(n.charCodeAt(0)) ?? n;
     for (let k = 0; k < n.length; k++) { start.push(at); end.push(i); }
     text += n;
   }
@@ -240,7 +261,8 @@ export function keyContextHex(text: string, at: number, run: string): boolean {
  * (`…sk-live-…1234⏎step 011`). The token is redacted from the plain view; the word is the next line's own. (A key whose wrapped tail happens to be a plain word keeps that tail: see the notes.)
  */
 function runsOnIntoWord(text: string, start: number, end: number, pattern: RegExp): boolean {
-  const piece = text.slice(start, end);
+  // Seen through the same fold as the match (a fullwidth or look-alike letter in the token would otherwise fail the ASCII pattern, and the next line's word would be redacted with the token).
+  const piece = fold(text.slice(start, end)).text;
   const brk = piece.search(/\r\n?|\n/);
   if (brk < 0) return false;
   const tail = piece.slice(Math.max(piece.lastIndexOf("\n"), piece.lastIndexOf("\r")) + 1).trim();

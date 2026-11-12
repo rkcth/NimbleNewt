@@ -5,6 +5,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readRemoteConfig, startRemoteWorker } from "./remote-host.mjs";
+import { safeMessage } from "./safe-error.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -18,7 +19,7 @@ try {
   const config = readRemoteConfig(resolve(argv[at + 1]));
   host = await startRemoteWorker({ root }, { ...config, log: (line) => console.log(line) });
 } catch (error) {
-  console.error(`the remote worker host did not start: ${String(error?.message ?? error).replace(/Bearer\s+\S+/gi, "Bearer [removed]").slice(0, 400)}`);
+  console.error(`the remote worker host did not start: ${safeMessage(error, 400)}`);
   process.exit(1);
 }
 console.log("the remote worker host is running");

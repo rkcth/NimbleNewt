@@ -11,6 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { environmentsRequested, localHostBuilder } from "./local-host.mjs";
+import { safeMessage } from "./safe-error.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = async (pkg) => import(pathToFileURL(join(root, "packages", pkg, "dist", "index.js")).href);
@@ -176,5 +177,5 @@ export async function main(argv, io = { stdin: process.stdin, stdout: process.st
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { if (error?.name !== "UnsupportedEnvironmentError") process.stderr.write(`${String(error?.message ?? error)}\n`); process.exitCode = 1; });
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (error) => { if (error?.name !== "UnsupportedEnvironmentError") process.stderr.write(`${safeMessage(error, 2000)}\n`); process.exitCode = 1; });
 }
