@@ -390,7 +390,10 @@ export class ResumeCheckService {
         const open = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id] === undefined);
         if (this.#reviewing.has(id)) return view<ResumeCheckBody>(found);
         let got: Awaited<ReturnType<ResumePorts["review"]>>;
+        // Guarded until the verdict is written, not only while the reviewer is asked: between the answer and the write the check still reads "reviewing", and another advance of it
+        // (the resume sweep beside the dispatcher's own check) would ask the reviewer a second time (CI repair round 7: seen on PostgreSQL on a slow runner, where that write is slow).
         this.#reviewing.add(id);
+        try {
         try { got = await this.#ports.review({ taskId: b.taskId, changes: open }); } catch (error) {
           if (error instanceof ReviewNotRun) {
             // No reviewer could be asked: recorded as not run, never as reviewed, and every open change is the owner's to accept (the rule from before a reviewer existed).
@@ -402,7 +405,7 @@ export class ResumeCheckService {
           }
           await this.#block(by, id, b, "review_failed", `the reviewer could not give a verdict: ${short(error instanceof Error ? error.message : String(error))}`);
           continue;
-        } finally { this.#reviewing.delete(id); }
+        }
         const verdicts: Record<string, ResumeVerdict> = { ...b.verdicts };
         for (const item of open) {
           const v = got[item.id];
@@ -413,6 +416,7 @@ export class ResumeCheckService {
         if (!done) { await this.#block(by, id, b, "review_failed", "the reviewer gave no reasoned verdict for every change"); continue; }
         await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts, review: { state: "ran", at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) reviewed`) }), ["reviewing"]);
         continue;
+        } finally { this.#reviewing.delete(id); }
       }
       if (b.phase === "executing") {
         // Repeatable: the continuation resume is recorded under this check's own command ID, so a restart records it once.

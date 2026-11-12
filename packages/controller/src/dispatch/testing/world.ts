@@ -136,6 +136,9 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 
 /** Every service the dispatcher is built from, over one storage and one clock, with a scripted worker host. */
+/** How long a world dispatcher's tick waits for a resume check it started (see `make`): long enough for any check of these tests, bounded so a stuck one still fails the test. */
+export const WORLD_RESUME_INLINE_MS = 30_000;
+
 export async function buildWorld(storage: ControllerStorage, o: { route?: RouteResolver; withBudget?: boolean; workerScript?: WorkerScript; options?: AttemptDispatcherOptions; staleAfterMs?: number } = {}): Promise<DispatchWorld> {
   const clock = new TestClock();
   const options = { clock: clock.now, pause: async () => undefined };
@@ -185,7 +188,9 @@ export async function buildWorld(storage: ControllerStorage, o: { route?: RouteR
     principal: dispatcherPrincipal, assignments, projects, checkouts: resources, credentials, admission, hosts, workers: [worker], contracts, harnesses, policy, effects, blockers, route, routing, pauses, decisions, generation, reviews,
     ...(o.withBudget === false ? {} : { budgets }),
   };
-  const make = (overrides: Partial<DispatcherDeps> = {}, opts: AttemptDispatcherOptions = {}): DispatcherService => DispatcherService.withEpoch(storage, epoch, { ...deps, workers: [world.worker], ...overrides }, { ...options, ...(o.options ?? {}), ...opts });
+  // A resume check runs apart from the tick and the tick waits for it only `resumeInlineMs` (250 ms by default). The tests here (except the off-loop ones, which set their own value) expect a quick
+  // check to finish within its tick; on a slow machine it did not (CI repair round 7, Windows), so the world's tick waits for the check itself (bounded: a check that never ends still fails its test).
+  const make = (overrides: Partial<DispatcherDeps> = {}, opts: AttemptDispatcherOptions = {}): DispatcherService => DispatcherService.withEpoch(storage, epoch, { ...deps, workers: [world.worker], ...overrides }, { ...options, resumeInlineMs: WORLD_RESUME_INLINE_MS, ...(o.options ?? {}), ...opts });
   const world: DispatchWorld = {
     storage, epoch, clock, owner, dispatcherPrincipal, resources, projects, assignments, inbox, effects, blockers, principals, grants, credentials, admission, hosts, contracts, harnesses, policy, routing, difficulty, budgets, pauses, generation, decisions, reviews, waits, project, deps, options,
     worker, dispatcher: undefined as never, restart: (overrides, opts) => make(overrides, opts), heartbeatHost,

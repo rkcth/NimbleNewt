@@ -26,12 +26,20 @@ function endpoint(scripts: Piece[][], contentType = "text/event-stream") {
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     state.bodies.push(Buffer.from(init?.body as Uint8Array ?? new Uint8Array()).toString("utf8"));
     const script = scripts[Math.min(state.calls++, scripts.length - 1)]!;
+    // Pulled, one piece per read: a piece goes out only when the relay asks for the next, so an error never discards a chunk the relay had not read yet. (Pushed all at once, a script whose
+    // pause had already run out by the time the stream started errored at once, and the stream dropped the chunk before it: a tool call that never arrived, on a slow CI runner; round 7.)
+    let next = 0;
     const body = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        for (const p of script) { if (typeof p === "string") controller.enqueue(enc.encode(p)); else if (p instanceof Error) { controller.error(p); return; } else await p; }
+      async pull(controller) {
+        while (next < script.length) {
+          const p = script[next++]!;
+          if (typeof p === "string") { controller.enqueue(enc.encode(p)); return; }
+          if (p instanceof Error) { controller.error(p); return; }
+          await p;
+        }
         controller.close();
       },
-    });
+    }, { highWaterMark: 0 });
     return new Response(body, { status: 200, headers: { "content-type": contentType } });
   };
   return { fetch, state };
