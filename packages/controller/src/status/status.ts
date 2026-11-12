@@ -20,6 +20,7 @@ import { safeSlice } from "../lifecycle/handoff-cut.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
 import type { CallBody } from "../mcp/mcp.js";
+import type { WakeView } from "../meetings/attendance.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { startSizeAlertText, type StartSizeService } from "../context/start-size.js";
 import type { JobService } from "../jobs/jobs.js";
@@ -257,6 +258,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
+  wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why) or stopped by you; its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default; one policy for the whole installation" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
@@ -335,6 +337,7 @@ export type StatusRequest =
   | { readonly kind: "approval_load"; readonly days?: number }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "landing" }
+  | { readonly kind: "wakes" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
@@ -432,6 +435,8 @@ export interface StatusDeps {
     status?(by: Principal): Promise<Readonly<Record<string, unknown>>>;
   };
   /** The landing settings at the installation layer with whether the owner set each (card H12s, `ConfigurationService.installationSettings` over `LANDING_SETTING_KEYS`). Absent: the view is not offered. */
+  /** The wakes of the controller's own meeting wake host (card M04h). Absent, or answering undefined (the application supplies its own host): the view is not offered. */
+  readonly wakes?: () => Promise<readonly WakeView[] | undefined>;
   readonly landing?: () => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>;
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
@@ -749,6 +754,7 @@ export class StatusService {
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
+      case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
@@ -1273,6 +1279,27 @@ export class StatusService {
     const sc = cite("profile-suggestion", "installation", s.revision === 0 ? undefined : s.revision);
     if (s.due) lines.push(line(`You are due to be asked about the derived profile (${s.kind === "trial-ended" ? "your trial of it has ended" : `you have approved ${s.approvalsSince} asks since the last answer`}): ${s.answers?.map((x) => shown(x, 20)).join(", ")} (the first is the default).${s.preview === undefined || s.preview.notes.length === 0 ? "" : ` Switching would change this: ${s.preview.notes.slice(0, 5).map((n) => shown(n, 300)).join("; ")}.`}`, sc));
     else lines.push(line("The derived-profile question is not due.", sc));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** The agents woken for a meeting (card M04h), one line each, owner only. A read that fails is said in one line. */
+  async wakeLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.wakes === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    let wakes: readonly WakeView[] | undefined;
+    try { wakes = await this.#deps.wakes(); } catch { return { observedAt: this.#runner.now(), lines: [line("The woken agents cannot be read right now.", cite("config-layer", "installation"))] }; }
+    if (wakes === undefined) return undefined;
+    const lines: Line[] = [];
+    for (const w of wakes) {
+      const title = ((await this.#runner.get("meeting-occurrence", w.occurrenceId))?.body as unknown as { title?: string } | undefined)?.title;
+      const meeting = title === undefined ? "a meeting" : `the meeting ${quoted(title)}`;
+      const who = shown(w.agent);
+      const text = w.state === "attending" ? `${who} is attending ${meeting}, woken at ${w.at}: only its meeting task runs; its other work stays held, and it is stopped again when the meeting ends or you stop the wake.`
+        : w.state === "waiting" ? `${who} was woken for ${meeting} at ${w.at} and is waiting to be brought into the room${w.tries > 0 ? ` (${w.tries} ${w.tries === 1 ? "try" : "tries"} so far${w.reason === undefined ? "" : `: ${shown(w.reason, 200)}`})` : ""}.`
+        : w.state === "gave-up" ? `The controller gave up bringing ${who} into ${meeting} after ${w.tries} ${w.tries === 1 ? "try" : "tries"}${w.reason === undefined ? "" : `: ${shown(w.reason, 200)}`}. It is stopped again; you can wake it again.`
+        : `You stopped the wake of ${who} for ${meeting}; it is stopped again.`;
+      lines.push(line(text, cite("meeting", w.occurrenceId), cite("meeting-wake-lease", w.leaseId, w.leaseRevision)));
+    }
+    if (lines.length === 0) lines.push(line("No stopped agent is woken for a meeting right now.", cite("config-layer", "installation")));
     return { observedAt: this.#runner.now(), lines };
   }
 

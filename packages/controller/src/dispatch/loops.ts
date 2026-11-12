@@ -6,7 +6,7 @@ import type { Principal } from "../security/principals.js";
 import type { EventService, EventSource, SourceService, Waker, WatchService } from "../events/index.js";
 import type { ReviewService } from "../review/index.js";
 import type { StallService } from "../health/index.js";
-import type { AttendanceService, MeetingService } from "../meetings/index.js";
+import type { AttendanceService, MeetingService, WakeAttender } from "../meetings/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { ProjectService } from "../domain/service.js";
@@ -90,6 +90,11 @@ export function messageLoops(messages: Pick<AgentMessageService, "release" | "se
 /** M04: the waiting returns to work, and the lease on rooms whose meeting was never ended. */
 export function attendanceLoops(attendance: Pick<AttendanceService, "sweepReturns">): DispatcherLoop[] {
   return [{ name: "attendance.sweepReturns", run: (by) => attendance.sweepReturns(by) }];
+}
+
+/** M04h: agents the owner woke for a meeting are brought into its room, and a wake the owner stopped is made final; the pass is bounded and every step repeatable. */
+export function wakeAttendLoops(host: { attend(by: Principal, attender: WakeAttender): Promise<unknown> }, attendance: WakeAttender): DispatcherLoop[] {
+  return [{ name: "meeting.wake-attend", run: (by) => host.attend(by, attendance) }];
 }
 
 /** M03d: the stand-up's decisions on improvements go back to the agents that proposed them, project by project; one that cannot be filed yet stays pending. */
