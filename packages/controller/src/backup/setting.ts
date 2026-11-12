@@ -31,7 +31,8 @@ const DEFAULT: Pick<EncryptionSettingBody, "enabled" | "scope"> = { enabled: tru
 const protection = (s: Pick<EncryptionSettingBody, "enabled" | "scope">): number => (!s.enabled ? 0 : s.scope === "secrets" ? 1 : 2);
 
 /** Whether later backups are sealed under this setting (the keyring being configured is a separate condition). */
-export const sealsBackups = (s: Pick<EncryptionSettingBody, "enabled" | "scope">): boolean => s.enabled && s.scope === "everything";
+/** Whether a new backup is sealed at all: any scope seals something (the secret values at least). */
+export const sealsBackups = (s: Pick<EncryptionSettingBody, "enabled" | "scope">): boolean => s.enabled;
 
 /**
  * The owner's setting for backup encryption (card K01b3): switch it off or on, and choose the scope. Owner only, revision-checked, recorded in the audit log, and announced (the hooks tell the owner through U11, so a
@@ -43,8 +44,14 @@ export class BackupEncryptionSettingService {
   readonly #hooks: ((change: EncryptionChange, by: string) => Promise<void>)[] = [];
   /** Whether this installation has a backup keyring configured: without one no backup can be sealed, so switching encryption on is refused (it would say backups are sealed while they are plain, and the next start would refuse to run). */
   readonly #keyringConfigured: boolean;
-  private constructor(runner: CommandRunner, keyringConfigured: boolean) { this.#runner = runner; this.#keyringConfigured = keyringConfigured; }
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { keyringConfigured?: boolean } = {}): BackupEncryptionSettingService { const { keyringConfigured, ...runnerOptions } = options; return new BackupEncryptionSettingService(new CommandRunner(storage, epoch, runnerOptions), keyringConfigured ?? true); }
+  /** Whether backups carry the secret values (the host gave a secret store and the names): what "secrets only" then seals. */
+  readonly #carriesSecrets: boolean;
+  /** Turning encryption back on needs a fresh proof that the recovery file opens the key (card K01b: as at setup). Returns the reason it is not yet proved, or undefined. */
+  readonly #enableProof: (() => string | undefined) | undefined;
+  private constructor(runner: CommandRunner, keyringConfigured: boolean, carriesSecrets: boolean, enableProof: (() => string | undefined) | undefined) { this.#runner = runner; this.#keyringConfigured = keyringConfigured; this.#carriesSecrets = carriesSecrets; this.#enableProof = enableProof; }
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { keyringConfigured?: boolean; carriesSecrets?: boolean; enableProof?: () => string | undefined } = {}): BackupEncryptionSettingService { const { keyringConfigured, carriesSecrets, enableProof, ...runnerOptions } = options; return new BackupEncryptionSettingService(new CommandRunner(storage, epoch, runnerOptions), keyringConfigured ?? true, carriesSecrets ?? false, enableProof); }
+  /** The setting in plain words, as this installation applies it. */
+  text(s: Pick<EncryptionSettingBody, "enabled" | "scope">): string { return describeSetting(s, this.#keyringConfigured, this.#carriesSecrets); }
 
   onChanged(hook: (change: EncryptionChange, by: string) => Promise<void>): void { this.#hooks.push(hook); }
 
@@ -86,6 +93,7 @@ export class BackupEncryptionSettingService {
         const after = { enabled: (command.enabled as boolean | undefined) ?? before.enabled, scope: (command.scope as EncryptionScope | undefined) ?? before.scope };
         if (after.enabled === before.enabled && after.scope === before.scope) throw new DomainError("invalid_command", "that is how backup encryption is set already");
         if (!this.#keyringConfigured && after.enabled && !before.enabled) throw new DomainError("invalid_transition", "no backup keyring is configured on this installation, so no backup can be encrypted: set one up on the host first (backup encryption-setup and the keyring option), then switch encryption on");
+        if (after.enabled && !before.enabled && this.#enableProof !== undefined) { const why = this.#enableProof(); if (why !== undefined) throw new DomainError("invalid_transition", why); }
         change = { before, after, weaker: protection(after) < protection(before) };
         const body: EncryptionSettingBody = { ...after, changedAt: this.#runner.now(), changedBy: owner.id };
         return { ref: REF, creates: current === undefined, changes: [current === undefined ? { type: "create" as const, ref: REF, body: body as unknown as JsonObject } : { type: "update" as const, ref: REF, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { enabledBefore: before.enabled, enabledAfter: after.enabled, scopeBefore: before.scope, scopeAfter: after.scope, weaker: change.weaker } };
@@ -94,14 +102,14 @@ export class BackupEncryptionSettingService {
     const now = await this.effective();
     // A replay of an earlier command has no change of its own and announces nothing again.
     if (change !== undefined) for (const hook of this.#hooks) await hook(change, owner.id).catch(() => undefined);
-    return { revision: result.revision, ...now, weaker: change?.weaker ?? false, changed: change !== undefined, text: describeSetting(now, this.#keyringConfigured) };
+    return { revision: result.revision, ...now, weaker: change?.weaker ?? false, changed: change !== undefined, text: describeSetting(now, this.#keyringConfigured, this.#carriesSecrets) };
   }
 }
 
 /** The plain-words account of a setting, said back to the owner. */
-export function describeSetting(s: Pick<EncryptionSettingBody, "enabled" | "scope">, keyringConfigured = true): string {
+export function describeSetting(s: Pick<EncryptionSettingBody, "enabled" | "scope">, keyringConfigured = true, carriesSecrets = false): string {
   if (!keyringConfigured) return `No backup keyring is configured on this installation, so new backups are written in plain whatever this setting says (it says ${s.enabled ? `on, for ${s.scope}` : "off"}). Encryption is set up on the host with backup encryption-setup and the keyring option.`;
   if (!s.enabled) return "Backup encryption is OFF: new backups are written in plain. Backups already made stay encrypted and open with the passcode or recovery file.";
-  if (s.scope === "secrets") return "Backup encryption is on for secrets only. No secret values are in a backup today (they stay in the secret store), so new backups are written in plain, with nothing to seal. Older encrypted backups open as before.";
-  return "Backup encryption is on for everything: every file of a new backup is sealed.";
+  if (s.scope === "secrets") return carriesSecrets ? "Backup encryption is on for secrets only: the secret values in a new backup are sealed under the backup key (the passcode or the recovery file opens them); the rest of the backup stays plain. If every unlock method is lost, the secrets are lost and the rest still restores." : "Backup encryption is on for secrets only, but this installation has no secret store set up for backups, so no secret values are carried: a new backup has nothing sealed and the rest is plain. Older encrypted backups open as before.";
+  return carriesSecrets ? "Backup encryption is on for everything: every file of a new backup is sealed, the secret values included. If every unlock method is lost, the backups cannot be read by anyone." : "Backup encryption is on for everything: every file of a new backup is sealed. If every unlock method is lost, the backups cannot be read by anyone.";
 }

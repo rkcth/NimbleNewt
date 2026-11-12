@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, scrypt, timingSafeEqual, type KeyObject } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { open } from "node:fs/promises";
+import { argon2idAsync, DEFAULT_ARGON2, type Argon2Params } from "./argon2.js";
 
 /**
  * Encrypted backups (card K01b, first slice). A backup key pair (X25519) is made once. The server keeps the public key and the private key wrapped (AES-256-GCM) once per unlock method: a passcode (scrypt) and a recovery key
@@ -30,7 +31,9 @@ export class PasscodeRefused extends Error { constructor(message: string) { supe
 export class SealedFileBad extends Error { constructor(message: string) { super(message); this.name = "SealedFileBad"; } }
 
 interface WrapperBase { readonly id: string; readonly nonce: string; readonly wrapped: string }
-export interface PasscodeWrapper extends WrapperBase { readonly kind: "passcode"; readonly salt: string; readonly kdf: { readonly name: "scrypt" } & ScryptParams }
+/** How a passcode wrapper turns the passcode into a key: Argon2id (new wrappers) or scrypt (wrappers made before Argon2id was added, which still open). The settings are stored with each wrapper, so they can be raised. */
+export type KdfRecord = ({ readonly name: "argon2id" } & Argon2Params) | ({ readonly name: "scrypt" } & ScryptParams);
+export interface PasscodeWrapper extends WrapperBase { readonly kind: "passcode"; readonly salt: string; readonly kdf: KdfRecord }
 export interface RecoveryWrapper extends WrapperBase { readonly kind: "recovery" }
 export type Wrapper = PasscodeWrapper | RecoveryWrapper;
 /** The public part: nothing in it opens a backup without a passcode or the recovery key. */
@@ -54,6 +57,21 @@ const kdf = (passcode: string, salt: Buffer, p: ScryptParams): Promise<Buffer> =
 const checkParams = (p: ScryptParams): void => {
   if (!Number.isInteger(p.N) || p.N < FLOOR_N || p.N > CEIL_N || (p.N & (p.N - 1)) !== 0 || p.r !== 8 || p.p !== 1) throw new SealedFileBad("the key derivation settings are outside what this version accepts");
 };
+/** Argon2id: at least 64 MiB (the card's floor), at most 256 MiB, 2 to 16 passes, one lane: a cheaper wrapper is a downgrade, a larger one a way to exhaust memory. */
+export const ARGON2_FLOOR_M = 65_536;
+export const ARGON2_CEIL_M = 262_144;
+const checkArgon2 = (p: Argon2Params): void => {
+  if (p === null || typeof p !== "object" || !Number.isInteger(p.m) || p.m < ARGON2_FLOOR_M || p.m > ARGON2_CEIL_M || !Number.isInteger(p.t) || p.t < 2 || p.t > 16 || p.p !== 1) throw new SealedFileBad("the key derivation settings are outside what this version accepts");
+};
+const checkKdf = (k: KdfRecord): void => { if (k?.name === "argon2id") checkArgon2(k); else if (k?.name === "scrypt") checkParams(k); else throw new SealedFileBad("a key wrapper is not valid"); };
+const kdfAny = async (passcode: string, salt: Buffer, k: KdfRecord): Promise<Buffer> => {
+  if (k.name !== "argon2id") return kdf(passcode, salt, k);
+  const pw = Buffer.from(passcode, "utf8");
+  try { return await argon2idAsync(pw, salt, { m: k.m, t: k.t, p: 1 }); } finally { pw.fill(0); }
+};
+/** What a new passcode wrapper uses: Argon2id with these settings, unless scrypt settings are given (older keyrings, and tests that want a quick derivation). */
+export type NewKdf = { readonly argon2?: Argon2Params; readonly scrypt?: ScryptParams };
+const chooseKdf = (o: NewKdf): KdfRecord => o.scrypt !== undefined ? { name: "scrypt", ...o.scrypt } : { name: "argon2id", ...(o.argon2 ?? DEFAULT_ARGON2) };
 
 /** Minimum strength: at least 12 characters, not one repeated character, within a bound (no hints are kept). */
 export function checkPasscode(passcode: string): void {
@@ -77,16 +95,16 @@ function unwrap(w: Wrapper, kek: Buffer, keyId: string): Buffer {
   } catch { throw new UnlockFailed(); }
 }
 
-async function passcodeWrapper(secret: Buffer, passcode: string, keyId: string, params: ScryptParams): Promise<PasscodeWrapper> {
-  checkPasscode(passcode); checkParams(params);
+async function passcodeWrapper(secret: Buffer, passcode: string, keyId: string, how: KdfRecord): Promise<PasscodeWrapper> {
+  checkPasscode(passcode); checkKdf(how);
   const salt = randomBytes(16); const id = b64(randomBytes(6));
-  const kek = await kdf(passcode, salt, params);
-  return { id, kind: "passcode", salt: b64(salt), kdf: { name: "scrypt", ...params }, ...wrap(secret, kek, keyId, { id, kind: "passcode" }) };
+  const kek = await kdfAny(passcode, salt, how);
+  return { id, kind: "passcode", salt: b64(salt), kdf: how, ...wrap(secret, kek, keyId, { id, kind: "passcode" }) };
 }
 const recoveryKek = (recoveryKey: Buffer, keyId: string): Buffer => hkdf(recoveryKey, Buffer.from(keyId), "nn-backup-recovery-kek");
 
 /** Makes a new backup key: the keyring (kept by the server) and the recovery file (given to the owner once, never logged). */
-export async function createKeyring(options: { passcode: string; /** More passcodes, each wrapped separately (at most MAX_PASSCODE_WRAPPERS in all). */ morePasscodes?: readonly string[]; generation?: { number: number; previousKeyId: string }; now?: () => Date; scrypt?: ScryptParams }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
+export async function createKeyring(options: { passcode: string; /** More passcodes, each wrapped separately (at most MAX_PASSCODE_WRAPPERS in all). */ morePasscodes?: readonly string[]; generation?: { number: number; previousKeyId: string }; now?: () => Date; scrypt?: ScryptParams; argon2?: Argon2Params }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
   const all = [options.passcode, ...(options.morePasscodes ?? [])];
   if (all.length > MAX_PASSCODE_WRAPPERS) throw new PasscodeRefused(`a key may have at most ${MAX_PASSCODE_WRAPPERS} passcodes`);
   if (new Set(all).size !== all.length) throw new PasscodeRefused("the same passcode was given twice");
@@ -94,7 +112,7 @@ export async function createKeyring(options: { passcode: string; /** More passco
   const secret = Buffer.from(privateKey.export({ type: "pkcs8", format: "der" }));
   const keyId = b64(randomBytes(12));
   const passes: PasscodeWrapper[] = [];
-  for (const passcode of all) passes.push(await passcodeWrapper(secret, passcode, keyId, options.scrypt ?? DEFAULT_SCRYPT));
+  for (const passcode of all) passes.push(await passcodeWrapper(secret, passcode, keyId, chooseKdf(options)));
   const recoveryKey = randomBytes(32); const rid = b64(randomBytes(6));
   const rec: RecoveryWrapper = { id: rid, kind: "recovery", ...wrap(secret, recoveryKek(recoveryKey, keyId), keyId, { id: rid, kind: "recovery" }) };
   secret.fill(0);
@@ -117,7 +135,7 @@ export function parseKeyring(value: unknown): Keyring {
   if (k.wrappers.filter((w) => w?.kind === "passcode").length > MAX_PASSCODE_WRAPPERS) throw new SealedFileBad("the key record has more passcode wrappers than this version accepts");
   for (const w of k.wrappers) {
     if (w === null || typeof w !== "object" || typeof w.id !== "string" || w.id.length > MAX_WRAPPER_ID || (w.kind !== "passcode" && w.kind !== "recovery")) throw new SealedFileBad("a key wrapper is not valid");
-    if (w.kind === "passcode") { if (w.kdf?.name !== "scrypt") throw new SealedFileBad("a key wrapper is not valid"); checkParams(w.kdf); unb64(w.salt, "salt", 16); }
+    if (w.kind === "passcode") { checkKdf(w.kdf); unb64(w.salt, "salt", 16); }
     unb64(w.nonce, "nonce", 12); unb64(w.wrapped, "wrapped key");
   }
   if (k.generation !== undefined && (!Number.isInteger(k.generation) || k.generation < 1 || k.generation > 100_000)) throw new SealedFileBad("the key record is not valid");
@@ -142,7 +160,7 @@ export async function unlockWithPasscode(keyring: Keyring, passcode: string): Pr
   if (typeof passcode !== "string" || Buffer.byteLength(passcode, "utf8") > MAX_PASSCODE_BYTES) throw new UnlockFailed();
   for (const w of parseKeyring(keyring).wrappers) {
     if (w.kind !== "passcode") continue;
-    const kek = await kdf(passcode, unb64(w.salt, "salt", 16), w.kdf);
+    const kek = await kdfAny(passcode, unb64(w.salt, "salt", 16), w.kdf);
     try { return new BackupKey(keyring, privateFrom(unwrap(w, kek, keyring.keyId), keyring)); } catch (e) { if (!(e instanceof UnlockFailed)) throw e; }
   }
   throw new UnlockFailed();
@@ -196,7 +214,8 @@ export function unlockWithRecoveryCode(keyring: Keyring, code: string): BackupKe
 }
 
 /** What a backup records about its encryption, in the manifest: the key it was made for and the public ephemeral half. */
-export interface BackupSeal { readonly scope: "everything"; readonly keyId: string; readonly ephemeral: string; readonly keyring: Keyring }
+export type BackupScope = "everything" | "secrets";
+export interface BackupSeal { readonly scope: BackupScope; readonly keyId: string; readonly ephemeral: string; readonly keyring: Keyring }
 
 const rootFrom = (shared: Buffer, keyId: string, ephemeral: Buffer): Buffer => hkdf(shared, Buffer.concat([Buffer.from(keyId), ephemeral]), "nn-backup-root");
 
@@ -211,12 +230,12 @@ export class BackupCipher {
 }
 
 /** Starts an encrypted backup from the public keyring only (no secret is needed, so a scheduled backup runs unattended). */
-export function beginSeal(keyring: Keyring): { cipher: BackupCipher; seal: BackupSeal } {
+export function beginSeal(keyring: Keyring, scope: BackupScope = "everything"): { cipher: BackupCipher; seal: BackupSeal } {
   const k = parseKeyring(keyring);
   const eph = generateKeyPairSync("x25519");
   const shared = diffieHellman({ privateKey: eph.privateKey, publicKey: createPublicKey({ key: unb64(k.publicKey, "public key"), format: "der", type: "spki" }) });
   const ephemeral = Buffer.from(eph.publicKey.export({ type: "spki", format: "der" }));
-  return { cipher: new BackupCipher(rootFrom(shared, k.keyId, ephemeral)), seal: { scope: "everything", keyId: k.keyId, ephemeral: b64(ephemeral), keyring: k } };
+  return { cipher: new BackupCipher(rootFrom(shared, k.keyId, ephemeral)), seal: { scope, keyId: k.keyId, ephemeral: b64(ephemeral), keyring: k } };
 }
 
 /** An unlocked private key: held in memory only for the operation that needed it. */
@@ -225,9 +244,9 @@ export class BackupKey {
   readonly #priv: KeyObject;
   constructor(keyring: Keyring, priv: KeyObject) { this.keyring = keyring; this.#priv = priv; }
   /** A new passcode wrapper for this same key (the key is unwrapped only for the moment of wrapping). */
-  async wrapPasscode(passcode: string, params: ScryptParams = DEFAULT_SCRYPT): Promise<PasscodeWrapper> {
+  async wrapPasscode(passcode: string, how: NewKdf = {}): Promise<PasscodeWrapper> {
     const secret = Buffer.from(this.#priv.export({ type: "pkcs8", format: "der" }));
-    try { return await passcodeWrapper(secret, passcode, this.keyring.keyId, params); } finally { secret.fill(0); }
+    try { return await passcodeWrapper(secret, passcode, this.keyring.keyId, chooseKdf(how)); } finally { secret.fill(0); }
   }
   /** The cipher for a backup, or a refusal when the backup was made for another key. */
   cipherFor(seal: BackupSeal): BackupCipher {
@@ -283,13 +302,13 @@ export async function* readPlain(path: string, cipher: BackupCipher | undefined,
 export const hasherFor = (cipher: BackupCipher | undefined) => cipher === undefined ? createHash("sha256") : cipher.hasher();
 
 /** Adds a passcode to the key (card K01b): the same key, one more wrapper. Needs the key open (the owner proved a passcode or the recovery file), and refuses a passcode that already opens it. */
-export async function addPasscode(key: BackupKey, passcode: string, options: { scrypt?: ScryptParams } = {}): Promise<Keyring> {
+export async function addPasscode(key: BackupKey, passcode: string, options: NewKdf = {}): Promise<Keyring> {
   const k = parseKeyring(key.keyring);
   if (k.wrappers.filter((w) => w.kind === "passcode").length >= MAX_PASSCODE_WRAPPERS) throw new PasscodeRefused(`a key may have at most ${MAX_PASSCODE_WRAPPERS} passcodes: remove one by rotating the key first`);
   checkPasscode(passcode);
   const same = await unlockWithPasscode(k, passcode).then(() => true, () => false);
   if (same) throw new PasscodeRefused("that passcode already opens this key");
-  return { ...k, wrappers: [...k.wrappers, await key.wrapPasscode(passcode, options.scrypt ?? DEFAULT_SCRYPT)] };
+  return { ...k, wrappers: [...k.wrappers, await key.wrapPasscode(passcode, options)] };
 }
 
 /**
@@ -297,9 +316,9 @@ export async function addPasscode(key: BackupKey, passcode: string, options: { s
  * so a passcode that was dropped (say, because it was exposed) opens only the backups made before: those stay readable with the old unlock methods, and the owner must be told. The old generation is not changed or deleted here;
  * each backup carries the key record it was made under, so an old backup restores without it.
  */
-export async function rotateKeyring(options: { current: BackupKey; passcodes: readonly string[]; now?: () => Date; scrypt?: ScryptParams }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
+export async function rotateKeyring(options: { current: BackupKey; passcodes: readonly string[]; now?: () => Date; scrypt?: ScryptParams; argon2?: Argon2Params }): Promise<{ keyring: Keyring; recoveryFile: RecoveryFile }> {
   const old = parseKeyring(options.current.keyring);
   if (options.passcodes.length < 1) throw new PasscodeRefused("a rotated key needs at least one passcode");
   const [first, ...more] = options.passcodes;
-  return createKeyring({ passcode: first!, morePasscodes: more, generation: { number: (old.generation ?? 1) + 1, previousKeyId: old.keyId }, ...(options.now === undefined ? {} : { now: options.now }), ...(options.scrypt === undefined ? {} : { scrypt: options.scrypt }) });
+  return createKeyring({ passcode: first!, morePasscodes: more, generation: { number: (old.generation ?? 1) + 1, previousKeyId: old.keyId }, ...(options.now === undefined ? {} : { now: options.now }), ...(options.scrypt === undefined ? {} : { scrypt: options.scrypt }), ...(options.argon2 === undefined ? {} : { argon2: options.argon2 }) });
 }

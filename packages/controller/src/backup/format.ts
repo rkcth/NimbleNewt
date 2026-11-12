@@ -26,6 +26,11 @@ export const PI_FOLDER = "pi-state";
 export const ARTIFACT_INDEX = "artifacts.jsonl";
 export const ARTIFACT_FOLDER = "artifacts";
 export const SEALED_SUFFIX = ".enc";
+/** The secret values of an encrypted backup (card K01b): one sealed file, whatever the scope; `count` secrets, `missing` names the installation uses that had no value when the copy was made. */
+export interface BackupSecrets { readonly index: BackupIndexEntry; readonly count: number; readonly missing: number }
+export const SECRETS_FILE = "secrets.jsonl.enc";
+/** Whether a manifest's table, blob and conversation files are sealed: only when the scope is everything (the "secrets only" scope seals the secrets file and leaves the rest plain). */
+export const filesSealed = (m: { readonly encryption?: { readonly scope: string } }): boolean => m.encryption?.scope === "everything";
 /** The file a table is kept in: sealed backups add `.enc`. */
 export const tableFile = (table: string, sealed: boolean): string => `${table}.jsonl${sealed ? SEALED_SUFFIX : ""}`;
 
@@ -46,6 +51,8 @@ export interface BackupManifest {
   readonly artifacts?: BackupArtifacts;
   /** Present when the installation lists conversation stores (card K01h): the agents' own Pi state is in the backup. */
   readonly piState?: BackupPiState;
+  /** Present when the backup is encrypted and the installation keeps secret values (card K01b): sealed under the backup key. Absent: references only, no value is in this backup. */
+  readonly secrets?: BackupSecrets;
   /** Present when the backup is encrypted (card K01b): the key it was made for, the public ephemeral half and the wrapped copies of the private key. Every table file and blob is sealed; digests below are keyed, not plain SHA-256. */
   readonly encryption?: BackupSeal;
   /** Present on an encrypted backup, written last: the keyed MAC over every other field of this manifest. */
@@ -55,9 +62,11 @@ export interface BackupManifest {
   readonly complete: true;
 }
 
+export const NO_SECRETS_NOTE = "Secret values kept outside the database (the secret store) are not in this backup.";
+export const SECRETS_SEALED_NOTE = "Secret values kept outside the database (the secret store) are in this backup, sealed under the backup key (secrets.jsonl.enc): they open only with the passcode or the recovery file.";
 export const BACKUP_NOTES: readonly string[] = [
   "This is a consistent copy of the controller database as of createdAt; nothing written after that is in it.",
-  "Secret values kept outside the database (the secret store) are not in this backup.",
+  NO_SECRETS_NOTE,
   "Effects that were intended but not confirmed at that moment are restored as uncertain: they are reconciled with the outside world, never run again.",
 ];
 

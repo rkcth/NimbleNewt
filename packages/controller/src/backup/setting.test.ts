@@ -39,7 +39,7 @@ test("the encryption setting is owner only at the service itself, validated, rev
   // Turning it on with a narrower scope in one go: on, secrets: not "weaker" than off, and seals nothing.
   const on = await svc.set(owner, { commandId: "c2", enabled: true, scope: "secrets" });
   assert.equal(on.weaker, false);
-  assert.equal(sealsBackups(await svc.effective()), false);
+  assert.equal(sealsBackups(await svc.effective()), true, "any scope seals something now: the secret values at least");
   const got = await svc.get(owner);
   assert.deepEqual([got.enabled, got.scope, got.revision, got.changedBy], [true, "secrets", 2, "owner:rob"]);
 });
@@ -47,9 +47,11 @@ test("the encryption setting is owner only at the service itself, validated, rev
 test("what seals a backup, and the words said back to the owner (card K01b3)", () => {
   assert.equal(sealsBackups({ enabled: true, scope: "everything" }), true);
   assert.equal(sealsBackups({ enabled: false, scope: "everything" }), false);
-  assert.equal(sealsBackups({ enabled: true, scope: "secrets" }), false);
+  assert.equal(sealsBackups({ enabled: true, scope: "secrets" }), true);
   assert.match(describeSetting({ enabled: false, scope: "everything" }), /OFF.*plain.*already made stay encrypted/);
-  assert.match(describeSetting({ enabled: true, scope: "secrets" }), /No secret values are in a backup today/);
+  assert.match(describeSetting({ enabled: true, scope: "secrets" }), /no secret store set up for backups.*nothing sealed/);
+  assert.match(describeSetting({ enabled: true, scope: "secrets" }, true, true), /secret values in a new backup are sealed.*the rest of the backup stays plain.*secrets are lost and the rest still restores/);
+  assert.match(describeSetting({ enabled: true, scope: "everything" }, true, true), /secret values included.*cannot be read by anyone/);
 });
 
 test("the proof reminder raises once when due, escalates only after the grace days, closes when proved, and holds no secret (card K01b3)", async () => {
@@ -83,4 +85,18 @@ test("the proof reminder raises once when due, escalates only after the grace da
   assert.deepEqual((await slow.sweep({ throttled: true })).raised, ["due"]);
   open.clear();
   assert.deepEqual((await slow.sweep({ throttled: true })).raised, []);
+});
+
+test("turning encryption back on needs a fresh proof that the recovery file opens the key, as at setup; widening or narrowing the scope while on does not (card K01b)", async () => {
+  let proved = false;
+  const s = new MemoryStorage();
+  const { epoch } = await s.acquireEpoch({ holder: "c1", at: "2026-11-01T00:00:00.000Z" });
+  const svc = BackupEncryptionSettingService.withEpoch(s, epoch, { enableProof: () => proved ? undefined : "prove the recovery file first" });
+  await svc.set(owner, { commandId: "o1", enabled: false });
+  await assert.rejects(svc.set(owner, { commandId: "o2", enabled: true }), /prove the recovery file first/);
+  assert.equal((await svc.effective()).enabled, false, "a refused switch-on changes nothing");
+  proved = true;
+  assert.equal((await svc.set(owner, { commandId: "o3", enabled: true })).enabled, true);
+  proved = false;
+  assert.equal((await svc.set(owner, { commandId: "o4", scope: "secrets" })).scope, "secrets", "no proof is asked for a scope change while it is on");
 });

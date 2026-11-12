@@ -9,12 +9,13 @@ import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, create
 import { readKeyringFile } from "./encryption.js";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
 import { ENCRYPTION_MARKER } from "./format.js";
-import { access } from "node:fs/promises";
+import { access, lstat } from "node:fs/promises";
 import { readManifest } from "./verify.js";
 import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup } from "./restore.js";
 import { manifestDigestOf, verifyBackup } from "./verify.js";
 import { trustedKeyOf, type SignatureTrust } from "./signing.js";
+import { generationReport, pruneGenerations, removedText } from "./generations.js";
 import { acquireDataLocks, type DataLock, type LockEnv } from "./data-lock.js";
 
 const USAGE = [
@@ -24,8 +25,10 @@ const USAGE = [
   "  backup encryption-setup <new keyring file> --passcode-file <file holding the passcode> --recovery-out <new recovery file> [--recovery-code-out <new file for the printable recovery code>]",
   "  backup encryption-add-passcode <keyring file> (--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>) --new-passcode-file <file holding the extra passcode>",
   "  backup encryption-rotate <keyring file> (--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>) --new-passcode-file <file> [--new-passcode-file-2 <file>] --recovery-out <new recovery file> [--recovery-code-out <new file>]   (removes or replaces a passcode: a new key for later backups)",
-  "  backup restore <backup folder> [--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>] [--require-encrypted yes] [--allow-plain yes] (--sqlite <new database file> | --postgres <connection url> [--schema <name>]) [--pi-state <new folder for the agents' conversation stores>] [--artifacts <new artifact folder>]",
+  "  backup encryption-generations <keyring file> --backups <backups folder> [--remove yes]   (shows which old key generations still have backups; with --remove yes deletes the archived keyrings no backup uses any more)",
+  "  backup restore <backup folder> [--secrets-out <new file for the secret values> | --skip-secrets yes] [--passcode-file <file> | --recovery-file <file> | --recovery-code-file <file>] [--require-encrypted yes] [--allow-plain yes] (--sqlite <new database file> | --postgres <connection url> [--schema <name>]) [--pi-state <new folder for the agents' conversation stores>] [--artifacts <new artifact folder>]",
   "--trusted-signing-key-file names a file of signing public keys you saved from backup.signing.status (one base64 key per line; not secret): the backup must then carry a valid signature of one of them. Without it the signature is not checked, and the output says so. --manifest-digest checks the backup against a digest you kept off the server.",
+  "An encrypted backup may carry the secret values, sealed under its key. A restore that opens it needs --secrets-out (a NEW file, mode 600, holding the values as JSON for you to load into the secret store and then delete) or --skip-secrets yes. With no passcode or recovery file given, a backup whose files are plain (the 'secrets only' scope) still restores and leaves the secret values out.",
   "Secrets are only ever read from files (mode 600) and written to new files; none is taken on the command line or printed.",
   "Giving a passcode or recovery file means the backup must be encrypted. A folder that has held encrypted backups refuses a plain one unless you give --allow-plain yes.",
   "The passcode and recovery files are for the moment of the command: put them there, run it, and remove them; keep the recovery file off this machine.",
@@ -51,7 +54,7 @@ function options(rest: readonly string[], known: readonly string[]): Map<string,
  */
 export async function runBackupCli(argv: readonly string[], print: (line: string) => void, lockEnv?: LockEnv): Promise<number> {
   const [command, folder, ...rest] = argv;
-  if (command === undefined || folder === undefined || !["list", "verify", "restore", "encryption-setup", "encryption-add-passcode", "encryption-rotate"].includes(command)) { print(USAGE); return 2; }
+  if (command === undefined || folder === undefined || !["list", "verify", "restore", "encryption-setup", "encryption-add-passcode", "encryption-rotate", "encryption-generations"].includes(command)) { print(USAGE); return 2; }
   try {
     if (command === "list") {
       if (rest.length > 0) { print(USAGE); return 2; }
@@ -75,7 +78,25 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       // Only files this command made are taken away again: a path that already held a file (say, the owner's earlier recovery file) refuses the write and is left as it was.
       const made = [folder];
       try { await writeNew(o.get("recovery-out")!, `${JSON.stringify(recoveryFile)}\n`); made.push(o.get("recovery-out")!); if (codeOut !== undefined) { await writeNew(codeOut, `${recoveryCodeOf(recoveryFile)}\n`); made.push(codeOut); } } catch (error) { for (const f of made) await rm(f, { force: true }).catch(() => undefined); throw error; }
-      print(`encryption set up: key ${keyring.keyId}, fingerprint ${keyringFingerprint(keyring)}; the recovery file is in ${o.get("recovery-out")!}. Keep it OFF this machine (and the passcode in your own safe place): with neither, the encrypted backups cannot be read by anyone. Remove the passcode file now; put a file back only for the moment of a proof.`);
+      print(`encryption set up: key ${keyring.keyId}, fingerprint ${keyringFingerprint(keyring)}; the recovery file is in ${o.get("recovery-out")!}. Keep it OFF this machine (and the passcode in your own safe place): with neither, nobody can open what is sealed. What that costs depends on the scope you choose (backup.encryption.set): with "secrets only" the secret values in the backups are lost and everything else still restores; with "everything" the backups cannot be read at all. There are no hints and no back door. Remove the passcode file now; put a file back only for the moment of a proof.`);
+      return 0;
+    }
+    if (command === "encryption-generations") {
+      const o = options(rest, ["backups", "remove"]);
+      if (typeof o === "string" || o.get("backups") === undefined) { print(typeof o === "string" ? o : "give --backups <the backups folder>"); print(USAGE); return 2; }
+      if (o.get("remove") !== undefined && o.get("remove") !== "yes") { print("--remove takes yes"); return 2; }
+      const report = await generationReport(folder, o.get("backups")!);
+      if (o.get("remove") === "yes") {
+        const done = await pruneGenerations(folder, o.get("backups")!);
+        for (const g of done.removed) print(removedText(g));
+        for (const g of done.kept) print(`generation ${g.generation} (key ${g.keyId}) is kept: ${g.backups > 0 ? `${g.backups} backup${g.backups === 1 ? "" : "s"} still use it` : done.folderUnconfirmed !== undefined ? `${done.folderUnconfirmed}, so it is not certain that no backup uses it` : "some backup folders could not be read, so it is not certain that none uses it"}`);
+        if (done.removed.length === 0 && done.kept.length === 0) print("there are no archived key generations beside that keyring");
+        return 0;
+      }
+      if (report.generations.length === 0) print("there are no archived key generations beside that keyring");
+      for (const g of report.generations) print(`generation ${g.generation} (key ${g.keyId}): ${g.backups} backup${g.backups === 1 ? "" : "s"} still use it${g.removable ? "; no backup uses it: it can be removed (--remove yes)" : ""}`);
+      if (report.folderUnconfirmed !== undefined && report.generations.length > 0) print(`${report.folderUnconfirmed}: until it is, no generation is called removable`);
+      if (report.unreadable > 0) print(`${report.unreadable} backup folder${report.unreadable === 1 ? "" : "s"} could not be read: until they can, no generation is called removable`);
       return 0;
     }
     if (command === "encryption-add-passcode" || command === "encryption-rotate") return await manageKey(command, folder, rest, print);
@@ -84,11 +105,11 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (typeof o === "string") { print(o); print(USAGE); return 2; }
       const check = await verifyBackup(folder, { ...(await unlockFrom(folder, o)), ...(await signatureFrom(o)) });
       if (check.ok && o.get("manifest-digest") !== undefined && manifestDigestOf(check.manifest!) !== o.get("manifest-digest")!.toLowerCase()) { print("problem: the manifest digest is not the one you gave: this is not the backup you kept the digest of"); return 1; }
-      if (check.ok) { print(`ok: ${check.manifest!.name} (schema ${check.manifest!.schemaVersion}) matches its manifest; manifest digest ${manifestDigestOf(check.manifest!)}`); if (check.signature !== undefined) print(check.signature.text); return 0; }
+      if (check.ok) { for (const n of check.notes ?? []) print(n); print(`ok: ${check.manifest!.name} (schema ${check.manifest!.schemaVersion}) matches its manifest; manifest digest ${manifestDigestOf(check.manifest!)}`); if (check.signature !== undefined) print(check.signature.text); return 0; }
       for (const p of check.problems) print(`problem: ${p}`);
       return 1;
     }
-    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "pi-state", "passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "deletions", "trusted-signing-key-file", "manifest-digest"]);
+    const opts = options(rest, ["sqlite", "postgres", "schema", "artifacts", "pi-state", "passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "deletions", "trusted-signing-key-file", "manifest-digest", "secrets-out", "skip-secrets"]);
     if (typeof opts === "string") { print(opts); print(USAGE); return 2; }
     if ((opts.get("sqlite") === undefined) === (opts.get("postgres") === undefined)) { print("give exactly one of --sqlite and --postgres"); return 2; }
     if (opts.get("schema") !== undefined && opts.get("postgres") === undefined) { print("--schema goes with --postgres"); return 2; }
@@ -106,10 +127,25 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
     if (opts.get("sqlite") !== undefined) storage = await SqliteStorage.open({ path: opts.get("sqlite")! });
     else storage = await PostgresStorage.open({ connectionString: opts.get("postgres")!, ...(opts.get("schema") === undefined ? {} : { schema: opts.get("schema")! }) });
     try {
+      // A file for the secret values, if the backup holds some and a key was given: it must not exist yet, and it is written only after the restore succeeded.
+      const secretsOut = opts.get("secrets-out");
+      if (opts.get("skip-secrets") !== undefined && opts.get("skip-secrets") !== "yes") throw new RestoreRefused("--skip-secrets takes yes");
+      if (secretsOut !== undefined && opts.get("skip-secrets") === "yes") throw new RestoreRefused("give --secrets-out or --skip-secrets yes, not both");
+      // lstat, not access: a link (even one pointing nowhere) at that path is refused here, before the restore, and not only when the file is finally written.
+      if (secretsOut !== undefined && await lstat(secretsOut).then(() => true, () => false)) throw new RestoreRefused("the secrets file already exists: it is never overwritten");
+      const held = (await readManifest(folder)).manifest?.secrets;
+      if (held !== undefined && held.count > 0 && unlocked.unlock !== undefined && secretsOut === undefined && opts.get("skip-secrets") !== "yes") throw new RestoreRefused("this backup holds secret values and nowhere was given to put them: give --secrets-out <new file>, or --skip-secrets yes to leave them out");
+      const collected: Record<string, string> = {};
       const blobs = opts.get("artifacts") === undefined ? undefined : await FileBlobStore.open({ directory: opts.get("artifacts")! });
       // Deletions the owner asked for after this backup was made are re-applied, so restoring an old backup does not bring a deleted record's text back.
       const ledgerPath = opts.get("deletions") ?? join(dirname(resolve(folder)), LEDGER_FILE);
-      const done = await restoreBackup(folder, storage, { ...(await signatureFrom(opts)), ...(opts.get("manifest-digest") === undefined ? {} : { expectedManifestDigest: opts.get("manifest-digest")!.toLowerCase() }), ...(blobs === undefined ? {} : { blobs }), ...(opts.get("pi-state") === undefined ? {} : { piTarget: (id: string) => join(opts.get("pi-state")!, id) }), ...unlocked, deletions: await new DeletionLedger(ledgerPath).read() });
+      const done = await restoreBackup(folder, storage, { ...(await signatureFrom(opts)), ...(opts.get("manifest-digest") === undefined ? {} : { expectedManifestDigest: opts.get("manifest-digest")!.toLowerCase() }), ...(blobs === undefined ? {} : { blobs }), ...(opts.get("pi-state") === undefined ? {} : { piTarget: (id: string) => join(opts.get("pi-state")!, id) }), ...unlocked, ...(opts.get("skip-secrets") === "yes" ? { skipSecrets: true } : { secrets: { get: async () => undefined, set: async (name: string, value: string) => { collected[name] = value; } } }), deletions: await new DeletionLedger(ledgerPath).read() });
+      if (Object.keys(collected).length > 0) {
+        if (secretsOut !== undefined) { await writeNew(secretsOut, `${JSON.stringify(collected)}\n`); print(`${Object.keys(collected).length} secret values were written to ${secretsOut} (mode 600): load them into the secret store and delete the file.`); }
+      }
+      if ((done.secrets?.refused ?? 0) > 0) print(`${done.secrets!.refused} entries of the backup named the backup-signing key, which a backup never carries: they were refused (check where this backup came from)`);
+      if (done.secretsLeftOut !== undefined) print(`the secret values were left out: ${done.secretsLeftOut}`);
+      for (const n of done.notes ?? []) print(n);
       if (done.signature !== undefined) print(done.signature.text);
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
       if (done.piFilesRestored > 0) print(`${done.piFilesRestored} conversation files of ${done.piStoresRestored} agent stores were put back`);

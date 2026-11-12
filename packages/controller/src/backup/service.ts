@@ -5,7 +5,8 @@ import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
 import { basename } from "node:path";
 import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention } from "./retention.js";
-import type { Keyring } from "./crypto.js";
+import type { BackupScope, Keyring } from "./crypto.js";
+import type { SecretsSource } from "./secrets.js";
 import type { BackupSigner } from "./signing.js";
 import { createBackup } from "./write.js";
 import type { PiStateSource } from "./pi-state.js";
@@ -27,7 +28,9 @@ export interface BackupServiceOptions {
   /** Encrypt each backup for this key (card K01b): the public keyring only. */
   readonly encryption?: Keyring;
   /** The keyring to seal for at the moment of each backup (card K01b3: the owner's on/off and scope setting); `undefined` means this backup is plain. Takes precedence over `encryption`. A source that throws fails the backup, it never falls back to plain. */
-  readonly encryptionSource?: () => Promise<Keyring | undefined>;
+  readonly encryptionSource?: () => Promise<Keyring | { readonly keyring: Keyring; readonly scope: BackupScope } | undefined>;
+  /** The secret values to carry in an encrypted backup (card K01b), sealed under the backup key whatever the scope; without it (or without encryption) a backup holds references only. */
+  readonly secrets?: SecretsSource;
   /** Signs each backup (card K01b3). */
   readonly signer?: BackupSigner;
   /** The agents' own conversation stores on this machine (card K01h): copied into each backup. */
@@ -52,9 +55,11 @@ export class BackupService {
   }
 
   /** The encryption and signing this backup gets: the owner's setting is read now (card K01b3), so a change applies from the next backup. */
-  async #sealing(): Promise<{ encryption?: Keyring; signer?: BackupSigner }> {
-    const encryption = this.#options.encryptionSource === undefined ? this.#options.encryption : await this.#options.encryptionSource();
-    return { ...(encryption === undefined ? {} : { encryption }), ...(this.#options.signer === undefined ? {} : { signer: this.#options.signer }) };
+  async #sealing(): Promise<{ encryption?: Keyring; scope?: BackupScope; secrets?: SecretsSource; signer?: BackupSigner }> {
+    const got = this.#options.encryptionSource === undefined ? this.#options.encryption : await this.#options.encryptionSource();
+    const encryption = got === undefined ? undefined : "keyring" in got ? got.keyring : got;
+    const scope = got !== undefined && "keyring" in got ? got.scope : undefined;
+    return { ...(encryption === undefined ? {} : { encryption, ...(scope === undefined ? {} : { scope }), ...(this.#options.secrets === undefined ? {} : { secrets: this.#options.secrets }) }), ...(this.#options.signer === undefined ? {} : { signer: this.#options.signer }) };
   }
 
   #now(): Date { return (this.#options.now ?? (() => new Date()))(); }
