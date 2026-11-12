@@ -17,3 +17,6 @@ export { BackupProofStore, type BackupProofBody } from "./proof.js";
 export { BackupSigningService, SIGNATURE_FILE, SIGNING_SECRET_NAME, AUTHENTICITY_NOTE, checkSignature, generateSigningKey, signManifest, signingKeyIdOf, trustedKeyOf, type BackupSigner, type SignatureCheck, type SignatureRecord, type SignatureTrust, type SigningKeyEntry, type SigningSecretStore, type TrustedSigningKey } from "./signing.js";
 export { BackupEncryptionSettingService, ENCRYPTION_SCOPES, describeSetting, sealsBackups, type EncryptionChange, type EncryptionScope } from "./setting.js";
 export { BackupProofReminder, type ProofReminderOptions, type ProofReminderSource } from "./reminder.js";
+export { SECRET_NAME, secretsSourceOf, secretsText, restoreSecrets, readSecrets, writeSecrets, type SecretsRestored, type SecretsSink, type SecretsSource } from "./secrets.js";
+export { argon2idAsync, argon2idSync, blake2b, DEFAULT_ARGON2, type Argon2Params } from "./argon2.js";
+export { generationReport, pruneGenerations, removedText, type GenerationReport, type GenerationUse } from "./generations.js";

@@ -12,6 +12,7 @@ import { SqliteStorage } from "../storage/sqlite/index.js";
 import { PostgresNoAnswer, PostgresStorage, PostgresSwapBusy, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { postgresFingerprint } from "../transfer/transfer.js";
 import { UnlockFailed, type BackupKey } from "./crypto.js";
+import type { SecretsRestored, SecretsSink } from "./secrets.js";
 import type { MaintenanceBarrier } from "./barrier.js";
 import type { BackupService } from "./service.js";
 import { ProofRefused, type UnlockMethod } from "./encryption.js";
@@ -19,7 +20,7 @@ import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js";
 import { manifestDigestOf, readManifest, verifyBackup } from "./verify.js";
 import { checkSignature, type SignatureTrust } from "./signing.js";
-import { tableFile, type BackupManifest } from "./format.js";
+import { filesSealed, tableFile, type BackupManifest } from "./format.js";
 import { validStoreId } from "./pi-state.js";
 import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
 import { canon, canonSync } from "./canon.js";
@@ -56,6 +57,9 @@ export interface RestorePlan {
   readonly version: string;
   readonly schemaVersion: number;
   readonly encrypted: boolean;
+  /** After an apply: what was done with an encrypted backup's secret values (counts only), or why they were left out. */
+  readonly secretsRestored?: SecretsRestored;
+  readonly secretsLeftOut?: string;
   readonly rows: number;
   readonly artifactFiles: number;
   readonly piStores: number;
@@ -105,6 +109,8 @@ export interface StagedRestoreOptions {
   readonly piFinal?: (id: string) => string | undefined;
   /** The unlock for an encrypted backup (reads a host file; never an argument). */
   readonly unlock?: (method: UnlockMethod) => Promise<BackupKey>;
+  /** Where an encrypted backup's secret values go (card K01b): the secret store. A value already there that differs is kept (a restore does not roll a rotated secret back). */
+  readonly secrets?: SecretsSink;
   readonly deletions?: () => Promise<readonly LedgerEntry[]>;
   /** The signing public keys this installation already trusts (card K01b3: the owner's records, never the backup's own). With it a backup must carry a valid signature of one of them, and the preview says what a valid signature shows. */
   readonly signatureTrust?: () => Promise<SignatureTrust | undefined>;
@@ -537,18 +543,21 @@ export class StagedRestore {
     await probe.close();
     if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
     const encrypted = m.encryption !== undefined;
+    // Only the scope "everything" seals the table files: in a "secrets only" backup they are plain and can be checked and counted without a key.
+    const sealedFiles = filesSealed(m);
     const warnings: string[] = [];
     // The signature is checked against the keys this installation already trusts, for plain and sealed backups alike (it needs no secret): a backup that fails is not offered for restore.
     const signature = await checkSignature(path, m, await this.#o.signatureTrust?.());
     if (signature.problems.length > 0) throw new DomainError("integrity", `the backup cannot be restored: ${signature.problems.join("; ")}`);
     if (this.#o.signatureTrust !== undefined) warnings.push(signature.text);
     let effects: number | undefined, deliveries: number | undefined;
-    if (!encrypted && verify) {
+    if (!sealedFiles && verify) {
       const check = await verifyBackup(path);
       if (!check.ok) throw new DomainError("integrity", `the backup cannot be restored: ${check.problems.join("; ")}`);
       effects = await countRows(join(path, tableFile("effects", false)), (r) => r["status"] === "intended");
       deliveries = await countRows(join(path, tableFile("deliveries", false)), (r) => r["state"] !== "delivered");
     } else if (encrypted) warnings.push("This backup is encrypted: it is checked and opened with the passcode or recovery file when you approve, before anything is changed.");
+    if (encrypted && !sealedFiles) warnings.push(m.secrets !== undefined && m.secrets.count > 0 ? `Only the secret values in this backup are sealed (${m.secrets.count}): they are opened with the passcode or recovery file when you approve and put into the secret store where it has none; a secret that is there already is kept as it is. Without an unlock method on this host the rest is restored and the secret values are left out.` : "This backup is marked encrypted for its secrets, but holds no secret values.");
     if (m.piState === undefined) warnings.push("Pi state is NOT included in this backup: the agents' own conversation memory on this machine stays as it is, so it may be AHEAD of the restored records (an agent may remember work the restored records do not show). Work that was in progress resumes from the restored records.");
     else if ((m.piState.problemCount ?? 0) > 0) warnings.push(`Some of the agents' conversation files could not be copied when this backup was made (${m.piState.problemCount}); those are not restored. First: ${m.piState.problems?.[0] ?? "see the backup's manifest"}.`);
     if (this.#o.piStateConfigured === false) warnings.push("Backups on this installation do not include the agents' conversation state at all (no conversation folders are set up), so the safety copy taken before the restore does not either.");
@@ -677,7 +686,8 @@ export class StagedRestore {
         if (why !== undefined) throw new DomainError("unavailable", why);
       }
       let unlock: BackupKey | undefined;
-      if (manifest.encryption !== undefined) {
+      // A "secrets only" backup restores without a key (its files are plain); the secret values are then left out and the result says so.
+      if (manifest.encryption !== undefined && (this.#o.unlock !== undefined || filesSealed(manifest))) {
         if (this.#o.unlock === undefined) throw new DomainError("unavailable", "the backup is encrypted and no unlock method is set up on this host");
         try { unlock = await this.#o.unlock(method ?? "passcode"); } catch (error) {
           if (error instanceof ProofRefused) throw new DomainError(error.code === "failed" || error.code === "rate_limited" ? "invalid_command" : "unavailable", error.message);
@@ -698,7 +708,7 @@ export class StagedRestore {
       const fresh: ControllerStorage = liveDb.pg === undefined ? await SqliteStorage.open({ path: stagedDb }) : await (liveDb.pg.openStaged ?? ((schema: string) => PostgresStorage.open({ connectionString: liveDb.pg!.url, schema })))(stagedDb);
       try {
         // The one verification: the restore checks the backup, and the manifest it checked must be the one the approval named.
-        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
+        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), ...(this.#o.secrets === undefined ? { skipSecrets: true } : { secrets: this.#o.secrets }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
       } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error; }
       await fresh.close();
       await this.#checkMargin(manifest, margin, shown);
@@ -727,7 +737,7 @@ export class StagedRestore {
         this.#pending = { pending, release };
         try { this.#o.onStaged?.(pending); } catch { /* the host's notice failing does not undo a staged restore */ }
         this.#restartFailed = undefined;
-        const plan: RestorePlan = { token: String(confirm), ...(await this.#plan(path, manifest, false)), ...(result.effectsMarkedUncertain === undefined ? {} : { effectsToMarkUncertain: result.effectsMarkedUncertain }), deliveriesToResend: result.deliveriesToResend };
+        const plan: RestorePlan = { token: String(confirm), ...(await this.#plan(path, manifest, false)), ...(result.effectsMarkedUncertain === undefined ? {} : { effectsToMarkUncertain: result.effectsMarkedUncertain }), deliveriesToResend: result.deliveriesToResend, ...(result.secrets === undefined ? {} : { secretsRestored: result.secrets }), ...(result.secretsLeftOut === undefined ? {} : { secretsLeftOut: result.secretsLeftOut }) };
         const automatic = this.#o.restart?.automatic;
         // A moment after the reply (the API records the command's outcome first): the host closes this controller and starts it again. A failure is kept for the status, and the owner restarts by hand.
         // Scheduled last, once nothing else here can fail: an apply that fails withdraws the restore, and no restart is made for it.

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
+import { generationReport, type GenerationUse } from "./generations.js";
 import { MAX_JSON_BYTES, UnlockFailed, type BackupKey, keyringFingerprint, parseKeyring, unlockWithPasscode, unlockWithRecovery, type Keyring } from "./crypto.js";
 
 export interface EncryptionOptions {
@@ -12,6 +13,8 @@ export interface EncryptionOptions {
   readonly recoveryFile?: string;
   /** Where the keyring file is, so the status can warn about a recovery file kept beside it (best effort). */
   readonly keyringFile?: string;
+  /** The backups folder, so the status can say which old key generations still have backups (card K01b). */
+  readonly backupsFolder?: string;
   readonly now?: () => Date;
   /** Shortest time between two proofs (each passcode proof costs 128 MiB and a fraction of a second). Default 10 seconds. */
   readonly minIntervalMs?: number;
@@ -65,6 +68,8 @@ export class BackupEncryption {
   #running = false;
   #store: ProofStore | undefined;
   #lastOk: { at: string; method: UnlockMethod } | undefined;
+  /** When the recovery file last opened the key in this run (not kept across a restart: turning encryption back on asks for a fresh proof). */
+  #lastRecoveryMs: number | undefined;
   constructor(options: EncryptionOptions) { this.#o = { ...options, keyring: parseKeyring(options.keyring) }; }
 
   /** Connects the database record of the last successful proof (at start). A proof recorded for another key is ignored. */
@@ -87,6 +92,16 @@ export class BackupEncryption {
   proofDue(): boolean { return this.#proofDue(); }
   proofSince(): string { return this.#lastOk?.at ?? this.#o.keyring.createdAt; }
   get proofEveryDays(): number { return this.#o.proofEveryDays ?? 92; }
+
+  /** Whether the recovery file was proved to open the key within `withinMs` (default 24 hours) in this run: what switching encryption back on asks for, as setup did. */
+  recoveryProofFresh(withinMs = 86_400_000): boolean { return this.#lastRecoveryMs !== undefined && this.#now().getTime() - this.#lastRecoveryMs <= withinMs && this.#now().getTime() >= this.#lastRecoveryMs; }
+
+  /** The old key generations (archived beside the keyring by a rotation) and how many backups still use each: the owner may remove an archive only when none does. Empty when nothing is archived or the folders are not known. */
+  async generations(): Promise<{ readonly old: readonly Pick<GenerationUse, "generation" | "keyId" | "backups" | "removable">[]; readonly unreadable: number }> {
+    if (this.#o.keyringFile === undefined || this.#o.backupsFolder === undefined) return { old: [], unreadable: 0 };
+    const r = await generationReport(this.#o.keyringFile, this.#o.backupsFolder).catch(() => undefined);
+    return r === undefined ? { old: [], unreadable: 0 } : { old: r.generations.map(({ generation, keyId, backups, removable }) => ({ generation, keyId, backups, removable })), unreadable: r.unreadable };
+  }
 
   get keyring(): Keyring { return this.#o.keyring; }
   #now(): Date { return (this.#o.now ?? (() => new Date()))(); }
@@ -150,6 +165,7 @@ export class BackupEncryption {
       }
       this.#last = { at: now.toISOString(), method, ok: true };
       this.#lastOk = { at: now.toISOString(), method };
+      if (method === "recovery") this.#lastRecoveryMs = now.getTime();
       await this.#store?.save({ at: now.toISOString(), method, keyId: this.#o.keyring.keyId }).catch(() => undefined);
       return { ok: true, method, at: now.toISOString() };
     } finally { this.#running = false; }

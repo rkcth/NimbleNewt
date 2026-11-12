@@ -29,13 +29,13 @@ const newest = (dir: string): string => readdirSync(dir).filter((n) => n.startsW
 test("the owner switches backup encryption off, on and narrows its scope by chat or API; it is owner only, revision-checked, recorded, announced, and removing the keyring option cannot quietly make plain backups (card K01b3)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-k3a-"));
   try {
-    const { keyring } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
-    const keyringFile = join(d, "keyring.json");
-    writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 });
+    const { keyring, recoveryFile } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
+    const keyringFile = join(d, "keyring.json"); const recoveryPath = join(d, "recovery.json");
+    writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 }); writeFileSync(recoveryPath, JSON.stringify(recoveryFile), { mode: 0o600 });
     let clock = Date.parse("2026-11-01T10:00:00.000Z");
     const start = (extra: object) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, backup: { directory: join(d, "backups"), now: () => new Date(clock), ...extra } });
     const dir = join(d, "backups");
-    let c = await start({ encryption: { keyringFile } });
+    let c = await start({ encryption: { keyringFile, recoveryFile: recoveryPath } });
     let token = "";
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
@@ -82,17 +82,23 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
 
       // On again: the key was never touched, so no new key is needed; the next backup is sealed for the same key.
       clock += 61_000;
+      // Switching on again needs the recovery file proved first, as at setup (card K01b).
+      assert.match(JSON.stringify(await call(boot.token, "backup.encryption.set", { enabled: true }, "s3a")), /recovery file still opens the backup key/);
+      assert.ok((await call(boot.token, "backup.encryption.verify", { method: "recovery" }, "v3")).ok);
       assert.ok((await call(boot.token, "backup.encryption.set", { enabled: true }, "s3")).ok);
       clock += 61_000; await call(boot.token, "backup.now", {}, "b3");
       assert.equal(manifestOf(dir, newest(dir)).encryption.keyId, keyring.keyId);
 
-      // Narrowing to secrets only: no secret values are in a backup, so it writes plain, and says so.
+      // Narrowing to secrets only on an installation that gave the backups no secret store: nothing to seal, the files stay plain, and it says so.
       const narrow = await call(boot.token, "backup.encryption.set", { scope: "secrets" }, "s4");
       assert.ok(narrow.ok, JSON.stringify(narrow));
       assert.deepEqual([narrow.result.weaker, narrow.result.scope], [true, "secrets"]);
-      assert.match(narrow.result.text, /No secret values are in a backup today/);
+      assert.match(narrow.result.text, /no secret store set up for backups/);
       clock += 61_000; await call(boot.token, "backup.now", {}, "b4");
-      assert.equal(manifestOf(dir, newest(dir)).encryption, undefined);
+      const narrowed = manifestOf(dir, newest(dir));
+      assert.equal(narrowed.encryption.scope, "secrets");
+      assert.equal(narrowed.secrets, undefined, "no secret values to carry");
+      assert.ok(readdirSync(join(dir, narrowed.name)).includes("state.jsonl"), "the tables are plain in this scope");
       // Widening again is not "weaker" and is announced as a strengthening.
       const wide = await call(boot.token, "backup.encryption.set", { scope: "everything" }, "s5");
       assert.equal(wide.result.weaker, false);

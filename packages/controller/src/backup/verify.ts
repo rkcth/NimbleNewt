@@ -5,9 +5,10 @@ import { SNAPSHOT_TABLES, canonicalJson } from "../storage/index.js";
 import { MAX_JSON_BYTES, UnlockFailed, hasherFor, parseKeyring, readPlain, type BackupCipher, type BackupKey } from "./crypto.js";
 import { parsePiIndex } from "./pi-state.js";
 import { checkSignature, type SignatureCheck, type SignatureTrust } from "./signing.js";
-import { ARTIFACT_FOLDER, PI_FOLDER, PI_INDEX, SEALED_SUFFIX, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
+import { readSecrets } from "./secrets.js";
+import { ARTIFACT_FOLDER, PI_FOLDER, filesSealed, PI_INDEX, SEALED_SUFFIX, BACKUP_FORMAT, MANIFEST_FILE, tableFile, type BackupManifest, type BlobIndexLine } from "./format.js";
 
-export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[]; /** Present when the signature was looked at (card K01b3): valid, unsigned before signing began, or not checked (no trusted key), with the plain statement of what it shows. */ readonly signature?: SignatureCheck }
+export interface BackupCheck { readonly ok: boolean; readonly manifest?: BackupManifest; readonly problems: readonly string[]; /** Things the owner should be told that are not problems (a "secrets only" backup's sealed part was not checked because no unlock was given). */ readonly notes?: readonly string[]; /** Present when the signature was looked at (card K01b3): valid, unsigned before signing began, or not checked (no trusted key), with the plain statement of what it shows. */ readonly signature?: SignatureCheck }
 
 /** Reads and checks a backup's manifest (not the files): the format, the product, the complete mark and a file for every table. */
 export async function readManifest(path: string): Promise<{ manifest?: BackupManifest; problems: string[] }> {
@@ -28,7 +29,7 @@ export async function readManifest(path: string): Promise<{ manifest?: BackupMan
     else for (const table of SNAPSHOT_TABLES) if (!manifest.files.some((f) => f.table === table)) problems.push(`the manifest has no file for ${table}`);
   }
   if (problems.length === 0 && manifest.encryption !== undefined) {
-    try { parseKeyring(manifest.encryption.keyring); if (manifest.encryption.scope !== "everything" || manifest.encryption.keyId !== manifest.encryption.keyring.keyId) problems.push("the backup's encryption record is not valid"); } catch { problems.push("the backup's encryption record is not valid"); }
+    try { parseKeyring(manifest.encryption.keyring); if ((manifest.encryption.scope !== "everything" && manifest.encryption.scope !== "secrets") || manifest.encryption.keyId !== manifest.encryption.keyring.keyId) problems.push("the backup's encryption record is not valid"); } catch { problems.push("the backup's encryption record is not valid"); }
   }
   return problems.length > 0 ? { problems } : { manifest, problems };
 }
@@ -37,9 +38,16 @@ export async function readManifest(path: string): Promise<{ manifest?: BackupMan
 /** A digest of the WHOLE manifest (every file digest, the artifact and conversation indexes, the MAC): what a restore approval is bound to, so nothing in the backup can change between the preview and the apply. */
 export const manifestDigestOf = (m: BackupManifest): string => createHash("sha256").update(canonicalJson(m as never)).digest("hex");
 
+/** The cipher for the table, blob and conversation files: needed only when the scope is everything. In a "secrets only" backup those files are plain and need no unlock. */
 export function cipherOf(manifest: BackupManifest, unlock: BackupKey | undefined): BackupCipher | undefined {
   if (manifest.encryption === undefined) return undefined;
+  if (!filesSealed(manifest)) { if (unlock !== undefined) unlock.cipherFor(manifest.encryption); return undefined; } // a key that was given must still be the backup's, but the files are plain
   if (unlock === undefined) throw new UnlockFailed("the backup is encrypted: give the passcode or the recovery file");
+  return unlock.cipherFor(manifest.encryption);
+}
+/** The cipher for the secrets file and the manifest MAC (any encrypted backup): `undefined` when no key was given. */
+export function secretsCipherOf(manifest: BackupManifest, unlock: BackupKey | undefined): BackupCipher | undefined {
+  if (manifest.encryption === undefined || unlock === undefined) return undefined;
   return unlock.cipherFor(manifest.encryption);
 }
 
@@ -53,13 +61,17 @@ export async function verifyBackup(path: string, options: { unlock?: BackupKey; 
   const signature = await checkSignature(path, manifest, options.signatureTrust);
   if (signature.problems.length > 0) return { ok: false, manifest, problems: signature.problems, signature };
   if (options.requireEncrypted === true && manifest.encryption === undefined) return { ok: false, manifest, problems: ["the backup is not encrypted, and encryption is required"] };
+  if (options.requireEncrypted === true && manifest.encryption !== undefined && !filesSealed(manifest) && options.unlock === undefined) return { ok: false, manifest, problems: ["encryption is required and only the secrets of this backup are sealed: give the passcode or the recovery file, so they can be checked"] };
   let cipher: BackupCipher | undefined;
-  try { cipher = cipherOf(manifest, options.unlock); } catch (error) { return { ok: false, manifest, problems: [error instanceof Error ? error.message : "the backup cannot be unlocked"] }; }
+  let macCipher: BackupCipher | undefined;
+  const notes: string[] = [];
+  try { cipher = cipherOf(manifest, options.unlock); macCipher = secretsCipherOf(manifest, options.unlock); } catch (error) { return { ok: false, manifest, problems: [error instanceof Error ? error.message : "the backup cannot be unlocked"] }; }
   const sealed = cipher !== undefined;
   // The manifest's own MAC comes first: everything below (names, counts, digests, notes) is read from a manifest that anyone with the folder could have changed.
-  if (cipher !== undefined) {
+  if (manifest.encryption !== undefined && macCipher === undefined) notes.push("This backup keeps only its secret values sealed; its other files are plain and were checked against their digests, but without the passcode or recovery file the manifest's own seal and the secrets were not checked.");
+  if (macCipher !== undefined) {
     const { mac, ...rest } = manifest;
-    const expected = Buffer.from(cipher.manifestMac(canonicalJson(rest as never)), "hex");
+    const expected = Buffer.from(macCipher.manifestMac(canonicalJson(rest as never)), "hex");
     const given = typeof mac === "string" && /^[0-9a-f]{64}$/.test(mac) ? Buffer.from(mac, "hex") : undefined;
     if (given === undefined || given.length !== expected.length || !timingSafeEqual(given, expected)) return { ok: false, manifest, problems: ["the manifest was changed or is not the one this backup was made with"] };
   }
@@ -82,7 +94,8 @@ export async function verifyBackup(path: string, options: { unlock?: BackupKey; 
   }
   if (manifest.artifacts !== undefined) problems.push(...await verifyArtifacts(path, manifest, cipher));
   if (manifest.piState !== undefined) problems.push(...await verifyPiState(path, manifest, cipher));
-  return { ok: problems.length === 0, manifest, problems, signature };
+  if (manifest.secrets !== undefined && macCipher !== undefined) { try { await readSecrets(path, manifest.secrets, macCipher); } catch (error) { problems.push(error instanceof Error && error.message.startsWith("secrets:") ? error.message : "secrets: the sealed file is missing or was changed"); } }
+  return { ok: problems.length === 0, manifest, problems, signature, ...(notes.length === 0 ? {} : { notes }) };
 }
 
 /** The artifact index matches the manifest, and every blob it lists is there with the size it says and the SHA-256 that is its name. */

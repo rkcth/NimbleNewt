@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
 import type { FileBlobStore } from "../artifacts/index.js";
 import { copyPiState, type PiStateSource } from "./pi-state.js";
-import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupSeal, type Keyring } from "./crypto.js";
+import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupScope, type BackupSeal, type Keyring } from "./crypto.js";
 import { SIGNATURE_FILE, type BackupSigner } from "./signing.js";
-import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+import { writeSecrets, type SecretsSource } from "./secrets.js";
+import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, NO_SECRETS_NOTE, SECRETS_SEALED_NOTE, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
 
 export interface BackupOptions {
   /** The folder the backups live in; each backup is a folder of its own inside it. */
@@ -22,6 +23,10 @@ export interface BackupOptions {
   readonly blobs?: FileBlobStore;
   /** Encrypt the backup for this key (the public keyring only: no secret is needed, so a scheduled backup runs unattended). */
   readonly encryption?: Keyring;
+  /** What the encryption seals (card K01b): `everything` (the default) seals every file; `secrets` seals only the secret values and leaves the rest of the backup plain. */
+  readonly scope?: BackupScope;
+  /** The secret values to carry (card K01b): written, sealed under the backup key, only when `encryption` is given. Without encryption a backup holds references only. */
+  readonly secrets?: SecretsSource;
   /** The agents' own conversation stores on this machine (card K01h): their files go into the backup too. */
   readonly piState?: PiStateSource;
   /** Signs the finished manifest (card K01b3): the signature file is written beside it before the folder gets its final name. A signer that fails fails the backup: none is written unsigned on an installation that signs. */
@@ -48,8 +53,9 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
   const final = join(options.root, name);
   const staging = `${final}${PARTIAL_SUFFIX}`;
   const pageSize = options.pageSize ?? 500;
-  const sealing = options.encryption === undefined ? undefined : beginSeal(options.encryption);
-  const cipher = sealing?.cipher;
+  const sealing = options.encryption === undefined ? undefined : beginSeal(options.encryption, options.scope ?? "everything");
+  // The cipher for the tables, blobs and conversation files: none in the "secrets only" scope, where only the secrets file is sealed.
+  const cipher = sealing !== undefined && sealing.seal.scope === "everything" ? sealing.cipher : undefined;
   const snapshot = await storage.snapshot();
   try {
     await mkdir(options.root, { recursive: true, mode: 0o700 });
@@ -85,9 +91,11 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
     }
     const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging, cipher);
     const piState = options.piState === undefined ? undefined : await copyPiState(options.piState, staging, cipher);
-    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(piState === undefined ? {} : { piState }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes: BACKUP_NOTES, complete: true };
+    const secrets = sealing === undefined || options.secrets === undefined ? undefined : await writeSecrets(staging, sealing.cipher, options.secrets);
+    const notes = secrets === undefined ? BACKUP_NOTES : BACKUP_NOTES.map((n) => n === NO_SECRETS_NOTE ? SECRETS_SEALED_NOTE : n);
+    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(piState === undefined ? {} : { piState }), ...(secrets === undefined ? {} : { secrets }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes, complete: true };
     // An encrypted backup's manifest ends with a keyed MAC over all of it, so the name, time, kind, epoch, notes, skipped list and file list cannot be changed by whoever only has the folder.
-    const manifest: BackupManifest = cipher === undefined ? unsigned : { ...unsigned, mac: cipher.manifestMac(canonicalJson(unsigned as never)) };
+    const manifest: BackupManifest = sealing === undefined ? unsigned : { ...unsigned, mac: sealing.cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);
     try { await manifestHandle.write(`${JSON.stringify(manifest, null, 2)}\n`); await manifestHandle.sync(); } finally { await manifestHandle.close(); }
     if (options.signer !== undefined) {
@@ -133,7 +141,8 @@ async function copyBlobs(blobs: FileBlobStore, staging: string, cipher: BackupCi
         if (why === undefined && hash.digest("hex") !== info.digest) why = "corrupt";
         if (why === undefined) await target.finish(); else await target.abort();
       } catch (error) { await target.abort().catch(() => undefined); throw error; }
-      if (why !== undefined) { await rm(join(folder, stored), { force: true }); skipped.push({ digest: info.digest, why }); continue; }
+      // A sealed backup does not name a skipped blob in the clear: the digest is keyed.
+      if (why !== undefined) { await rm(join(folder, stored), { force: true }); skipped.push({ digest: cipher === undefined ? info.digest : hasherFor(cipher).update(info.digest).digest("hex"), why }); continue; }
       lines.push(`${JSON.stringify(cipher === undefined ? { digest: info.digest, size } : { digest: info.digest, size, file: stored })}\n`);
       bytes += size;
     }

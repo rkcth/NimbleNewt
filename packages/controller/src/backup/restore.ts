@@ -4,7 +4,8 @@ import { join } from "node:path";
 import type { SignatureCheck, SignatureTrust } from "./signing.js";
 import { createInterface } from "node:readline";
 import { SNAPSHOT_TABLES, canonicalJson, type ControllerStorage, type SnapshotRow } from "../storage/index.js";
-import { cipherOf, blobFile, manifestDigestOf, readAll, verifyBackup } from "./verify.js";
+import { cipherOf, secretsCipherOf, blobFile, manifestDigestOf, readAll, verifyBackup } from "./verify.js";
+import { readSecrets, restoreSecrets, type SecretsRestored, type SecretsSink } from "./secrets.js";
 import { parsePiIndex, writePiState } from "./pi-state.js";
 import { readPlain, type BackupKey } from "./crypto.js";
 import { ledgerFilter, type LedgerEntry } from "../retention/ledger.js";
@@ -32,6 +33,11 @@ export interface RestoreResult {
   readonly blobsSkippedDeleted: number;
   readonly piStoresRestored: number;
   readonly piFilesRestored: number;
+  /** The secret values of an encrypted backup (card K01b): what was done with them; absent when the backup holds none, or when they were left out (`secretsLeftOut` says why). Counts only, never a value. */
+  readonly secrets?: SecretsRestored;
+  readonly secretsLeftOut?: string;
+  /** Things the owner should be told that are not problems. */
+  readonly notes?: readonly string[];
 }
 
 const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this effect was intended when the backup was taken; whether it happened afterwards is not known, so it must be reconciled with the outside world and is never run again" });
@@ -40,12 +46,15 @@ const RESTORED_EVIDENCE = canonicalJson({ restoredFromBackup: true, note: "this 
  * Restores a backup into an empty store (one no controller has owned). The backup is verified first, against its manifest and the store's schema version; nothing is written when it fails. An interrupted restore leaves
  * a partly filled store, which the caller discards (a restore always starts from a new, empty database), because the state row that makes a store look used is written last.
  */
-export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** The signing public keys already trusted (card K01b3): the backup must carry a valid signature of one of them. */ signatureTrust?: SignatureTrust; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string } = {}): Promise<RestoreResult> {
+export async function restoreBackup(path: string, storage: ControllerStorage, options: { pageSize?: number; /** Where the backup's artifact blobs go; required when the backup has any. */ blobs?: FileBlobStore; /** The unlocked key, for an encrypted backup. */ unlock?: BackupKey; /** The deletions recorded outside the database (`DeletionLedger.read`): applied to the rows as they are restored. */ deletions?: readonly LedgerEntry[]; /** The signing public keys already trusted (card K01b3): the backup must carry a valid signature of one of them. */ signatureTrust?: SignatureTrust; /** Refuse a backup that is not encrypted. */ requireEncrypted?: boolean; /** Where the backup's secret values go (card K01b); required when the backup holds them and a key was given, unless `skipSecrets`. */ secrets?: SecretsSink; /** Take a value that is already in the store over the backup's value (default: keep what is there, a secret changed since the backup is not rolled back). */ overwriteSecrets?: boolean; /** Leave the secret values out on purpose. */ skipSecrets?: boolean; /** Where the conversation store `id` goes (an empty or missing folder); required when the backup has Pi state. */ piTarget?: (id: string) => string; /** The digest of the manifest the caller approved (`manifestDigestOf`): the backup verified here must be exactly that one. */ expectedManifestDigest?: string } = {}): Promise<RestoreResult> {
   const check = await verifyBackup(path, { ...(options.signatureTrust === undefined ? {} : { signatureTrust: options.signatureTrust }), ...(options.unlock === undefined ? {} : { unlock: options.unlock }), ...(options.requireEncrypted === undefined ? {} : { requireEncrypted: options.requireEncrypted }) });
   if (!check.ok || check.manifest === undefined) throw new RestoreRefused(`the backup cannot be restored: ${check.problems.join("; ")}`);
   const manifest = check.manifest;
   if (options.expectedManifestDigest !== undefined && manifestDigestOf(manifest) !== options.expectedManifestDigest) throw new RestoreRefused("the backup is not the one that was approved: it changed after the preview");
   const cipher = cipherOf(manifest, options.unlock);
+  const secretsCipher = secretsCipherOf(manifest, options.unlock);
+  const wantsSecrets = manifest.secrets !== undefined && manifest.secrets.count > 0 && secretsCipher !== undefined && options.skipSecrets !== true;
+  if (wantsSecrets && options.secrets === undefined) throw new RestoreRefused("the backup holds secret values and nowhere was given to put them: give a place for them, or say they are to be left out");
   if (manifest.artifacts !== undefined && manifest.artifacts.blobs > 0 && options.blobs === undefined) throw new RestoreRefused("the backup holds artifact files, and no artifact store was given to put them in");
   if (manifest.piState !== undefined && manifest.piState.files > 0 && options.piTarget === undefined) throw new RestoreRefused("the backup holds the agents' conversation stores, and no folder was given to put them in");
   if ((await storage.currentEpoch()) !== 0) throw new RestoreRefused("the target is not empty: a controller has already owned it. Restore into a new, empty database.");
@@ -53,6 +62,14 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
   const targetVersion = probe.schemaVersion;
   await probe.close();
   if (targetVersion !== manifest.schemaVersion) throw new RestoreRefused(`the backup has schema version ${manifest.schemaVersion} and the target has ${targetVersion}; restore it with the version of NimbleNewt that made it, then upgrade`);
+  // The secret values are read and checked before anything is written, and put into the store first (like the artifacts: harmless without the rows, and the state row that makes the store look used is still last).
+  let secrets: SecretsRestored | undefined;
+  let secretsLeftOut: string | undefined;
+  if (manifest.secrets !== undefined && manifest.secrets.count > 0) {
+    if (options.skipSecrets === true) secretsLeftOut = "they were left out on request";
+    else if (secretsCipher === undefined) secretsLeftOut = "no passcode or recovery file was given, so the sealed secret values were not opened";
+    else { const entries = await readSecrets(path, manifest.secrets, secretsCipher).catch(() => { throw new RestoreRefused("the backup cannot be restored: the secret values were changed or cannot be read"); }); secrets = await restoreSecrets(entries, options.secrets!, { ...(options.overwriteSecrets === undefined ? {} : { overwrite: options.overwriteSecrets }) }); }
+  }
   let blobs = 0, skippedDeleted = 0;
   // Artifacts on the deletion ledger stay deleted: their files are not put back (unless another artifact that is not deleted holds the same bytes).
   const goneBlobs = new Set<string>();
@@ -107,5 +124,5 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles, ...(check.signature === undefined ? {} : { signature: check.signature }) };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles, ...(secrets === undefined ? {} : { secrets }), ...(secretsLeftOut === undefined ? {} : { secretsLeftOut }), ...(check.notes === undefined ? {} : { notes: check.notes }), ...(check.signature === undefined ? {} : { signature: check.signature }) };
 }

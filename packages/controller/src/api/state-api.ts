@@ -226,9 +226,9 @@ export interface StateApiDeps {
   readonly policyForward?: Pick<PolicyEditService, "forward">;
   readonly deliverables?: Pick<DeliverableService, "list" | "get">;
   readonly backups?: Pick<BackupService, "backUpNow" | "backUpFor" | "list" | "status">;
-  readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify">;
+  readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify" | "generations">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
-  readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set">;
+  readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set" | "text">;
   readonly backupSigning?: Pick<BackupSigningService, "status" | "rotate">;
   readonly backupRestore?: Context["backupRestore"];
   readonly databaseTransfer?: Context["databaseTransfer"];

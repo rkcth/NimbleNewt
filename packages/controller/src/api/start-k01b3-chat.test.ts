@@ -32,12 +32,12 @@ test("the owner switches backup encryption off and on by free wording through th
     return JSON.stringify([{ kind: "command", op: "backup.encryption.set", args: { enabled: meant === "on" }, evidence: owner, basis: "owner" }]);
   } };
   try {
-    const { keyring } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
-    const keyringFile = join(d, "keyring.json");
-    writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 });
+    const { keyring, recoveryFile } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
+    const keyringFile = join(d, "keyring.json"); const recoveryPath = join(d, "recovery.json");
+    writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 }); writeFileSync(recoveryPath, JSON.stringify(recoveryFile), { mode: 0o600 });
     let clock = Date.parse("2026-11-01T10:00:00.000Z");
     const dir = join(d, "backups");
-    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: dir, now: () => new Date(clock), encryption: { keyringFile } } });
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: dir, now: () => new Date(clock), encryption: { keyringFile, recoveryFile: recoveryPath } } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       let m = 0;
@@ -51,6 +51,9 @@ test("the owner switches backup encryption off and on by free wording through th
       const done = await turn("Yes, do that.", "agree");
       assert.equal(done[0].status, "applied", JSON.stringify(done));
       assert.equal(await backupNow(), false, "the next backup is plain");
+      // Turning it back on first needs the recovery file proved, as at setup (card K01b; the refusal itself is tested through the API).
+      const proof = (await c.api.handle(boot.token, { v: 1, op: "backup.encryption.verify", commandId: `v${m++}`, args: { method: "recovery" } } as never)) as { ok: boolean };
+      assert.ok(proof.ok, JSON.stringify(proof));
       await turn("Actually, protect my backups again.", "on");
       assert.equal((await turn("Go ahead.", "agree"))[0].status, "applied");
       assert.equal(await backupNow(), true, "sealed again with the same key");

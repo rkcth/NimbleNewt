@@ -1249,7 +1249,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { enabled, setting?: { enabled, scope, revision, changedAt?, changedBy?, text }, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof? } }`, or `{ item: { enabled: false } }`.
+Result: `{ item: { enabled, setting?: { enabled, scope, revision, changedAt?, changedBy?, text }, scope, keyId, createdAt, fingerprint, generation, proofDue, proofEveryDays, lastSuccessfulProof?, warnings, pinned?, approvedNext?, unlockMethods: { passcode, recovery }, lastProof?, oldKeyGenerations?: [{ generation, keyId, backups, removable }], unreadableBackups? } }`, or `{ item: { enabled: false } }`. `oldKeyGenerations` lists the key generations a rotation archived and how many backups still use each; one with no backup (`removable`) may be deleted with `backup encryption-generations --remove yes` on the host, and the recovery file made for it then opens nothing.
 
 #### `backup.signing.status`
 
@@ -4338,7 +4338,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `backup.encryption.set`
 
-Owner only, recorded and announced to the owner's inbox: switches backup encryption on or off, or chooses its scope, without touching the key or any old backup (they stay readable with the passcode or recovery file). `enabled: false` means new backups are written in PLAIN, so say that to the owner and have them agree first. Scope `everything` seals every file of a backup; `secrets` seals only secret values, and since no secret values are in a backup today (they stay in the secret store) that writes plain backups too. The installation refuses to start with its backup keyring removed from the configuration unless this setting says off, so taking the option away is no way around it. The same call turns encryption back on. It applies from the next backup. Give `expectedRevision` from backup.encryption.status `setting.revision`.
+Owner only, recorded and announced to the owner's inbox: switches backup encryption on or off, or chooses its scope, without touching the key or any old backup (they stay readable with the passcode or recovery file). `enabled: false` means new backups are written in PLAIN, so say that to the owner and have them agree first. Scope `everything` seals every file of a backup; `secrets` seals only the secret values (carried in a sealed file when the host gave the backups the secret store) and leaves the rest of the backup plain; with every unlock method lost the secrets are lost and the rest restores, whereas with `everything` the backups cannot be read at all. Switching encryption back on after it was off is refused until the recovery file was proved to open the key (`backup.encryption.verify`, method recovery). The installation refuses to start with its backup keyring removed from the configuration unless this setting says off, so taking the option away is no way around it. The same call turns encryption back on. It applies from the next backup. Give `expectedRevision` from backup.encryption.status `setting.revision`.
 
 Arguments:
 
@@ -4385,7 +4385,7 @@ Arguments:
 - `confirm`: the token from backup.restore.preview
 - `method` (optional): passcode or recovery, for an encrypted backup (default passcode)
 
-Result: `{ item: { name, restartRequired: true, restart: { automatic, instruction }, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded? } }`; `restart` says whether this host restarts the controller itself or what the owner must do to restart it; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
+Result: `{ item: { name, restartRequired: true, restart: { automatic, instruction }, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded?, secretsRestored?: { restored, same, keptDifferent, overwritten }, secretsLeftOut? } }`; `secretsRestored` (counts only) says what became of the secret values of an encrypted backup (a value already in the secret store that differs is kept, not rolled back), and `secretsLeftOut` why they were not opened; `restart` says whether this host restarts the controller itself or what the owner must do to restart it; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
 
 #### `backup.restore.cancel`
 
