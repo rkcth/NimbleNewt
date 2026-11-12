@@ -162,6 +162,33 @@ for (const backend of backends) {
     assert.doesNotMatch(items[0]!.detail ?? "", /6 times within 10 minutes/, items[0]!.detail);
   });
 
+  suite("denial counts survive a restart: the count goes on, a run that paged does not page again, and quiet counts are forgotten (card U11d)", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    await c.watch.reportDenial("agent:ann"); await c.watch.reportDenial("agent:ann");
+    await c.watch.reportDenial("agent:bob");
+    const restarted = c.restart();
+    assert.equal((await restarted.reportDenial("agent:ann")).raised, true, "the two before the restart count: the third pages");
+    assert.equal((await restarted.reportDenial("agent:bob")).raised, false, "another agent is counted on its own");
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1);
+    // The run already paged: a second restart does not page again and the item's count goes on.
+    const again = c.restart();
+    assert.equal((await again.reportDenial("agent:ann")).raised, false, "the same run does not page twice");
+    const items = (await c.open()).filter((i) => /ann/.test(i.label));
+    assert.equal(items.length, 1);
+    assert.match(items[0]!.label, /refused 4 times/);
+    await c.flush(); await c.flush();
+    assert.equal(c.sent.length, 1, "nothing more was sent");
+    // Counts that have been quiet for a whole window are forgotten (and so is what was remembered), and a restart then starts from nothing.
+    now += 11 * MIN;
+    await again.sweep(c.owner);
+    assert.deepEqual(Object.keys(await c.svc.watchMemory()).filter((k) => k.startsWith("deny:")), [], "nothing is kept for quiet agents");
+    assert.equal((await c.restart().reportDenial("agent:bob")).raised, false);
+    // An unreadable remembered count is the same as none.
+    await c.svc.remember("deny:agent:zed", "not json");
+    assert.equal((await c.restart().reportDenial("agent:zed")).raised, false);
+  });
+
   suite("a security event is always Urgent, once per key, and when the owner lets Urgent wait for the end of quiet hours it waits (card U11c)", async (c) => {
     await c.watch.reportSecurity({ kind: "protected-path-touched", key: "a1" });
     await c.watch.reportSecurity({ kind: "protected-path-touched", key: "a1" });

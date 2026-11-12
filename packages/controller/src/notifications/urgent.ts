@@ -36,7 +36,8 @@ export interface UrgentWatchOptions {
 }
 
 /** Bounds: hosts examined per sweep (the rest on the next sweeps, from a cursor), hosts remembered in one pass, agents whose denials are counted at once. */
-export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200, waitingPerSweep: 100, raisesPerSweep: 20, projectsCounted: 1000 } as const;
+export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200, waitingPerSweep: 100, raisesPerSweep: 20, projectsCounted: 1000, denialTimesKept: 1000 } as const;
+const DENIAL_KEY = "deny:";
 
 export type SecurityEvent = "sandbox-escape-attempt" | "credential-misused" | "protected-path-touched" | "integrity-check-failed";
 const SECURITY_TEXT: Readonly<Record<SecurityEvent, string>> = {
@@ -65,8 +66,7 @@ async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T>
  * Triggers built here: no good backup within the owner's limit (default 48 hours, `backupMaxAgeHours`), an enrolled host silent for longer than `hostDownAfterMinutes` (default 10), repeated policy
  * denials of one agent over `deniedThreshold` within `deniedWindowMinutes` (off until the owner sets a number; at most `deniedAlertsPerHour` agents page in an hour), and the security events a caller
  * reports through `reportSecurity`. A condition that has cleared (a backup made, a host heard from again, the host gone) closes its item (de-escalation); turning a trigger off with `null` closes its
- * open item too. What is open is read from the notification state, so a restart forgets nothing; when "no backup" was first seen is kept there as well. Denial counts are in memory: a restart starts
- * them again. The text sent outside is built here and holds no payload: names and counts only.
+ * open item too. What is open is read from the notification state, so a restart forgets nothing; when "no backup" was first seen is kept there as well. Denial counts are kept in the notification state as well (`deny:<agent>`), so a restart goes on from them. The text sent outside is built here and holds no payload: names and counts only.
  */
 export class UrgentWatch {
   readonly #n: NotificationService;
@@ -108,6 +108,7 @@ export class UrgentWatch {
     if (options.throttled === true && nowMs < this.#nextSweepAt) return { raised, cleared };
     this.#nextSweepAt = nowMs + (settings.sweepEverySeconds ?? DEFAULT_SWEEP_SECONDS) * 1000;
     let failure: unknown;
+    try { await this.#pruneDenials(settings); } catch (error) { failure ??= error; }
     try { if (this.#o.backups !== undefined) await this.#backupCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.critical !== undefined) await this.#criticalCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
@@ -299,7 +300,7 @@ export class UrgentWatch {
       if (threshold === undefined || threshold === null) return { raised: false };
       const window = (settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES) * 60_000;
       const nowMs = Date.parse(this.#now());
-      const prior = this.#denials.get(agentId);
+      const prior = this.#denials.get(agentId) ?? await this.#loadDenials(agentId);
       const kept = (prior?.times ?? []).filter((t) => nowMs - t < window);
       const state = kept.length === 0 || prior === undefined ? { times: kept, total: 0, raised: false, capped: false, since: nowMs } : prior;
       kept.push(nowMs);
@@ -308,8 +309,14 @@ export class UrgentWatch {
       state.times = kept; state.total = state.raised ? state.total + 1 : kept.length;
       this.#denials.delete(agentId); this.#denials.set(agentId, state);
       // Bounded memory: the agent that was quiet longest is forgotten first.
-      while (this.#denials.size > URGENT_LIMITS.agentsCounted) this.#denials.delete(this.#denials.keys().next().value as string);
-      if (!state.raised && kept.length < threshold) return { raised: false };
+      while (this.#denials.size > URGENT_LIMITS.agentsCounted) {
+        const forgotten = this.#denials.keys().next().value as string;
+        this.#denials.delete(forgotten);
+        await this.#n.remember(DENIAL_KEY + forgotten, null);
+      }
+      // Kept across a restart (the owner's count of refusals must not start again at zero, nor the run that already paged page a second time). Written when the state is final, after the item is raised.
+      const keep = async (): Promise<void> => { await this.#n.remember(DENIAL_KEY + agentId, JSON.stringify({ t: kept.slice(-URGENT_LIMITS.denialTimesKept), n: state.total, r: state.raised ? 1 : 0, c: state.capped ? 1 : 0, s: state.since })); };
+      if (!state.raised && kept.length < threshold) { await keep(); return { raised: false }; }
       if (!state.raised) state.since = kept[0]!;
       const name = code(agentId.replace(/^agent:/, ""));
       const ref = { kind: "agent", id: name };
@@ -322,6 +329,7 @@ export class UrgentWatch {
       if (state.raised) {
         // The same run of denials: the item's count and text move on, nobody is paged again.
         await this.#n.emitFromController({ commandId: `urg-deny:${agentId}:${kept[0]}:${state.total}`, kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label: label(state.total), ref, ...project, detail });
+        await keep();
         return { raised: false };
       }
       // A new run of denials. An item still open from the earlier run is closed first, so this one is a new item that is told.
@@ -333,8 +341,32 @@ export class UrgentWatch {
       await this.#n.emitFromController({ commandId: this.#id(`urg-deny:${agentId}`), kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label: label(state.total), ref, ...project, detail });
       state.raised = true;
       if (!state.capped) this.#alerts.push(nowMs);
+      await keep();
       return { raised: true };
     } catch { return { raised: false }; }
+  }
+
+  /** The denial count of one agent as the notification state remembers it (after a restart), or nothing when it is absent or unreadable. */
+  async #loadDenials(agentId: string): Promise<{ times: number[]; total: number; raised: boolean; capped: boolean; since: number } | undefined> {
+    const text = (await this.#n.watchMemory())[DENIAL_KEY + agentId];
+    if (text === undefined) return undefined;
+    try {
+      const v = JSON.parse(text) as { t?: unknown; n?: unknown; r?: unknown; c?: unknown; s?: unknown };
+      if (!Array.isArray(v.t) || !v.t.every((x) => typeof x === "number" && Number.isFinite(x)) || typeof v.n !== "number" || typeof v.s !== "number") return undefined;
+      return { times: v.t as number[], total: v.n, raised: v.r === 1, capped: v.c === 1, since: v.s };
+    } catch { return undefined; }
+  }
+
+  /** Forgets remembered denial counts that have been quiet for longer than the window (a fresh run would start from nothing anyway), so the state does not grow. */
+  async #pruneDenials(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>): Promise<void> {
+    const window = (settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES) * 60_000;
+    const nowMs = Date.parse(this.#now());
+    for (const [key, text] of Object.entries(await this.#n.watchMemory())) {
+      if (!key.startsWith(DENIAL_KEY)) continue;
+      let last = -Infinity;
+      try { const t = (JSON.parse(text) as { t?: unknown }).t; if (Array.isArray(t)) last = Math.max(...t.filter((x): x is number => typeof x === "number")); } catch { /* unreadable: forgotten below */ }
+      if (nowMs - last >= window) { this.#denials.delete(key.slice(DENIAL_KEY.length)); await this.#n.remember(key, null); }
+    }
   }
 
   /** A security event another service detected (a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check): always Urgent, once per `key`, an item of its own per key. */
