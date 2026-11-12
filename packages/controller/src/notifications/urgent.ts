@@ -36,8 +36,21 @@ export interface UrgentWatchOptions {
 }
 
 /** Bounds: hosts examined per sweep (the rest on the next sweeps, from a cursor), hosts remembered in one pass, agents whose denials are counted at once. */
-export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200, waitingPerSweep: 100, raisesPerSweep: 20, projectsCounted: 1000, denialTimesKept: 1000 } as const;
-const DENIAL_KEY = "deny:";
+export const URGENT_LIMITS = { hostsPerSweep: 100, hostsPerCycle: 20_000, agentsCounted: 1000, securityKinds: 8, reportersCounted: 1000, securityKeyChars: 200, waitingPerSweep: 100, raisesPerSweep: 20, projectsCounted: 1000, denialTimesKept: 1000, denialsWaiting: 1000, denialsPerSweep: 100 } as const;
+
+/** One agent's run of refusals: the times inside the window, the run's count, whether it was raised (and held back by the hourly cap), when it began, whether its raise is decided but not yet confirmed, and the revision of its record. */
+interface DenialRun { times: number[]; total: number; raised: boolean; capped: boolean; since: number; pending: boolean; project?: string; revision: number | undefined }
+
+/** A remembered count read back, or `undefined` when any value is of the wrong type or out of range (it then counts as none, never pages). Times later than `nowMs` are dropped (the clock was put back). */
+function denialRun(body: Readonly<Record<string, unknown>>, nowMs: number): Omit<DenialRun, "revision"> | undefined {
+  const { t, n, r, c, s, p, j } = body;
+  const time = (x: unknown): x is number => typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 8.64e15;
+  const flag = (x: unknown): boolean | undefined => (x === 1 ? true : x === 0 || x === undefined ? false : undefined);
+  if (!Array.isArray(t) || t.length > URGENT_LIMITS.denialTimesKept || !t.every(time) || !time(s) || typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > 1e9) return undefined;
+  const raised = flag(r); const capped = flag(c); const pending = flag(p);
+  if (raised === undefined || capped === undefined || pending === undefined || (pending && !raised) || (j !== undefined && (typeof j !== "string" || !PROJECT_ID.test(j)))) return undefined;
+  return { times: (t as number[]).filter((x) => x <= nowMs), total: n, raised, capped, since: s, pending, ...(j === undefined ? {} : { project: j }) };
+}
 
 export type SecurityEvent = "sandbox-escape-attempt" | "credential-misused" | "protected-path-touched" | "integrity-check-failed";
 const SECURITY_TEXT: Readonly<Record<SecurityEvent, string>> = {
@@ -66,12 +79,16 @@ async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T>
  * Triggers built here: no good backup within the owner's limit (default 48 hours, `backupMaxAgeHours`), an enrolled host silent for longer than `hostDownAfterMinutes` (default 10), repeated policy
  * denials of one agent over `deniedThreshold` within `deniedWindowMinutes` (off until the owner sets a number; at most `deniedAlertsPerHour` agents page in an hour), and the security events a caller
  * reports through `reportSecurity`. A condition that has cleared (a backup made, a host heard from again, the host gone) closes its item (de-escalation); turning a trigger off with `null` closes its
- * open item too. What is open is read from the notification state, so a restart forgets nothing; when "no backup" was first seen is kept there as well. Denial counts are kept in the notification state as well (`deny:<agent>`), so a restart goes on from them. The text sent outside is built here and holds no payload: names and counts only.
+ * open item too. What is open is read from the notification state, so a restart forgets nothing; when "no backup" was first seen is kept there as well. Denial counts are kept in a small record per agent (`notification-denial`, never the shared notification state), so a restart goes on from them; a run's raise is decided and written before the item is raised, with command IDs fixed by the run, so a stop at any point neither pages twice nor misses the page. The text sent outside is built here and holds no payload: names and counts only.
  */
 export class UrgentWatch {
   readonly #n: NotificationService;
   readonly #o: UrgentWatchOptions;
-  readonly #denials = new Map<string, { times: number[]; total: number; raised: boolean; capped: boolean; since: number }>();
+  readonly #denials = new Map<string, DenialRun>();
+  /** Per agent: the work running for it (refusals one after the other) and how many refusals wait. */
+  readonly #denialQueue = new Map<string, Promise<void>>();
+  readonly #denialWaiting = new Map<string, number>();
+  #denialCursor: string | undefined;
   readonly #alerts: number[] = [];
   readonly #reports = new Map<string, number[]>();
   #nextSweepAt = 0;
@@ -108,7 +125,7 @@ export class UrgentWatch {
     if (options.throttled === true && nowMs < this.#nextSweepAt) return { raised, cleared };
     this.#nextSweepAt = nowMs + (settings.sweepEverySeconds ?? DEFAULT_SWEEP_SECONDS) * 1000;
     let failure: unknown;
-    try { await this.#pruneDenials(settings); } catch (error) { failure ??= error; }
+    try { await this.#pruneDenials(settings, raised); } catch (error) { failure ??= error; }
     try { if (this.#o.backups !== undefined) await this.#backupCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.critical !== undefined) await this.#criticalCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
@@ -295,77 +312,143 @@ export class UrgentWatch {
    */
   async reportDenial(agentId: string, projectId?: string): Promise<{ raised: boolean }> {
     try {
-      const settings = await this.#n.controllerSettings();
-      const threshold = settings.deniedThreshold;
-      if (threshold === undefined || threshold === null) return { raised: false };
-      const window = (settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES) * 60_000;
-      const nowMs = Date.parse(this.#now());
-      const prior = this.#denials.get(agentId) ?? await this.#loadDenials(agentId);
-      const kept = (prior?.times ?? []).filter((t) => nowMs - t < window);
-      const state = kept.length === 0 || prior === undefined ? { times: kept, total: 0, raised: false, capped: false, since: nowMs } : prior;
-      kept.push(nowMs);
-      if (kept.length > threshold + 1) kept.splice(0, kept.length - (threshold + 1));
-      // Before the item is raised, only the refusals inside the window count (a slow trickle, each within the window of the one before, never adds up to a page); once raised, the run's count goes on.
-      state.times = kept; state.total = state.raised ? state.total + 1 : kept.length;
-      this.#denials.delete(agentId); this.#denials.set(agentId, state);
-      // Bounded memory: the agent that was quiet longest is forgotten first.
-      while (this.#denials.size > URGENT_LIMITS.agentsCounted) {
-        const forgotten = this.#denials.keys().next().value as string;
-        this.#denials.delete(forgotten);
-        await this.#n.remember(DENIAL_KEY + forgotten, null);
+      // Refusals that arrive together (one agent making parallel calls) are counted one after the other, never from the same state: otherwise each of them could reach the threshold and page.
+      const waiting = this.#denialWaiting.get(agentId) ?? 0;
+      if (waiting >= URGENT_LIMITS.denialsWaiting) return { raised: false };
+      this.#denialWaiting.set(agentId, waiting + 1);
+      try { return await this.#oneAgent(agentId, () => this.#denial(agentId, projectId)); } finally {
+        const left = (this.#denialWaiting.get(agentId) ?? 1) - 1;
+        if (left <= 0) this.#denialWaiting.delete(agentId); else this.#denialWaiting.set(agentId, left);
       }
-      // Kept across a restart (the owner's count of refusals must not start again at zero, nor the run that already paged page a second time). Written when the state is final, after the item is raised.
-      const keep = async (): Promise<void> => { await this.#n.remember(DENIAL_KEY + agentId, JSON.stringify({ t: kept.slice(-URGENT_LIMITS.denialTimesKept), n: state.total, r: state.raised ? 1 : 0, c: state.capped ? 1 : 0, s: state.since })); };
-      if (!state.raised && kept.length < threshold) { await keep(); return { raised: false }; }
-      if (!state.raised) state.since = kept[0]!;
-      const name = code(agentId.replace(/^agent:/, ""));
-      const ref = { kind: "agent", id: name };
-      const project = projectId === undefined ? {} : { projectId };
-      const minutes = Math.round(window / 60_000);
-      const label = (n: number): string => `Urgent: agent ${name} was refused ${n} times`;
-      const detail = !state.raised
-        ? `Agent ${name} was refused ${state.total} times within ${minutes} minutes (threshold ${threshold}).`
-        : `Agent ${name} was refused ${threshold} times within ${minutes} minutes (threshold ${threshold}), and ${state.total} times in all since ${new Date(state.since).toISOString()} with no ${minutes}-minute gap.`;
-      if (state.raised) {
-        // The same run of denials: the item's count and text move on, nobody is paged again.
-        await this.#n.emitFromController({ commandId: `urg-deny:${agentId}:${kept[0]}:${state.total}`, kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label: label(state.total), ref, ...project, detail });
-        await keep();
-        return { raised: false };
-      }
-      // A new run of denials. An item still open from the earlier run is closed first, so this one is a new item that is told.
-      await this.#n.settleFromController({ commandId: this.#id(`urg-deny-reopen:${agentId}`), kind: "maintenance", ref, ...project });
-      const hourAgo = nowMs - HOUR;
-      while (this.#alerts.length > 0 && this.#alerts[0]! < hourAgo) this.#alerts.shift();
-      const cap = settings.deniedAlertsPerHour === undefined ? DEFAULT_DENIED_ALERTS_PER_HOUR : settings.deniedAlertsPerHour;
-      state.capped = cap !== null && this.#alerts.length >= cap;
-      await this.#n.emitFromController({ commandId: this.#id(`urg-deny:${agentId}`), kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label: label(state.total), ref, ...project, detail });
-      state.raised = true;
-      if (!state.capped) this.#alerts.push(nowMs);
-      await keep();
-      return { raised: true };
     } catch { return { raised: false }; }
   }
 
-  /** The denial count of one agent as the notification state remembers it (after a restart), or nothing when it is absent or unreadable. */
-  async #loadDenials(agentId: string): Promise<{ times: number[]; total: number; raised: boolean; capped: boolean; since: number } | undefined> {
-    const text = (await this.#n.watchMemory())[DENIAL_KEY + agentId];
-    if (text === undefined) return undefined;
-    try {
-      const v = JSON.parse(text) as { t?: unknown; n?: unknown; r?: unknown; c?: unknown; s?: unknown };
-      if (!Array.isArray(v.t) || !v.t.every((x) => typeof x === "number" && Number.isFinite(x)) || typeof v.n !== "number" || typeof v.s !== "number") return undefined;
-      return { times: v.t as number[], total: v.n, raised: v.r === 1, capped: v.c === 1, since: v.s };
-    } catch { return undefined; }
+  /** Runs `work` for one agent after what is already running for it (its refusals, the sweep's look at its count). */
+  async #oneAgent<T>(agentId: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.#denialQueue.get(agentId) ?? Promise.resolve()).then(work);
+    const tail = run.then(() => undefined, () => undefined);
+    this.#denialQueue.set(agentId, tail);
+    try { return await run; } finally { if (this.#denialQueue.get(agentId) === tail) this.#denialQueue.delete(agentId); }
   }
 
-  /** Forgets remembered denial counts that have been quiet for longer than the window (a fresh run would start from nothing anyway), so the state does not grow. */
-  async #pruneDenials(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>): Promise<void> {
+  async #denial(agentId: string, projectId: string | undefined): Promise<{ raised: boolean }> {
+    const settings = await this.#n.controllerSettings();
+    const threshold = settings.deniedThreshold;
+    if (threshold === undefined || threshold === null) return { raised: false };
     const window = (settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES) * 60_000;
     const nowMs = Date.parse(this.#now());
-    for (const [key, text] of Object.entries(await this.#n.watchMemory())) {
-      if (!key.startsWith(DENIAL_KEY)) continue;
-      let last = -Infinity;
-      try { const t = (JSON.parse(text) as { t?: unknown }).t; if (Array.isArray(t)) last = Math.max(...t.filter((x): x is number => typeof x === "number")); } catch { /* unreadable: forgotten below */ }
-      if (nowMs - last >= window) { this.#denials.delete(key.slice(DENIAL_KEY.length)); await this.#n.remember(key, null); }
+    const prior = this.#denials.get(agentId) ?? await this.#loadDenials(agentId, nowMs);
+    // A raise that a stop interrupted is finished first, as it was decided (the owner was due that page), before this refusal is counted.
+    const finished = prior !== undefined && prior.pending ? await this.#finishRaise(agentId, prior, settings) : false;
+    // A refusal "later" than now (the clock was put back) is not counted: counting it could page for refusals that are not inside the window.
+    const kept = (prior?.times ?? []).filter((t) => t <= nowMs && nowMs - t < window);
+    const state: DenialRun = kept.length === 0 || prior === undefined ? { times: kept, total: 0, raised: false, capped: false, since: nowMs, pending: false, revision: prior?.revision } : prior;
+    kept.push(nowMs);
+    if (kept.length > threshold + 1) kept.splice(0, kept.length - (threshold + 1));
+    // Before the item is raised, only the refusals inside the window count (a slow trickle, each within the window of the one before, never adds up to a page); once raised, the run's count goes on.
+    state.times = kept; state.total = state.raised ? state.total + 1 : kept.length;
+    this.#denials.delete(agentId); this.#denials.set(agentId, state);
+    // Bounded memory: the agent that was quiet longest is forgotten first (its count stays in its record and is read again on its next refusal).
+    while (this.#denials.size > URGENT_LIMITS.agentsCounted) this.#denials.delete(this.#denials.keys().next().value as string);
+    if (!state.raised && kept.length < threshold) { await this.#keepDenials(agentId, state); return { raised: finished }; }
+    if (state.raised) {
+      // The same run of denials: the item's count and text move on, nobody is paged again.
+      const { ref, label, detail } = this.#denialText(agentId, state, settings, false);
+      await this.#n.emitFromController({ commandId: `urg-deny:${agentId}:${kept[0]}:${state.total}`, kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label, ref, ...(state.project === undefined ? {} : { projectId: state.project }), detail });
+      await this.#keepDenials(agentId, state);
+      return { raised: finished };
+    }
+    // A new run of denials. Whether it pages is decided and written BEFORE the item is raised (`pending`), and the raise uses command IDs fixed by the run's start: a stop at any point after the
+    // decision is finished by the next refusal or by the sweep with the same IDs, so the run is raised (and paged) exactly once, never twice and never not at all.
+    state.since = kept[0]!;
+    const hourAgo = nowMs - HOUR;
+    while (this.#alerts.length > 0 && this.#alerts[0]! < hourAgo) this.#alerts.shift();
+    const cap = settings.deniedAlertsPerHour === undefined ? DEFAULT_DENIED_ALERTS_PER_HOUR : settings.deniedAlertsPerHour;
+    state.capped = cap !== null && this.#alerts.length >= cap;
+    if (!state.capped) this.#alerts.push(nowMs);
+    state.raised = true; state.pending = true;
+    if (projectId === undefined) delete state.project; else state.project = projectId;
+    await this.#keepDenials(agentId, state);
+    return { raised: (await this.#finishRaise(agentId, state, settings)) || finished };
+  }
+
+  /** The item's record, label and detail for an agent's run of refusals (`first`: the raise; otherwise the run's count moving on). */
+  #denialText(agentId: string, state: DenialRun, settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, first: boolean): { ref: { kind: string; id: string }; label: string; detail: string } {
+    const name = code(agentId.replace(/^agent:/, ""));
+    const minutes = settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES;
+    const threshold = settings.deniedThreshold ?? state.total;
+    const label = `Urgent: agent ${name} was refused ${state.total} times`;
+    const detail = first
+      ? `Agent ${name} was refused ${state.total} times within ${minutes} minutes (threshold ${threshold}).`
+      : `Agent ${name} was refused ${threshold} times within ${minutes} minutes (threshold ${threshold}), and ${state.total} times in all since ${new Date(state.since).toISOString()} with no ${minutes}-minute gap.`;
+    return { ref: { kind: "agent", id: name }, label, detail };
+  }
+
+  /**
+   * Raises the item of a run whose raise was decided (`pending`): closes the item of an earlier run still open, then raises this one, both with command IDs fixed by the run's start, so doing it again
+   * after a stop repeats nothing that was done. `true` when this call raised it (a page unless the hourly cap held it back); `false` when it had been raised before the stop.
+   */
+  async #finishRaise(agentId: string, state: DenialRun, settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>): Promise<boolean> {
+    const { ref, label, detail } = this.#denialText(agentId, state, settings, true);
+    const project = state.project === undefined ? {} : { projectId: state.project };
+    // The same command ID with other words (the count moved on since): it was done before the stop.
+    const done = (error: unknown): boolean => error instanceof DomainError && error.code === "command_conflict";
+    try { await this.#n.settleFromController({ commandId: `urg-deny-reopen:${agentId}:${state.since}`, kind: "maintenance", ref, ...project }); } catch (error) { if (!done(error)) throw error; }
+    let told = true;
+    try { await this.#n.emitFromController({ commandId: `urg-deny-raise:${agentId}:${state.since}`, kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label, ref, ...project, detail }); } catch (error) { if (!done(error)) throw error; told = false; }
+    state.pending = false;
+    await this.#keepDenials(agentId, state);
+    return told;
+  }
+
+  /** Writes the agent's count to its record (kept across a restart). Nothing is written while no threshold is set (the caller returns before). One controller counts at a time (see the notes): when the record changed meanwhile, this controller's count is written over it. */
+  async #keepDenials(agentId: string, state: DenialRun): Promise<void> {
+    const body = { t: state.times.slice(-URGENT_LIMITS.denialTimesKept), n: state.total, r: state.raised ? 1 : 0, c: state.capped ? 1 : 0, s: state.since, p: state.pending ? 1 : 0, ...(state.project === undefined ? {} : { j: state.project }) };
+    let written = await this.#n.keepDenialCount(agentId, body, state.revision);
+    if (written === false) written = await this.#n.keepDenialCount(agentId, body, (await this.#n.denialCount(agentId))?.revision);
+    if (written === false) throw new Error(`the refusal count of ${agentId} changed twice while it was written`);
+    state.revision = written;
+  }
+
+  /**
+   * The denial count of one agent as the storage remembers it (after a restart, or after the agent was forgotten from memory), or nothing when it is absent or does not make sense (a value of the wrong
+   * type or out of range): a record that cannot be trusted never pages. Refusals "later" than now are dropped by the caller.
+   */
+  async #loadDenials(agentId: string, nowMs: number): Promise<DenialRun | undefined> {
+    const found = await this.#n.denialCount(agentId);
+    if (found === undefined) return undefined;
+    const run = denialRun(found.body, nowMs);
+    // Not trusted: counted from nothing, and the record is written over at its revision on this refusal.
+    return run === undefined ? { times: [], total: 0, raised: false, capped: false, since: nowMs, pending: false, revision: found.revision } : { ...run, revision: found.revision };
+  }
+
+  /**
+   * Forgets remembered denial counts that have been quiet for a whole window (a fresh run would start from nothing anyway), so storage does not grow, and finishes a raise a stop interrupted (so a
+   * page is not missed when the agent is never refused again). With no threshold set every count is forgotten. Each agent is looked at in its own turn with its refusals (a refusal arriving meanwhile
+   * is never thrown away), at most `denialsPerSweep` per sweep from a cursor.
+   */
+  async #pruneDenials(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[]): Promise<void> {
+    const window = (settings.deniedWindowMinutes ?? DEFAULT_DENIED_WINDOW_MINUTES) * 60_000;
+    const off = settings.deniedThreshold === undefined || settings.deniedThreshold === null;
+    if (off) this.#denials.clear();
+    const page = await this.#n.denialCounts({ ...(this.#denialCursor === undefined ? {} : { afterId: this.#denialCursor }), limit: URGENT_LIMITS.denialsPerSweep });
+    this.#denialCursor = page.length < URGENT_LIMITS.denialsPerSweep ? undefined : page[page.length - 1]!.id;
+    for (const { agentId } of page) {
+      await this.#oneAgent(agentId, async () => {
+        const found = await this.#n.denialCount(agentId);
+        if (found === undefined) return;
+        const nowMs = Date.parse(this.#now());
+        const run = this.#denials.get(agentId) ?? denialRun(found.body, nowMs);
+        if (!off && run !== undefined && run.pending) {
+          const state: DenialRun = { ...run, revision: found.revision };
+          this.#denials.set(agentId, state);
+          if (await this.#finishRaise(agentId, state, settings)) raised.push(`agent:${code(agentId.replace(/^agent:/, ""))}`);
+          return;
+        }
+        const last = run === undefined ? -Infinity : Math.max(-Infinity, ...run.times.filter((t) => t <= nowMs));
+        if (!off && nowMs - last < window) return;
+        if (await this.#n.keepDenialCount(agentId, null, found.revision) !== false) this.#denials.delete(agentId);
+      });
     }
   }
 
