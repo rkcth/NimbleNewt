@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, mkdir, readdir, readlink, realpath, type FileHandle } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { WorkspaceError } from "./errors.js";
 import { fold, splitRelative, touchesGit } from "./names.js";
 
@@ -81,5 +81,19 @@ export const NOFOLLOW = typeof constants.O_NOFOLLOW === "number" ? constants.O_N
 
 /** Whether two stats are the same file (same device and inode). */
 export const sameFile = (a: { dev: number | bigint; ino: number | bigint }, b: { dev: number | bigint; ino: number | bigint }): boolean => a.dev === b.dev && a.ino === b.ino;
+
+/**
+ * Whether a file opened by the path `absolute` (from `resolveSafe`, so canonical and inside the root) really is the file at that path (H12o second review). `O_NOFOLLOW` covers only the last name: a directory on the way swapped
+ * for a link between the walk and the open is followed, and the opened file can be any file the host can read. On Linux the kernel says where an open file is (`/proc/self/fd/N`, the canonical path of the opened file itself,
+ * not a second walk), which settles it without a race. Elsewhere the file at the path must be the opened one and its directory must still be real (a second look, which narrows the window but cannot close it; noted).
+ */
+export async function openedAt(handle: FileHandle, absolute: string): Promise<boolean> {
+  if (process.platform === "linux") {
+    const where = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => undefined);
+    if (where !== undefined) return where === absolute;
+  }
+  const [opened, now, parent] = await Promise.all([handle.stat(), lstat(absolute).catch(() => undefined), realpath(dirname(absolute)).catch(() => undefined)]);
+  return now !== undefined && sameFile(opened, now) && parent === dirname(absolute);
+}
 
 void sep;

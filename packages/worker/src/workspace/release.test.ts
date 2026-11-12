@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -331,5 +331,40 @@ test("a file name that is not valid UTF-8 refuses the release cleanly (a typed r
     assert.equal(r.ok, false, JSON.stringify(r));
     assert.match(reasonOf(r), /not valid UTF-8/);
     assert.equal(w.head(), head);
+  } finally { await w.done(); }
+});
+
+test("a directory on the way swapped for a link after the walk cannot make the no-follow re-read agree with what git read outside the checkout (H12o second review)", { skip: posix }, async () => {
+  const w = await world();
+  try {
+    // What a won race leaves: git read `src/a.ts` through `src` swapped for a link to a host directory (it staged the host file), and the agent swaps `src` again right after the re-read's walk.
+    const hostDir = join(w.dir, "host-dir");
+    await mkdir(hostDir);
+    await writeFile(join(hostDir, "a.ts"), "HOST-ONLY-CONTENT\n");
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const src = join(w.made.checkout, "src"); const aside = join(w.made.checkout, "src-real");
+    const file = join(w.dir, "git-wrapper-dir");
+    await writeFile(file, `#!/bin/sh\ncase " $* " in *" add -A"*) '${realGit()}' "$@" || exit 1; sha=$('${realGit()}' --git-dir '${w.made.gitDir}' hash-object -w '${join(hostDir, "a.ts")}') || exit 1; '${realGit()}' --git-dir '${w.made.gitDir}' --work-tree '${w.made.checkout}' update-index --cacheinfo "100644,$sha,src/a.ts" || exit 1; exit 0;; esac\nexec '${realGit()}' "$@"\n`);
+    await chmod(file, 0o755);
+    let swapped = false;
+    const git = await GitBridge.create({ scratch: join(w.dir, "scratch3"), git: file, hooks: { beforeOpen: async (absolute) => {
+      if (swapped || !absolute.endsWith(join("src", "a.ts"))) return;
+      swapped = true; await rename(src, aside); await symlink(hostDir, src);
+    } } });
+    const ws = new LocalWorkspaces({ root: w.root, git, shared: (p) => (p === "prj-one" ? w.shared : undefined), busy: () => [], landing: () => ({ branch: "main", requirePermit: true }), clock: () => "2026-11-12T10:00:00.000Z" });
+    const head = w.head();
+    const r = await ws.port.run(call("release"));
+    assert.equal(swapped, true, "the swap happened between the walk and the open");
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /^"src\/a\.ts" changed or was replaced by a link while it was being staged/);
+    assert.equal(w.head(), head, "nothing was committed");
+    assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false);
+    const secret = execFileSync("git", ["--git-dir", w.made.gitDir, "hash-object", join(hostDir, "a.ts")], { encoding: "utf8" }).trim();
+    assert.doesNotMatch(execFileSync("git", ["--git-dir", w.made.gitDir, "ls-files", "-s"], { encoding: "utf8" }), new RegExp(secret), "the index no longer names the blob read from outside");
+    // The agent's directory back in place, an honest release commits the agent's own file.
+    await rm(src); await rename(aside, src);
+    const ok = await w.ws.port.run(call("release"));
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.equal(sh(w.dir, "--git-dir", w.made.gitDir, "show", "HEAD:src/a.ts"), "export const a = 2;");
   } finally { await w.done(); }
 });

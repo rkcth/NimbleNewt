@@ -9,7 +9,7 @@ import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
 import { splitRelative, touchesGit } from "./names.js";
-import { NOFOLLOW, resolveSafe, sameFile } from "./paths.js";
+import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
@@ -38,15 +38,17 @@ export const filesDigest = (files: readonly { path: string; op: "write" | "delet
 export class GitBridge {
   readonly #empty: string;
   readonly #git: string;
+  readonly #beforeOpen: ((absolute: string) => Promise<void>) | undefined;
 
   /** `scratch` is a directory only the controller can write: it holds the empty hooks directory and the empty home. */
-  private constructor(scratch: string, git: string) { this.#empty = scratch; this.#git = git; }
+  private constructor(scratch: string, git: string, beforeOpen?: (absolute: string) => Promise<void>) { this.#empty = scratch; this.#git = git; this.#beforeOpen = beforeOpen; }
 
-  static async create(options: { scratch: string; git?: string }): Promise<GitBridge> {
+  /** `hooks.beforeOpen` is a test seam (H12o second review): it runs between the check of a checkout file's path and its opening for a read, where a hostile process could swap a name. */
+  static async create(options: { scratch: string; git?: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void> } }): Promise<GitBridge> {
     const scratch = await realpath(await mkdir(options.scratch, { recursive: true, mode: 0o700 }).then(() => options.scratch));
     await mkdir(join(scratch, "no-hooks"), { recursive: true, mode: 0o700 });
     await mkdir(join(scratch, "home"), { recursive: true, mode: 0o700 });
-    return new GitBridge(scratch, options.git ?? "git");
+    return new GitBridge(scratch, options.git ?? "git", options.hooks?.beforeOpen);
   }
 
   #env(): NodeJS.ProcessEnv {
@@ -218,7 +220,7 @@ export class GitBridge {
           const opened = await handle.stat();
           const now = await lstat(safe.absolute).catch(() => undefined);
           const parent = await realpath(dirname(safe.absolute)).catch(() => undefined);
-          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
+          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent || !(await openedAt(handle, safe.absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
           await handle.truncate(0);
           if (s.mode !== undefined) await handle.chmod(s.mode);
           streamed = true; // the stream closes the handle
@@ -397,8 +399,11 @@ export class GitBridge {
 
   /** A file of the checkout, opened without following a link, as a plain file within the size limit. */
   async #readChecked(absolute: string, shown: string): Promise<Buffer> {
-    const handle = await open(absolute, constants.O_RDONLY | NOFOLLOW).catch(() => { throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} could not be opened without following a link`); });
+    await this.#beforeOpen?.(absolute);
+    const handle = await open(absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} could not be opened without following a link`); });
     try {
+      // A directory on the way swapped for a link is followed by the open (no-follow covers the last name only): the file read must be the one at the checked path (H12o second review).
+      if (!(await openedAt(handle, absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} was reached through a link; it was not read`, { tamper: true });
       const info = await handle.stat();
       if (!info.isFile()) throw new WorkspaceError("invalid_path", `${JSON.stringify(shown.slice(0, 80))} is not a plain file`);
       if (info.size > GIT_LIMITS.fileBytes) throw new WorkspaceError("invalid_path", `${JSON.stringify(shown.slice(0, 80))} is larger than the ${GIT_LIMITS.fileBytes} bytes a change may carry`);
@@ -459,7 +464,11 @@ export class GitBridge {
     if (files.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files are staged`);
     // Git reads a file it saw as plain by opening its path, which follows a link: a file swapped for a link (or a directory on the way swapped for one) between git's look and its read would put the content of a
     // file outside the checkout, read with the host's rights, into the commit. So every written file is read again here without following any link and must be exactly what was staged (H12o review).
-    for (const f of files) if (f.op === "write") await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path));
+    // H12o second review: on a refusal the index is put back to the head, so it no longer names a blob git read from outside the checkout.
+    try { for (const f of files) if (f.op === "write") await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path)); } catch (error) {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir }).catch(() => undefined);
+      throw error;
+    }
     const status = await this.status(options);
     return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
   }
@@ -470,8 +479,11 @@ export class GitBridge {
     if (staged === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(staged)) throw changed();
     const safe = await resolveSafe(checkout, path).catch(() => { throw changed(); });
     if (safe.exists !== "file") throw changed();
+    await this.#beforeOpen?.(safe.absolute);
     const handle = await open(safe.absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw changed(); });
     try {
+      // No-follow covers the last name only: a directory on the way swapped for a link after the walk would lead this read to the same outside file git read, and the hashes would agree (H12o second review).
+      if (!(await openedAt(handle, safe.absolute))) throw changed();
       const info = await handle.stat();
       if (!info.isFile()) throw changed();
       const hash = createHash(staged.length === 64 ? "sha256" : "sha1").update(`blob ${info.size}\0`);
