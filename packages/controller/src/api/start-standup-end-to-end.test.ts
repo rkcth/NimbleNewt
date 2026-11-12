@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { AdmissionService } from "../admission/index.js";
 import { ScriptedInterpreter } from "../chat/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
@@ -13,7 +13,22 @@ import { HostService } from "../hosts/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { PolicyService } from "../policy/index.js";
 import { DifficultyService } from "../routing/index.js";
-import { startController, type Controller } from "./index.js";
+import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
+import { startController, type Controller, type StartOptions } from "./index.js";
+
+// The stores a whole controller can be started on (the other two storage variants are covered by each sink's own unit suite). The typical tier runs SQLite only.
+let server: Promise<TestServer> | undefined;
+after(async () => { if (server !== undefined) await (await server).stop(); });
+interface Store { readonly name: string; open(dir: string): Promise<{ storage: StartOptions["storage"]; close(): Promise<void> }> }
+const stores: Store[] = [
+  { name: "SQLite", open: async (d) => ({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, close: async () => undefined }) },
+  ...(process.env["NIMBLENEWT_TIER"] === "typical" ? [] : [{ name: "PostgreSQL", open: async () => {
+    server ??= startTestServer();
+    const s = await server;
+    const schema = `m03h_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
+    return { storage: { kind: "postgres" as const, url: s.url(), schema }, close: async () => { await withClient(s.url(), async (cl) => { await cl.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }); } };
+  } }]),
+];
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -29,13 +44,14 @@ const HOUR = 3_600_000, DAY = 24 * HOUR;
  * is asked, once, whether it saw it exactly once: the stand-up's records, the advance notice to each agent, the owner's question and its notification, the usage sink (worker-slot time) in the preparation review, the activity record
  * and its replay for a task the meeting changed, and the retention rule over the stand-up's derived records.
  */
-test("a scheduled stand-up runs through the running controller and every sink sees it exactly once (card M03h)", async () => {
+for (const store of stores) test(`${store.name}: a scheduled stand-up runs through the running controller and every sink sees it exactly once (card M03h)`, async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-su-e2e-"));
+  const db = await store.open(d);
   let skew = -30 * DAY;
   const clock = (): string => new Date(Date.now() + skew).toISOString();
   const worker = new ScriptedWorker("host:w1", async (): Promise<WorkerTurnResult> => { skew += 20 * 60_000; return { status: "completed", text: "Watered the beds.", checkpoint: { turn: 1 } }; });
   const c: Controller = await startController({
-    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    storage: db.storage, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     dispatch: { timer: new ManualTimer(), manual: true, workers: [worker], clock },
     chat: { interpreter: new ScriptedInterpreter({}) },
   } as never);
@@ -185,5 +201,5 @@ test("a scheduled stand-up runs through the running controller and every sink se
     assert.deepEqual((await ok(boot.token, "retention.run", {}, "rr2")).candidates, [], "nothing is left for a second pass");
     assert.deepEqual((await kinds("standup-prep")).map((x) => x.id), [occ]);
     assert.equal((await ok(boot.token, "standup.briefs", { occurrenceId: occ })).item.length, 0);
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { await c.close(); await db.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

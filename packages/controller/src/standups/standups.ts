@@ -23,6 +23,9 @@ import { clean, cut, invalid, plain, whole, type Cite, type OutcomeSink } from "
 
 // ---- records --------------------------------------------------------------------------------------------------------------------
 
+/** The kind of a project's list of its stand-ups' IDs (named by the project). */
+const INDEX_KIND = "standup-index";
+
 /** What a stand-up schedule adds to a meeting schedule (kind `standup-config`, named by the schedule's ID). */
 export interface StandupConfigBody {
   readonly scheduleId: string;
@@ -166,7 +169,7 @@ export interface StandupOptions extends RunnerOptions {
   readonly scanPages?: number;
 }
 
-export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000 } as const;
+export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000, perProject: 200 } as const;
 
 /**
  * One stand-up of a project, as the stand-ups status answer tells it (card M03h): the schedule as it stands, and the two meetings the owner asks about — the one coming up next and the last one this stand-up made. Everything on these lines
@@ -276,6 +279,11 @@ export class StandupService {
     const duration = command.durationMinutes === undefined ? STANDUP_LIMITS.durationDefault : whole(command.durationMinutes, "durationMinutes", 1, 480);
     const window = this.#window(command.windowFrom, command.windowTo, command.time, duration);
     const coverageHours = command.coverageHours === undefined ? STANDUP_LIMITS.coverageDefault : whole(command.coverageHours, "coverageHours", 1, STANDUP_LIMITS.coverageMax);
+    // A project that already holds the most stand-ups is refused before a schedule is made (an orphan schedule with no stand-up would be left otherwise). Only a caller who may manage the project's meetings is told; the meeting service refuses the rest below.
+    if (allows(by, "meeting.manage", projectId)) {
+      const held = (await this.#runner.get(INDEX_KIND, projectId))?.body as unknown as { ids?: string[] } | undefined;
+      if ((held?.ids?.length ?? 0) >= STANDUP_LIMITS.perProject) throw new DomainError("unavailable", `a project holds at most ${STANDUP_LIMITS.perProject} stand-ups`);
+    }
     // The meeting service checks authority, roster, zone and dates; it is called first so a caller without rights learns nothing about the window rules.
     const made = await this.#meetings.createSchedule(by, {
       commandId: command.commandId, projectId, title: command.title, roster: command.roster, time: command.time, ...(command.recurrence === undefined ? {} : { recurrence: command.recurrence }), ...(command.timeZone === undefined ? {} : { timeZone: command.timeZone }),
@@ -294,7 +302,56 @@ export class StandupService {
         },
       }));
     });
+    // The project's index of its stand-ups (card M03h). A crash between the two writes is mended by the replay of the same command, which comes here again.
+    await this.#retrying(() => this.#indexAdd(by, projectId, made.id));
     return { scheduleId: made.id, replayed: made.replayed };
+  }
+
+  /**
+   * The IDs of a project's stand-ups from its index (kind `standup-index`, named by the project), so the chat's lookups read the project's own few records and not every stand-up of the installation. A project with no index
+   * record yet (it has stand-ups from before the index, or none) is looked up once the old way, and the index is written from what was found, so every later look is the cheap one; a project that has none gets an empty
+   * index. The index is only ever added to by `configure`, in the project of the schedule (a stand-up has one project for ever). A failed write of it is not an error of the read: the found IDs are used and the next look tries again.
+   */
+  async #ids(by: Principal, projectId: string): Promise<{ ids: readonly string[]; revision: number }> {
+    const found = await this.#runner.get(INDEX_KIND, projectId);
+    if (found !== undefined) return { ids: (found.body as unknown as { ids: string[] }).ids, revision: found.revision };
+    const ids: string[] = [];
+    for (let after: string | undefined; ;) {
+      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const c of chunk) if ((c.body as unknown as StandupConfigBody).projectId === projectId) ids.push(c.id);
+      if (chunk.length < 100) break;
+      after = chunk[chunk.length - 1]!.id;
+    }
+    ids.sort();
+    const kept = ids.slice(0, STANDUP_LIMITS.perProject);
+    const digest = sha256(canonicalJson(kept as unknown as JsonObject)).slice(0, 16);
+    try {
+      await this.#runner.command("standup.index.create", { commandId: `sxi:${projectId}:${digest}`, actor: by.id }, async () => ({
+        payload: { projectId, ids: kept },
+        build: async () => {
+          const ref: AggregateRef = { kind: INDEX_KIND, id: projectId };
+          return { ref, creates: true, changes: [{ type: "create", ref, body: { ids: kept } as unknown as JsonObject }], detail: { projectId } };
+        },
+      }));
+    } catch { /* another look made it first, or the write failed: the found IDs stand */ }
+    const written = await this.#runner.get(INDEX_KIND, projectId).catch(() => undefined);
+    return written === undefined ? { ids: kept, revision: 0 } : { ids: (written.body as unknown as { ids: string[] }).ids, revision: written.revision };
+  }
+
+  /** Puts a stand-up on its project's index (idempotent). The index is made first from what exists, when there is none, so it is complete from the start. */
+  async #indexAdd(by: Principal, projectId: string, scheduleId: string): Promise<void> {
+    const index = await this.#ids(by, projectId);
+    if (index.ids.includes(scheduleId)) return;
+    if (index.ids.length >= STANDUP_LIMITS.perProject) throw new DomainError("unavailable", `a project holds at most ${STANDUP_LIMITS.perProject} stand-ups`);
+    if (index.revision === 0) throw new DomainError("unavailable", "the project's stand-up index could not be written");
+    const ids = [...index.ids, scheduleId].sort();
+    await this.#runner.command("standup.index.add", { commandId: `sxa:${scheduleId}:${index.revision}`, actor: by.id }, async () => ({
+      payload: { projectId, scheduleId },
+      build: async () => {
+        const ref: AggregateRef = { kind: INDEX_KIND, id: projectId };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: index.revision, body: { ids } as unknown as JsonObject }], detail: { projectId } };
+      },
+    }));
   }
 
   /**
@@ -365,7 +422,7 @@ export class StandupService {
   }
 
   /**
-   * A project's stand-ups (not the ended ones unless asked), in no particular order (the records are read in ID order, which is random), found by reading every stand-up record of the installation page by page (there is no per-project index; stand-ups are few), for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. At most `limit` (default 20, at most 50) are returned;
+   * A project's stand-ups (not the ended ones unless asked), in no particular order (the records are read in ID order, which is random), found from the project's index of its stand-ups (`#ids`), for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. At most `limit` (default 20, at most 50) are returned;
    * `more` says some were left out. Added for the chat (card M03g), which names a stand-up by its title.
    */
   async list(viewer: Principal, projectId: string, options: { includeEnded?: boolean; endedOnly?: boolean; limit?: number } = {}): Promise<{ items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[]; more: boolean } | undefined> {
@@ -374,26 +431,18 @@ export class StandupService {
     const items: { scheduleId: string; title: string; state: string; time: string; timeZone: string; revision: number }[] = [];
     // Whether the viewer may read the project's meetings is asked directly, so a readable project with no stand-ups answers an empty list, not "not found".
     if ((await this.#meetings.planned(viewer, project, { limit: 1 })) === undefined) return undefined;
-    let after: string | undefined;
-    for (;;) {
-      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      if (chunk.length === 0) break;
-      for (const c of chunk) {
-        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
-        const schedule = await this.#meetings.schedule(viewer, c.id);
-        if (schedule === undefined) continue;
-        if (options.endedOnly === true ? schedule.state !== "ended" : schedule.state === "ended" && options.includeEnded !== true) continue;
-        if (items.length >= limit) return { items, more: true };
-        items.push({ scheduleId: c.id, title: schedule.title, state: schedule.state, time: schedule.time, timeZone: schedule.timeZone, revision: schedule.revision });
-      }
-      after = chunk[chunk.length - 1]!.id;
-      if (chunk.length < 100) break;
+    for (const id of (await this.#ids(viewer, project)).ids) {
+      const schedule = await this.#meetings.schedule(viewer, id);
+      if (schedule === undefined || schedule.projectId !== project) continue;
+      if (options.endedOnly === true ? schedule.state !== "ended" : schedule.state === "ended" && options.includeEnded !== true) continue;
+      if (items.length >= limit) return { items, more: true };
+      items.push({ scheduleId: id, title: schedule.title, state: schedule.state, time: schedule.time, timeZone: schedule.timeZone, revision: schedule.revision });
     }
     return { items, more: false };
   }
 
   /**
-   * The project's stand-ups by their latest occurrence — when each ran or is planned, and that occurrence's state — most recent first, for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. A stand-up whose schedule has not made an occurrence yet has nothing to tell and is left out; ended stand-ups are listed too (their last meeting was still a stand-up of this project). Found the same way as `list` (every stand-up record of the installation; there is no per-project index). At most `limit` (default 20, at most 50); `more` says some were left out. Added for the chat's meetings status answer (card M03h).
+   * The project's stand-ups by their latest occurrence — when each ran or is planned, and that occurrence's state — most recent first, for someone who may read the project's meetings; anyone else gets undefined, as for a project with none. A stand-up whose schedule has not made an occurrence yet has nothing to tell and is left out; ended stand-ups are listed too (their last meeting was still a stand-up of this project). Found the same way as `list` (the project's index). At most `limit` (default 20, at most 50); `more` says some were left out. Added for the chat's meetings status answer (card M03h).
    */
   async recent(viewer: Principal, projectId: string, options: { limit?: number } = {}): Promise<{ items: { occurrenceId: string; revision: number; title: string; startsAt: string; state: string; scheduleId: string }[]; more: boolean } | undefined> {
     const project = checkProjectId(projectId);
@@ -401,21 +450,13 @@ export class StandupService {
     // The right to read the project's meetings is asked directly, so a readable project with no stand-ups answers an empty list, not undefined.
     if ((await this.#meetings.planned(viewer, project, { limit: 1 })) === undefined) return undefined;
     const items: { occurrenceId: string; revision: number; title: string; startsAt: string; state: string; scheduleId: string }[] = [];
-    let after: string | undefined;
-    for (;;) {
-      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      if (chunk.length === 0) break;
-      for (const c of chunk) {
-        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
-        const last = (await this.#meetings.schedule(viewer, c.id))?.lastOccurrenceId;
-        if (last === undefined) continue;
-        const found = await this.#runner.get("meeting-occurrence", last);
-        const body = found?.body as unknown as OccurrenceBody | undefined;
-        if (found === undefined || body === undefined || body.projectId !== project) continue;
-        items.push({ occurrenceId: found.id, revision: found.revision, title: body.title, startsAt: body.startsAt, state: body.state, scheduleId: c.id });
-      }
-      after = chunk[chunk.length - 1]!.id;
-      if (chunk.length < 100) break;
+    for (const id of (await this.#ids(viewer, project)).ids) {
+      const last = (await this.#meetings.schedule(viewer, id))?.lastOccurrenceId;
+      if (last === undefined) continue;
+      const found = await this.#runner.get("meeting-occurrence", last);
+      const body = found?.body as unknown as OccurrenceBody | undefined;
+      if (found === undefined || body === undefined || body.projectId !== project) continue;
+      items.push({ occurrenceId: found.id, revision: found.revision, title: body.title, startsAt: body.startsAt, state: body.state, scheduleId: id });
     }
     items.sort((x, y) => (x.startsAt !== y.startsAt ? (x.startsAt < y.startsAt ? 1 : -1) : x.occurrenceId < y.occurrenceId ? -1 : 1));
     return { items: items.slice(0, limit), more: items.length > limit };
@@ -424,7 +465,7 @@ export class StandupService {
   /**
    * The project's stand-ups as the owner asks about them (card M03h): each schedule as it stands — its state, how often and at what time it is held, how long it lasts and who is on its roster — with the meeting coming up next and how the
    * last one ended. Unlike `recent`, a stand-up that has not made a meeting yet is shown (a stand-up set up this morning is one of the project's stand-ups), and ended ones are counted but left out unless asked for. For someone who may read
-   * the project's meetings; anyone else gets undefined, as for a project with none. Found the same way as `list` (every stand-up record of the installation; there is no per-project index). At most `limit` (default 20, at most 50) are returned,
+   * the project's meetings; anyone else gets undefined, as for a project with none. Found the same way as `list` (the project's index). At most `limit` (default 20, at most 50) are returned,
    * the ones with a meeting coming up first (soonest first), then the rest by title; `more` says some of the shown kind were left out.
    */
   async overview(viewer: Principal, projectId: string, options: { includeEnded?: boolean; limit?: number } = {}): Promise<{ items: StandupSummary[]; more: boolean; ended: number } | undefined> {
@@ -452,20 +493,16 @@ export class StandupService {
     }
     const items: StandupSummary[] = [];
     let ended = 0;
-    let after: string | undefined;
-    for (;;) {
-      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      if (chunk.length === 0) break;
-      for (const c of chunk) {
-        if ((c.body as unknown as StandupConfigBody).projectId !== project) continue;
-        const found = await this.#meetings.schedule(viewer, c.id);
-        if (found === undefined) continue;
+    for (const id of (await this.#ids(viewer, project)).ids) {
+      {
+        const found = await this.#meetings.schedule(viewer, id);
+        if (found === undefined || found.projectId !== project) continue;
         const s = found;
         if (s.state === "ended" && options.includeEnded !== true) {
           ended += 1;
           continue;
         }
-        const next = nextOf.get(c.id);
+        const next = nextOf.get(id);
         let last: View<OccurrenceBody> | undefined;
         if (s.lastOccurrenceId !== undefined) {
           // The last meeting this stand-up made, when it is one of this project's occurrences. The schedule's latest occurrence may be the meeting still ahead of it: that one has not been held, so it is told once, as the next one.
@@ -476,7 +513,7 @@ export class StandupService {
           last = foundLast !== undefined && foundLast.id !== next?.id && foundLast.state !== "planned" ? foundLast : undefined;
         }
         items.push({
-          scheduleId: c.id, revision: found.revision, title: s.title, state: s.state, time: s.time, timeZone: s.timeZone, recurrence: recurrenceWords(s.recurrence),
+          scheduleId: id, revision: found.revision, title: s.title, state: s.state, time: s.time, timeZone: s.timeZone, recurrence: recurrenceWords(s.recurrence),
           durationMinutes: s.durationMinutes, roster: s.roster, occurrences: s.occurrences,
           ...(s.window === undefined ? {} : { window: { from: s.window.from, to: s.window.to } }),
           ...(s.endDate === undefined ? {} : { endsOn: s.endDate }),
@@ -484,8 +521,6 @@ export class StandupService {
           ...(last === undefined ? {} : { lastAt: last.startsAt, lastState: last.state, lastOccurrenceId: last.id, lastRevision: last.revision }),
         });
       }
-      after = chunk[chunk.length - 1]!.id;
-      if (chunk.length < 100) break;
     }
     const lower = (t: string): string => t.toLowerCase();
     items.sort((x, y) =>

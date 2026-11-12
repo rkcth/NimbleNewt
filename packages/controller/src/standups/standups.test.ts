@@ -1193,4 +1193,88 @@ for (const backend of backends) {
     assert.equal(((await c.standups.agenda(c.owner, occ))!.notes ?? []).some((n) => /most a project holds/.test(n)), false, "answering one makes room again");
   });
 
+  // ---- card M03h: the project's own index of its stand-ups ----------------------------------------------------------------------------------
+
+  /** The service over a storage that remembers which kinds were listed (a scan of every record of a kind) and which were read by ID. */
+  const spied = (c: Ctx): { service: StandupService; listed: string[] } => {
+    const listed: string[] = [];
+    const spy = new Proxy(c.storage, { get(target, key) {
+      const value = (target as never)[key];
+      if (key === "listAggregates") return async (kind: string, page: never) => { listed.push(kind); return target.listAggregates(kind, page); };
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    } });
+    return { service: StandupService.withEpoch(spy, c.epoch, { meetings: c.meetings, assignments: c.assignments }, { availability: c.pauses.availability, ...options } as never), listed };
+  };
+  const indexOf = async (c: Ctx, project: string): Promise<{ ids: string[]; revision: number } | undefined> => {
+    const found = await c.storage.getAggregate({ kind: "standup-index", id: project });
+    return found === undefined ? undefined : { ids: (found.body as unknown as { ids: string[] }).ids, revision: found.revision };
+  };
+  const dropIndex = async (c: Ctx, project: string): Promise<void> => {
+    const found = (await c.storage.getAggregate({ kind: "standup-index", id: project }))!;
+    await new CommandRunner(c.storage, c.epoch, options).command("test.drop-index", { commandId: cid("drop"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: found, creates: false, changes: [{ type: "delete" as const, ref: { kind: "standup-index", id: project }, expectedRevision: found.revision }], detail: {} }) }));
+  };
+
+  suite("a project's stand-ups are found from its own index, so the lookups read no stand-up record of other projects (card M03h)", async (c) => {
+    const daily = await c.schedule();
+    const weekly = await c.schedule({ title: "Weekly review", time: "10:00", windowTo: "11:00" });
+    const theirs = await c.standups.configure(c.eve, { commandId: cid("sc"), projectId: c.b, title: "Other project's", roster: [c.pA], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/Berlin" } as never);
+    assert.deepEqual((await indexOf(c, c.a))!.ids, [daily.scheduleId, weekly.scheduleId].sort(), "configure puts each stand-up on its project's index, in order");
+    assert.deepEqual((await indexOf(c, c.b))!.ids, [theirs.scheduleId], "another project has its own index");
+    // The same command again changes nothing.
+    const before = (await indexOf(c, c.a))!;
+    const again = await c.standups.configure(c.mgr, { commandId: "same-cmd", projectId: c.a, title: "Third", roster: [c.pA], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/Berlin" } as never);
+    const replay = await c.standups.configure(c.mgr, { commandId: "same-cmd", projectId: c.a, title: "Third", roster: [c.pA], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/Berlin" } as never);
+    assert.equal(replay.scheduleId, again.scheduleId);
+    const after = (await indexOf(c, c.a))!;
+    assert.equal(after.ids.length, before.ids.length + 1, "a repeated command lists the stand-up once");
+    assert.equal(after.ids.filter((x) => x === again.scheduleId).length, 1);
+
+    const { service, listed } = spied(c);
+    const list = await service.list(c.owner, c.a);
+    assert.deepEqual(list!.items.map((x) => x.scheduleId).sort(), after.ids);
+    assert.equal((await service.recent(c.owner, c.a))!.items.length, 0, "none has met");
+    assert.equal((await service.overview(c.owner, c.a))!.items.length, 3);
+    assert.deepEqual(await service.list(c.owner, c.b).then((x) => x?.items.some((i) => after.ids.includes(i.scheduleId))), false, "another project's list holds none of this one's");
+    assert.deepEqual(listed.filter((k) => k === "standup-config"), [], "no stand-up record was listed: the index was read");
+    assert.deepEqual(await service.list(c.eve, c.a), undefined, "rights are asked as before");
+  });
+
+  suite("a project that has stand-ups from before the index is looked up once the old way and the index is written from that (card M03h)", async (c) => {
+    const one = await c.schedule();
+    const two = await c.schedule({ title: "Second" });
+    await dropIndex(c, c.a);
+    assert.equal(await indexOf(c, c.a), undefined);
+    const { service, listed } = spied(c);
+    assert.deepEqual((await service.list(c.owner, c.a))!.items.map((x) => x.scheduleId).sort(), [one.scheduleId, two.scheduleId].sort());
+    assert.ok(listed.includes("standup-config"), "the first look scans");
+    assert.deepEqual((await indexOf(c, c.a))!.ids, [one.scheduleId, two.scheduleId].sort(), "and writes the index");
+    listed.length = 0;
+    await service.overview(c.owner, c.a);
+    assert.deepEqual(listed.filter((k) => k === "standup-config"), [], "the next look does not scan");
+    // A stand-up made after the backfill joins it; one made while the index is missing is in the rebuilt one.
+    const three = await c.schedule({ title: "Third" });
+    assert.ok((await indexOf(c, c.a))!.ids.includes(three.scheduleId));
+    await dropIndex(c, c.a);
+    const four = await c.schedule({ title: "Fourth" });
+    assert.deepEqual((await indexOf(c, c.a))!.ids, [one.scheduleId, two.scheduleId, three.scheduleId, four.scheduleId].sort(), "a rebuilt index holds the new stand-up exactly once");
+    // A project with none gets an empty index and keeps answering an empty list.
+    assert.deepEqual(await service.list(c.owner, c.b), { items: [], more: false });
+    assert.deepEqual((await indexOf(c, c.b))!.ids, []);
+  });
+
+  suite("a project holds at most 200 stand-ups, refused before any schedule is made (card M03h)", async (c) => {
+    const first = await c.schedule();
+    const index = (await indexOf(c, c.a))!;
+    const ids = [first.scheduleId, ...Array.from({ length: 199 }, (_, i) => `msc-${i.toString().padStart(20, "0")}`)];
+    await new CommandRunner(c.storage, c.epoch, options).command("test.fill-index", { commandId: cid("fill"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "standup-index", id: c.a }, creates: false, changes: [{ type: "update" as const, ref: { kind: "standup-index", id: c.a }, expectedRevision: index.revision, body: { ids } as never }], detail: {} }) }));
+    const schedules = async (): Promise<number> => (await c.storage.listAggregates("meeting-schedule", { limit: 1000 })).length;
+    const made = await schedules();
+    await refuses("unavailable", () => c.schedule({ title: "One too many" }), (e) => assert.match(e.message, /at most 200/));
+    assert.equal(await schedules(), made, "no schedule was left behind");
+    assert.equal((await indexOf(c, c.a))!.ids.length, 200);
+    // Another project is not held back, and a caller who may not manage the project learns nothing of the limit.
+    assert.ok((await c.standups.configure(c.eve, { commandId: cid("sc"), projectId: c.b, title: "B stand-up", roster: [c.pA], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/Berlin" } as never)).scheduleId);
+    await refuses("forbidden", () => c.standups.configure(c.eve, { commandId: cid("sc"), projectId: c.a, title: "Not mine", roster: [c.pA], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "Europe/Berlin" } as never));
+  });
+
 }
