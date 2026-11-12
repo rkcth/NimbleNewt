@@ -459,6 +459,32 @@ for (const backend of backendsNamed(backendName)) {
     assert.deepEqual([told[0]!.agentId, told[0]!.projectId], ["agent:ann", c.project]);
   });
 
+  suite("a call refused because the agent holds no grant for it is told to the denial hook once, like a policy denial; a pause, a budget or a decision refusal is not a denial (card U11c, other refusal points)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const { taskId } = await c.task("t", ann);
+    await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 1000 });
+    const told: { callId?: string; agentId: string; projectId: string }[] = [];
+    c.dispatcher = c.restart({ denied: async (d) => { told.push(d); } });
+    const out: ToolResult[] = [];
+    c.worker.script = async ({ gateway }) => {
+      out.push(await gateway.call(read("ok"), local()));
+      // A pause is not the agent's doing: refused, not told.
+      await c.pauses.pause(c.owner, { commandId: "p1", scope: { kind: "task", id: taskId }, reason: "hold" });
+      out.push(await gateway.call(read("paused"), local()));
+      await c.pauses.resume(c.owner, { commandId: "p2", scope: { kind: "task", id: taskId }, reason: "go" });
+      // The grant is taken away: each new call is a refusal the owner may want to hear about; the same call asked again, or twice at once, is not a second one.
+      await setGrants(c, "ann", workGrants(c.project, []));
+      out.push(await gateway.call(read("a"), local()));
+      out.push(await gateway.call(read("a"), local()));
+      out.push(...await Promise.all([gateway.call(read("b"), local()), gateway.call(read("b"), local())]));
+      return { status: "completed", text: "x" };
+    };
+    await c.run();
+    assert.deepEqual(out.map((r) => r.state), ["confirmed", "refused", "refused", "refused", "refused", "refused"], JSON.stringify(out));
+    assert.deepEqual(told.map((t) => t.callId).sort(), ["a", "b"], JSON.stringify(told));
+    assert.deepEqual([told[0]!.agentId, told[0]!.projectId], ["agent:ann", c.project]);
+  });
+
   suite("what the approval policy decided for each call is counted once for the approval-load figures, and a failure to count never changes the call (card U08)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     await c.task("t", ann);

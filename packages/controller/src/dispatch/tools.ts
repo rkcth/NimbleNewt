@@ -216,7 +216,7 @@ export class ToolPath {
     }
     // The agent's grants as they are now (the credential's snapshot is taken again for each call), and the contract's permission list.
     const fresh = await this.#deps.credentials.principalOf(this.#deps.principal, d.attemptId, { limit: false });
-    if (!allows(fresh, toolAction(c.tool.name), d.projectId, { resource: { kind: "task", id: d.taskId }, now: this.#runner.now() })) return refused(`${d.agentId} holds no grant for ${toolAction(c.tool.name)} on this task now`);
+    if (!allows(fresh, toolAction(c.tool.name), d.projectId, { resource: { kind: "task", id: d.taskId }, now: this.#runner.now() })) return { kind: "refused", reason: `${d.agentId} holds no grant for ${toolAction(c.tool.name)} on this task now`, denied: true };
     const permissions = await this.#permissions(d.taskId);
     // Inside the contract's ceiling the approved contract covers the call; beyond it the policy still decides, and what it would have allowed or sent to a reviewer goes to the owner instead (asked again).
     const beyond = permissions.length > 0 && !permissions.some((p) => p === "*" || p === "tool.*" || p === toolAction(c.tool.name) || p === `class.${cls}`);
