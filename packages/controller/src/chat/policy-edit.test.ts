@@ -938,6 +938,67 @@ for (const backend of backends) {
     assert.match(removed.draft.explanation.join(" "), /these 2 entries are no longer in it/, "removing the setting names what it drops too");
   });
 
+  suite("the owner sets the landing permit and protected paths for ONE project in chat: shown first, the project by name or the one in focus, a replaced list names every dropped entry, and nothing else is touched (card H12u)", async (c, script) => {
+    const key = "workspace.landing.protectedPaths";
+    const say1 = "Also keep ci/ out of landings in project A.";
+    script[say1] = [pe({ type: "setting", layer: "project", projectName: "A", key, value: ["ci/"] }, "keep ci/ out of landings")];
+    const first = only((await c.say(say1)).outcomes);
+    assert.equal(first.status, "proposed", JSON.stringify(first));
+    assert.equal(await c.configuration.layer(c.w.owner, "project", c.a), undefined, "shown first: nothing is written yet");
+    const draft = (await c.edits.get(c.w.owner, first.editId!))!;
+    assert.match(JSON.stringify(draft), /project \\"A\\" \(proj-[a-z2-7]{20}\) only/, JSON.stringify(draft));
+    assert.match(JSON.stringify(draft), /this project only, in addition to the installation's own list and the built-in list/);
+    assert.equal((await c.edits.apply(c.w.owner, { commandId: cid("pa"), editId: first.editId! })).status, "applied");
+    assert.deepEqual((await c.configuration.layer(c.w.owner, "project", c.a))!.applied[key]!.value, ["ci/"]);
+    assert.equal(await c.configuration.layer(c.w.owner, "project", c.b), undefined, "another project is untouched");
+    assert.equal(await c.configuration.layer(c.w.owner, "installation"), undefined, "the installation is untouched");
+    // The project in focus is meant when no project is named; a list that leaves an entry out names it before the owner agrees.
+    const say2 = "Only keep docs/ out of landings here.";
+    script[say2] = [pe({ type: "setting", layer: "project", key, value: ["docs/"] }, "keep docs/ out of landings")];
+    const second = only((await c.say(say2)).outcomes);
+    assert.equal(second.status, "proposed", JSON.stringify(second));
+    const text = (await c.edits.get(c.w.owner, second.editId!))!.explanation.join(" ");
+    assert.match(text, /This replaces the whole list of this project, so this entry is no longer in it: "ci\/"/, text);
+    assert.match(text, /It is \["ci\/"\] now \(from project\)/);
+    // A project the owner did not name, a name that is not in the message and an installation-only key are refused, not guessed.
+    const prep = (change: Record<string, unknown>, wording: string) => c.edits.prepare(c.w.owner, { change: { type: "setting", layer: "project", ...change } as never, conditions: [], evidence: wording, wording, quoted: false, forwarded: false });
+    const ghost = await prep({ projectName: "Nowhere", key, value: ["x/"] }, "Protect x/ in project Nowhere.");
+    assert.ok(ghost.ok && ghost.draft.status === "refused", JSON.stringify(ghost)); assert.match(JSON.stringify(ghost), /no project called/);
+    const foreign = await prep({ projectName: "B", key, value: ["x/"] }, "Protect x/ in project A.");
+    assert.equal(foreign.ok, false); assert.match(JSON.stringify(foreign), /is not in your message/, "a project name the owner never said");
+    const branch = await prep({ projectName: "A", key: "workspace.landing.branch", value: "main" }, "Land project A on main.");
+    assert.match(JSON.stringify(branch), /can only be set for the whole installation/);
+    const defaults = await prep({ projectName: "A", key: "workspace.landing.protectDefaults", value: false }, "Switch off the built-in protected files for project A.");
+    assert.match(JSON.stringify(defaults), /can only be set for the whole installation/, "a project cannot weaken the built-in list");
+    // The permit: a project can require it, never switch it off where the installation requires it.
+    const permit = await prep({ projectName: "A", key: "workspace.landing.requirePermit", value: false }, "Let project A land without the permit.");
+    assert.ok(permit.ok, JSON.stringify(permit));
+    const made = await c.edits.create(c.w.owner, { commandId: cid("pp"), turnId: "t", wording: "Let project A land without the permit.", draft: permit.draft });
+    const done = await c.edits.apply(c.w.owner, { commandId: cid("pq"), editId: made.id });
+    assert.notEqual(done.status, "applied", JSON.stringify(done));
+    assert.equal((await c.configuration.layer(c.w.owner, "project", c.a))!.applied["workspace.landing.requirePermit"], undefined, "the permit was not switched off");
+  });
+
+  suite("H12u review: the owner's project name decides which project a setting is for (an ID that is another project is refused) and a project name never goes with a wider layer", async (c) => {
+    const key = "workspace.landing.protectedPaths";
+    const prep = (change: Record<string, unknown>, wording: string) => c.edits.prepare(c.w.owner, { change: { type: "setting", key, ...change } as never, conditions: [], evidence: wording, wording, quoted: false, forwarded: false });
+    const refused = (r: unknown): boolean => { const x = r as { ok: boolean; draft?: { status?: string } }; return !x.ok || x.draft?.status === "refused"; };
+    // The owner said project A; an ID of project B (for example taken from quoted text) does not turn the change to B.
+    const swapped = await prep({ layer: "project", projectName: "A", scopeId: c.b, value: ["x/"] }, "Protect x/ in project A.");
+    assert.ok(refused(swapped), JSON.stringify(swapped));
+    assert.match(JSON.stringify(swapped), /is not the project called/);
+    // The same ID as the name: accepted, for project A.
+    const agreed = await prep({ layer: "project", projectName: "A", scopeId: c.a, value: ["x/"] }, "Protect x/ in project A.");
+    assert.ok(!refused(agreed), JSON.stringify(agreed));
+    assert.ok(JSON.stringify(agreed).includes(`(${c.a}) only`), JSON.stringify(agreed));
+    // "For project A" is never read as the whole installation or a team.
+    for (const layer of ["installation", "team"] as const) {
+      const wide = await prep({ layer, ...(layer === "team" ? { scopeId: "team-aaaaaaaaaaaaaaaaaaaa" } : {}), projectName: "A", value: ["x/"] }, "Protect x/ in project A.");
+      assert.ok(refused(wide), JSON.stringify(wide));
+      assert.match(JSON.stringify(wide), /a project name goes only with a project setting/);
+    }
+  });
+
   suite("a grant with no end is a proposal that says it never ends; it is not applied unseen, a replay makes one grant, and only the owner can apply it", async (c, script) => {
     const ann = "agent:ann";
     script[`Let ${ann} commit in development permanently.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development permanently")];

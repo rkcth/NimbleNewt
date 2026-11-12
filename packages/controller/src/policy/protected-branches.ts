@@ -78,6 +78,22 @@ export class ProtectedBranchService {
     return typeof landing === "string" && NAME.test(landing) && !landing.includes("..") ? landing : undefined;
   }
 
+  /** The projects that name their own landing branch, in project ID order, at most `limit` (for the owner's landing view). */
+  async landings(limit = 200): Promise<readonly { readonly projectId: string; readonly branch: string }[]> {
+    const out: { projectId: string; branch: string }[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 1000 && out.length < limit; page++) {
+      const chunk = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of chunk) {
+        after = a.id;
+        const landing = (a.body as unknown as BranchSettingsBody).landing;
+        if (typeof landing === "string" && NAME.test(landing) && !landing.includes("..") && out.length < limit) out.push({ projectId: a.id, branch: landing });
+      }
+      if (chunk.length < 200) break;
+    }
+    return out;
+  }
+
   async get(by: Principal, projectId: string): Promise<{ revision: number; protected: readonly string[]; landing?: string; isDefault: boolean }> {
     if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read a project's branch settings`);
     const found = await this.#runner.get(KIND, this.#id(projectId));
