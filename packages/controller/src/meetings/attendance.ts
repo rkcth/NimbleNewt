@@ -518,6 +518,17 @@ export class AttendanceService {
     return undefined;
   }
 
+  /**
+   * Guards for a caller's commit that rests on what `meetingOfTask` and `admission` read (follow-up to T07): every meeting creation and settlement rewrites the global list of waiting meetings under a revision check, so a commit that
+   * checks the revision read here fails, and is decided again, when a meeting was made or ended after the read. Before the first meeting of the installation the list does not exist yet: the guard then creates it empty, which a
+   * meeting created meanwhile also creates, so one of the two commits meets the other and is decided again. Read it BEFORE the reads it guards.
+   */
+  async meetingLocks(): Promise<Change[]> {
+    const ref: AggregateRef = { kind: "meeting-open", id: "all" };
+    const found = await this.#runner.get(ref.kind, ref.id);
+    return [found === undefined ? { type: "create", ref, body: { count: 0, projects: [] } as unknown as JsonObject } : { type: "check", ref, expectedRevision: found.revision }];
+  }
+
   /** The agent principals (active agents only) among the given ones, sorted and without repeats. Records of other kinds and retired agents are left out. */
   async #activeAgents(principals: readonly string[]): Promise<string[]> {
     const out: string[] = [];
