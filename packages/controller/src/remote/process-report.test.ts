@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { DomainError } from "../domain/errors.js";
 import { RemoteWorkerHost } from "./host.js";
 import { PROTOCOL_HEADER, REMOTE_LIMITS, SESSION_HEADER } from "./protocol.js";
 import { RemoteOfferRunner } from "./runner.js";
@@ -475,7 +476,9 @@ test("the runner answers the controller's look with a report even when nothing c
     pollControl: async () => script.shift() ?? [],
     reportProcesses: async (r: Sent) => { sent.push(r); return { kept: true }; },
   };
-  const handle = { run: async () => { await new Promise((ok) => setTimeout(ok, 700)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
+  // The turn lasts until every scripted message was handled and reported on (four live reports), not a fixed time (review of L02e: a slow CI runner may not poll five times in 700 ms).
+  const waitFor = async (done: () => boolean) => { for (let i = 0; i < 1000 && !done(); i += 1) await new Promise((ok) => setTimeout(ok, 10)); };
+  const handle = { run: async () => { await waitFor(() => sent.filter((r) => !r.final).length >= 4); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
   const host = {
     start: async () => handle,
     localWork: async () => ({ processes: held, costs: [{ attemptId: "att-other", computeMs: 99999 }, { attemptId: "att-aaaaaaaaaaaaaaaaaaaa", computeMs: compute }], known: [] }),
@@ -507,7 +510,8 @@ test("a runner whose host cannot end local work ignores a kill without failing, 
     pollControl: async () => (polled++ === 0 ? [{ seq: 1, kind: "kill" }] : polled === 3 ? [{ seq: 2, kind: "kill" }] : []),
     reportProcesses: async (r: { final: boolean; processes: readonly unknown[] }) => { sent.push(r); return { kept: true }; },
   };
-  const handle = { run: async () => { await new Promise((ok) => setTimeout(ok, 400)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
+  // The turn lasts until both kills were read and one more look was made after them (review of L02e: not a fixed time a slow CI runner may not fit four polls in).
+  const handle = { run: async () => { for (let i = 0; i < 1000 && polled < 5; i += 1) await new Promise((ok) => setTimeout(ok, 10)); return { status: "completed", text: "done", endKind: "normal" }; }, checkpoint: async () => undefined, restart: async () => undefined, stop: async () => undefined };
   const trouble: string[] = [];
   const mk = (host: object) => new RemoteOfferRunner({ client: { attempt: () => attempt } as never, host: host as never, abilities: FULL_ABILITIES, controlMs: 30, onTrouble: (_id, what) => trouble.push(what) });
   const offer = stubRun({ list: () => [] }).offer;
@@ -517,4 +521,22 @@ test("a runner whose host cannot end local work ignores a kill without failing, 
   assert.equal(await mk({ start: async () => handle, localWork: async () => ({ processes: [{ ref: "stuck", kind: "process", state: "uncooperative" }], known: [] }), endLocalWork: async () => { throw new Error("the sandbox would not end it"); } }).run(offer), "completed");
   assert.ok(trouble.includes("control kill"));
   assert.deepEqual(sent.at(-1)!.processes, [{ ref: "stuck", kind: "process", state: "uncooperative" }]);
+});
+
+test("Force Stop's kill names the placement the host read, so a move or a new run in between is fenced rather than killed; a fenced or vanished one is not a failure, anything else is (review of L02e)", async () => {
+  const sentTo: { attemptId: string; kind: string; placement: number | undefined }[] = [];
+  let answer: Error | undefined;
+  const remote = {
+    placement: async (_by: unknown, attemptId: string) => ({ attemptId, hostId: "host:r1", placement: 7, state: "accepted", control: [] }),
+    control: async (_by: unknown, attemptId: string, m: { kind: string }, placement?: number) => { sentTo.push({ attemptId, kind: m.kind, placement }); if (answer !== undefined) throw answer; return 1; },
+  } as never;
+  const host = new RemoteWorkerHost("host:r1", remote, {} as never, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never });
+  await host.endLocalWork(["att-aaaaaaaaaaaaaaaaaaaa"]);
+  assert.deepEqual(sentTo, [{ attemptId: "att-aaaaaaaaaaaaaaaaaaaa", kind: "kill", placement: 7 }], "the kill is bound to placement 7, which the controller checks in the same commit");
+  answer = new DomainError("fenced", "attempt is held under placement 8, not 7");
+  await host.endLocalWork(["att-aaaaaaaaaaaaaaaaaaaa"]);
+  answer = new DomainError("not_found", "gone");
+  await host.endLocalWork(["att-aaaaaaaaaaaaaaaaaaaa"]);
+  answer = new Error("storage down");
+  await assert.rejects(host.endLocalWork(["att-aaaaaaaaaaaaaaaaaaaa"]), /could not be told/);
 });
