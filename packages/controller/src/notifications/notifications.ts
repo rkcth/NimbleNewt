@@ -12,6 +12,9 @@ import type { ReviewBody } from "../review/review.js";
 import type { HoldsUp } from "../critical/critical-path.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
+/** The record kind of one agent's remembered refusal count (see `denialCount`). */
+const DENIAL_KIND = "notification-denial";
+
 /** What can be told to the owner (card U11). */
 export const NOTIFICATION_KINDS = ["blocker", "review-request", "owner-question", "maintenance", "presence", "safety-stop"] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -581,6 +584,39 @@ export class NotificationService {
   /** Remembers (or with `null` forgets) one small fact for the controller's watches. */
   async remember(key: string, value: string | null): Promise<void> {
     await this.#patchState((x) => { const { [key]: _gone, ...rest } = x.watch ?? {}; void _gone; return { ...x, watch: value === null ? rest : { ...rest, [key]: value } }; });
+  }
+
+  /**
+   * One agent's refusal count as the controller's Urgent watch remembers it across a restart (card U11d, review). A small record per agent, never the shared notification state: a chatty agent
+   * then neither rewrites the record the digest, the hourly Urgent limit and the sweep cursor live in (contention), nor grows it towards the storage limit (1000 agents with long runs would pass it).
+   * Internal to the watch; never exposed through the API.
+   */
+  async denialCount(agentId: string): Promise<{ readonly body: JsonObject; readonly revision: number } | undefined> {
+    const found = await this.#runner.get(DENIAL_KIND, derivedId("dny", agentId));
+    return found === undefined || found.body["agent"] !== agentId ? undefined : { body: found.body, revision: found.revision };
+  }
+
+  /** The remembered refusal counts, a page at a time in record ID order (for the watch's sweep that forgets quiet ones). */
+  async denialCounts(page: { readonly afterId?: string; readonly limit: number }): Promise<{ readonly id: string; readonly agentId: string; readonly body: JsonObject; readonly revision: number }[]> {
+    return (await this.#runner.list(DENIAL_KIND, page)).flatMap((a) => { const agentId = a.body["agent"]; return typeof agentId === "string" ? [{ id: a.id, agentId, body: a.body, revision: a.revision }] : []; });
+  }
+
+  /** Writes one agent's count (`null` removes it) at the revision it was read at (`undefined`: there was none). The new revision (0 once removed); `false` when it changed meanwhile and nothing was written. */
+  async keepDenialCount(agentId: string, body: JsonObject | null, expectedRevision: number | undefined): Promise<number | false> {
+    if (body === null && expectedRevision === undefined) return 0;
+    const ref: AggregateRef = { kind: DENIAL_KIND, id: derivedId("dny", agentId) };
+    const change: Change = body === null ? { type: "delete", ref, expectedRevision: expectedRevision! }
+      : expectedRevision === undefined ? { type: "create", ref, body: { ...body, agent: agentId } } : { type: "update", ref, expectedRevision, body: { ...body, agent: agentId } };
+    try {
+      const r = await this.#runner.command("notification.denial-count", { commandId: `dny-${this.#runner.now()}-${this.#seq++}-${Math.random().toString(36).slice(2, 8)}`, actor: "notifications" }, async () => ({
+        payload: { agent: agentId, remove: body === null },
+        build: async () => ({ ref, creates: expectedRevision === undefined, changes: [change], detail: {}, contention: async () => new DomainError("stale_revision", "the refusal count changed at the same moment") }),
+      }));
+      return body === null ? 0 : r.revision;
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found" || error.code === "command_conflict")) return false;
+      throw error;
+    }
   }
 
   /** The record IDs of the open items that point at records of one kind (a watch uses this to see what it has already raised, also after a restart). */

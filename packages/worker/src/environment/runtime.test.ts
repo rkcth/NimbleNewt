@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -495,10 +495,12 @@ describe("the host's support check and the agent's view of its environment", () 
     const host = localEnvironmentHost({ root, worker: hooks(worker), source, protectedPaths: [data] });
     assert.equal(host.problem, undefined);
     const rt = host.runtime!; const a = fixture({ name: "tool", version: "1.0.0" }); source.files.set(url("tool"), a.bytes);
-    assert.deepEqual(await host.reach("environment", { agentId: AGENT }), {}, "no active revision: an empty grant");
+    assert.deepEqual(await host.reach("environment", { agentId: AGENT, environmentRevision: 1 }), {}, "nothing on this host for the agent: an empty grant");
+    assert.deepEqual(await host.reach("environment", { agentId: AGENT }), {}, "an attempt pinned to no environment gets an empty grant");
     assert.equal(await host.reach("other", { agentId: AGENT }), undefined, "other names are not answered here");
     assert.equal((await rt.reload({ requestId: "m", agentId: AGENT, revision: 1, manifest: manifest([ref(a)]), checkpointId: "c", change: spec({ ...a, source: url("tool") }) })).ok, true);
-    const grant = await host.reach("environment", { agentId: AGENT });
+    assert.deepEqual(await host.reach("environment", { agentId: AGENT }), {}, "an attempt pinned to no environment gets none, although one is active now");
+    const grant = await host.reach("environment", { agentId: AGENT, environmentRevision: 1 });
     assert.equal(grant!.readOnly!.length, 1);
     assert.equal(grant!.readOnly![0]!.guest, "/opt/environment");
     assert.equal(grant!.readOnly![0]!.host, realpathSync(join(rt.environments.revisionDir(AGENT, 1), "packages")));
@@ -506,9 +508,43 @@ describe("the host's support check and the agent's view of its environment", () 
     assert.deepEqual(grant!.env, { NN_ENVIRONMENT: "/opt/environment" });
     // An environment changed on disk is not handed to an agent.
     writeFileSync(join(grant!.readOnly![0]!.host, "tool", "index.js"), "evil()");
-    await assert.rejects(() => host.reach("environment", { agentId: AGENT }));
+    await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 1 }));
     assert.equal(existsSync(join(data, "environments")), false, "nothing was made inside the data directory");
     assert.deepEqual(readdirSync(data), []);
+  });
+});
+
+describe("the environment an attempt sees is the revision it was pinned to (card A09 sixth slice)", () => {
+  test("a revision made active after the attempt began is not mounted for it; the pinned revision stays whole; one that is not here or was changed is refused", { skip: process.platform !== "linux" && "the local environment host is Linux only (environment/host.ts)" }, async () => {
+    const data = fresh("data"); const root = hostEnvironmentsBase(data);
+    const worker = new Worker(); const source = new Source();
+    const host = localEnvironmentHost({ root, worker: hooks(worker), source, protectedPaths: [data] });
+    const rt = host.runtime!; const a = fixture({ name: "tool", version: "1.0.0" }); const b = fixture({ name: "extra", version: "2.0.0" });
+    source.files.set(url("tool"), a.bytes); source.files.set(url("extra"), b.bytes);
+    assert.equal((await rt.reload({ requestId: "m1", agentId: AGENT, revision: 1, manifest: manifest([ref(a)]), checkpointId: "c1", change: spec({ ...a, source: url("tool") }) })).ok, true);
+    const first = await host.reach("environment", { agentId: AGENT, environmentRevision: 1 });
+    // The environment moves on while the attempt that was pinned to revision 1 runs.
+    assert.equal((await rt.reload({ requestId: "m2", agentId: AGENT, revision: 2, manifest: manifest([ref(a), ref(b)]), checkpointId: "c2", change: spec({ ...b, source: url("extra") }) })).ok, true);
+    assert.equal(await rt.environments.active(AGENT), 2);
+    const still = await host.reach("environment", { agentId: AGENT, environmentRevision: 1 });
+    assert.deepEqual(still, first, "the same mount as before the change");
+    assert.equal(existsSync(join(still!.readOnly![0]!.host, "extra")), false, "the package that came with revision 2 is not in the attempt's environment");
+    assert.equal(existsSync(join(still!.readOnly![0]!.host, "tool")), true);
+    const later = await host.reach("environment", { agentId: AGENT, environmentRevision: 2 });
+    assert.equal(existsSync(join(later!.readOnly![0]!.host, "extra")), true, "a later attempt pinned to revision 2 sees it");
+    assert.notEqual(later!.readOnly![0]!.host, still!.readOnly![0]!.host);
+    // The agent has an environment here but not the revision named: the attempt does not start with another one.
+    await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 3 }), /revision 3 .* not on this host/);
+    // Review: the pinned revision's packages moved out of the environments directory and linked back, intact, are refused (the mount is never made from outside it); put back, it is mounted again.
+    const pinnedPackages = join(rt.environments.revisionDir(AGENT, 1), "packages"); const outside = join(fresh("outside"), "packages");
+    renameSync(pinnedPackages, outside); symlinkSync(outside, pinnedPackages);
+    await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 1 }), /not inside the environments directory/);
+    unlinkSync(pinnedPackages); renameSync(outside, pinnedPackages);
+    assert.deepEqual(await host.reach("environment", { agentId: AGENT, environmentRevision: 1 }), first);
+    // A pinned revision that is no longer the active one is still checked against its record.
+    writeFileSync(join(still!.readOnly![0]!.host, "tool", "index.js"), "evil()");
+    await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 1 }));
+    assert.equal((await host.reach("environment", { agentId: AGENT, environmentRevision: 2 }))!.readOnly!.length, 1, "revision 2 is untouched");
   });
 });
 

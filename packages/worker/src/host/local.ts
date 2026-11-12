@@ -27,6 +27,8 @@ export interface HostOrder {
   readonly taskId: string;
   readonly projectId: string;
   readonly agentId: string;
+  /** The agent's environment revision the controller pinned this attempt to (card A09 sixth slice). A reach that mounts the environment mounts exactly this revision; absent means the attempt has no environment. */
+  readonly environmentRevision?: number;
   readonly route: string;
   readonly credential: string;
   readonly recipe: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: ResourceLimits };
