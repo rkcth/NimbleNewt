@@ -195,7 +195,7 @@ test("the owner's landing policy carried in the request can only hold the host's
   assert.match(moved.refuse, /owner's landing branch for this project is "main" but this host is set up to land it on "trunk"/);
   assert.equal(moved.branch, undefined);
   // A protected list that is not a list of paths refuses the landing.
-  for (const protectedPaths of ["docs/", [1], [""], ["x".repeat(301)], Array.from({ length: 101 }, (_, i) => `p${i}`)]) assert.match(remoteLandingPolicy(PINS, call({ branch: "trunk", protectedPaths })).refuse, /protected paths were not a list/);
+  for (const protectedPaths of ["docs/", [1], [""], ["x".repeat(301)], Array.from({ length: 201 }, (_, i) => `p${i}`)]) assert.match(remoteLandingPolicy(PINS, call({ branch: "trunk", protectedPaths })).refuse, /protected paths were not a list/);
 });
 
 test("the remote host checks a done: its worker is given the check, and so is the responder; a check names only a real attempt ID (card H12a)", { skip: LINUX_ONLY }, async () => {

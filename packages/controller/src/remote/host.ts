@@ -69,7 +69,13 @@ export class RemoteWorkerHost implements WorkerHost {
         if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return { ok: false, reason: `the owner's landing policy for this project could not be read here, or names no landing branch, so the landing was not sent to ${this.hostId} (nothing was changed)` };
         call = { ...call, landing: policy };
       } else if (call.landing !== undefined) call = { requestId: call.requestId, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: call.quietAttempts, ...(call.assignee === undefined ? {} : { assignee: call.assignee }) };
-      const answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 });
+      let answer;
+      try { answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }); } catch (error) {
+        // A landing whose carried policy the request check refuses (malformed, or beyond what a request carries) was never sent (that check runs before anything is listed for the host): a clean refusal, not a failure that
+        // may have changed the checkout.
+        if (call.operation === "landing" && error instanceof DomainError && error.code === "invalid_command") return { ok: false, reason: `the owner's landing policy could not be carried to ${this.hostId} (${String(error.message).slice(0, 200)}), so the landing was not sent (nothing was changed)` };
+        throw error;
+      }
       if (answer.ok === false && answer.failed === true) throw new DomainError("unavailable", answer.reason);
       return answer.ok ? answer : { ok: false, reason: answer.reason };
     } };

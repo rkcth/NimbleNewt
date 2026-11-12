@@ -42,7 +42,7 @@ export function remoteLandingPolicy(pins, call) {
   if (carried === null || typeof carried !== "object" || typeof carried.branch !== "string" || carried.branch.length === 0) return { refuse: "the controller did not send the owner's landing policy with this landing, so nothing was landed on this host" };
   if (carried.branch !== pinned) return { refuse: `the owner's landing branch for this project is ${JSON.stringify(carried.branch.slice(0, 100))} but this host is set up to land it on ${JSON.stringify(pinned)}; nothing was landed (the host's operator changes its landing setting to follow)` };
   const extra = carried.protectedPaths;
-  if (extra !== undefined && (!Array.isArray(extra) || extra.length > 100 || extra.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300))) return { refuse: "the owner's protected paths were not a list of paths, so nothing was landed on this host" };
+  if (extra !== undefined && (!Array.isArray(extra) || extra.length > 200 || extra.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300))) return { refuse: "the owner's protected paths were not a list of paths, so nothing was landed on this host" };
   return { branch: pinned, requirePermit: true, protectDefaults: true, ...(extra === undefined || extra.length === 0 ? {} : { protectedPaths: [...extra] }) };
 }
 

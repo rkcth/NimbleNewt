@@ -98,6 +98,16 @@ export class WorkspaceResponder {
         const detail = JSON.parse(JSON.stringify(cut)) as JsonObject;
         if (Buffer.byteLength(JSON.stringify(detail), "utf8") <= REMOTE_LIMITS.workspaceDetailBytes) return { ok: true, summary: "checked", detail };
       }
+      // Last: only what the verdict is decided by (each check's state and exit, the tree's counts, each evidence path's presence). The names of uncommitted files, the reasons and the output are words for the agent, and a
+      // large but honest report (long reasons, long file names) must still come back rather than leave a done that can never be checked.
+      const bare = {
+        checkout: report.checkout,
+        ...(report.tree === undefined || report.tree === null ? {} : { tree: { ...report.tree, uncommitted: [] } }),
+        ...(report.evidence === undefined ? {} : { evidence: report.evidence.map((e) => ({ path: e.path, present: e.present })) }),
+        checks: report.checks.map((c) => ({ name: c.name, state: c.state, ...(c.exitCode === undefined ? {} : { exitCode: c.exitCode }), ...(c.timedOut === true ? { timedOut: true } : {}) })),
+      };
+      const detail = JSON.parse(JSON.stringify(bare)) as JsonObject;
+      if (Buffer.byteLength(JSON.stringify(detail), "utf8") <= REMOTE_LIMITS.workspaceDetailBytes) return { ok: true, summary: "checked", detail };
     } catch (error) { return { ok: false, reason: `this host could not check the work: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
     return { ok: false, reason: "the report of the check did not fit in an answer, so the work was not checked" };
   }

@@ -175,8 +175,8 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
 
 interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void> }
 
-/** The branch names a landing policy may carry (the same shape the host's configuration accepts). */
-const LANDING_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+/** The branch names a landing policy may carry: the same shape the owner's `workspace.landing.branch` accepts (up to 200 characters), so an owner's valid policy is never refused here as malformed (a host whose pin is another branch refuses it itself, by name). */
+const LANDING_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 /** The owner's landing policy as carried to a remote host (card H12a): only the four owner-set figures, each checked and bounded; anything else is refused, so a request cannot smuggle a field. */
 function checkCarriedLanding(value: unknown): CarriedLanding {
   if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("landing", "must be an object");
@@ -186,7 +186,7 @@ function checkCarriedLanding(value: unknown): CarriedLanding {
   if (o["requirePermit"] !== undefined && typeof o["requirePermit"] !== "boolean") invalid("landing.requirePermit", "must be true or false");
   if (o["protectDefaults"] !== undefined && typeof o["protectDefaults"] !== "boolean") invalid("landing.protectDefaults", "must be true or false");
   const paths = o["protectedPaths"];
-  if (paths !== undefined && (!Array.isArray(paths) || paths.length > 100 || paths.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300 || p.includes("\0")))) invalid("landing.protectedPaths", "must be a list of at most 100 paths of 1 to 300 characters");
+  if (paths !== undefined && (!Array.isArray(paths) || paths.length > 200 || paths.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300 || p.includes("\0")))) invalid("landing.protectedPaths", "must be a list of at most 200 paths of 1 to 300 characters");
   return { ...(o["branch"] === undefined ? {} : { branch: o["branch"] as string }), ...(o["requirePermit"] === undefined ? {} : { requirePermit: o["requirePermit"] as boolean }), ...(paths === undefined ? {} : { protectedPaths: [...(paths as string[])] }), ...(o["protectDefaults"] === undefined ? {} : { protectDefaults: o["protectDefaults"] as boolean }) };
 }
 

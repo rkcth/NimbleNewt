@@ -56,7 +56,7 @@ for (const backend of backends) {
   suite("the carried policy is checked and bounded before it is sent: unknown fields, a path-like branch, wrong types, too many paths, and a policy on any operation but a landing are refused (card H12a)", async (c) => {
     await c.host("r1");
     const ask = (x: WorkspaceCall) => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", x, { waitMs: 100 });
-    for (const bad of [{ extra: 1 }, { branch: "../x" }, { branch: "-rf" }, { branch: "a b" }, { branch: 7 }, { requirePermit: "no" }, { protectDefaults: 0 }, { protectedPaths: "docs/" }, { protectedPaths: [1] }, { protectedPaths: [""] }, { protectedPaths: ["x".repeat(301)] }, { protectedPaths: Array.from({ length: 101 }, (_, i) => `p${i}`) }, { protectedPaths: ["a\0b"] }, null, []]) {
+    for (const bad of [{ extra: 1 }, { branch: "../x" }, { branch: "-rf" }, { branch: "a b" }, { branch: 7 }, { requirePermit: "no" }, { protectDefaults: 0 }, { protectedPaths: "docs/" }, { protectedPaths: [1] }, { protectedPaths: [""] }, { protectedPaths: ["x".repeat(301)] }, { protectedPaths: Array.from({ length: 201 }, (_, i) => `p${i}`) }, { protectedPaths: ["a\0b"] }, null, []]) {
       await refuses("invalid_command", () => ask(landing({ landing: bad as never })));
     }
     await refuses("invalid_command", () => ask(landing({ operation: "integration", landing: { branch: "main" } })));
@@ -115,7 +115,9 @@ for (const backend of backends) {
     assert.equal((loud as DoneCheckReport).checks[0]!.state, "failed");
     assert.ok(((loud as DoneCheckReport).checks[0]!.output ?? "").length <= 600);
     const huge = Array.from({ length: 20 }, (_, i) => ({ name: `c${i}`, run: ["x"], timeoutMs: 10 }));
-    const tooBig = await run(async () => ({ checkout: true, tree: { uncommitted: Array.from({ length: 20 }, () => "f".repeat(250)), uncommittedCount: 20, ahead: 1 }, checks: [] }), { ...request, checks: huge });
+    // Even the bare figures do not fit: a hundred evidence paths of 500 characters (the paths are what the verdict is matched on, so they cannot be dropped).
+    const longPaths = Array.from({ length: 100 }, (_, i) => `${i}/${"p".repeat(490)}`);
+    const tooBig = await run(async () => ({ checkout: true, tree: { uncommitted: [], uncommittedCount: 0, ahead: 1 }, evidence: longPaths.map((path) => ({ path, present: true })), checks: [] }), { ...request, checks: huge, evidence: longPaths });
     assert.ok(tooBig instanceof Error);
     assert.match((tooBig as Error).message, /did not fit in an answer/);
   });
@@ -134,5 +136,64 @@ for (const backend of backends) {
       await refuses("invalid_command", () => ask({ req }));
     }
     assert.deepEqual(await r1.client.workspaceRequests(), [], "nothing hostile was sent");
+  });
+  suite("review: a large but honest report still comes back (the verdict's figures kept, the words dropped), so a remote done is not left impossible to check (card H12a)", async (c) => {
+    const r1 = await c.host("r1");
+    const checks = Array.from({ length: 10 }, (_, i) => ({ name: `check-${i}`, run: ["x"], timeoutMs: 10 }));
+    const evidence = Array.from({ length: 10 }, (_, i) => `docs/evidence/part-${i}-${"e".repeat(40)}.md`);
+    const big = { checkout: true, tree: { uncommitted: Array.from({ length: 20 }, (_, i) => `src/${"f".repeat(100)}-${i}.ts`), uncommittedCount: 25, ahead: 0, changed: 3 }, evidence: evidence.map((path) => ({ path, present: true, why: "w".repeat(200) })), checks: checks.map((x) => ({ name: x.name, state: "not-run" as const, reason: "r".repeat(300) })) };
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], port: { run: async () => ({ ok: false, reason: "no" }) }, verify: async () => big });
+    const pending = hostWith(c as never).verify(ATT, { taskId: TASK, projectId: PROJECT }, { checks, evidence, maxOutputBytes: 1000 });
+    await wait(() => r1.client.workspaceRequests());
+    responder.handle(await r1.client.workspaceRequests());
+    const got = await pending;
+    assert.equal(got.checkout, true);
+    assert.equal(got.tree!.uncommittedCount, 25, "the count is kept when the names are dropped");
+    assert.equal(got.tree!.ahead, 0);
+    assert.deepEqual(got.checks.map((x) => x.state), checks.map(() => "not-run"), "every check asked is reported, none as passed");
+    assert.deepEqual(got.evidence!.map((e) => e.path), evidence);
+  });
+
+  suite("review: an answer cannot be replayed onto a new check, and another host cannot answer one: each check is a fresh request bound to the asked host (card H12a)", async (c) => {
+    const r1 = await c.host("r1");
+    const r2 = await c.host("r2");
+    const handle = hostWith(c as never, { workspaceWaitMs: 3000 });
+    const failing: DoneCheckReport = { ...good, checks: [{ name: "tests", state: "failed", exitCode: 1 }] };
+    const first = handle.verify(ATT, { taskId: TASK, projectId: PROJECT }, request);
+    await wait(() => r1.client.workspaceRequests());
+    const [old] = await r1.client.workspaceRequests();
+    await r1.client.answerWorkspace(old!.requestId, { ok: true, summary: "checked", detail: good as never });
+    assert.deepEqual(await first, good);
+    // The next check of the same attempt (say the work changed and failed): a new request ID, so the earlier pass cannot stand in for it.
+    const second = handle.verify(ATT, { taskId: TASK, projectId: PROJECT }, request);
+    await wait(() => r1.client.workspaceRequests());
+    const [fresh] = await r1.client.workspaceRequests();
+    assert.notEqual(fresh!.requestId, old!.requestId);
+    // The old pass sent again is taken only as a repeat of the old request; it does not answer the new one.
+    await r1.client.answerWorkspace(old!.requestId, { ok: true, summary: "checked", detail: good as never });
+    await assert.rejects(r2.client.answerWorkspace(fresh!.requestId, { ok: true, summary: "checked", detail: good as never }), /no such workspace request/);
+    assert.equal((await r1.client.workspaceRequests()).length, 1, "the new check is still waiting for its own answer");
+    await r1.client.answerWorkspace(fresh!.requestId, { ok: true, summary: "checked", detail: failing as never });
+    assert.deepEqual(await second, failing);
+  });
+
+  suite("review: an owner's policy the settings accept (200 protected paths, a long branch name) is carried, and one beyond what a request carries is a clean refusal with nothing sent, not a failure (card H12a)", async (c) => {
+    const r1 = await c.host("r1");
+    const seen: WorkspaceCall[] = [];
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => [], port: { run: async (x) => { seen.push(x); return { ok: true, summary: "ok" }; } } });
+    const paths = Array.from({ length: 200 }, (_, i) => `docs/p${i}/`);
+    const branch = `release/${"b".repeat(150)}`;
+    const handle = hostWith(c as never, { landingPolicy: async () => ({ branch, requirePermit: true, protectDefaults: true, protectedPaths: paths }) });
+    const pending = handle.workspace.run(landing());
+    await wait(() => r1.client.workspaceRequests());
+    responder.handle(await r1.client.workspaceRequests());
+    assert.deepEqual(await pending, { ok: true, summary: "ok" });
+    assert.deepEqual(seen[0]!.landing, { branch, requirePermit: true, protectDefaults: true, protectedPaths: paths });
+    for (const policy of [{ branch: "main", protectedPaths: [...paths, "one-more"] }, { branch: "b".repeat(201) }, { branch: "main", extra: true }]) {
+      const answer = await hostWith(c as never, { landingPolicy: async () => policy }).workspace.run(landing());
+      assert.equal(answer.ok, false, JSON.stringify(policy).slice(0, 80));
+      assert.match((answer as { reason: string }).reason, /could not be carried to host:r1 .*not sent \(nothing was changed\)/);
+    }
+    assert.deepEqual(await r1.client.workspaceRequests(), [], "nothing was listed for the host");
   });
 }
