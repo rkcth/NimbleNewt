@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { constants, existsSync, readdirSync, realpathSync } from "node:fs";
+import { constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
@@ -59,6 +59,8 @@ export class LocalWorkspaces {
       git: options.git,
       journal: join(options.root, "journal"),
       locate: (call) => this.locate(call),
+      // The platform commits a task's work in its own checkout when asked for `release` (card H12o); the owner's landing policy is read first.
+      release: true,
       // Fails closed: a host that cannot say which attempts are busy does not carry the request out (the host treats a throw as not quiet).
       attemptsQuiet: async (attemptIds) => { const busy = new Set(await options.busy()); return !attemptIds.some((id) => busy.has(id)); },
       ...(options.landing === undefined ? {} : { landing: options.landing }),
@@ -87,7 +89,8 @@ export class LocalWorkspaces {
     if (shared === undefined) return undefined;
     const dir = this.#taskDir(call);
     if (dir === undefined) return undefined;
-    return { shared, checkout: join(dir, "checkout"), gitDir: join(dir, "task.git"), bridgeState: this.#stateOf(shared), quarantineRoot: join(this.#options.root, "quarantine") };
+    const attemptId = readAttempt(join(dir, "attempt"));
+    return { shared, checkout: join(dir, "checkout"), gitDir: join(dir, "task.git"), bridgeState: this.#stateOf(shared), quarantineRoot: join(this.#options.root, "quarantine"), ...(attemptId === undefined ? {} : { attemptId }) };
   }
 
   /**
@@ -122,7 +125,7 @@ export class LocalWorkspaces {
    * renamed into place with a `complete` mark, so a crash part-way leaves nothing that looks like a checkout (the leftover is removed later), and two callers for one task share one making. A checkout that was quarantined
    * is not made again here: the task's folder is still there and its git directory is kept, so this refuses rather than start the agent on an empty folder.
    */
-  async ensure(call: { readonly taskId: string; readonly projectId: string }): Promise<{ readonly checkout: string; readonly gitDir: string }> {
+  async ensure(call: { readonly taskId: string; readonly projectId: string; /** The attempt that is about to work in the checkout (card H12o): kept beside the checkout, outside it, so a release commit can name it. */ readonly attemptId?: string }): Promise<{ readonly checkout: string; readonly gitDir: string }> {
     if (!plain(call.taskId) || !plain(call.projectId)) throw new WorkspaceError("invalid_path", "the task or project name is not a plain name");
     const shared = this.#options.shared(call.projectId);
     if (shared === undefined) throw new WorkspaceError("unavailable", "this host holds no shared repository for that project");
@@ -131,7 +134,11 @@ export class LocalWorkspaces {
     const run = earlier.then(() => this.#ensure(call, shared), () => this.#ensure(call, shared));
     const tail = run.catch(() => undefined);
     this.#making.set(key, tail);
-    try { return await run; } finally { if (this.#making.get(key) === tail) this.#making.delete(key); }
+    try {
+      const made = await run;
+      if (call.attemptId !== undefined && ATTEMPT.test(call.attemptId)) await writeAttempt(join(this.#options.root, call.projectId, call.taskId, "attempt"), call.attemptId);
+      return made;
+    } finally { if (this.#making.get(key) === tail) this.#making.delete(key); }
   }
 
   async #ensure(call: { readonly taskId: string; readonly projectId: string }, shared: string): Promise<{ readonly checkout: string; readonly gitDir: string }> {
@@ -169,6 +176,21 @@ export class LocalWorkspaces {
       if (info !== undefined && Date.now() - info.mtimeMs > 10 * 60_000) await rm(join(staging, name), { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+const ATTEMPT = /^[A-Za-z0-9._:-]{1,120}$/;
+/** The attempt last recorded for a task (a plain file beside the checkout, written by the host); anything else, or a name that is not plain, is no attempt. */
+function readAttempt(file: string): string | undefined {
+  try {
+    if (!lstatSync(file).isFile()) return undefined;
+    const text = readFileSync(file, "utf8").trim();
+    return ATTEMPT.test(text) ? text : undefined;
+  } catch { return undefined; }
+}
+/** Replaces the record atomically; a failure only loses the name (the commit is then made without an attempt trailer), never the work. */
+async function writeAttempt(file: string, attemptId: string): Promise<void> {
+  const temporary = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+  try { await writeFile(temporary, `${attemptId}\n`, { mode: 0o600, flag: "wx" }); await rename(temporary, file); } catch { await rm(temporary, { force: true }).catch(() => undefined); }
 }
 
 export const PROGRESS_LIMITS = { planBytes: 256 * 1024, steps: 200, stepChars: 200 } as const;

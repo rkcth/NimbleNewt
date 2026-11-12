@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -530,4 +530,48 @@ test("reapply: a file added on both sides with different content keeps the agent
     assert.equal(again.unchanged, true);
     assert.equal(execFileSync("git", ["--git-dir", w.gitDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore);
   } finally { await w.done(); }
+});
+
+test("integrate does not carry a host file reached through a directory swapped for a link after the walk (H12o second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const hostDir = join(w.dir, "host-dir");
+    await mkdir(hostDir);
+    await writeFile(join(hostDir, "a.ts"), "HOST-ONLY-CONTENT\n");
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const src = join(w.checkout, "src"); const aside = join(w.checkout, "src-real");
+    // The second read of src/a.ts is the one integrate carries (the first is the mode-only look of `changes`).
+    let reads = 0;
+    const git = await GitBridge.create({ scratch: join(w.dir, "scratch3"), hooks: { beforeOpen: async (absolute) => {
+      if (!absolute.endsWith(join("src", "a.ts")) || ++reads !== 2) return;
+      await rename(src, aside); await symlink(hostDir, src);
+    } } });
+    await refuses("link_refused", () => git.integrate({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge, author: "agent:ann", reason: "x" }));
+    assert.equal(reads, 2);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "the shared workspace is untouched");
+  } finally { await w.done(); }
+});
+
+test("integrate does not hang on a file swapped for a FIFO after the walk, and reapply does not write through a directory swapped for a link (H12o second review)", { skip: process.platform === "win32" ? "no FIFOs" : skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.checkout, "src", "a.ts"), "export const a = 2;\n");
+    let reads = 0;
+    const git = await GitBridge.create({ scratch: join(w.dir, "scratch3"), hooks: { beforeOpen: async (absolute) => {
+      if (!absolute.endsWith(join("src", "a.ts")) || ++reads !== 2) return;
+      await rm(absolute); execFileSync("mkfifo", [absolute]);
+    } } });
+    await refuses("invalid_path", () => git.integrate({ gitDir: w.gitDir, checkout: w.checkout, bridge: w.bridge, author: "agent:ann", reason: "x" }));
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+  } finally { await w.done(); }
+  const v = await world();
+  try {
+    const hostDir = join(v.dir, "host-dir"); await mkdir(hostDir);
+    await writeFile(join(hostDir, "b.ts"), "HOST-ONLY-CONTENT\n");
+    await writeFile(join(v.shared, "src", "b.ts"), "export const b = 2;\n"); sh(v.shared, "add", "-A"); sh(v.shared, "commit", "-q", "-m", "b");
+    const next = await v.git.head(v.shared);
+    const src = join(v.checkout, "src");
+    await refuses("link_refused", () => v.git.reapply({ shared: v.shared, commit: next, gitDir: v.gitDir, checkout: v.checkout, hooks: { beforeOpen: async () => { await rename(src, join(v.checkout, "src-real")); await symlink(hostDir, src); } } }));
+    assert.equal(await readFile(join(hostDir, "b.ts"), "utf8"), "HOST-ONLY-CONTENT\n", "the host file was not cut or written");
+  } finally { await v.done(); }
 });

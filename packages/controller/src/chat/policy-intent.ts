@@ -9,7 +9,7 @@ import { CELL_KEYS, MODES, PROFILES, type Mode, type Profile } from "../policy/e
  */
 export type PolicyScope = "installation" | "project";
 export interface PolicyWhere { readonly projectName?: string; readonly projectId?: string }
-export type LayerName = "installation" | "team" | "agent" | "task";
+export type LayerName = "installation" | "project" | "team" | "agent" | "task";
 
 export type PolicyEditChange =
   | { readonly type: "profile"; readonly to: Profile }
@@ -20,7 +20,7 @@ export type PolicyEditChange =
   | ({ readonly type: "reserve" | "unreserve"; readonly tool: string } & PolicyWhere)
   | ({ readonly type: "grant"; readonly grantee: string; readonly approve: Approve; readonly environments?: readonly Environment[]; /** null: the grant has no end. */ readonly lengthDays?: number | null; readonly until?: string; /** null: the grant has no spending limit; the proposal the owner confirms says so. */ readonly spendLimit?: number | null; readonly audiences?: readonly string[] } & PolicyWhere)
   | ({ readonly type: "revoke"; readonly grantee: string; readonly approve: Approve } & PolicyWhere)
-  | { readonly type: "setting"; readonly layer: LayerName; readonly scopeId?: string; readonly key: string; readonly value?: unknown; readonly remove?: true };
+  | { readonly type: "setting"; readonly layer: LayerName; readonly scopeId?: string; /** The project layer (card H12u): the project by the owner's own words for its name (the project in focus when neither this nor `scopeId` is given). */ readonly projectName?: string; readonly key: string; readonly value?: unknown; readonly remove?: true };
 
 /** An approval grant names a class of action or one tool, never both and never a wildcard. */
 export interface Approve { readonly class?: ActionClass; readonly tool?: string }
@@ -88,11 +88,11 @@ export function checkPolicyChange(raw: unknown, field: string): PolicyEditChange
     }
     case "revoke": known(raw, ["type", "grantee", "approve", ...W], field); return { type: "revoke", grantee: name(raw["grantee"], `${field}.grantee`), approve: approve(raw["approve"], `${field}.approve`), ...where(raw, field) };
     case "setting": {
-      known(raw, ["type", "layer", "scopeId", "key", "value", "remove"], field);
+      known(raw, ["type", "layer", "scopeId", "projectName", "key", "value", "remove"], field);
       if ((raw["value"] === undefined) === (raw["remove"] === undefined)) return invalid(field, "needs exactly one of value and remove");
       if (raw["remove"] !== undefined && raw["remove"] !== true) invalid(`${field}.remove`, "must be true");
       if (raw["value"] !== undefined && JSON.stringify(raw["value"]).length > POLICY_INTENT_LIMITS.value) invalid(`${field}.value`, "is too long");
-      return { type: "setting", layer: oneOf(raw["layer"], ["installation", "team", "agent", "task"] as const, `${field}.layer`), ...(raw["scopeId"] === undefined ? {} : { scopeId: name(raw["scopeId"], `${field}.scopeId`) }), key: name(raw["key"], `${field}.key`), ...(raw["value"] === undefined ? {} : { value: raw["value"] }), ...(raw["remove"] === undefined ? {} : { remove: true as const }) };
+      return { type: "setting", layer: oneOf(raw["layer"], ["installation", "project", "team", "agent", "task"] as const, `${field}.layer`), ...(raw["scopeId"] === undefined ? {} : { scopeId: name(raw["scopeId"], `${field}.scopeId`) }), ...(raw["projectName"] === undefined ? {} : { projectName: name(raw["projectName"], `${field}.projectName`) }), key: name(raw["key"], `${field}.key`), ...(raw["value"] === undefined ? {} : { value: raw["value"] }), ...(raw["remove"] === undefined ? {} : { remove: true as const }) };
     }
     default: return invalid(`${field}.type`, "is not a kind of policy change this system supports");
   }

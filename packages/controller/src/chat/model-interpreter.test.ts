@@ -110,15 +110,18 @@ test("the prompt tells the model how the owner sets where finished work lands, i
     { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "workspace.landing.branch", value: "integration" }, evidence: "land work on integration", basis: "owner" },
     { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "workspace.landing.protectedPaths", value: ["docs/"] }, evidence: "land work on integration", basis: "owner" },
     { kind: "status", request: { kind: "landing" }, evidence: "land work on integration", basis: "owner" },
+    { kind: "policy_edit", change: { type: "setting", layer: "project", projectName: "garden", key: "workspace.landing.protectedPaths", value: [".env"] }, evidence: "keep .env out in the garden project", basis: "owner" },
   ];
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intents); } }, () => ["a/primary"]);
   const out = await m.interpret({ ...input, text: "land work on integration", quoted: [] }) as unknown[];
-  assert.equal(out.length, 3, JSON.stringify(out));
+  assert.equal(out.length, 4, JSON.stringify(out));
   for (const key of ["workspace.landing.branch", "workspace.landing.protectedPaths", "workspace.landing.requirePermit", "workspace.landing.protectDefaults"]) assert.ok(system.includes(key), key);
   assert.match(system, /until one is set nothing lands/);
   assert.match(system, /replaces the whole installation's list, so to add or drop one path first read the status kind landing/);
   assert.match(system, /which only the owner can do/);
-  assert.match(system, /one landing branch for the whole installation, not one per project/);
+  assert.match(system, /installation's landing branch is the branch of every project that has none of its own/);
+  assert.match(system, /"layer":"project" and "projectName"/);
+  assert.match(system, /cannot switch the permit off where the installation requires it/);
   assert.ok(system.includes("landing() - owner only: where finished work lands"), "the status kind is listed");
   assert.ok(Object.keys(STATUS_KINDS).includes("landing"));
 });

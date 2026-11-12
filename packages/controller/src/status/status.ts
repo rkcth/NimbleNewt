@@ -259,7 +259,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
-  landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default; one policy for the whole installation" },
+  landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -438,6 +438,8 @@ export interface StatusDeps {
   /** The wakes of the controller's own meeting wake host (card M04h). Absent, or answering undefined (the application supplies its own host): the view is not offered. */
   readonly wakes?: () => Promise<readonly WakeView[] | undefined>;
   readonly landing?: () => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>;
+  /** The projects that have landing values of their own (a project layer of the configuration, or their own landing branch), each value as that project gets it and where it comes from (card H12u). Absent: the view lists the installation only. */
+  readonly landingProjects?: () => Promise<{ readonly projects: readonly { readonly projectId: string; /** The branch the owner named for this project (`project.branches.set`, landing). */ readonly branch?: string; readonly values: Readonly<Record<string, { readonly value: unknown; readonly source: { readonly layer: string; readonly id: string }; readonly own?: unknown }>> }[]; readonly truncated: boolean }>;
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
@@ -1316,12 +1318,37 @@ export class StatusService {
     const mark = (k: string): string => (v[k]?.set === true ? "you set it" : "the default");
     const branch = v["workspace.landing.branch"]?.value, permit = v["workspace.landing.requirePermit"]?.value, defaults = v["workspace.landing.protectDefaults"]?.value, paths = v["workspace.landing.protectedPaths"]?.value;
     const listed = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === "string") : [];
+    const strings = (x: unknown): string[] => (Array.isArray(x) ? x.filter((p): p is string => typeof p === "string") : []);
+    const projectLines: Line[] = [];
+    if (this.#deps.landingProjects !== undefined) {
+      try {
+        const found = await this.#deps.landingProjects();
+        const where = (src: { layer: string }): string => (src.layer === "project" ? "this project's setting" : src.layer === "installation" ? "the installation's setting" : "the default");
+        for (const p of found.projects.slice(0, 20)) {
+          const record = await this.#runner.get("project", p.projectId);
+          const label = `${record === undefined ? "Project" : `Project ${shown((record.body as unknown as { name: string }).name, 80)}`} (${p.projectId})`;
+          const pc = cite("config-layer", `project.${p.projectId}`);
+          const b = p.values["workspace.landing.branch"];
+          const permit = p.values["workspace.landing.requirePermit"];
+          const eff = strings(p.values["workspace.landing.protectedPaths"]?.value);
+          const own = strings(p.values["workspace.landing.protectedPaths"]?.own);
+          projectLines.push(
+            line(`${label}: landing branch ${p.branch !== undefined ? `${shown(p.branch, 200)} (this project's own landing branch, which wins over the installation's)` : typeof b?.value === "string" ? `${shown(b.value, 200)} (the installation's)` : "none, so nothing lands for it until a branch is named"}.`, pc),
+            line(`${label}: review permit ${permit?.value === false ? "not required" : "required"} (${permit === undefined ? "the default" : where(permit.source)}).`, pc),
+            line(`${label}: extra protected paths in force, kept for your review: ${eff.length === 0 ? "none" : eff.slice(0, 50).map((x) => shown(x, 120)).join(", ")}; this project adds ${own.length === 0 ? "none of its own" : own.slice(0, 50).map((x) => shown(x, 120)).join(", ")} (the installation's paths and the built-in files apply to it as well).`, pc),
+          );
+        }
+        if (found.projects.length > 20 || found.truncated) projectLines.push(line("More projects have values of their own than are listed here.", c));
+      } catch { projectLines.push(line("The projects' own landing values cannot be read right now, so a landing that needs them is refused until they can.", c)); }
+    }
+    if (this.#deps.landingProjects !== undefined && projectLines.length === 0) projectLines.push(line("No project has landing values of its own: every project uses the installation's.", c));
     return { observedAt: this.#runner.now(), lines: [
-      line("Where finished work lands: the review permit and protected paths are one policy for the whole installation; the landing branch below is the installation default, and a project with its own landing branch set by you lands there instead.", c),
+      line("Where finished work lands: the lines below are the installation's policy, which every project gets unless it has values of its own. You can set the review permit and extra protected paths for one project (they add to the installation's, never weaker); a project's own landing branch (the branch settings) wins over the installation's branch.", c),
       line(typeof branch === "string" ? `Landing branch: ${shown(branch, 200)} (you set it). A landing is refused while the shared workspace is on another branch.` : "Landing branch: none set, so nothing lands until you name one.", c),
       line(permit === false ? "Review permit: not required (you set it); commits land without the review gate's commit permit." : `Review permit: required (${mark("workspace.landing.requirePermit")}); only commits made through the review gate land.`, c),
       line(defaults === false ? "Built-in protected files (CI configuration, hooks, ownership and package manager files): off (you set it)." : `Built-in protected files (CI configuration, hooks, ownership and package manager files): kept for your review (${mark("workspace.landing.protectDefaults")}).`, c),
       line(listed.length === 0 ? "Your extra protected paths: none." : `Your extra protected paths, kept for your review: ${listed.slice(0, 50).map((p) => shown(p, 120)).join(", ")}${listed.length > 50 ? ` and ${listed.length - 50} more` : ""}.`, c),
+      ...projectLines,
     ] };
   }
 
