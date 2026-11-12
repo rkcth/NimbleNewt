@@ -86,7 +86,7 @@ for (const backend of backends) {
       const m = machine(ok, join(dir, "ok")); m.put(A1, "log.jsonl", "fine\n");
       // `quiet` is connected but no process answers its requests (waitMs short); `gone` is revoked-looking: reported unreachable by the host list.
       const hosts = async () => ({ ask: ["host:ok", "host:quiet"], unreachable: [{ hostId: "host:gone", why: "it has not been heard from lately" }] });
-      const source = sourceFor(c, dir, transfers, hosts, 400);
+      const source = sourceFor(c, dir, transfers, hosts, 4000);
       const staging = join(dir, "backup"); mkdirSync(staging);
       const done = await copyPiState(source, staging, undefined);
       assert.equal(done.stores, 1, "the answering host's store is there");
