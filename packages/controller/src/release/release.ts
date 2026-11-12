@@ -20,6 +20,10 @@ export interface Manifest {
   /** Dependency lock name -> sha256. */
   readonly dependencyLocks: Readonly<Record<string, string>>;
   readonly matrix: readonly Cell[];
+  /** Optional (K02): the sha256 of the database migration plan this release carries. When present, an activation must quote it, so the owner's word covers what will happen to the data. */
+  readonly migrationPlan?: string;
+  /** Optional (K02): the installations this release is built for (their names as the owner gave them to the controller). When present, staging and activation are refused anywhere else. */
+  readonly targets?: readonly string[];
 }
 export interface CandidateBody { readonly manifest: Manifest; readonly submittedBy: string; readonly submittedAt: string }
 export interface HostAuthBody { readonly hostId: string; readonly os: Cell["os"]; readonly arch: Cell["arch"]; readonly active: boolean; readonly by: string; readonly at: string }
@@ -100,11 +104,12 @@ export interface HostJobs { readonly jobs: HostJob[]; readonly cancel: string[] 
 export interface HostJob { readonly attemptId: string; readonly payload: JobPayload; readonly pickedUpAt?: string }
 
 /** `attemptsPerCell`: attempts one agent may make per platform of a candidate. `cellEntries`: all attempts of a platform (the owner's included); agents stop at `agentEntries`, which leaves the owner room. */
-export const RELEASE_LIMITS = { jobs: 32, attemptsPerCell: 20, cellEntries: 500, agentEntries: 200, openPerHost: 200, cancelKeep: 32, cancelMs: 24 * 3600_000, graceSeconds: 600, defaultStartsPerHour: 12, startsPerHourMax: 100_000, qaAgentIds: 100, defaultTimeoutSeconds: 3600, defaultMemoryMb: 4096, cells: 20, artifacts: 100, locks: 100, summary: 500, timeoutSeconds: 24 * 3600, memoryMb: 1_000_000 } as const;
+export const RELEASE_LIMITS = { jobs: 32, attemptsPerCell: 20, cellEntries: 500, agentEntries: 200, openPerHost: 200, cancelKeep: 32, cancelMs: 24 * 3600_000, graceSeconds: 600, defaultStartsPerHour: 12, startsPerHourMax: 100_000, qaAgentIds: 100, defaultTimeoutSeconds: 3600, defaultMemoryMb: 4096, cells: 20, targets: 20, artifacts: 100, locks: 100, summary: 500, timeoutSeconds: 24 * 3600, memoryMb: 1_000_000 } as const;
 const OS = ["linux", "darwin", "win32"] as const;
 const ARCH = ["x64", "arm64"] as const;
 const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+const TARGET = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._@/+-]{0,127}$/;
 const REVISION = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/;
 const CANDIDATE = "release-candidate";
@@ -179,17 +184,27 @@ const checkCell = (value: unknown, field: string): Cell => {
 export function checkManifest(value: unknown): Manifest {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return bad("manifest", "must be an object");
   const m = value as Record<string, unknown>;
-  onlyKnown(m, ["sourceCommit", "suiteRevision", "artifacts", "dependencyLocks", "matrix"]);
+  onlyKnown(m, ["sourceCommit", "suiteRevision", "artifacts", "dependencyLocks", "matrix", "migrationPlan", "targets"]);
   if (typeof m["sourceCommit"] !== "string" || !COMMIT.test(m["sourceCommit"])) bad("sourceCommit", "must be a full 40-character commit hash");
   if (typeof m["suiteRevision"] !== "string" || !REVISION.test(m["suiteRevision"])) bad("suiteRevision", "must name the test suite revision");
   const rows = m["matrix"];
   if (!Array.isArray(rows) || rows.length === 0 || rows.length > RELEASE_LIMITS.cells) return bad("matrix", `needs 1 to ${RELEASE_LIMITS.cells} platforms`);
   const cells = rows.map((r, i) => checkCell(r, `matrix[${i}]`));
   if (new Set(cells.map(cellKey)).size !== cells.length) bad("matrix", "lists a platform twice");
+  if (m["migrationPlan"] !== undefined && (typeof m["migrationPlan"] !== "string" || !SHA.test(m["migrationPlan"]))) bad("migrationPlan", "must be the sha256 (64 hexadecimal characters) of the migration plan");
+  let targets: string[] | undefined;
+  if (m["targets"] !== undefined) {
+    const t = m["targets"];
+    if (!Array.isArray(t) || t.length === 0 || t.length > RELEASE_LIMITS.targets || t.some((x) => typeof x !== "string" || !TARGET.test(x))) return bad("targets", `must list 1 to ${RELEASE_LIMITS.targets} installation names (lower-case letters, digits, dots, dashes and underscores)`);
+    if (new Set(t as string[]).size !== t.length) bad("targets", "lists an installation twice");
+    targets = [...(t as string[])].sort();
+  }
   return {
     sourceCommit: m["sourceCommit"] as string, suiteRevision: m["suiteRevision"] as string,
     artifacts: hashMap(m["artifacts"], "artifacts", RELEASE_LIMITS.artifacts), dependencyLocks: hashMap(m["dependencyLocks"], "dependencyLocks", RELEASE_LIMITS.locks),
     matrix: cells.sort((a, b) => (cellKey(a) < cellKey(b) ? -1 : 1)),
+    ...(m["migrationPlan"] === undefined ? {} : { migrationPlan: m["migrationPlan"] as string }),
+    ...(targets === undefined ? {} : { targets }),
   };
 }
 

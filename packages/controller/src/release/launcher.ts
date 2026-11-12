@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { checkRange, negotiateProtocol, type VersionRange } from "../remote/protocol.js";
 import { verifyReleaseDirectory, type Switcher } from "./activation.js";
@@ -74,6 +74,8 @@ export interface LauncherState {
   readonly window?: number;
   /** Things the owner is to be told; see `LauncherNotice`. */
   readonly notices?: readonly LauncherNotice[];
+  /** The highest database schema version a controller has opened (K02d): a release whose declared schema range ends below it cannot start on this database, so it is not a fall-back. Only ever raised. */
+  readonly db?: { readonly version: number; readonly by: string; readonly at: string };
   readonly failed: readonly FailedRelease[];
   readonly log: readonly LauncherLogEntry[];
 }
@@ -108,6 +110,7 @@ function checkState(value: unknown): LauncherState {
   // again at its next start), and a notice that does not read is dropped. Blocking the launch for either would leave nothing running to repair them.
   const out: Record<string, unknown> = { ...s };
   if (s["window"] !== undefined && !validWindow(s["window"])) delete out["window"];
+  if (s["db"] !== undefined && !validDb(s["db"])) delete out["db"];
   if (s["notices"] !== undefined) {
     const kept = Array.isArray(s["notices"]) ? (s["notices"] as unknown[]).filter(validNotice).slice(-LAUNCHER_LIMITS.notices) : [];
     if (kept.length > 0) out["notices"] = kept; else delete out["notices"];
@@ -115,6 +118,7 @@ function checkState(value: unknown): LauncherState {
   return out as unknown as LauncherState;
 }
 const validWindow = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= STARTUP_WINDOW_BOUNDS.min && v <= STARTUP_WINDOW_BOUNDS.max;
+const validDb = (d: unknown): boolean => d !== null && typeof d === "object" && !Array.isArray(d) && Number.isSafeInteger((d as { version?: unknown }).version) && (d as { version: number }).version >= 0 && typeof (d as { by?: unknown }).by === "string" && typeof (d as { at?: unknown }).at === "string";
 function validNotice(n: unknown): boolean {
   if (n === null || typeof n !== "object" || Array.isArray(n)) return false;
   const r = n as Record<string, unknown>;
@@ -282,6 +286,21 @@ export class Launcher {
     });
   }
 
+  /**
+   * A controller opened the database at this schema version (K02d). Kept only when higher than what is recorded, so the record says how far any release has taken the data. The launcher reads it when it
+   * decides whether the last known good can still run on this database. Writes nothing when it is already recorded.
+   */
+  async noteDatabase(version: number, by: string): Promise<void> {
+    if (!Number.isSafeInteger(version) || version < 0) throw new LauncherStateError("a database schema version is a whole number");
+    await this.#serial(async () => {
+      const s = await this.#load();
+      if (s.db !== undefined && s.db.version >= version) return;
+      // The first controller start on a new installation comes before any staging, so the release root may not exist yet.
+      await mkdir(this.#o.root, { recursive: true, mode: 0o700 });
+      await this.#write({ ...s, db: { version, by: by.slice(0, 80), at: this.#now() } });
+    });
+  }
+
   /** The owner's startup window, mirrored into this file by the controller (it is the launcher's to read when the database is not). `null` puts the default back. Writes nothing when it is already so. */
   async setWindow(seconds: number | null): Promise<void> {
     if (seconds !== null && !(Number.isSafeInteger(seconds) && seconds >= STARTUP_WINDOW_BOUNDS.min && seconds <= STARTUP_WINDOW_BOUNDS.max)) throw new LauncherStateError(`the startup window must be ${STARTUP_WINDOW_BOUNDS.min} to ${STARTUP_WINDOW_BOUNDS.max} seconds`);
@@ -347,6 +366,12 @@ export class Launcher {
     if (kp.length > 0) return `the last known good no longer verifies: ${kp[0]}`;
     if (this.#o.workers !== undefined && k.protocol === undefined) return "the last known good declared no protocol range, so it cannot be shown to speak to the workers";
     if (this.#o.workers !== undefined && k.protocol !== undefined) { const n = negotiateProtocol(k.protocol, this.#o.workers); if (!n.ok) return `the last known good is not compatible with the workers: ${n.reason}`; }
+    // K02d: the failed release may already have taken the database past what the known good understands. The check reads the known good's own compat.json (its files verified just above).
+    if (s.db !== undefined) {
+      let schema: VersionRange | undefined;
+      try { schema = parseCompat(await readFile(join(this.#dir(k.id), "compat.json"), "utf8")).schema; } catch { schema = undefined; }
+      if (schema !== undefined && s.db.version > schema.max) return `the database is at schema version ${s.db.version} (taken there by ${s.db.by}), newer than the last known good understands (up to ${schema.max}); falling back would not start, so a snapshot taken before the upgrade has to be restored first (K01)`;
+    }
     return undefined;
   }
 
@@ -523,12 +548,18 @@ function closing(s: LauncherState, match: (n: LauncherNotice) => boolean, by: "a
   return (s.notices ?? []).map((n) => (n.closedAt === undefined && match(n) ? { ...n, closedAt: at, closedBy: by } : n));
 }
 
-/** Reads the protocol range of a staged release's `compat.json` text; throws a plain Error naming what is wrong. */
-export function parseCompat(text: string): { protocol: VersionRange } {
+/**
+ * Reads a staged release's `compat.json`: the worker protocol range its controller speaks (required) and, optionally, the range of database schema versions it can run on (`schema`, K02d); throws a plain Error naming what is wrong.
+ * A schema version is the number of the last applied migration (see `storage/migrations.ts`); a release that names none is treated as "not stated", which the launcher does not check.
+ */
+export function parseCompat(text: string): { protocol: VersionRange; schema?: VersionRange } {
   let v: unknown;
   try { v = JSON.parse(text); } catch { throw new Error("compat.json is not JSON"); }
   if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("compat.json must be an object");
   const keys = Object.keys(v);
-  if (keys.length !== 1 || keys[0] !== "protocol") throw new Error("compat.json must hold exactly one field, protocol: { min, max }");
-  try { return { protocol: checkRange((v as { protocol: unknown }).protocol, "protocol") }; } catch (error) { throw new Error(`compat.json: ${(error as Error).message}`); }
+  if (!keys.includes("protocol") || keys.some((k) => k !== "protocol" && k !== "schema")) throw new Error("compat.json must hold protocol: { min, max } and, optionally, schema: { min, max }");
+  try {
+    const o = v as { protocol: unknown; schema?: unknown };
+    return { protocol: checkRange(o.protocol, "protocol"), ...(o.schema === undefined ? {} : { schema: checkRange(o.schema, "schema") }) };
+  } catch (error) { throw new Error(`compat.json: ${(error as Error).message}`); }
 }

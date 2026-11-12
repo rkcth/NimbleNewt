@@ -6,6 +6,7 @@
 //
 // Without --announce it only installs releases/<id> (read-only, verified). --announce tells the launcher the release may run (Launcher.expect). --switch (needs --announce) also moves the pointer, which the
 // launcher follows the next time it starts a controller. Exit codes: 0 done, 1 refused or failed (reason on stderr).
+import { lstat, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { safeMessage } from "./safe-error.mjs";
@@ -15,11 +16,13 @@ const lib = async (file) => import(pathToFileURL(join(repo, "packages", "control
 
 const HELP = `NimbleNewt updater
 
-  stage --root DIR --source DIR --digest SHA256 [--announce] [--switch] [--switcher pointer|symlink]
+  stage --root DIR --source DIR --digest SHA256 [--trusted-keys FILE --signature-file FILE] [--announce] [--switch] [--switcher pointer|symlink]
 
   --root DIR      The release root (must exist). Or NIMBLENEWT_RELEASE_ROOT.
   --source DIR    A verified release directory: its files plus MANIFEST.json (as release.stage leaves them).
   --digest HEX    The SHA-256 of that MANIFEST.json, from whoever authorised the release. A different manifest is refused.
+  --trusted-keys FILE   A file of trusted Ed25519 public keys (base64 DER, one per line). With --signature-file the release is installed only if a listed key signed it.
+  --signature-file FILE A file holding the base64 signature over "nimblenewt-release-digest-v1", a line break, the digest and a line break. Both flags or neither.
   --announce      Tell the launcher the release may run.
   --switch        With --announce: also move the pointer to it (the launcher follows at its next start).
   --switcher K    pointer (default) or symlink.
@@ -40,7 +43,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
       if (eq >= 0) { v = k.slice(eq + 1); k = k.slice(0, eq); if (["announce", "switch", "help"].includes(k)) throw new Error(`--${k} takes no value`); }
       else if (["announce", "switch", "help"].includes(k)) v = true;
       else { v = argv[i + 1]; i++; if (v === undefined) throw new Error(`--${k} needs a value`); }
-      if (!["root", "source", "digest", "announce", "switch", "switcher", "help"].includes(k)) throw new Error(`unknown option --${k}`);
+      if (!["root", "source", "digest", "announce", "switch", "switcher", "trusted-keys", "signature-file", "help"].includes(k)) throw new Error(`unknown option --${k}`);
       if (k in flags) throw new Error(`--${k} was given twice`);
       flags[k] = v;
     }
@@ -51,9 +54,19 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   if (root === undefined || flags.source === undefined || flags.digest === undefined) { err("--root, --source and --digest are required."); return 1; }
   if (flags.switch === true && flags.announce !== true) { err("--switch needs --announce."); return 1; }
   if (flags.switcher !== undefined && flags.switcher !== "pointer" && flags.switcher !== "symlink") { err("--switcher must be pointer or symlink."); return 1; }
+  if ((flags["trusted-keys"] === undefined) !== (flags["signature-file"] === undefined)) { err("--trusted-keys and --signature-file go together."); return 1; }
   const { stageRelease, announceRelease } = await lib("release/updater.js");
+  let trust;
+  if (flags["trusted-keys"] !== undefined) {
+    // Small plain files only: a link, a folder or a large file is refused.
+    const plain = async (path) => { const st = await lstat(path); if (!st.isFile() || st.size > 16_384) throw new Error(`${path} must be a plain file of at most 16 KiB`); return readFile(path, "utf8"); };
+    try {
+      const keys = (await plain(flags["trusted-keys"])).split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
+      trust = { keys, signature: (await plain(flags["signature-file"])).trim() };
+    } catch (error) { err(`refused (invalid_input): ${safeMessage(error, 2000)}`); return 1; }
+  }
   try {
-    const staged = await stageRelease({ root, source: flags.source, digest: flags.digest });
+    const staged = await stageRelease({ root, source: flags.source, digest: flags.digest, ...(trust === undefined ? {} : { trust }) });
     io.stdout.write(`${staged.reused ? "already installed" : "installed"} ${staged.id} (${staged.files} files, ${staged.bytes} bytes) at ${staged.dir}\n`);
     if (flags.announce === true) {
       const r = await announceRelease({ root, release: staged, ...(flags.switcher === undefined ? {} : { switcher: flags.switcher }), switchPointer: flags.switch === true });

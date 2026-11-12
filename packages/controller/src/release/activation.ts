@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { join, sep } from "node:path";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
@@ -12,6 +13,7 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
 import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type LauncherNotice } from "./launcher.js";
 import { DEFAULT_START_FAILURE_LEVEL, type StartFailureLevel, type StartNoticeSink } from "./start-notices.js";
+import { ReleaseTrust, type TrustedKey } from "./trust.js";
 import { RELEASE_KINDS, candidateIdOf, type ApprovalBody, type CandidateBody, type Cell } from "./release.js";
 
 /**
@@ -46,12 +48,24 @@ const bad = (field: string, message: string): never => { throw new DomainError("
 const sha256 = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
 const wholeRev = (v: unknown): void => { if (v !== undefined && (!Number.isSafeInteger(v) || (v as number) < 0)) bad("expectedRevision", "must be a whole number"); };
 const strictOwner = (by: Principal, what: string): void => { if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not ${what}; only the owner does`); };
+/**
+ * Release management (K02c) is the owner's, or an agent's to whom the owner granted `release.manage` (a grantable action distinct from the toolbox's `agent.manage`/`catalog.*`; only the owner makes grants). The grant must be that exact action:
+ * `*` and a `release.*` prefix do not count, so a broad "run everything" or supervisor grant does not reach the installation's own releases. A task credential never does. The holder may stage, remove, verify, read, activate and roll back, and attach
+ * signatures; it cannot approve, change settings, change the trust root, confirm a start, resolve a switch or acknowledge notices (all the owner's). Its activation is further limited (see `activate`).
+ */
+const mayManage = (by: Principal, what: string): void => {
+  if (by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not ${what}; only the owner or a holder of release.manage does`);
+  if (by.kind === "owner") return;
+  if (by.kind === "agent" && allowsExactly(by, "release.manage", "*")) return;
+  throw new DomainError("forbidden", `${by.id} may not ${what}; only the owner or a holder of release.manage does`);
+};
+const isOwner = (by: Principal): boolean => by.kind === "owner" && by.taskScope === undefined;
 const known = (command: object, fields: readonly string[]): void => { const u = Object.keys(command).filter((k) => !fields.includes(k)); if (u.length > 0) bad(u[0]!, "is not a field of this command"); };
 const idOf = (v: unknown): string => { if (typeof v !== "string" || !CANDIDATE_ID.test(v)) return bad("candidateId", "is not a release candidate ID"); return v; };
 
 /** What the staged directory holds, fixed at staging: the file digests of the candidate's manifest, with sizes. Its digest is what the owner's word is bound to. */
 export interface StagedManifest { readonly candidateId: string; readonly sourceCommit: string; readonly files: Readonly<Record<string, { readonly sha256: string; readonly size: number }>> }
-export interface StagedBody { readonly candidateId: string; readonly digest: string; readonly bytes: number; readonly files: number; readonly stagedBy: string; readonly stagedAt: string; /** The worker protocol range the release's controller speaks, from its `compat.json` artifact (a digest-bound file of the release). */ readonly protocol?: VersionRange }
+export interface StagedBody { readonly candidateId: string; readonly digest: string; readonly bytes: number; readonly files: number; readonly stagedBy: string; readonly stagedAt: string; /** The worker protocol range the release's controller speaks, from its `compat.json` artifact (a digest-bound file of the release). */ readonly protocol?: VersionRange; /** The database schema range from `compat.json` (K02d), when it names one. */ readonly schema?: VersionRange; /** The key ID of the trusted signature the release had when staged (K02b); activation checks again. */ readonly signedBy?: string }
 /** `digest` is the digest of the staged MANIFEST.json (the manifest digest) that the launcher verifies at launch. */
 export interface ReleaseRef { readonly id: string; readonly digest: string }
 export interface JournalBody { readonly kind: "activate" | "rollback"; readonly from?: ReleaseRef; readonly to: ReleaseRef; readonly by: string; readonly startedAt: string }
@@ -186,6 +200,10 @@ export interface ActivationOptions {
   readonly runningRelease?: string;
   /** Where the owner is told of a fall-back or a failed start (K02f); without it the notices stay in the launcher's file and `release.status`. */
   readonly notices?: StartNoticeSink;
+  /** This installation's name for release targets (K02): a candidate whose manifest lists `targets` is staged and activated only where this is one of them; with targets and no name here, it is refused. */
+  readonly installationId?: string;
+  /** The database's current schema version (the number of the last applied migration), for the launcher's fall-back check (K02d). Without it nothing is recorded and that check never refuses. */
+  readonly schemaVersion?: () => Promise<number>;
 }
 export interface ActivationStatus {
   readonly revision: number;
@@ -201,7 +219,11 @@ export interface ActivationStatus {
   readonly pointer: string | null;
   readonly diverged: boolean;
   readonly history: readonly HistoryEntry[];
-  readonly staged: readonly { readonly candidateId: string; readonly digest: string; readonly stagedAt: string; readonly bytes: number }[];
+  readonly staged: readonly { readonly candidateId: string; readonly digest: string; readonly stagedAt: string; readonly bytes: number; readonly schema?: VersionRange }[];
+  /** The trust root: whether a signature is needed now and which keys are trusted (K02b). */
+  readonly trust: { readonly required: boolean; readonly keys: readonly Pick<TrustedKey, "keyId" | "label">[] };
+  /** The highest database schema version any controller opened here (the launcher's record, K02d). */
+  readonly databaseSchema?: number;
   readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly keepStaged: number | null; readonly startupWindowSeconds: number; readonly startFailureLevel: StartFailureLevel; readonly revision: number };
   /** What the launcher wrote for the owner (a fall-back, a failed start), newest last, with whether it was told and whether it is still open. */
   readonly startNotices: readonly { readonly kind: LauncherNotice["kind"]; readonly release: string; readonly to?: string; readonly reason: string; readonly at: string; readonly told: boolean; readonly state: "open" | "acknowledged" | "confirmed" }[];
@@ -213,9 +235,10 @@ export class ReleaseActivationService {
   readonly #o: ActivationOptions;
   readonly #sw: Switcher;
   readonly #launcher: Launcher;
+  readonly #trust: ReleaseTrust;
   readonly #locks = new Map<string, Promise<unknown>>();
   private constructor(runner: CommandRunner, o: ActivationOptions) {
-    this.#runner = runner; this.#o = o;
+    this.#runner = runner; this.#o = o; this.#trust = new ReleaseTrust(runner);
     this.#sw = (o.switcher ?? (process.platform === "win32" ? "pointer" : "symlink")) === "pointer" ? new PointerSwitcher(o.root) : new SymlinkSwitcher(o.root);
     this.#launcher = new Launcher({ root: o.root, switcher: this.#sw, ...(o.compat === undefined ? {} : { workers: o.compat.workers }) });
   }
@@ -247,6 +270,9 @@ export class ReleaseActivationService {
 
   async settings(owner: Principal): Promise<{ revision: number; requireApproval: boolean; maxStagedBytes: number | null; keepStaged: number | null; maxStaged: number; maxFiles: number; maxFileBytes: number; startupWindowSeconds: number; startFailureLevel: StartFailureLevel; set: { startupWindowSeconds?: number; startFailureLevel?: StartFailureLevel; requireApproval?: boolean; maxStagedBytes?: number; keepStaged?: number; maxStaged?: number; maxFiles?: number; maxFileBytes?: number } }> {
     strictOwner(owner, "read the release activation settings");
+    return this.#settings();
+  }
+  async #settings() {
     const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
     const b = found?.body as unknown as ActivationSettingsBody | undefined;
     return { revision: found?.revision ?? 0, requireApproval: b?.requireApproval ?? true, maxStagedBytes: b?.maxStagedBytes ?? null, keepStaged: b?.keepStaged ?? null, maxStaged: b?.maxStaged ?? ACTIVATION_LIMITS.staged, maxFiles: b?.maxFiles ?? ACTIVATION_LIMITS.files, maxFileBytes: b?.maxFileBytes ?? ACTIVATION_LIMITS.fileBytes, startupWindowSeconds: b?.startupWindowSeconds ?? DEFAULT_STARTUP_WINDOW_SECONDS, startFailureLevel: b?.startFailureLevel ?? DEFAULT_START_FAILURE_LEVEL, set: { ...(b?.startupWindowSeconds === undefined ? {} : { startupWindowSeconds: b.startupWindowSeconds }), ...(b?.startFailureLevel === undefined ? {} : { startFailureLevel: b.startFailureLevel }), ...(b?.requireApproval === undefined ? {} : { requireApproval: b.requireApproval }), ...(b?.maxStagedBytes === undefined ? {} : { maxStagedBytes: b.maxStagedBytes }), ...(b?.keepStaged === undefined ? {} : { keepStaged: b.keepStaged }), ...(b?.maxStaged === undefined ? {} : { maxStaged: b.maxStaged }), ...(b?.maxFiles === undefined ? {} : { maxFiles: b.maxFiles }), ...(b?.maxFileBytes === undefined ? {} : { maxFileBytes: b.maxFileBytes }) } };
@@ -295,12 +321,14 @@ export class ReleaseActivationService {
 
   /** Copies the artifacts of a candidate from `incoming/<candidate>/` into a new versioned directory, refusing any file whose digest is not the manifest's. The same candidate staged twice is the same release. */
   async stage(owner: Principal, command: NoActor & { candidateId: string }): Promise<{ candidateId: string; digest: string; bytes: number; files: number; replayed: boolean }> {
-    strictOwner(owner, "stage a release");
+    mayManage(owner, "stage a release");
     known(command, ["commandId", "candidateId"]);
     const id = idOf(command.candidateId);
     return this.#serial(`stage:${id}`, async () => {
       const candidate = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined;
       if (candidate === undefined) throw new DomainError("not_found", "no such release candidate");
+      this.#target(candidate.manifest);
+      const signedBy = await this.#signed(id);
       const existing = await this.#runner.get(STAGED, id);
       if (existing !== undefined) {
         const b = existing.body as unknown as StagedBody;
@@ -314,7 +342,7 @@ export class ReleaseActivationService {
       const caps = await this.#caps();
       const all = await this.#runner.list(STAGED, { limit: caps.staged + 1 });
       if (all.length >= caps.staged) throw new DomainError("invalid_transition", `${caps.staged} releases are already staged; the oldest must be removed first (or the owner raises maxStaged)`);
-      const settings = await this.settings(owner);
+      const settings = await this.#settings();
       const used = all.reduce((n, a) => n + (a.body as unknown as StagedBody).bytes, 0);
       const names = Object.keys(candidate.manifest.artifacts).sort();
       if (names.length > caps.files) bad("candidateId", "has too many artifacts");
@@ -341,8 +369,9 @@ export class ReleaseActivationService {
           if (settings.maxStagedBytes !== null && used + bytes > settings.maxStagedBytes) throw new DomainError("invalid_transition", `staging would use more than the ${settings.maxStagedBytes} bytes the owner allowed for staged releases`);
         }
         let protocol: VersionRange | undefined;
+        let schema: VersionRange | undefined;
         if (files[COMPAT_FILE] !== undefined) {
-          try { protocol = parseCompat(await readFile(join(tmp, COMPAT_FILE), "utf8")).protocol; } catch (error) { throw new DomainError("invalid_command", `${(error as Error).message} (staged nothing)`, { field: "candidateId" }); }
+          try { const c = parseCompat(await readFile(join(tmp, COMPAT_FILE), "utf8")); protocol = c.protocol; schema = c.schema; } catch (error) { throw new DomainError("invalid_command", `${(error as Error).message} (staged nothing)`, { field: "candidateId" }); }
         } else if (this.#o.compat?.required === true) throw new DomainError("invalid_command", `the release has no ${COMPAT_FILE} naming the worker protocol range its controller speaks, so it cannot be checked for compatibility (staged nothing)`, { field: "candidateId" });
         const manifest: StagedManifest = { candidateId: id, sourceCommit: candidate.manifest.sourceCommit, files };
         const text = canonicalJson(manifest as unknown as JsonObject);
@@ -355,7 +384,7 @@ export class ReleaseActivationService {
         await lockTree(this.#dir(id));
         await syncDir(releases);
         const ref: AggregateRef = { kind: STAGED, id };
-        const body: StagedBody = { candidateId: id, digest, bytes, files: names.length, stagedBy: owner.id, stagedAt: this.#runner.now(), ...(protocol === undefined ? {} : { protocol }) };
+        const body: StagedBody = { candidateId: id, digest, bytes, files: names.length, stagedBy: owner.id, stagedAt: this.#runner.now(), ...(protocol === undefined ? {} : { protocol }), ...(schema === undefined ? {} : { schema }), ...(signedBy === undefined ? {} : { signedBy }) };
         await this.#runner.command("release.stage", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
           payload: { candidateId: id },
           build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { candidateId: id, digest, bytes, files: names.length } }),
@@ -425,9 +454,10 @@ export class ReleaseActivationService {
   // ---- activation ---------------------------------------------------------------------------------------------------------------------------------------------------------
 
   /** Owner only. The word is bound to the candidate, to the digest of what was staged and to this platform, and needs the candidate approved (unless the owner turned that requirement off). */
-  async activate(owner: Principal, command: NoActor & { candidateId: string; digest: string; expectedRevision?: number }): Promise<{ revision: number; replayed: boolean }> {
-    strictOwner(owner, "activate a release");
-    known(command, ["commandId", "candidateId", "digest", "expectedRevision"]);
+  async activate(owner: Principal, command: NoActor & { candidateId: string; digest: string; migrationPlan?: string; expectedRevision?: number }): Promise<{ revision: number; replayed: boolean }> {
+    mayManage(owner, "activate a release");
+    known(command, ["commandId", "candidateId", "digest", "migrationPlan", "expectedRevision"]);
+    if (command.migrationPlan !== undefined && (typeof command.migrationPlan !== "string" || !SHA.test(command.migrationPlan))) bad("migrationPlan", "must be the 64 hexadecimal characters of the migration plan's digest");
     const id = idOf(command.candidateId);
     if (typeof command.digest !== "string" || !SHA.test(command.digest)) bad("digest", "must be the 64 hexadecimal characters of the staged release's digest");
     wholeRev(command.expectedRevision);
@@ -442,16 +472,21 @@ export class ReleaseActivationService {
       if (candidateIdOf(candidate.manifest) !== id) throw new DomainError("invalid_transition", "the candidate's record does not match its ID; it is not activated");
       await this.#startable(id);
       await this.#compatible(id, "the release");
+      // The word covers the data too: a candidate that carries a migration plan is activated only by someone who quotes that plan's digest, and one that carries none is not activated with a plan quoted for it.
+      if (candidate.manifest.migrationPlan !== command.migrationPlan) throw new DomainError("invalid_command", candidate.manifest.migrationPlan === undefined ? "migrationPlan: the release carries no migration plan; do not name one" : "migrationPlan: the release carries a migration plan; quote its digest (release.status or the candidate shows it) to activate", { field: "migrationPlan" });
+      this.#target(candidate.manifest);
+      await this.#signed(id);
       const p = this.#platform();
       if (!candidate.manifest.matrix.some((c) => c.os === p.os && c.arch === p.arch)) throw new DomainError("invalid_transition", `the release was not tested for this installation's platform (${p.os}/${p.arch})`);
-      if ((await this.settings(owner)).requireApproval && ((await this.#runner.get(RELEASE_KINDS.approval, id))?.body as unknown as ApprovalBody | undefined)?.candidateId !== id) throw new DomainError("invalid_transition", "the release is not approved (release.approve); the owner may switch that requirement off");
+      // A holder of release.manage never activates what the owner has not approved, whatever the owner's setting says about their own activations: switching the requirement off is the owner's convenience for the owner.
+      if (((await this.#settings()).requireApproval || !isOwner(owner)) && ((await this.#runner.get(RELEASE_KINDS.approval, id))?.body as unknown as ApprovalBody | undefined)?.candidateId !== id) throw new DomainError("invalid_transition", "the release is not approved (release.approve)" + (isOwner(owner) ? "; the owner may switch that requirement off" : "; a holder of release.manage needs the owner's approval"));
       return this.#transition(owner, "activate", command.commandId, { id, digest: sb.digest }, command.expectedRevision);
     });
   }
 
   /** Owner only. Goes back to the release that was current before the last activation, named by its ID so that a moved record cannot send it elsewhere. */
   async rollback(owner: Principal, command: NoActor & { releaseId: string; expectedRevision?: number }): Promise<{ revision: number; replayed: boolean }> {
-    strictOwner(owner, "roll a release back");
+    mayManage(owner, "roll a release back");
     known(command, ["commandId", "releaseId", "expectedRevision"]);
     const id = idOf(command.releaseId);
     wholeRev(command.expectedRevision);
@@ -461,10 +496,27 @@ export class ReleaseActivationService {
       if (body?.previous === undefined || body.previous.id !== id) throw new DomainError("invalid_transition", "that is not the release before the current one");
       await this.#startable(id);
       await this.#compatible(id, "the release to go back to");
+      const cand = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined;
+      if (cand !== undefined) this.#target(cand.manifest);
+      await this.#signed(id);
       return this.#transition(owner, "rollback", command.commandId, body.previous, command.expectedRevision);
     });
   }
 
+  /** A candidate that names target installations is used only on one of them (K02). The installation's name is the owner's option; with targets and no name the release is refused (fail closed). */
+  #target(manifest: CandidateBody["manifest"]): void {
+    if (manifest.targets === undefined) return;
+    const me = this.#o.installationId;
+    if (me === undefined) throw new DomainError("invalid_transition", "the release names the installations it is for, but this installation has no name configured (the releases installationId option), so it is not used here");
+    if (!manifest.targets.includes(me)) throw new DomainError("invalid_transition", `the release is for ${manifest.targets.join(", ")}, not for this installation (${me})`);
+  }
+  /** Staging, activation and rollback need a valid signature from a trusted key when the trust root requires one (K02b). Returns the signing key's ID when there is one, else undefined. */
+  async #signed(id: string): Promise<string | undefined> {
+    const need = await this.#trust.required();
+    const c = await this.#trust.check(id);
+    if (need && !c.ok) throw new DomainError("invalid_transition", `the release is not signed as this installation requires: ${c.reason}`);
+    return c.ok ? c.keyId : undefined;
+  }
   /** A release the launcher found failing to start is not activated again (a rebuilt candidate has another ID). */
   async #startable(id: string): Promise<void> {
     const st = await this.#launcher.read().catch(() => undefined);
@@ -473,9 +525,13 @@ export class ReleaseActivationService {
   }
   /** Controller-worker protocol compatibility, checked before the pointer moves: the release's controller must share a protocol version with the workers (a rollback target too, so mixed versions are never switched into). */
   async #compatible(id: string, what: string): Promise<void> {
+    // K02d: a release that states the database schemas it can run on is not switched to (or rolled back to) when the data has already been taken past them: code goes back only to a release that understands the data.
+    const staged = (await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined;
+    const db = (await this.#launcher.read().catch(() => undefined))?.db;
+    if (staged?.schema !== undefined && db !== undefined && db.version > staged.schema.max) throw new DomainError("invalid_transition", `${what} understands database schema versions up to ${staged.schema.max}, but this database is at ${db.version}; it would not start (a snapshot taken before the upgrade has to be restored first)`);
     const c = this.#o.compat;
     if (c === undefined) return;
-    const range = ((await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined)?.protocol;
+    const range = staged?.protocol;
     if (range === undefined) { if (c.required === true) throw new DomainError("invalid_transition", `${what} declares no worker protocol range (${COMPAT_FILE}), so it is not switched to`); return; }
     const n = negotiateProtocol(range, c.workers);
     if (!n.ok) throw new DomainError("invalid_transition", `${what} cannot work with this installation's workers: ${n.reason}`);
@@ -730,7 +786,7 @@ export class ReleaseActivationService {
 
   /** Owner only. Removes a staged release (record and files) so the staging cap does not fill for good. Refused for the current release, the previous one (the rollback target) and either end of an open switch. */
   async remove(owner: Principal, command: NoActor & { candidateId: string }): Promise<{ candidateId: string; removed: true }> {
-    strictOwner(owner, "remove a staged release");
+    mayManage(owner, "remove a staged release");
     known(command, ["commandId", "candidateId"]);
     const id = idOf(command.candidateId);
     return this.#serial("switch", async () => {
@@ -743,15 +799,18 @@ export class ReleaseActivationService {
   }
 
   /** Owner only. Checks the current release's files (or the named staged release's) against the manifest digest the record keeps, as the launcher does at launch. */
-  async verify(owner: Principal, command: { releaseId?: string } = {}): Promise<{ releaseId: string | null; digest: string | null; ok: boolean; problems: string[] }> {
-    strictOwner(owner, "verify a release");
+  async verify(owner: Principal, command: { releaseId?: string } = {}): Promise<{ releaseId: string | null; digest: string | null; ok: boolean; problems: string[]; migrationPlan?: string; targets?: readonly string[]; signedBy?: string | null }> {
+    mayManage(owner, "verify a release");
     const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
     const id = command.releaseId === undefined ? body?.current?.id : idOf(command.releaseId);
     if (id === undefined) return { releaseId: null, digest: null, ok: false, problems: ["no release is current"] };
     const digest = body?.current?.id === id ? body.current.digest : ((await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined)?.digest;
     if (digest === undefined) throw new DomainError("not_found", "that release is neither current nor staged");
     const problems = await this.#verify(id, digest);
-    return { releaseId: id, digest, ok: problems.length === 0, problems };
+    // What the owner's word on an activation also covers (K02): the migration plan and the installations the release is for, from the candidate record, and whether a trusted key's signature is on it now.
+    const manifest = ((await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined)?.manifest;
+    const sig = await this.#trust.check(id);
+    return { releaseId: id, digest, ok: problems.length === 0, problems, ...(manifest?.migrationPlan === undefined ? {} : { migrationPlan: manifest.migrationPlan }), ...(manifest?.targets === undefined ? {} : { targets: manifest.targets }), signedBy: sig.ok ? sig.keyId : null };
   }
 
   /**
@@ -812,12 +871,14 @@ export class ReleaseActivationService {
   }
 
   async status(owner: Principal): Promise<ActivationStatus> {
-    strictOwner(owner, "read the release activation status");
+    mayManage(owner, "read the release activation status");
     const state = await this.#runner.get(STATE.kind, STATE.id);
     const body = state?.body as unknown as ActivationBody | undefined;
     const pointer = await this.#sw.read().catch(() => "invalid" as const);
     const listed = await this.#runner.list(STAGED, { limit: ACTIVATION_LIMITS.listed });
-    const s = await this.settings(owner);
+    const s = await this.#settings();
+    const trust = await this.#trust.list();
+    const dbSchema = (await this.#launcher.read().catch(() => undefined))?.db?.version;
     return {
       revision: state?.revision ?? 0,
       ...(body?.current === undefined ? {} : { current: body.current }),
@@ -829,9 +890,77 @@ export class ReleaseActivationService {
       pointer: pointer ?? null,
       diverged: body?.journal === undefined && (pointer ?? null) !== (body?.current?.id ?? null),
       history: body?.history ?? [],
-      staged: listed.map((a) => { const b = a.body as unknown as StagedBody; return { candidateId: b.candidateId, digest: b.digest, stagedAt: b.stagedAt, bytes: b.bytes }; }),
+      staged: listed.map((a) => { const b = a.body as unknown as StagedBody; return { candidateId: b.candidateId, digest: b.digest, stagedAt: b.stagedAt, bytes: b.bytes, ...(b.schema === undefined ? {} : { schema: b.schema }) }; }),
+      trust: { required: trust.required, keys: trust.keys.map((k) => ({ keyId: k.keyId, label: k.label })) },
+      ...(dbSchema === undefined ? {} : { databaseSchema: dbSchema }),
       settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, startupWindowSeconds: s.startupWindowSeconds, startFailureLevel: s.startFailureLevel, revision: s.revision },
       startNotices: ((await this.#launcher.read().catch(() => undefined))?.notices ?? []).map((n) => ({ kind: n.kind, release: n.release, ...(n.to === undefined ? {} : { to: n.to }), reason: n.reason, at: n.at, told: n.sentAt !== undefined, state: n.closedBy ?? "open" })),
     };
+  }
+
+  // ---- signed artifact sets: the trust root (K02b) -------------------------------------------------------------------------------------------------------------------------
+
+  /** The trusted signing keys and whether a signature is needed now. Owner or a holder of release.manage. */
+  async trust(by: Principal): Promise<{ revision: number; keys: readonly TrustedKey[]; require: boolean | null; required: boolean }> {
+    mayManage(by, "read the release trust root");
+    return this.#trust.list();
+  }
+  /** Owner only: trusts a key (an Ed25519 public key). Widens what may be activated, so chat shows it first. */
+  async addTrustedKey(owner: Principal, command: NoActor & { publicKey?: unknown; keyFile?: unknown; label?: unknown; expectedRevision?: number }): Promise<{ revision: number; keyId: string }> {
+    strictOwner(owner, "trust a release signing key");
+    wholeRev(command.expectedRevision);
+    const { keyFile, ...rest } = command;
+    if ((command.publicKey === undefined) === (keyFile === undefined)) bad("publicKey", "give exactly one of publicKey and keyFile");
+    return this.#trust.add(owner, (keyFile === undefined ? rest : { ...rest, publicKey: await this.#trustFile(keyFile, "keyFile") }) as never, this.#runner.now());
+  }
+  /** Owner only: withdraws a key; everything only it signed stops counting at once. */
+  async removeTrustedKey(owner: Principal, command: NoActor & { keyId: unknown; expectedRevision?: number }): Promise<{ revision: number; keyId: string }> {
+    strictOwner(owner, "stop trusting a release signing key");
+    wholeRev(command.expectedRevision);
+    return this.#trust.remove(owner, command, this.#runner.now());
+  }
+  /** Owner only: `true` always needs a signature, `false` never (digests only), `null` follows the trust root (needed once any key is trusted). */
+  async requireSignature(owner: Principal, command: NoActor & { required: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+    strictOwner(owner, "change whether releases must be signed");
+    wholeRev(command.expectedRevision);
+    return this.#trust.setRequired(owner, command, this.#runner.now());
+  }
+  /** Owner or a holder of release.manage: keeps a signature after checking it against the trust root. Changes nothing that runs; a signature by an untrusted key is refused. */
+  async attachSignature(by: Principal, command: NoActor & { candidateId: string; signature?: unknown; signatureFile?: unknown }): Promise<{ keyId: string; replayed: boolean }> {
+    mayManage(by, "attach a release signature");
+    known(command, ["commandId", "candidateId", "signature", "signatureFile"]);
+    const id = idOf(command.candidateId);
+    if ((command.signature === undefined) === (command.signatureFile === undefined)) bad("signature", "give exactly one of signature and signatureFile");
+    if ((await this.#runner.get(RELEASE_KINDS.candidate, id)) === undefined) throw new DomainError("not_found", "no such release candidate");
+    const signature = command.signatureFile === undefined ? command.signature : await this.#trustFile(command.signatureFile, "signatureFile");
+    return this.#trust.attach(by, { ...(command.commandId === undefined ? {} : { commandId: command.commandId }), candidateId: id, signature } as never, this.#runner.now());
+  }
+  /**
+   * A key or a signature may be given as the name of a plain file in `trust/` under the release root, because the chat refuses anything that looks like a key (so none can be pasted into it) and the owner names no path:
+   * the name is one path part, the file is a regular file (not a link) of at most 512 bytes, read as text. The content is validated exactly like a value given directly.
+   */
+  async #trustFile(name: unknown, field: string): Promise<string> {
+    if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) || name.includes("..")) return bad(field, "must be the name of a file in the trust folder under the release root (letters, digits, dots, dashes and underscores)");
+    const path = join(this.#o.root, "trust", name);
+    let fh;
+    try {
+      const l = await lstat(path);
+      if (!l.isFile()) return bad(field, "is not a plain file in the trust folder");
+      fh = await open(path, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0));
+    } catch (error) { if (error instanceof DomainError) throw error; throw new DomainError("not_found", `${field}: no such file in the trust folder`); }
+    try {
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > 512) return bad(field, "must be a plain file of at most 512 bytes");
+      return (await fh.readFile("utf8")).trim();
+    } finally { await fh.close(); }
+  }
+
+  /**
+   * Records how far the database schema has gone (K02d), for the launcher's fall-back check. Called by `startController` once the database is open (so a migration this process ran is on record before anything else can fail).
+   * Without a `schemaVersion` option nothing is recorded. Never throws: an unreadable launcher file leaves the old record and the next start tries again.
+   */
+  async noteDatabase(): Promise<number | undefined> {
+    if (this.#o.schemaVersion === undefined) return undefined;
+    try { const v = await this.#o.schemaVersion(); await this.#launcher.noteDatabase(v, this.#o.runningRelease ?? "controller"); return v; } catch { return undefined; }
   }
 }

@@ -2228,6 +2228,16 @@ Arguments:
 
 Result: `{ attempts }`.
 
+#### `release.trust.list`
+
+Owner or a holder of `release.manage`: the signing keys the owner trusts for release artifact sets (their IDs and labels), whether a signature is needed now (`required`: the owner's setting if set, otherwise true once any key is trusted) and the revision to quote when changing them.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, keys, require, required } }`.
+
 #### `release.status`
 
 Owner only: the current and previous release, the last known good and whether the current release has confirmed a healthy start, releases the launcher found failing to start, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
@@ -6261,12 +6271,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.activate`
 
-Owner only: makes a staged release the current one. The word is bound to the candidate, to the digest of what was staged (so a changed directory is refused) and to this installation's platform (the candidate must have been tested for it); the candidate must be approved unless the owner switched that requirement off. The files are verified again, then the switch is one atomic step recorded in a journal, so an interruption ends at the old release or the new, never between. A candidate built by an agent cannot stage or activate itself: only the owner can.
+Owner only: makes a staged release the current one. The word is bound to the candidate, to the digest of what was staged (so a changed directory is refused) and to this installation's platform (the candidate must have been tested for it); the candidate must be approved unless the owner switched that requirement off. The files are verified again, then the switch is one atomic step recorded in a journal, so an interruption ends at the old release or the new, never between. A candidate that names target installations is activated only on one of them, one that carries a migration plan only by a word that quotes its digest, and with a trusted signing key on record only when a valid signature from it is attached. Who: the owner, or an agent the owner granted exactly `release.manage` (never through `*`; it needs the owner's approval of the candidate whatever the approval setting says). Candidates are submitted and approved by the owner alone, so an agent-built candidate cannot stage or activate itself.
 
 Arguments:
 
 - `candidateId`: the staged candidate
 - `digest`: the digest `release.stage` returned
+- `migrationPlan` (optional): the digest of the migration plan the candidate carries (required exactly when it carries one; release.verify shows it)
 - `expectedRevision` (optional): the `revision` of release.status
 - `commandId`: required
 
@@ -6299,6 +6310,65 @@ Arguments:
 - `commandId`: required
 
 Result: `{ revision, releaseId }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.trust.add`
+
+Owner only: trusts an Ed25519 public key (base64 DER SubjectPublicKeyInfo) as a release publisher. From then on staging, activating and rolling back need a valid signature by a trusted key over the candidate (unless the owner set `release.trust.require` to false). At most 20 keys. The private key never reaches the controller.
+
+Arguments:
+
+- `publicKey` (optional): base64 DER (SubjectPublicKeyInfo) of an Ed25519 public key
+- `keyFile` (optional): instead of publicKey: the name of a file in the `trust` folder under the release root that holds it (the chat refuses anything that looks like a key, so it cannot be pasted there)
+- `label` (optional): a short plain label
+- `expectedRevision` (optional): the revision of release.trust.list
+- `commandId`: required
+
+Result: `{ revision, keyId }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.trust.remove`
+
+Owner only: stops trusting a key. A release signed only by it stops counting as signed at once (a running release is not touched; the next staging, activation or rollback is refused unless another trusted key signed it).
+
+Arguments:
+
+- `keyId`: the key's ID from release.trust.list
+- `expectedRevision` (optional): the revision of release.trust.list
+- `commandId`: required
+
+Result: `{ revision, keyId }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.trust.require`
+
+Owner only: `true` always needs a trusted signature (even with no key trusted yet, which then blocks staging), `false` never does (digests alone are the owner's word), `null` follows the trust root (needed once any key is trusted, the default).
+
+Arguments:
+
+- `required`: true, false or null
+- `expectedRevision` (optional): the revision of release.trust.list
+- `commandId`: required
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.signature.attach`
+
+Owner or a holder of `release.manage`: keeps a signature (base64 Ed25519) over a candidate after checking it against the trust root; one that no trusted key made is refused and kept nowhere. The signed text is `nimblenewt-release-v1`, a line break, the candidate ID and a line break. Changes nothing that runs.
+
+Arguments:
+
+- `candidateId`: the candidate
+- `signature` (optional): base64 of the 64-byte Ed25519 signature
+- `signatureFile` (optional): instead of signature: the name of a file in the `trust` folder under the release root that holds it
+- `commandId`: required
+
+Result: `{ keyId, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

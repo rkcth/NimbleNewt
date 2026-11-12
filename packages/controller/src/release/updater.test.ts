@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Launcher, PointerSwitcher, SimulatedCrash, UpdaterError, announceRelease, installRelease, stageRelease, verifyReleaseDirectory, type StageReleaseOptions, type UpdaterErrorCode } from "./index.js";
 import { sha256 } from "./start-fixture.js";
+import { signedDigestText, signedText } from "./trust.js";
 
 /**
  * The updater (card K02 follow-up) in temporary directories: a release is installed from a verified source directory, never over an existing one, atomically, with links and unmanifested files refused, and
@@ -369,5 +371,30 @@ test("inputs: relative or control-character paths, a missing root and an oversiz
     await refused("invalid_input", stageRelease({ root: join(base, "missing"), source: s.dir, digest: s.digest }));
     writeFileSync(join(s.dir, "MANIFEST.json"), "x".repeat(2 * 1024 * 1024));
     await refused("source_invalid", stageRelease(opts(root, s)), /larger than/);
+  });
+});
+
+test("signed artifact sets: with trusted keys the release is installed only when a trusted key signed its digest; nothing is written otherwise (K02b updater)", async () => {
+  await scratch(async ({ root, src }) => {
+    const a = generateKeyPairSync("ed25519"), b = generateKeyPairSync("ed25519");
+    const der = (k: { publicKey: import("node:crypto").KeyObject }): string => k.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const sig = (k: { privateKey: import("node:crypto").KeyObject }, text: Buffer): string => sign(null, text, k.privateKey).toString("base64");
+    const s = src();
+    const good = sig(a, signedDigestText(s.digest));
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(b)], signature: good } })), /no valid signature/);
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(b, signedDigestText(s.digest)) } })));
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(a, signedDigestText(sha256("another"))) } })), /no valid signature/);
+    // The candidate-ID signature of the controller's path is not a signature over the digest.
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(a, signedText(s.id)) } })));
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [], signature: good } })), /no valid signature/);
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: ["not a key", der(b)], signature: good } })));
+    for (const bad of ["", "AAAA", "!!", "A".repeat(200)]) await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: bad } })));
+    assert.deepEqual(releasesOf(root), [], "nothing was written by any refusal");
+    const done = await stageRelease(opts(root, s, { trust: { keys: [der(b), der(a)], signature: good } }));
+    assert.equal(done.id, s.id);
+    assert.deepEqual(releasesOf(root), [s.id]);
+    // Without trust the behaviour is as before (digest only).
+    const t = src({ "controller.js": "other\n" }, `rcn-${sha256("second").slice(0, 24)}`);
+    assert.equal((await stageRelease(opts(root, t))).id, t.id);
   });
 });
