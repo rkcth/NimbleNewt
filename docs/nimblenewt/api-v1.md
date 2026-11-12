@@ -2274,7 +2274,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `maintenance.get`
 
-One maintenance request in full, as a reviewer needs it: kind, class, the exact spec (package version, source, install behaviour, mount, site), its digest, the rollback plan, the decision, the recorded effect, any pending reason. The requester, its supervisor and the owner may read it.
+One maintenance request in full, as a reviewer needs it: kind, class, the exact spec (package version, source, install behaviour, mount, site), its digest, the rollback plan, the decision, the recorded effect, any pending reason, and `review`: a summary derived from the record (exact change, source, digest, access, install behaviour, rollback plan, whether it can be undone, `requesterClaims` naming what only the requester says, and a `warning` when shown text was cleaned of invisible characters or secrets; it describes the request and never judges it safe). The requester, its supervisor and the owner may read it.
 
 Arguments:
 
