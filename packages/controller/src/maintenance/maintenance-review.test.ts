@@ -316,6 +316,19 @@ for (const [index, backend] of backends.entries()) {
         const made = await request(w, ann.principal, "package", pkg(`q-ok-${n}`, { source: ok }));
         assert.equal((await w.body(made.maintenanceId)).status, "pending", ok);
       }
+      // Review fix: a parameter named pass or pw is a password too; a token in the PATH (as some private registries put it) is refused like one in the query string, also encoded twice.
+      for (const bad of [`${SRC}?pass=abc123`, `${SRC}?pw=abc123`]) await assert.rejects(() => request(w, ann.principal, "package", pkg("q-pkg", { source: bad })), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /secret in its query string/.test(e.message) && !e.message.includes("abc123"));
+      for (const bad of [`${SRC}/${ghKey}/simple/x.tgz`, `${SRC}/r/${skKey}/x.tgz`, `${SRC}/${encodeURIComponent(encodeURIComponent(ghKey))}/x.tgz`]) {
+        for (const run of [() => request(w, ann.principal, "package", pkg("q-pkg", { source: bad })), () => w.m.catalogue(w.owner, { commandId: cid("c"), add: true, name: "q-pkg", version: "1.2.3", digest: D("a"), source: bad })]) {
+          await assert.rejects(run, (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /value shaped like a secret/.test(e.message) && !e.message.includes(ghKey) && !e.message.includes(skKey), bad);
+        }
+      }
+      // Content-addressed paths and digests are not secrets: a registry file path with a long hex segment, an IPFS-style name, a pip `#sha256=` link.
+      const hex = "d4dc8cbf4b79a37c8ef04c2e1361cfa027182c0e450b5f4a1c2e3d9b7a6f";
+      for (const ok of [`https://files.example.org/packages/3f/2a/${hex}/requests-2.31.0-py3-none-any.whl`, `https://files.example.org/dl/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG/file.tgz`, `https://files.example.org/p/requests-2.31.0.tar.gz#sha256=${hex}0a1b`]) {
+        const made = await request(w, ann.principal, "package", pkg(`q-ok-${n}`, { source: ok }));
+        assert.equal((await w.body(made.maintenanceId)).status, "pending", ok);
+      }
       // Nothing was stored for a refusal.
       assert.equal((await w.m.list(w.owner, {})).items.every((i) => !JSON.stringify(i).includes("abc123")), true);
     });

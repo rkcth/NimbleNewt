@@ -47,7 +47,7 @@ const BOSS_KINDS: readonly MaintenanceKind[] = ["package", "extension", "mount",
 /** Kinds a standing permission of the owner (`approve.maintenance.<kind>`) approves without asking anyone, and only without install scripts: broader access is reviewed per change, protected changes are the owner's, and install scripts run only after an approval of the exact artifact. */
 const STANDING_KINDS: readonly MaintenanceKind[] = ["package", "extension"];
 /** Parameter names that carry a secret whatever the value looks like. A source that needs one is not a source this platform fetches on an agent's word. */
-const SECRET_PARAM = /(?:token|secret|passw|passwd|pwd|api[-_.]?key|apikey|access[-_.]?key|private[-_.]?key|auth(?:orization)?(?![a-z])|credential|signature|session|bearer|jwt|cookie|(?:^|[-_.])(?:sig|key|sas)$)/i;
+const SECRET_PARAM = /(?:token|secret|passw|passwd|pwd|api[-_.]?key|apikey|access[-_.]?key|private[-_.]?key|auth(?:orization)?(?![a-z])|credential|signature|session|bearer|jwt|cookie|(?:^|[-_.])(?:sig|key|sas|pass|pw)$)/i;
 /** The query string and fragment of an address, as names and values (the fragment as a query too, since `#a=b` is used that way), each decoded once more and twice at most. */
 function secretInTail(url: string): boolean {
   const at = url.search(/[?#]/);
@@ -63,6 +63,17 @@ function secretInTail(url: string): boolean {
   }
   return redactText(decode(tail)) !== decode(tail);
 }
+/**
+ * Whether the host or path of an address (everything before the query string and fragment) holds a value shaped like a credential, read as a whole and decoded twice at most (a token in the path, as some private registries use, is as
+ * much a secret as one in the query string). Whole, not per segment: a lone digest segment (a content-addressed path) looks like a random secret to the scanner out of context.
+ */
+function secretInPath(url: string): boolean {
+  const at = url.search(/[?#]/);
+  const head = at < 0 ? url : url.slice(0, at);
+  const decode = (v: string): string => { let out = v; for (let i = 0; i < 2; i++) { try { const d = decodeURIComponent(out); if (d === out) break; out = d; } catch { break; } } return out; };
+  const whole = decode(head);
+  return redactText(whole) !== whole;
+}
 /** A source is an https URL without credentials. The message never repeats it (it may carry a secret). */
 export function checkSource(v: unknown, field: string): string {
   const s = lone(v, field, 200);
@@ -74,6 +85,7 @@ export function checkSource(v: unknown, field: string): string {
   if (u.username !== "" || u.password !== "" || /^https:\/\/[^/?#]*@/i.test(s)) return bad(field, "must not carry a user name or password");
   // A secret in the query string or the fragment (a token, a signature, a key) would be stored, shown to the reviewer and sent to the registry as written: refused at request time, without repeating it (card A09 sixth slice).
   if (secretInTail(s)) return bad(field, "must not carry a secret in its query string or fragment (a parameter named like a token, key, password or signature, or a value shaped like one); ask for a source that needs none");
+  if (secretInPath(s)) return bad(field, "must not carry a value shaped like a secret (a token or key) in its address; ask for a source that needs none");
   return s;
 }
 /** The rule that counts for a site and port: a deny on a host (or on a parent domain) wins over an allow, a deny without a port covers every port, an allow is for the exact host (or its `*.` rule) and port 443 unless a port is named. */

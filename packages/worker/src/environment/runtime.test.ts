@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -535,6 +535,12 @@ describe("the environment an attempt sees is the revision it was pinned to (card
     assert.notEqual(later!.readOnly![0]!.host, still!.readOnly![0]!.host);
     // The agent has an environment here but not the revision named: the attempt does not start with another one.
     await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 3 }), /revision 3 .* not on this host/);
+    // Review: the pinned revision's packages moved out of the environments directory and linked back, intact, are refused (the mount is never made from outside it); put back, it is mounted again.
+    const pinnedPackages = join(rt.environments.revisionDir(AGENT, 1), "packages"); const outside = join(fresh("outside"), "packages");
+    renameSync(pinnedPackages, outside); symlinkSync(outside, pinnedPackages);
+    await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 1 }), /not inside the environments directory/);
+    unlinkSync(pinnedPackages); renameSync(outside, pinnedPackages);
+    assert.deepEqual(await host.reach("environment", { agentId: AGENT, environmentRevision: 1 }), first);
     // A pinned revision that is no longer the active one is still checked against its record.
     writeFileSync(join(still!.readOnly![0]!.host, "tool", "index.js"), "evil()");
     await assert.rejects(() => host.reach("environment", { agentId: AGENT, environmentRevision: 1 }));
