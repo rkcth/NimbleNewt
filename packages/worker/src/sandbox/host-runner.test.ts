@@ -128,8 +128,9 @@ describe("the host's script runner (card T02d)", () => {
 
   test("a Node.js in a system directory is not offered (mounting /usr would show the whole system), and the host says it has no interpreter", async () => {
     // Stand in for process.execPath with a program whose install directory is a system one (the shell is in /usr/bin or /bin on every Linux and macOS host).
-    const shellRoot = dirname(dirname(realpathSync("/bin/sh")));
-    if (["/usr", "/bin", "/lib", "/sbin", "/"].includes(shellRoot)) assert.equal(ownNodeInstall("/bin/sh"), undefined);
+    // (Windows has no /bin/sh: there only the rest is checked.)
+    const shellRoot = process.platform === "win32" ? undefined : dirname(dirname(realpathSync("/bin/sh")));
+    if (shellRoot !== undefined && ["/usr", "/bin", "/lib", "/sbin", "/"].includes(shellRoot)) assert.equal(ownNodeInstall("/bin/sh"), undefined);
     assert.ok(ownNodeInstall(process.execPath) === undefined || ownNodeInstall(process.execPath)!.executable === "bin/node");
     const host = await hostScriptRunner({ launcher: fakeLauncher(true), base: join(root, "data6"), interpreters: [] });
     if (ownNodeInstall() === undefined) assert.match(host.problem()!, /no interpreter is offered/);
