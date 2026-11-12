@@ -161,6 +161,11 @@ export class MeetingWakeHost implements WakeControl {
     const todo: { agent: string; entry: LeaseEntry }[] = [];
     for (const lease of await this.#leases()) {
       const agent = lease.body.agent;
+      // A lease whose rooms are all over and that needs nothing more (each wake settled, or never brought in and never stopped) is removed, so the records stay as many as the agents woken for meetings still open and a pass
+      // never stops reading at old ones (one pass reads at most `scan`). A new wake racing this changes the revision and the removal is simply tried on a later pass.
+      let spent = true;
+      for (const e of lease.body.leases) if ((e.attendedAt !== undefined || e.stoppedAt !== undefined) && e.settledAt === undefined || (await this.#open(e.occurrenceId, agent))) { spent = false; break; }
+      if (spent) { await this.#drop(lease.id, lease.revision).catch(() => undefined); continue; }
       for (const e of lease.body.leases) {
         if (e.settledAt !== undefined) continue;
         const open = await this.#open(e.occurrenceId, agent);
@@ -231,6 +236,13 @@ export class MeetingWakeHost implements WakeControl {
   async #leases(): Promise<{ id: string; revision: number; body: LeaseBody }[]> {
     const found = await this.#runner.list(WAKE_LEASE_KIND, { limit: WAKE_LIMITS.scan });
     return found.map((a) => ({ id: a.id, revision: a.revision, body: a.body as unknown as LeaseBody }));
+  }
+
+  async #drop(id: string, revision: number): Promise<void> {
+    await this.#runner.command("meeting.host.wake-drop", { commandId: `mwl-drop-${id}-${revision}`, actor: "system" }, async () => ({
+      payload: { id, revision },
+      build: async () => { const ref = { kind: WAKE_LEASE_KIND, id }; return { ref, creates: false, changes: [{ type: "delete" as const, ref, expectedRevision: revision }], detail: { id } }; },
+    }));
   }
 
   /** One change to one entry of an agent's lease as its own command (the ID names the step, so a repeat after a crash is the same change); a race with another change is read again. */

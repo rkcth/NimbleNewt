@@ -37,7 +37,7 @@ async function world(backend: (typeof backends)[number]) {
   const host = MeetingWakeHost.withEpoch(w.storage, epoch, life);
   const stopAgent = (agent: string, intentId = "stp-1") => { resting.set(idOf(agent), { state: "stopped", intentId }); };
   const wake = async (agent: string, occ: number, key = `${occurrenceOf(occ)}:${agent}:1`) => host.recover({ key, agent, occurrenceId: occurrenceOf(occ), projectId: "proj-aaaaaaaaaaaaaaaaaaaa" });
-  return { w, host, room, stopAgent, wake, resting, close: () => w.close() };
+  return { w, host, room, stopAgent, wake, resting, runner, close: () => w.close() };
 }
 
 /** An attendance service that remembers what it was asked; `fail` makes a step refuse once or always. */
@@ -61,7 +61,32 @@ function attender() {
   return { a, calls, seats, fail, count: (prefix: string) => calls.filter((c) => c.startsWith(prefix)).length };
 }
 
+const B32 = "abcdefghijklmnopqrstuvwxyz234567";
+const manyAgent = (n: number): string => `agent:agt-${Array.from({ length: 20 }, (_, i) => B32[Math.floor(n / 32 ** Math.min(i, 3)) % 32]!).join("")}`;
+
 for (const backend of backends) {
+  test(`${backend.name}: leases of meetings that are over are removed, so a new wake is never left unread behind ${WAKE_LIMITS.scan} old ones (card M04h review)`, async () => {
+    const t = await world(backend);
+    try {
+      const agents = Array.from({ length: WAKE_LIMITS.scan + 5 }, (_, i) => manyAgent(i + 40));
+      // The last agent's lease sorts after every other one, so a pass that only reads the first ones never sees it unless the old ones are gone.
+      agents.sort((x, y) => (derivedId("mwl", x) < derivedId("mwl", y) ? -1 : 1));
+      const late = agents.pop()!;
+      for (const a of agents) t.stopAgent(a);
+      await t.room(20, agents.filter((_, i) => i % 3 === 0)); await t.room(21, agents.filter((_, i) => i % 3 === 1)); await t.room(22, agents.filter((_, i) => i % 3 === 2));
+      for (const [i, a] of agents.entries()) await t.wake(a, 20 + (i % 3));
+      for (const occ of [20, 21, 22]) await t.room(occ, agents.filter((_, i) => i % 3 === occ - 20), "ended");
+      t.stopAgent(late); await t.room(23, [late]); await t.wake(late, 23);
+      const at = attender();
+      let seen = false;
+      for (let pass = 0; pass < 3 && !seen; pass++) { await t.host.attend(by, at.a); seen = at.calls.includes(`join ${late}`); }
+      assert.ok(seen, "the new wake was brought in");
+      assert.deepEqual((await t.host.list()).map((w) => w.agent), [late]);
+      const left = await t.runner.list("meeting-wake-lease", { limit: 1000 });
+      assert.equal(left.length, 1, "only the live lease is kept");
+    } finally { await t.close(); }
+  });
+
   test(`${backend.name}: a woken agent is brought in, at most three a pass and five at a time; the rest wait for a place (card M04h)`, async () => {
     const t = await world(backend);
     try {
