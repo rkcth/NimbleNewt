@@ -148,7 +148,7 @@ export function localHostBuilder(setup) {
               launcher, app: worker.appFromRepository(setup.root, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [dataDir],
               workspace: async (order) => {
                 await refreshShared();
-                const made = await workspaces.ensure({ taskId: order.taskId, projectId: order.projectId });
+                const made = await workspaces.ensure({ taskId: order.taskId, projectId: order.projectId, ...(typeof order.attemptId === "string" ? { attemptId: order.attemptId } : {}) });
                 const home = join(base, "attempts", order.attemptId, "home");
                 const scratch = join(base, "attempts", order.attemptId, "scratch");
                 mkdirSync(home, { recursive: true, mode: 0o700 }); mkdirSync(scratch, { recursive: true, mode: 0o700 });

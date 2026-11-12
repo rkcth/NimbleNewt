@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
@@ -19,6 +19,11 @@ const COMMIT = /^[0-9a-f]{40}$/;
 export const DONE_STATE_LIMITS = { named: 20, paths: 30 } as const;
 /** Where the commits made through a permit are listed: a file in the checkout's git directory (host side, outside the checkout the agent edits). Text in a commit message proves nothing; a commit counts as permitted only if `commit()` made it and listed it here. */
 export const permitLedgerPath = (gitDir: string): string => join(gitDir, "nn-permit-ledger");
+
+/** Where the commits the release operation made are listed (host side, in the checkout's git directory). They are not permit commits: `unpermitted` does not read this file. */
+export const releaseLedgerPath = (gitDir: string): string => join(gitDir, "nn-release-ledger");
+/** Who a release commit is by: the platform, never the agent. */
+export const RELEASE_IDENTITY = { name: "NimbleNewt release", email: "release@nimblenewt.invalid" } as const;
 
 /** A digest of a list of staged files in the one form the controller and the worker both compute: sorted by path, each as {"op","path"}. */
 export const filesDigest = (files: readonly { path: string; op: "write" | "delete" }[]): string =>
@@ -469,6 +474,43 @@ export class GitBridge {
     // The checkout's branch moves only from the reviewed base to the new commit.
     await this.#run(["update-ref", "HEAD", commitId, permit.base], { gitDir: options.gitDir });
     return { commitId, parent: permit.base };
+  }
+
+  /**
+   * Commits what a task's checkout holds, in the checkout's own git directory and nowhere else (card H12o, the release operation). It is the platform's commit, not the agent's and not a reviewed one: the author, the committer, the
+   * message and the trailers are built here from the request, the task and the attempt (all plain names, checked), and the agent supplies none of them. It is **not** a commit made through the review gate's permit: it is not
+   * listed in the permit ledger, so a landing that requires the permit still refuses it (the permit rule is the landing policy's, not this commit's). Nothing outside the checkout and its git directory is touched.
+   *
+   * How it stays safe in a checkout the agent could write: the repository is the host's own (`--git-dir`), no hook runs (`core.hooksPath` is an empty directory, and a commit is made with `commit-tree` and `update-ref`, which run none),
+   * no configuration of the user or the system is read, no alias is reachable (argv only), and the attributes the checkout supplies cannot name a filter: the host writes `info/attributes` (which outranks every `.gitattributes`)
+   * that unsets `filter`, `ident`, `text` and the working-tree encoding for every path. A Git-named entry, a link or a submodule anywhere refuses the whole commit (`stage`). The head moves from the head it was staged on
+   * to the new commit only (a compare-and-swap), and the commit is listed in the release ledger before the head moves. Nothing to commit is not an error: it answers `commitId: undefined`.
+   */
+  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+    if (!/^wsr-[a-z2-7]{20}$/.test(options.requestId)) throw new WorkspaceError("invalid_path", "a release names a request ID of the controller's form");
+    if (!/^[A-Za-z0-9._:-]{1,120}$/.test(options.taskId) || (options.attemptId !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(options.attemptId))) throw new WorkspaceError("invalid_path", "a release names a plain task and attempt");
+    await this.#neutralAttributes(options.gitDir);
+    const staged = await this.stage(options);
+    if (staged.files.length === 0) return { parent: staged.base, tree: staged.tree, files: [], ignored: staged.ignored };
+    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`])];
+    const message = `Work of task ${options.taskId}${options.attemptId === undefined ? "" : ` (attempt ${options.attemptId})`}\n\nCommitted by NimbleNewt after the agent reported the work done; ${staged.files.length} file(s). Not a reviewed commit.\n\n${trailers.join("\n")}\n`;
+    const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
+    const commitId = (await this.#run(["commit-tree", staged.tree, "-p", staged.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
+    if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    await appendFile(releaseLedgerPath(options.gitDir), `${commitId} ${options.requestId} ${options.attemptId ?? "-"}\n`, { mode: 0o600 });
+    await this.#run(["update-ref", "HEAD", commitId, staged.base], { gitDir: options.gitDir });
+    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored };
+  }
+
+  /** Writes the repository's own attribute file (it outranks every attribute file in the checkout): no path may name a filter, an ident expansion, a line-ending conversion or a re-encoding. Replaced atomically, only when it differs. */
+  async #neutralAttributes(gitDir: string): Promise<void> {
+    const file = join(gitDir, "info", "attributes");
+    const text = "* -filter -ident -text -working-tree-encoding\n";
+    if (await readFile(file, "utf8").catch(() => undefined) === text) return;
+    await mkdir(join(gitDir, "info"), { recursive: true, mode: 0o700 });
+    const temporary = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+    await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
+    await rename(temporary, file);
   }
 
   /**

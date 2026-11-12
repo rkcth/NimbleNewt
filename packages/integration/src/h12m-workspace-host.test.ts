@@ -46,7 +46,7 @@ async function machine(dir: string, name: string) {
 const api = async (c: { api: { handle(token: string, req: never): Promise<unknown> } }, token: string, op: string, args: Record<string, unknown>, commandId?: string) =>
   (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as { ok: boolean; result?: any; error?: { code: string; message: string } };
 
-test("local host: refresh, integration and quarantine of a running agent's real checkout by the production workspace port; release is a typed refusal; the agent is told, a quarantine stops it, and the host is found by the task's last placement (card H12m)", { skip }, async () => {
+test("local host: refresh, integration and quarantine of a running agent's real checkout by the production workspace port; release commits in the checkout (card H12o); the agent is told, a quarantine stops it, and the host is found by the task's last placement (card H12m)", { skip }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-h12m-"));
   const m = await machine(dir, "w1");
   // The production workspace port of a local host (LocalWorkspaces, card H12q): it makes each task's checkout in its own layout and answers the controller's requests for it, with the host's own busy check wired to the LocalWorker.
@@ -157,15 +157,17 @@ test("local host: refresh, integration and quarantine of a running agent's real 
     assert.equal(told.length, 2);
     assert.match(told[1]!, /was refreshed.*read them again/);
 
-    // ---- release: this host cannot commit through a workspace request (the commit needs the review gate's permit, card H12o) and says so as a typed refusal, after the quiesce; nothing changes and the agent runs on
+    // ---- release (card H12o): the production host commits the checkout's work in the checkout's own git directory, after the quiesce; the shared repository is untouched and the agent runs on ----------------
+    await writeFile(join(where.checkout, "src", "a.ts"), "export const a = 4; // committed by release\n");
     const beforeRelease = m.state();
-    const rel = await api(c, boot.token, "workspace.request", { operation: "release", taskId: A.task, reason: "commit the reviewed work" }, "r-rel");
+    const rel = await api(c, boot.token, "workspace.request", { operation: "release", taskId: A.task, reason: "commit the work" }, "r-rel");
     assert.equal(rel.ok, true, JSON.stringify(rel));
-    assert.equal(rel.result.state, "refused");
-    assert.match(rel.result.summary, /commit permit/);
-    assert.equal(ran.at(-1)!.operation, "release", "the refusal is the host's own");
+    assert.equal(rel.result.state, "done", JSON.stringify(rel));
+    assert.equal(rel.result.detail.committed, true);
+    assert.equal(ran.at(-1)!.operation, "release");
     assert.deepEqual(rel.result.quietAttempts, [A.attempt], "release runs behind the quiesce like the other operations");
-    assert.equal(m.state(), beforeRelease);
+    assert.equal(m.state(), beforeRelease, "the shared repository is untouched");
+    assert.equal(sh(where.checkout, "--git-dir", where.gitDir, "show", "HEAD:src/a.ts"), "export const a = 4; // committed by release");
     assert.equal((await state(A.attempt)).frozen, undefined);
     assert.equal((await state(A.attempt)).state, "running");
 
