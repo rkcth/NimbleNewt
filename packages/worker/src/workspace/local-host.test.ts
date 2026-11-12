@@ -249,16 +249,18 @@ test("doneState says what is not committed, the commits and changes ahead of the
     await rm(join(made.checkout, "logs", "link.txt"));
     assert.equal(g("status", "--porcelain"), before, "reading changes nothing in the checkout's index");
     await writeFile(join(made.checkout, "empty.txt"), "");
-    await writeFile(join(made.checkout, "*"), "a star\n");
+    // Windows cannot name a file "*": there the path is still taken literally, and so is not found.
+    const star = process.platform !== "win32";
+    if (star) await writeFile(join(made.checkout, "*"), "a star\n");
     g("add", "-A"); g("commit", "-q", "-m", "work");
     const clean = await w.ws.doneState(scope, ["logs/test.txt", "empty.txt", "logs", "missing.txt", "*", "src/*.ts"]);
-    assert.deepEqual([clean?.uncommittedCount, clean?.ahead, clean?.changed], [0, 1, 5]);
+    assert.deepEqual([clean?.uncommittedCount, clean?.ahead, clean?.changed], [0, 1, star ? 5 : 4]);
     assert.deepEqual(clean?.evidence, [
       { path: "logs/test.txt", present: true },
       { path: "empty.txt", present: false, why: "empty" },
       { path: "logs", present: false, why: "a folder, not a file" },
       { path: "missing.txt", present: false, why: "not in the checkout (or ignored)" },
-      { path: "*", present: true },
+      star ? { path: "*", present: true } : { path: "*", present: false, why: "not in the checkout (or ignored)" },
       { path: "src/*.ts", present: false, why: "not in the checkout (or ignored)" },
     ], "paths are taken literally: a pattern matches no other file");
   } finally { await w.done(); }

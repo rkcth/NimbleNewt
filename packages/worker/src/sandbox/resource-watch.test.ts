@@ -84,6 +84,7 @@ describe("the sampling monitor: reading the system", () => {
   });
 
   test("the real ps sampler sees a real process tree (this host's ps)", async (t) => {
+    if (process.platform === "win32") return t.skip("needs a shell and ps");
     const child = spawn("/bin/sh", ["-c", "sleep 30 & sleep 30 & wait"], { stdio: "ignore" });
     try {
       const sampler = psSampler();
@@ -398,7 +399,8 @@ describe("the sampling monitor: real runs through the launcher (this host's ps, 
     assert.equal(r.cpuPauses, undefined);
   });
 
-  test("an injected sampler decides: its figures end the run, and the result carries numbers only", async () => {
+  test("an injected sampler decides: its figures end the run, and the result carries numbers only", async (t) => {
+    if (process.platform === "win32") return t.skip("needs a shell");
     const launcher = await make({ usageSampler: async () => sample({ rssMb: 9999, pids: [] }) });
     const r = await go(launcher, ["/bin/sh", "-c", "sleep 20"], { memoryMb: 64 });
     assert.deepEqual(r.limitExceeded, { limit: "memoryMb", value: 64, observed: 9999 });
