@@ -461,10 +461,12 @@ for (const backend of backendsNamed(backendName)) {
 
   suite("a call refused because the agent holds no grant for it is told to the denial hook once, like a policy denial; a pause, a budget or a decision refusal is not a denial (card U11c, other refusal points)", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
-    const { taskId } = await c.task("t", ann);
+    const { taskId, attemptId } = await c.task("t", ann);
     await c.budgets.open(c.owner, { commandId: "bo", taskId, currency: "USD", costMicros: 1000 });
     const told: { callId?: string; agentId: string; projectId: string }[] = [];
     c.dispatcher = c.restart({ denied: async (d) => { told.push(d); } });
+    // A second controller process on the same store, told to the same hook: the same call asked through both at once is still one denial (only the process whose refusal is written tells it).
+    const other = c.restart({ denied: async (d) => { told.push(d); } });
     const out: ToolResult[] = [];
     c.worker.script = async ({ gateway }) => {
       out.push(await gateway.call(read("ok"), local()));
@@ -472,16 +474,29 @@ for (const backend of backendsNamed(backendName)) {
       await c.pauses.pause(c.owner, { commandId: "p1", scope: { kind: "task", id: taskId }, reason: "hold" });
       out.push(await gateway.call(read("paused"), local()));
       await c.pauses.resume(c.owner, { commandId: "p2", scope: { kind: "task", id: taskId }, reason: "go" });
+      // A changed decision revision, and a route that is no longer allowed: refused, not told.
+      await c.decisions.record(c.owner, { commandId: "d1", projectId: c.project, category: "decision", topic: "db", statement: "use pg", wording: "We will use PostgreSQL here", source: { channel: "direct" }, basedOn: 0 } as never);
+      out.push(await gateway.call(read("decision"), local()));
+      await c.dispatcher.acknowledgeDecisions(attemptId!);
+      await c.routing.exclude(c.owner, { commandId: "ex", kind: "route", name: "localp/small", reason: "outage" });
+      out.push(await gateway.call(read("route"), local()));
+      await c.routing.lift(c.owner, { commandId: "lf", kind: "route", name: "localp/small", reason: "back" });
       // The grant is taken away: each new call is a refusal the owner may want to hear about; the same call asked again, or twice at once, is not a second one.
       await setGrants(c, "ann", workGrants(c.project, []));
       out.push(await gateway.call(read("a"), local()));
       out.push(await gateway.call(read("a"), local()));
       out.push(...await Promise.all([gateway.call(read("b"), local()), gateway.call(read("b"), local())]));
+      const across = await Promise.all([gateway.call(read("x"), local()), other.gateway(attemptId!).call(read("x"), local())]);
+      assert.deepEqual(across.map((r) => r.state), ["refused", "refused"], JSON.stringify(across));
+      // A used-up budget is not the agent's doing either (and is checked before the grant): refused, not told.
+      await c.budgets.charge(c.dispatcherPrincipal, { commandId: "ch", activity: "model-call", taskId, costMicros: 1000 });
+      out.push(await gateway.call(read("budget"), local()));
       return { status: "completed", text: "x" };
     };
     await c.run();
-    assert.deepEqual(out.map((r) => r.state), ["confirmed", "refused", "refused", "refused", "refused", "refused"], JSON.stringify(out));
-    assert.deepEqual(told.map((t) => t.callId).sort(), ["a", "b"], JSON.stringify(told));
+    assert.deepEqual(out.map((r) => r.state), ["confirmed", "refused", "refused", "refused", "refused", "refused", "refused", "refused", "refused"], JSON.stringify(out));
+    assert.deepEqual(out.slice(1).map((r) => /paused/.test((r as { reason: string }).reason) ? "pause" : /decision revision/.test((r as { reason: string }).reason) ? "decision" : /no longer eligible/.test((r as { reason: string }).reason) ? "route" : /holds no grant/.test((r as { reason: string }).reason) ? "grant" : /budget/.test((r as { reason: string }).reason) ? "budget" : "other"), ["pause", "decision", "route", "grant", "grant", "grant", "grant", "budget"], JSON.stringify(out));
+    assert.deepEqual(told.map((t) => t.callId).sort(), ["a", "b", "x"], JSON.stringify(told));
     assert.deepEqual([told[0]!.agentId, told[0]!.projectId], ["agent:ann", c.project]);
   });
 

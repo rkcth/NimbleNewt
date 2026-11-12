@@ -141,6 +141,27 @@ for (const backend of backends) {
     assert.equal((await c.watch.reportDenial("agent:carl")).raised, false);
   });
 
+  suite("refusals spread out so that no threshold of them fall inside one window never page, even when each comes within the window of the one before (card U11c review)", async (c) => {
+    await c.set({ deniedThreshold: 3, deniedWindowMinutes: 10 });
+    for (let i = 0; i < 6; i++) {
+      assert.equal((await c.watch.reportDenial("agent:ann")).raised, false, `refusal ${i + 1}, 9 minutes after the one before`);
+      now += 9 * MIN;
+    }
+    assert.equal((await c.open()).length, 0, "never three inside ten minutes");
+    // Now three inside the window: one item, and its text counts what came inside the window.
+    now += 30 * MIN;
+    await c.watch.reportDenial("agent:ann"); now += MIN; await c.watch.reportDenial("agent:ann"); now += MIN;
+    assert.equal((await c.watch.reportDenial("agent:ann")).raised, true);
+    await c.flush();
+    assert.match(c.sent[0]!.text, /agent ann was refused 3 times/);
+    // The run goes on (each refusal within the window of the last): the item's count moves, and its text no longer says they all came inside one window.
+    for (let i = 0; i < 3; i++) { now += 9 * MIN; await c.watch.reportDenial("agent:ann"); }
+    const items = await c.open();
+    assert.equal(items.length, 1);
+    assert.match(items[0]!.label, /refused 6 times/);
+    assert.doesNotMatch(items[0]!.detail ?? "", /6 times within 10 minutes/, items[0]!.detail);
+  });
+
   suite("a security event is always Urgent, once per key, and when the owner lets Urgent wait for the end of quiet hours it waits (card U11c)", async (c) => {
     await c.watch.reportSecurity({ kind: "protected-path-touched", key: "a1" });
     await c.watch.reportSecurity({ kind: "protected-path-touched", key: "a1" });
