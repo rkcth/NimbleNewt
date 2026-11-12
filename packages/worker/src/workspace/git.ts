@@ -2,14 +2,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
 import { splitRelative, touchesGit } from "./names.js";
-import { NOFOLLOW, resolveSafe, sameFile } from "./paths.js";
+import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
@@ -19,6 +19,11 @@ const COMMIT = /^[0-9a-f]{40}$/;
 export const DONE_STATE_LIMITS = { named: 20, paths: 30 } as const;
 /** Where the commits made through a permit are listed: a file in the checkout's git directory (host side, outside the checkout the agent edits). Text in a commit message proves nothing; a commit counts as permitted only if `commit()` made it and listed it here. */
 export const permitLedgerPath = (gitDir: string): string => join(gitDir, "nn-permit-ledger");
+
+/** Where the commits the release operation made are listed (host side, in the checkout's git directory). They are not permit commits: `unpermitted` does not read this file. */
+export const releaseLedgerPath = (gitDir: string): string => join(gitDir, "nn-release-ledger");
+/** Who a release commit is by: the platform, never the agent. */
+export const RELEASE_IDENTITY = { name: "NimbleNewt release", email: "release@nimblenewt.invalid" } as const;
 
 /** A digest of a list of staged files in the one form the controller and the worker both compute: sorted by path, each as {"op","path"}. */
 export const filesDigest = (files: readonly { path: string; op: "write" | "delete" }[]): string =>
@@ -33,15 +38,17 @@ export const filesDigest = (files: readonly { path: string; op: "write" | "delet
 export class GitBridge {
   readonly #empty: string;
   readonly #git: string;
+  readonly #beforeOpen: ((absolute: string) => Promise<void>) | undefined;
 
   /** `scratch` is a directory only the controller can write: it holds the empty hooks directory and the empty home. */
-  private constructor(scratch: string, git: string) { this.#empty = scratch; this.#git = git; }
+  private constructor(scratch: string, git: string, beforeOpen?: (absolute: string) => Promise<void>) { this.#empty = scratch; this.#git = git; this.#beforeOpen = beforeOpen; }
 
-  static async create(options: { scratch: string; git?: string }): Promise<GitBridge> {
+  /** `hooks.beforeOpen` is a test seam (H12o second review): it runs between the check of a checkout file's path and its opening for a read, where a hostile process could swap a name. */
+  static async create(options: { scratch: string; git?: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void> } }): Promise<GitBridge> {
     const scratch = await realpath(await mkdir(options.scratch, { recursive: true, mode: 0o700 }).then(() => options.scratch));
     await mkdir(join(scratch, "no-hooks"), { recursive: true, mode: 0o700 });
     await mkdir(join(scratch, "home"), { recursive: true, mode: 0o700 });
-    return new GitBridge(scratch, options.git ?? "git");
+    return new GitBridge(scratch, options.git ?? "git", options.hooks?.beforeOpen);
   }
 
   #env(): NodeJS.ProcessEnv {
@@ -213,7 +220,7 @@ export class GitBridge {
           const opened = await handle.stat();
           const now = await lstat(safe.absolute).catch(() => undefined);
           const parent = await realpath(dirname(safe.absolute)).catch(() => undefined);
-          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
+          if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent || !(await openedAt(handle, safe.absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
           await handle.truncate(0);
           if (s.mode !== undefined) await handle.chmod(s.mode);
           streamed = true; // the stream closes the handle
@@ -392,8 +399,11 @@ export class GitBridge {
 
   /** A file of the checkout, opened without following a link, as a plain file within the size limit. */
   async #readChecked(absolute: string, shown: string): Promise<Buffer> {
-    const handle = await open(absolute, constants.O_RDONLY | NOFOLLOW).catch(() => { throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} could not be opened without following a link`); });
+    await this.#beforeOpen?.(absolute);
+    const handle = await open(absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} could not be opened without following a link`); });
     try {
+      // A directory on the way swapped for a link is followed by the open (no-follow covers the last name only): the file read must be the one at the checked path (H12o second review).
+      if (!(await openedAt(handle, absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(shown.slice(0, 80))} was reached through a link; it was not read`, { tamper: true });
       const info = await handle.stat();
       if (!info.isFile()) throw new WorkspaceError("invalid_path", `${JSON.stringify(shown.slice(0, 80))} is not a plain file`);
       if (info.size > GIT_LIMITS.fileBytes) throw new WorkspaceError("invalid_path", `${JSON.stringify(shown.slice(0, 80))} is larger than the ${GIT_LIMITS.fileBytes} bytes a change may carry`);
@@ -406,11 +416,14 @@ export class GitBridge {
     let seen = 0;
     const walk = async (dir: string, depth: number): Promise<void> => {
       if (depth > 64) throw new WorkspaceError("invalid_path", "the checkout is nested too deeply");
-      for (const name of await readdir(dir)) {
+      for (const raw of await readdir(dir, { encoding: "buffer" })) {
         if (++seen > 200_000) throw new WorkspaceError("invalid_path", "the checkout holds too many files to check");
+        // A name that is not UTF-8 cannot be named back to the file system from text (H12o review: it used to end the walk with an untyped error, leaving the request uncertain).
+        const name = raw.toString("utf8");
+        if (!Buffer.from(name, "utf8").equals(raw)) throw new WorkspaceError("invalid_path", "the checkout holds a file name that is not valid UTF-8; the whole change was refused");
         if (touchesGit([name])) throw new WorkspaceError("protected_path", `the checkout holds ${JSON.stringify(name.slice(0, 40))}, which is Git's own name; the whole change was refused`);
-        const info = await lstat(join(dir, name));
-        if (info.isDirectory()) await walk(join(dir, name), depth + 1);
+        const info = await lstat(join(dir, name)).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+        if (info?.isDirectory() === true) await walk(join(dir, name), depth + 1);
       }
     };
     await walk(checkout, 0);
@@ -431,13 +444,16 @@ export class GitBridge {
    * reviewer approves and what `commit` will insist on.
    */
   async stage(options: { gitDir: string; checkout: string }): Promise<{ base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+    await this.#neutralAttributes(options.gitDir);
     await this.#refuseGitData(options.checkout);
     await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout });
     const listing = (await this.#run(["ls-files", "-s", "-z"], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    const blobs = new Map<string, string>();
     for (const line of listing) {
       const mode = line.slice(0, 6);
       const path = line.slice(line.indexOf("\t") + 1);
       if (mode === "120000" || mode === "160000") throw new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} is a link or a submodule entry, which a commit through the bridge does not carry`);
+      blobs.set(path, line.slice(7, line.indexOf(" ", 7)));
     }
     // A commit builds on the checkout's own head (an earlier commit of its own, or the base the checkout started from).
     const base = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
@@ -446,8 +462,35 @@ export class GitBridge {
     const files: { path: string; op: "write" | "delete" }[] = [];
     for (let i = 0; i + 1 < diff.length; i += 2) files.push({ path: diff[i + 1]!, op: diff[i] === "D" ? "delete" : "write" });
     if (files.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files are staged`);
+    // Git reads a file it saw as plain by opening its path, which follows a link: a file swapped for a link (or a directory on the way swapped for one) between git's look and its read would put the content of a
+    // file outside the checkout, read with the host's rights, into the commit. So every written file is read again here without following any link and must be exactly what was staged (H12o review).
+    // H12o second review: on a refusal the index is put back to the head, so it no longer names a blob git read from outside the checkout.
+    try { for (const f of files) if (f.op === "write") await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path)); } catch (error) {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir }).catch(() => undefined);
+      throw error;
+    }
     const status = await this.status(options);
     return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
+  }
+
+  /** Refuses unless the file at `path` in the checkout, opened without following a link at any name and without blocking, is a plain file whose Git blob ID is `staged`. */
+  async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<void> {
+    const changed = (): WorkspaceError => new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed or was replaced by a link while it was being staged; nothing was committed`, { tamper: true });
+    if (staged === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(staged)) throw changed();
+    const safe = await resolveSafe(checkout, path).catch(() => { throw changed(); });
+    if (safe.exists !== "file") throw changed();
+    await this.#beforeOpen?.(safe.absolute);
+    const handle = await open(safe.absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw changed(); });
+    try {
+      // No-follow covers the last name only: a directory on the way swapped for a link after the walk would lead this read to the same outside file git read, and the hashes would agree (H12o second review).
+      if (!(await openedAt(handle, safe.absolute))) throw changed();
+      const info = await handle.stat();
+      if (!info.isFile()) throw changed();
+      const hash = createHash(staged.length === 64 ? "sha256" : "sha1").update(`blob ${info.size}\0`);
+      let read = 0;
+      for await (const chunk of handle.createReadStream({ autoClose: false, highWaterMark: 1 << 20 }) as AsyncIterable<Buffer>) { read += chunk.length; hash.update(chunk); }
+      if (read !== info.size || hash.digest("hex") !== staged) throw changed();
+    } finally { await handle.close(); }
   }
 
   /**
@@ -469,6 +512,42 @@ export class GitBridge {
     // The checkout's branch moves only from the reviewed base to the new commit.
     await this.#run(["update-ref", "HEAD", commitId, permit.base], { gitDir: options.gitDir });
     return { commitId, parent: permit.base };
+  }
+
+  /**
+   * Commits what a task's checkout holds, in the checkout's own git directory and nowhere else (card H12o, the release operation). It is the platform's commit, not the agent's and not a reviewed one: the author, the committer, the
+   * message and the trailers are built here from the request, the task and the attempt (all plain names, checked), and the agent supplies none of them. It is **not** a commit made through the review gate's permit: it is not
+   * listed in the permit ledger, so a landing that requires the permit still refuses it (the permit rule is the landing policy's, not this commit's). Nothing outside the checkout and its git directory is touched.
+   *
+   * How it stays safe in a checkout the agent could write: the repository is the host's own (`--git-dir`), no hook runs (`core.hooksPath` is an empty directory, and a commit is made with `commit-tree` and `update-ref`, which run none),
+   * no configuration of the user or the system is read, no alias is reachable (argv only), and the attributes the checkout supplies cannot name a filter: the host writes `info/attributes` (which outranks every `.gitattributes`)
+   * that unsets `filter`, `ident`, `text` and the working-tree encoding for every path. A Git-named entry, a link or a submodule anywhere refuses the whole commit (`stage`). The head moves from the head it was staged on
+   * to the new commit only (a compare-and-swap), and the commit is listed in the release ledger before the head moves. Nothing to commit is not an error: it answers `commitId: undefined`.
+   */
+  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+    if (!/^wsr-[a-z2-7]{20}$/.test(options.requestId)) throw new WorkspaceError("invalid_path", "a release names a request ID of the controller's form");
+    if (!/^[A-Za-z0-9._:-]{1,120}$/.test(options.taskId) || (options.attemptId !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(options.attemptId))) throw new WorkspaceError("invalid_path", "a release names a plain task and attempt");
+    const staged = await this.stage(options);
+    if (staged.files.length === 0) return { parent: staged.base, tree: staged.tree, files: [], ignored: staged.ignored };
+    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`])];
+    const message = `Work of task ${options.taskId}${options.attemptId === undefined ? "" : ` (attempt ${options.attemptId})`}\n\nCommitted by NimbleNewt after the agent reported the work done; ${staged.files.length} file(s). Not a reviewed commit.\n\n${trailers.join("\n")}\n`;
+    const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
+    const commitId = (await this.#run(["commit-tree", staged.tree, "-p", staged.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
+    if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    await appendFile(releaseLedgerPath(options.gitDir), `${commitId} ${options.requestId} ${options.attemptId ?? "-"}\n`, { mode: 0o600 });
+    await this.#run(["update-ref", "HEAD", commitId, staged.base], { gitDir: options.gitDir });
+    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored };
+  }
+
+  /** Writes the repository's own attribute file (it outranks every attribute file in the checkout): no path may name a filter, an ident expansion, a line-ending conversion or a re-encoding. Replaced atomically, only when it differs. */
+  async #neutralAttributes(gitDir: string): Promise<void> {
+    const file = join(gitDir, "info", "attributes");
+    const text = "* -filter -ident -text -working-tree-encoding\n";
+    if (await readFile(file, "utf8").catch(() => undefined) === text) return;
+    await mkdir(join(gitDir, "info"), { recursive: true, mode: 0o700 });
+    const temporary = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+    await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
+    await rename(temporary, file);
   }
 
   /**
