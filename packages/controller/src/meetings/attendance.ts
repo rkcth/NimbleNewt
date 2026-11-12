@@ -131,6 +131,26 @@ export interface MeetingDecision {
 
 /** Wakes or recovers a suspended or stopped agent (L02 and L03 supply it). Called only after the owner authorized it, once per key. */
 export interface WakeSink { wake(request: { readonly key: string; readonly agent: string; readonly occurrenceId: string; readonly projectId: string }): Promise<void> }
+/** One wake as the owner sees it (card M04h): who was woken for which meeting and where it stands. */
+export interface WakeView {
+  readonly agent: string;
+  readonly occurrenceId: string;
+  readonly projectId: string;
+  readonly at: string;
+  /** `waiting` (woken, not yet in the room, or waiting for a place), `attending`, `gave-up` (the host could not bring it in; `reason` says why), `stopped` (the owner ended the wake) or `ended` (it attended, then left the room or was stopped, suspended or paused again; `reason` says which). */
+  readonly state: "waiting" | "attending" | "gave-up" | "stopped" | "ended";
+  readonly meetingTaskId?: string;
+  readonly tries: number;
+  readonly reason?: string;
+  readonly leaseId: string;
+  readonly leaseRevision: number;
+}
+/** What the owner can see and stop of the wakes the controller's own host made (card M04h). Absent when the application supplies its own wake host. */
+export interface WakeControl {
+  list(): Promise<readonly WakeView[]>;
+  /** Ends the wake record so the agent reports at rest again; true when the agent had already joined the room (the caller then makes it leave). */
+  stop(request: { readonly occurrenceId: string; readonly agent: string; readonly by: string }): Promise<{ readonly found: boolean; readonly attended: boolean }>;
+}
 /**
  * Warns an agent about the meeting's quick-answer period (owner decision 2026-10-29): a meeting is a context switch for quick answers with the agent's tools and desk, not for long-running work. `ahead` is sent when the agent is
  * asked to prepare, `begins` when it joins, `ends` when it is returned to its work. Idempotent by `key`; best effort (a failure never changes the attendance).
@@ -143,6 +163,8 @@ export interface AttendanceOptions extends RunnerOptions {
   /** Whether an agent may be reached (the pause service's `availability`, with L02/L03's suspended and stopped). Required. Fails closed: a missing or failing hook reads as `stopped`. */
   readonly availability: (principalId: string) => Promise<Availability>;
   readonly wake?: WakeSink;
+  /** The list and the stop of the wakes the controller's own host made (card M04h). */
+  readonly wakeControl?: WakeControl;
   readonly notices?: NoticeSink;
   /** Warnings about the no-long-running-work period of a meeting. */
   readonly window?: WindowSink;
@@ -237,6 +259,7 @@ export class AttendanceService {
   readonly #histories: HistoryService | undefined;
   readonly #availability: AttendanceOptions["availability"];
   readonly #wake: WakeSink | undefined;
+  readonly #wakeControl: WakeControl | undefined;
   readonly #notices: NoticeSink | undefined;
   readonly #window: WindowSink | undefined;
 
@@ -253,6 +276,7 @@ export class AttendanceService {
     this.#leadMinutes = deps.leadMinutes;
     this.#availability = options.availability;
     this.#wake = options.wake;
+    this.#wakeControl = options.wakeControl;
     this.#notices = options.notices;
     this.#window = options.window;
   }
@@ -269,8 +293,8 @@ export class AttendanceService {
    * safe long-running operation (a detached job that carries on while the agent attends) all start. It sees the meetings that already exist, which M01 makes at the start of each schedule's preparation lead (so the lead is how far ahead it can look). Advisory and read-only: the dispatcher asks before it asks H03 for a place. Looks at the meetings waiting to be held (at most 1000, M01's cap), and only
    * at those the agent will attend (eligible, or a paused agent the owner invited). For the owner, host or service principal, or the agent itself.
    */
-  async admission(by: Principal, query: { agent: string; expectedMinutes: number; yieldsAtBoundary?: boolean; safeLongRunning?: boolean }): Promise<AdmissionAdvice> {
-    onlyKnown(query, ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"]);
+  async admission(by: Principal, query: { agent: string; expectedMinutes: number; yieldsAtBoundary?: boolean; safeLongRunning?: boolean; /** The task about to start (the dispatcher names it): the agent's own bounded meeting task is the meeting, not a conflict with it (card M04h). */ taskId?: string }): Promise<AdmissionAdvice> {
+    onlyKnown(query, ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning", "taskId"]);
     const agent = typeof query.agent === "string" && AGENT.test(query.agent) ? query.agent : invalid("agent", "is not an agent principal");
     const expected = whole(query.expectedMinutes, "expectedMinutes", 1, ATTENDANCE_LIMITS.expectedMax);
     if (!(staff(by) || (by.kind === "agent" && by.id === agent && by.taskScope === undefined))) throw forbidden(by, "ask about that agent's admission");
@@ -288,6 +312,8 @@ export class AttendanceService {
         if (body === undefined || body.state !== "planned" || body.mode !== "live" || ms(body.endsAt) <= nowMs) continue;
         const seat = body.participants.find((p) => p.id === agent);
         if (seat === undefined || !(live === "available" || (live === "paused" && seat.status === "owner-invited"))) continue;
+        // The agent's bounded meeting task for this very meeting is how it attends; it is never held back by the meeting it is for.
+        if (typeof query.taskId === "string" && query.taskId === derivedId("task", `attend-task:${attendanceIdOf(id, agent)}`)) continue;
         // The work would still be running when the meeting starts (or the meeting is on): that is the conflict. The occurrence exists from its preparation lead, so the lead is how far ahead this can see.
         const from = ms(body.startsAt);
         if (from >= horizon && !(lead > 0 && from - nowMs <= lead * 60_000)) continue;
@@ -375,14 +401,21 @@ export class AttendanceService {
    */
   async #decide(who: string, seat?: ParticipantRecord): Promise<{ state: AttendanceState; reason?: string; bounded: boolean; covers?: PauseExemptionBody["covers"] }> {
     const availability = await this.#reach(who);
-    if (availability === "available") return { state: "preparing", bounded: false };
+    if (availability === "available") {
+      // An agent the controller's own host woke is `available` while a stop still holds it (card M04h): it attends through the same bounded permission a paused agent the owner invited gets, covering exactly the gates now held and
+      // no other (a later stop is another request and is not covered). An agent no pause holds is simply available.
+      const agentId = AGENT.exec(who)?.[1];
+      const holds = agentId === undefined ? [] : await this.#pauses.agentHolds(agentId);
+      if (holds.length === 0 || holds.some((h) => h.scope.kind === "installation")) return { state: "preparing", bounded: false };
+      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId, stop: h.stop })) };
+    }
     if (availability === "paused") {
       const out = (reason: string) => ({ state: "unavailable" as const, reason, bounded: false });
       if (seat?.status !== "owner-invited" || seat.ownerInvitedAt === undefined) return out("paused: a schedule or a request does not wake a paused agent; its saved brief is available");
       const holds = await this.#pauses.agentHolds(agentIdOf(who));
       if (holds.some((h) => h.scope.kind === "installation")) return out("the whole installation is paused; an invitation never overrides that. Its saved brief is available");
       if (holds.some((h) => h.pausedAt > (seat.ownerInvitedAt as string))) return out("it was paused again after the owner's invitation; the owner invites it again if it should attend. Its saved brief is available");
-      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId })) };
+      return { state: "preparing", bounded: true, covers: holds.map((h) => ({ kind: h.scope.kind as "agent" | "team", id: h.scope.id, requestId: h.requestId, stop: h.stop })) };
     }
     return { state: "unavailable", reason: `${availability}: it stays ${availability} unless the owner authorizes waking or recovering it; its saved brief is available`, bounded: false };
   }
@@ -827,10 +860,55 @@ export class AttendanceService {
     if (replay) return;
     const nowIso = this.#runner.now();
     await this.#update(by, "wake", att.id, (b) => {
-      const { reason: _r, ...rest } = b;
-      void _r;
+      // A new wake starts afresh: a block the owner's earlier stop of a wake left on the seat does not carry over.
+      const { reason: _r, reportedBlock: _rb, ...rest } = b;
+      void _r; void _rb;
       return { ...rest, state: "preparing", wake: { by: by.id, at: nowIso, n, ...(given === undefined ? {} : { commandId: given }) } };
     }, "wake-authorized", availability);
+  }
+
+  /** Where one agent's seat in a room stands (for whoever runs the meeting; the wake host reads it before it prepares an agent a cut-off pass already joined). */
+  async seatOf(by: Principal, occurrenceId: string, agent: string): Promise<{ readonly state: AttendanceState; readonly meetingTaskId?: string; readonly left?: boolean } | undefined> {
+    const id = this.#occurrenceId(occurrenceId);
+    const room = await this.#roomFor(id);
+    if (room === undefined || !this.#mayRun(by, room.body.projectId)) throw forbidden(by, "read that seat");
+    const att = await this.#attendance(id, typeof agent === "string" ? agent : invalid("agent", "is not an agent principal"));
+    return att === undefined ? undefined : { state: att.body.state, ...(att.body.meetingTaskId === undefined ? {} : { meetingTaskId: att.body.meetingTaskId }), ...(att.body.leftAt === undefined ? {} : { left: true }) };
+  }
+
+  /** The wakes the controller's own host holds, for the owner (card M04h). Nothing when the application supplies its own wake host. */
+  async wakes(by: Principal, _command?: unknown): Promise<readonly WakeView[]> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw forbidden(by, "see the wakes");
+    return this.#wakeControl === undefined ? [] : this.#wakeControl.list();
+  }
+
+  /**
+   * The owner ends a wake: the agent reports at rest again at once (nothing new is started for it), and an agent already in the room leaves it, which finishes its meeting task and ends its permission. A wake that never got the agent in
+   * leaves the seat blocked with the reason. Repeating it changes nothing more.
+   */
+  async stopWake(by: Principal, command: NoActor & { occurrenceId: string; agent: string }): Promise<void> {
+    onlyKnown(command, ["commandId", "occurrenceId", "agent"]);
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw forbidden(by, "stop a wake");
+    const occurrenceId = this.#occurrenceId(command.occurrenceId);
+    const agent = typeof command.agent === "string" ? command.agent : invalid("agent", "is not an agent principal");
+    agentIdOf(agent);
+    if (this.#wakeControl === undefined) throw new DomainError("invalid_command", "no wake of the controller's own host exists here", { field: "agent" });
+    const done = await this.#wakeControl.stop({ occurrenceId, agent, by: by.id });
+    if (!done.found) throw new DomainError("not_found", `${agent} has no wake for that meeting`, { field: "agent" });
+    await this.#endWake(by, occurrenceId, agent);
+  }
+
+  /** Makes the room agree with a wake that is over: the agent leaves when it joined, else its seat says why it is not coming. Repeatable; also what the host's loop calls to finish a stop a crash cut off. */
+  async endWake(by: Principal, occurrenceId: string, agent: string): Promise<void> {
+    if (!this.#mayRun(by, (await this.#roomFor(this.#occurrenceId(occurrenceId)))?.body.projectId ?? "")) throw forbidden(by, "end a wake");
+    await this.#endWake(by, occurrenceId, agent);
+  }
+
+  async #endWake(by: Principal, occurrenceId: string, agent: string): Promise<void> {
+    const att = await this.#attendance(occurrenceId, agent);
+    if (att === undefined || att.body.leftAt !== undefined) return;
+    if (att.body.state === "present" || att.body.joinedAt !== undefined) { await this.#leave(by, att.id, "left"); return; }
+    if (att.body.state === "preparing" || att.body.state === "blocked") await this.#update(by, "wake-stopped", att.id, (b) => ({ ...b, state: "blocked", reportedBlock: { reason: "the wake of this agent was stopped", at: this.#runner.now() } }), "blocked", "the wake of this agent was stopped");
   }
 
   /**

@@ -104,7 +104,7 @@ export interface PauseExemptionBody {
   readonly state: "active" | "ended";
   readonly endedAt?: string;
   /** The agent, team and installation-free pause gates the permission covers: the ones that held the agent when the owner's invitation was granted, each with the request that paused it. A gate paused again or newly, and any installation pause, still blocks the meeting task. */
-  readonly covers: readonly { readonly kind: "agent" | "team"; readonly id: string; readonly requestId: string }[];
+  readonly covers: readonly { readonly kind: "agent" | "team"; readonly id: string; readonly requestId: string; /** The Stop or Suspend in force on that gate when the permission was granted (`stopInForceOf`): a Stop, Suspend or Force Stop made later keeps the gate's pause and so its request, and only this tells it apart; the gate is no longer covered once it differs. Absent on a permission an older build wrote. */ readonly stop?: string }[];
 }
 export const PAUSE_EXEMPTION_KIND = "pause-exemption";
 export const exemptionIdOf = (taskId: string): string => `pxm-${checkTaskId(taskId).slice(5)}`;
@@ -146,6 +146,10 @@ const INDEX_STATE_KIND = "pause-index-state";
 const INDEX_STATE_ID = "index-built";
 const gateIdOf = (scope: PauseScope): string => derivedId("pgt", `${scope.kind}\0${scope.id}`);
 const requestIdOf = (gateId: string, seq: number): string => derivedId("prq", `${gateId}\0${seq}`);
+/** The stop service's pointer to the latest Suspend, Stop or Force Stop requested for a scope (one record per scope, rewritten by every new request). Read here so a meeting permission can tell a later stop from the one it was granted under. */
+export const STOP_ACTIVE_KIND = "stop-active";
+export const stopActiveIdOf = (scope: PauseScope): string => derivedId("stp", `${scope.kind}\0${scope.id}`);
+const STOP_INTENT_KIND = "stop-intent";
 const sameScope = (a: PauseScope, b: PauseScope): boolean => a.kind === b.kind && a.id === b.id;
 const clean = (body: object): JsonObject => Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) as unknown as JsonObject;
 /** The change that makes a gate's index entry inactive, in the same operation that ends or takes over its condition; none when there is no live entry. */
@@ -624,14 +628,28 @@ export class PauseService implements PauseGuard, PauseLookup {
   }
 
   /** The pause gates (agent, then its teams, then the installation) that hold an agent now, with who paused each and when, for the attendance service's decision about a direct invitation. */
-  async agentHolds(agentId: string): Promise<readonly { scope: PauseScope; requestId: string; pausedAt: string }[]> {
+  async agentHolds(agentId: string): Promise<readonly { scope: PauseScope; requestId: string; pausedAt: string; /** The Stop or Suspend in force on the gate (`stopInForceOf`), for a meeting permission to record. */ stop: string }[]> {
     if (typeof agentId !== "string" || !AGENT_ID.test(agentId)) invalid("agentId", "is not an agent ID");
-    const out: { scope: PauseScope; requestId: string; pausedAt: string }[] = [];
+    const out: { scope: PauseScope; requestId: string; pausedAt: string; stop: string }[] = [];
     for (const scope of await this.#chain({ kind: "agent", id: agentId })) {
       const gate = ((await this.#runner.get("pause-gate", gateIdOf(scope)))?.body as unknown as PauseGateBody | undefined);
-      if (gate !== undefined && gate.intent === "pause" && gate.requestId !== undefined) out.push({ scope, requestId: gate.requestId, pausedAt: gate.pausedAt ?? "" });
+      if (gate !== undefined && gate.intent === "pause" && gate.requestId !== undefined) out.push({ scope, requestId: gate.requestId, pausedAt: gate.pausedAt ?? "", stop: await this.stopInForceOf(scope) });
     }
     return out;
+  }
+
+  /**
+   * Which Suspend, Stop or Force Stop was last requested for a scope, as one string: its request and its mode (a Suspend still under way that is made a Stop keeps its record, so the mode tells the two apart), or `none`.
+   * A Stop made while the scope is already paused keeps the gate's pause request, so this is what tells a meeting permission that the owner stopped the agent again after it was granted (card M04h review).
+   */
+  async stopInForceOf(scope: PauseScope, locks?: Change[]): Promise<string> {
+    const pointer = await this.#runner.get(STOP_ACTIVE_KIND, stopActiveIdOf(scope));
+    // A new request rewrites the pointer: locking it makes a caller's commit fail when a stop lands meanwhile. A first stop on a scope only paused rewrites the gate as it takes the pause over, which the caller locks with the chain.
+    if (pointer !== undefined) locks?.push({ type: "check", ref: { kind: STOP_ACTIVE_KIND, id: pointer.id }, expectedRevision: pointer.revision });
+    const intentId = (pointer?.body as unknown as { intentId?: string } | undefined)?.intentId;
+    if (intentId === undefined) return "none";
+    const mode = ((await this.#runner.get(STOP_INTENT_KIND, intentId))?.body as unknown as { mode?: string } | undefined)?.mode;
+    return `${intentId}:${mode ?? "unknown"}`;
   }
 
   async isPaused(taskId: string): Promise<boolean> {
@@ -757,7 +775,9 @@ export class PauseService implements PauseGuard, PauseLookup {
         for (const s of await this.#chain({ kind: "agent", id: exemption.agentId }, locks)) {
           const found = s.kind === "installation" ? undefined : await this.#runner.get("pause-gate", gateIdOf(s));
           const gate = found?.body as unknown as PauseGateBody | undefined;
-          const covered = gate !== undefined && gate.intent === "pause" && exemption.covers.some((c) => c.kind === s.kind && c.id === s.id && c.requestId === gate.requestId);
+          const cover = gate !== undefined && gate.intent === "pause" ? exemption.covers.find((c) => c.kind === s.kind && c.id === s.id && c.requestId === gate.requestId) : undefined;
+          // A Stop, Suspend or Force Stop requested since the permission was granted is the owner's later word and is never covered (card M04h review).
+          const covered = cover !== undefined && (cover.stop === undefined || cover.stop === (await this.stopInForceOf(s, locks)));
           // A gate left out is locked here (a pause landing meanwhile fails the caller's commit); a gate kept is locked by the caller with the rest of the chain.
           if (covered) locks?.push({ type: "check", ref: { kind: "pause-gate", id: found!.id }, expectedRevision: found!.revision }); else rest.push(s);
         }

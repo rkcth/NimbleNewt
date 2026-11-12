@@ -3,7 +3,7 @@ export { knownZone, instantOf, nextSlot, dueSlots, type Recurrence, type Slot, t
 export {
   ATTENDANCE_LIMITS, AttendanceService,
   type AdmissionAdvice, type AttendanceBody, type AttendanceDeps, type AttendanceEvent, type AttendanceOptions, type AttendanceState, type InterruptedWork, type KeptReason, type MeetingDecision, type NoticeSink, type ParticipantView, type ReturnKind, type ReturnPlan,
-  type RevalidationBody, type RevalidationEntry, type RoomBody, type RoomKind, type RoomPhase, type RoomStatus, type WakeSink, type WindowSink,
+  type RevalidationBody, type RevalidationEntry, type RoomBody, type RoomKind, type RoomPhase, type RoomStatus, type WakeControl, type WakeSink, type WakeView, type WindowSink,
 } from "./attendance.js";
 export { MeetingRecordService, RECORD_LIMITS, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DiscussionEntry, type RecordOptions } from "./record.js";
 export type * from "./record-types.js";
@@ -13,5 +13,5 @@ export { INVITATION_LIMITS, InvitationInbox, withNudge, type InvitationView, typ
 export { meetingNoticeSink, meetingWindowSink } from "./notice-sink.js";
 export { SAFE_LONG_RUNNING_SETTING, safeLongRunningOf, type SafeLongRunningJobs, type SafeLongRunningOptions } from "./safe-long-running.js";
 export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
-export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, type WakeHostLifecycle } from "./wake-host.js";
+export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, WAKE_LIMITS, type WakeAttender, type WakeHostLifecycle, type WakePass } from "./wake-host.js";
 export { MeetingDeskReadService, type DeskReadBody } from "./desk-reads.js";

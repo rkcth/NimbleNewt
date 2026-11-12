@@ -24,7 +24,7 @@ import type { LandingPolicyFigures } from "./landing-policy.js";
 import { checkLocalWorkerLimits, type LocalWorkerLimits } from "./worker-limits.js";
 import type { LaunchRecord } from "./worker-limits-settings.js";
 import type { WorkspaceOpService, WorkspacePort } from "../workspace-ops/index.js";
-import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type DispatcherDeps, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
+import { DispatchDriver, DispatcherService, QuiesceCoordinator, checkpointStoredTokens, controllerGuards, estimatedFirstCall, usableWindow, type RuntimeGuards, type ToolGateway, type WorkOrder, activeAgents, attendanceLoops, wakeAttendLoops, budgetNoticeLoops, coverageLoops, type CoverageNoticeLike, workspaceLoops, decisionLoops, meetingLoops, eventLoops, watchLoops, wakeLoops, attemptWaker, recordLoops, responsibilityLoops, probeLoops, grantLapseLoops, sourceLoops, improvementOutcomeLoops, untoldImprovementLoops, type RouteProbes, recoveryLoops, reviewLoops, messageLoops, projectIds, standupLoops, type AttemptDispatcherOptions, type DispatcherLimitFigures, type DispatcherLoop, type DispatcherDeps, type RouteResolver, type TimerPort, type WorkerHost } from "../dispatch/index.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { CutoverService } from "../routing/cutover.js";
 import { DomainError } from "../domain/errors.js";
@@ -59,7 +59,7 @@ import { ActivityService } from "../activity/index.js";
 import type { BackupService } from "../backup/index.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { CoverageService, IncidentService, ResponsibilityChecks } from "../projects/index.js";
-import { AttendanceService, InvitationInbox, MeetingService, meetingNoticeSink, meetingWindowSink, withNudge, type InvitationSink, type WakeSink } from "../meetings/index.js";
+import { AttendanceService, InvitationInbox, MeetingService, MeetingWakeHost, type WakeAttender, meetingNoticeSink, meetingWindowSink, withNudge, type InvitationSink, type WakeSink } from "../meetings/index.js";
 import { AgentMessageService } from "../messaging/index.js";
 import { NotificationService } from "../notifications/index.js";
 import type { ContractService } from "../planning/index.js";
@@ -237,6 +237,8 @@ export interface ComposeInput {
   readonly availability?: (principalId: string) => Promise<Availability>;
   /** Brings an agent the host reports stopped or suspended up for one meeting, after the owner authorized it (card M04f). Absent: the owner's authorization is refused ("no wake path"). */
   readonly meetingWake?: WakeSink;
+  /** Card M04h: the controller's own wake host, when it is the one in use: its loop brings woken agents into their rooms through the attendance service, and the owner sees and stops its wakes through the same service. */
+  readonly wakeHost?: MeetingWakeHost;
   /** Card M04h: what the composed meeting wake host says about an agent a pause holds (the same function the controller's own pause service uses); the dispatcher's pause service answers the attendance the same way. */
   readonly pausedAvailability?: (principalId: string, options?: { readonly meetingWake?: boolean }) => Promise<Availability | undefined>;
   /** Whether a task's work is a safe long-running operation during a meeting (card M04g, asked only for a running attempt). `options.dispatcher.safeLongRunning` replaces it. */
@@ -337,6 +339,47 @@ export interface ComposeInput {
  * `sweepReturns`), stand-ups (M03 `prepare`, `deliverOutcomes`), event subscriptions (H06b `expireIdle`) and decisions (C08 `resume`), and the driver that ticks them. The dispatcher acts as
  * `service:dispatcher`, provisioned here with a credential that lives only in this process. The services built here share the controller's epoch, so a controller that was deposed writes nothing.
  */
+/**
+ * What the controller's wake host may do for a woken agent (card M04h), all through services that make their own checks: the attendance service prepares it, joins it (the bounded meeting task and the permission that lets only that task past the stop)
+ * and ends the wake; the assignment service admits one attempt on that task, the same admission the dispatcher uses to read again, which the dispatcher then claims through its ordinary checks (pause, meeting, route, budget, grant, host, lease).
+ */
+export function wakeAttender(attendance: AttendanceService, assignments: Pick<AssignmentService, "getAssignment" | "admitAttempt">, harnessOf: (taskId: string) => Promise<string | undefined>, dispatcher: () => Pick<DispatcherService, "stop" | "liveAttemptsOf"> | undefined): WakeAttender {
+  return {
+    prepare: (by, command) => attendance.prepare(by, command),
+    join: (by, command) => attendance.join(by, command),
+    endWake: (by, occurrenceId, agent) => attendance.endWake(by, occurrenceId, agent),
+    seat: (by, occurrenceId, agent) => attendance.seatOf(by, occurrenceId, agent),
+    endAttempt: async (by, taskId, reason) => {
+      // The task is done by now (the agent left), so the live attempts are asked of the dispatcher, not read off the assignment.
+      const d = dispatcher();
+      if (d === undefined) return;
+      for (const attemptId of await d.liveAttemptsOf(by, { taskId })) {
+        try { await d.stop(by, attemptId, { reason }); } catch (error) {
+          // An attempt that already ended is what was wanted.
+          if (!(error instanceof DomainError) || error.code !== "not_found") throw error;
+        }
+      }
+    },
+    admit: async (by, request) => {
+      const agentId = /^agent:(agt-[a-z2-7]{20})$/.exec(request.agent)?.[1];
+      for (let tries = 0; tries < 3; tries++) {
+        const a = await assignments.getAssignment(request.taskId);
+        if (agentId === undefined || a === undefined || a.state !== "assigned" || a.owner?.kind !== "agent" || a.owner.id !== agentId) throw new DomainError("unavailable", "the meeting task is not assigned to that agent");
+        if (a.activeAttemptId !== undefined) return;
+        // The harness is the one the owner's routing names for the task, as the dispatcher will find again at the claim; none named leaves the attempt gate to say so.
+        const harness = await harnessOf(request.taskId);
+        try {
+          await assignments.admitAttempt({ commandId: request.commandId, actor: by.id, taskId: request.taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: agentId }, ...(harness === undefined ? {} : { harness }) });
+          return;
+        } catch (error) {
+          if (!(error instanceof DomainError) || error.code !== "stale_revision") throw error;
+        }
+      }
+      throw new DomainError("unavailable", "the meeting task's assignment kept changing");
+    },
+  };
+}
+
 export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> {
   const { storage, epoch } = i;
   const ro: RunnerOptions = i.options.clock === undefined ? {} : { clock: i.options.clock };
@@ -400,7 +443,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const attendance = AttendanceService.withEpoch(storage, epoch, { meetings, pauses, projects: i.projects, assignments: i.assignments, agents: i.agents, histories: i.histories,
     // The time an agent spends in a meeting is charged as compute: to its meeting task, or to the shared-overhead rule "meeting" (card R05d).
     charge: (u) => chargeRetry.submit(principal, { commandId: u.commandId, activity: "meeting", agentId: u.agentId, computeMs: u.computeMs, projectId: u.projectId, ...(u.taskId === undefined ? { sharedOverheadRule: "meeting" } : { taskId: u.taskId }) }).then(() => undefined),
-    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages), window: meetingWindowSink(messages), ...(i.meetingWake === undefined ? {} : { wake: i.meetingWake }) });
+    ...(i.onError === undefined ? {} : { onChargeError: i.onError }), ...(i.leadMinutes === undefined ? {} : { leadMinutes: i.leadMinutes }) }, { ...ro, availability: pauses.availability, notices: meetingNoticeSink(messages), window: meetingWindowSink(messages), ...(i.meetingWake === undefined ? {} : { wake: i.meetingWake }), ...(i.wakeHost === undefined ? {} : { wakeControl: i.wakeHost }) });
   const watches = WatchService.withEpoch(storage, epoch, { events, inbox: InboxService.withEpoch(storage, epoch, i.assignments), assignments: i.assignments, projects: i.projects }, ro);
   const followUps = chatTurnFollowUps(storage, epoch, ro);
   const improvements = ImprovementService.withEpoch(storage, epoch, { meetings }, { ...ro, outcomes: improvementOutcomeSink(messages) });
@@ -415,7 +458,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     { name: "hosts.quiet", run: async (by) => { await quiet.service?.sweep(by); } },
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
     ...(i.release === undefined ? [] : [{ name: "release.expire", run: async () => { await i.release!.expire(); } }]),
-    ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches),
+    ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...(i.wakeHost === undefined ? [] : wakeAttendLoops(i.wakeHost, wakeAttender(attendance, i.assignments, async (taskId) => { const c = await route({ commandId: `mwl-route:${taskId}`, taskId }); return "none" in c ? undefined : c.harness; }, () => live.dispatcher))), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects), ...eventLoops(events), ...watchLoops(watches),
     // The event is already in the agent's inbox; waking it is making sure an attempt is there to read it: one running will at its next boundary, one waiting for a place will when it starts (card H13c).
     ...wakeLoops(watches, attemptWaker(() => live.dispatcher, principal)), ...(i.records === undefined ? [] : recordLoops({ sweep: (by, command) => i.records!.sweep(recovering(by), command) }, projects)), ...(i.responsibilities === undefined ? [] : [...responsibilityLoops(i.responsibilities.checks, i.responsibilities.incidents, projects, i.responsibilities.notify), ...(i.responsibilities.coverage === undefined ? [] : coverageLoops(i.responsibilities.coverage.service, i.responsibilities.coverage.notify))]), ...(i.eventSources === undefined ? [] : sourceLoops(SourceService.withEpoch(storage, epoch, events, ro), i.eventSources, i.eventSourcesOff, { tell: (n) => notifications.emitFromController({ commandId: n.id, kind: "maintenance", ref: { kind: "principal", id: "dispatcher" }, detail: n.text }), log: (m) => i.onError?.(new Error(m)) })), ...(i.probes === undefined ? [] : probeLoops(i.probes.cutover, i.probes.probes)), ...(i.routes === undefined ? [] : [{ name: "routes.tick", run: async (by: Principal) => { await i.routes!.cutover.tick(by); } }]), ...(i.retention === undefined ? [] : [{ name: "retention.sweep", run: async (by: Principal) => { await i.retention!.restoreReserve?.(); await i.retention!.sweep(by); } }]), ...(i.backups === undefined ? [] : [{ name: "backups.nightly", run: async () => { void i.backups!.runScheduled().catch(() => undefined); /* started, not awaited: a long copy never holds up the other loops; a failure is kept in the backup status */ } }]), ...improvementOutcomeLoops(improvements, projects), ...untoldImprovementLoops(improvements, projects, (n) => notifications.emitFromController({ commandId: n.key, kind: "maintenance", level: "notice", ref: { kind: "improvement-item", id: n.itemId }, detail: n.text, projectId: n.projectId })), ...reviewLoops(i.reviews, projects), ...decisionLoops(decisions, projects),
     // A pause the owner gave a time to is lifted when the time comes, and only that scope (card L06b).

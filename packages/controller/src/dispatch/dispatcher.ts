@@ -1867,7 +1867,7 @@ export class DispatcherService {
       // With no harness shipped nothing can stop a conversation, so nothing yields (an empty list is not "every harness can").
       const shipped = this.#deps.harnesses.list();
       const yieldsAtBoundary = shipped.length > 0 && shipped.every((h) => h.abort !== "none");
-      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary });
+      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: agentId, taskId, expectedMinutes: (await this.#contractOf(taskId)).maxMinutes ?? this.#options.expectedMinutes, yieldsAtBoundary });
       if (advice.decision === "defer") return skip("meeting", "a meeting the agent attends starts before this work would end");
     }
     // 5. Route and harness, and the recovery gate: every admission names its harness.

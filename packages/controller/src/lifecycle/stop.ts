@@ -8,7 +8,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { PauseScope, PauseService } from "./pause.js";
-import { PAUSE_LIMITS } from "./pause.js";
+import { PAUSE_LIMITS, STOP_ACTIVE_KIND, stopActiveIdOf } from "./pause.js";
 import { assignmentIdOf, generationIdOf, type AssignmentBody } from "../domain/assignment-model.js";
 
 /** `suspend` stops at a durable checkpoint; `stop` goes on to end execution; `force-stop` skips preparation. */
@@ -89,7 +89,8 @@ export interface StopIntentBody {
 export const addCapped = (a: number, b: number): number => { const x = Number.isSafeInteger(a) && a > 0 ? a : 0; const y = Number.isSafeInteger(b) && b > 0 ? b : 0; return Math.min(Number.MAX_SAFE_INTEGER, x + y); };
 export const STOP_LIMITS = { reason: 500, deadlineMs: { default: 60_000, max: 3_600_000 }, inventory: 100, history: 60, advances: 8 } as const;
 const KIND = "stop-intent";
-const ACTIVE = "stop-active";
+/** The pointer to a scope's latest request; the pause service reads it too (a meeting permission is not carried past a later stop). */
+const ACTIVE = STOP_ACTIVE_KIND;
 const FORCE_REF = "stop-force-ref";
 /** What has been charged for the cleanup of one attempt, whichever stop request asked (card L02d): one record per attempt, so Suspend then Stop, overlapping task and agent stops, and a stop after a resume never charge twice. */
 const CHARGE = "stop-charge";
@@ -161,7 +162,7 @@ export class StopService {
     await this.#pauses.dropResumeCondition(by, scope);
     const gateRequestId = (await this.#pauses.gate(by, scope))?.requestId;
     const intentId = derivedId("stp", scopedCommandId(by.id, command.commandId));
-    const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
+    const activeRef: AggregateRef = { kind: ACTIVE, id: stopActiveIdOf(scope) };
     const run = await this.#runner.command("stop.request", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { scope: scope as unknown as JsonObject, mode: command.mode, reason, deadlineMs, spendBudget: command.spendBudget ?? null },
       build: async () => {
@@ -534,7 +535,7 @@ export class StopService {
   }
 
   async #activeId(scope: PauseScope): Promise<string | undefined> {
-    return ((await this.#runner.get(ACTIVE, derivedId("stp", scopeKey(scope))))?.body as unknown as { intentId?: string } | undefined)?.intentId;
+    return ((await this.#runner.get(ACTIVE, stopActiveIdOf(scope)))?.body as unknown as { intentId?: string } | undefined)?.intentId;
   }
 
   #push(b: StopIntentBody, phase: StopPhase, by: string, note: string): StopIntentBody["history"] {
@@ -542,7 +543,7 @@ export class StopService {
   }
 
   async #create(by: Principal, commandId: unknown, id: string, scope: PauseScope, projectId: string | undefined, mode: StopMode, reason: string, gateRequestId?: string): Promise<void> {
-    const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("stp", scopeKey(scope)) };
+    const activeRef: AggregateRef = { kind: ACTIVE, id: stopActiveIdOf(scope) };
     await this.#runner.command("stop.request", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { scope: scope as unknown as JsonObject, mode, reason },
       build: async () => {

@@ -1325,7 +1325,7 @@ export class ChatService {
       if (refused !== undefined) return refused;
     }
     // A meeting named by its words (the one planned meeting of the project whose title contains them, or the only one) and an agent named by its name: both are resolved from the records, and anything unclear asks.
-    if (intent.op === "meeting.invite-direct") {
+    if (intent.op === "meeting.invite-direct" || intent.op === "meeting.attend.wake" || intent.op === "meeting.attend.wake-stop") {
       const topic = args["meetingTopic"];
       const agentName = args["agentName"];
       delete args["meetingTopic"];
