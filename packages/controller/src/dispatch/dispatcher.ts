@@ -47,7 +47,7 @@ import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unanswere
 import { sealContract } from "../remote/contract.js";
 import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
-import { routeCostWords } from "./route-cost.js";
+import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -308,6 +308,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly resumeJobMs?: number;
   /** How many resume checks may run apart at once (default 4). A check beyond that waits for a free place; nothing is dropped. */
   readonly resumeJobsMax?: number;
+  /** How long `shutdown` waits for resume checks and loops running apart from the tick (default 5 s). After it, neither `shutdown` nor `idle` waits for them (L04d follow-up review). */
+  readonly resumeShutdownMs?: number;
   /** Assignments looked at per tick. Default 100. */
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
@@ -474,6 +476,9 @@ export class DispatcherService {
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
   /** Card L04d follow-up: the resume checks now running apart from the tick, by check command key (in memory only: the check itself is in the store, so a restart asks again). */
   readonly #resumeJobs = new Map<string, ResumeJob>();
+  /** Set by `shutdown` once the off-tick checks had their bounded time; `#shutSignal` wakes an `idle()` that was waiting for them. */
+  #shutDown = false;
+  readonly #shutSignal: { promise: Promise<void>; resolve: () => void } = (() => { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; })();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   /** Per attempt: the route move the context already accepted (card C07f), so a start that waits does not rebuild the context every tick. Bounded. */
   readonly #routeOk = new Map<string, string>();
@@ -710,7 +715,10 @@ export class DispatcherService {
     for (const c of this.#endedAborts) c.abort();
     await Promise.race([Promise.allSettled([...this.#endedCalls]), new Promise<void>((resolve) => { setTimeout(resolve, (this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000) + 1000).unref(); })]);
     // Resume checks running apart from the tick get a short time to end before the store closes (they are bounded by their client; a check cut short here is asked again by the next controller, which finds it in the store).
-    if (this.#resumeRunning() > 0 || this.#apartLoops.size > 0) await Promise.race([Promise.allSettled([...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)]), new Promise<void>((resolve) => { setTimeout(resolve, 5000).unref(); })]);
+    if (this.#resumeRunning() > 0 || this.#apartLoops.size > 0) await Promise.race([Promise.allSettled([...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)]), new Promise<void>((resolve) => { setTimeout(resolve, this.#options.resumeShutdownMs ?? 5000).unref(); })]);
+    // From here `idle()` no longer waits for them: the driver's stop calls it after this, and a model call (or a sweep of several) must not hold the controller's stop past the bound above (L04d follow-up review).
+    this.#shutDown = true;
+    this.#shutSignal.resolve();
     await this.dropWorkers();
     return { closed, errors };
   }
@@ -743,7 +751,9 @@ export class DispatcherService {
   #resumeRunning(): number { let n = 0; for (const j of this.#resumeJobs.values()) if (j.settledAt === undefined) n++; return n; }
 
   async idle(): Promise<void> {
-    while (this.#live.size > 0 || this.#ending.size > 0 || this.#resumeRunning() > 0 || this.#apartLoops.size > 0) await Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending, ...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)]);
+    // After `shutdown`, checks and loops running apart from the tick are not waited for: shutdown gave them their bounded time, and what they leave is in the store for the next controller.
+    const apart = (): boolean => !this.#shutDown && (this.#resumeRunning() > 0 || this.#apartLoops.size > 0);
+    while (this.#live.size > 0 || this.#ending.size > 0 || apart()) await Promise.race([Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending, ...(this.#shutDown ? [] : [...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)])]), ...(this.#shutDown ? [] : [this.#shutSignal.promise])]);
   }
 
   /**
@@ -793,10 +803,10 @@ export class DispatcherService {
    */
   async #costStep(attemptId: string, taskId: string, from: string, to: string): Promise<void> {
     if (this.#deps.activity === undefined) return;
-    let table: Awaited<ReturnType<NonNullable<DispatcherDeps["routing"]>["get"]>> | undefined;
-    let budget: Awaited<ReturnType<NonNullable<DispatcherDeps["budgets"]>["accounting"]>> | undefined;
-    try { table = await this.#deps.routing?.get(); } catch (error) { this.#options.onError?.(error); }
-    try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, taskId); } catch (error) { this.#options.onError?.(error); }
+    let table: Awaited<ReturnType<NonNullable<DispatcherDeps["routing"]>["get"]>> | typeof UNREADABLE | undefined;
+    let budget: Awaited<ReturnType<NonNullable<DispatcherDeps["budgets"]>["accounting"]>> | typeof UNREADABLE | undefined;
+    try { table = await this.#deps.routing?.get(); } catch (error) { this.#options.onError?.(error); table = UNREADABLE; }
+    try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, taskId); } catch (error) { this.#options.onError?.(error); budget = UNREADABLE; }
     const words = routeCostWords({ table, from, to, budget });
     await this.#stepOf(attemptId, `route-cost:${createHash("sha256").update(`${from}>${to}`).digest("hex").slice(0, 24)}`, "model-selected", `Attempt ${attemptId} moved from route ${from} to route ${to}. ${words}`, [{ kind: "dispatch", id: attemptId }]);
   }

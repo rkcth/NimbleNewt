@@ -146,3 +146,63 @@ for (const store of stores) {
     } finally { release(); await c.close().catch(() => undefined); await db.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   });
 }
+
+for (const store of stores) {
+  test(`${store.name}: the controller's resume sweep runs apart from the tick: a review left out by a stopped controller, for a paused task only the sweep reaches, does not hold the tick (review: start.ts marks resumes.sweep apart)`, async () => {
+    const db = await store.open();
+    const root = mkdtempSync(join(tmpdir(), "nn-roff-checkout-"));
+    let c = await open(db.storage, holdingWorker());
+    const releases: (() => void)[] = [];
+    const gated = (asked: string[]) => {
+      const gate = new Promise<void>((r) => { releases.push(r); });
+      return {
+        complete: async (): Promise<string> => { throw new Error("the routed client asks for the detailed reply"); },
+        completeDetailed: async (route: string, request: { user: string }) => {
+          asked.push(route);
+          await gate;
+          const ids = (request.user.match(/these ids: ([^\n]*)/)?.[1] ?? "").split(", ").filter((x) => x !== "");
+          return { text: JSON.stringify(Object.fromEntries(ids.map((id) => [id, { relevant: false, rationale: "the task only reads the soil report" }]))), usage: { inputTokens: 10, outputTokens: 5 } };
+        },
+      };
+    };
+    try {
+      const { token, owner, project } = await setUp(c);
+      const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<any> => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "a.ts"), "now", "utf8");
+      assert.ok((await call("resource.bind", { projectId: project, kind: "repository", label: "src", locator: root, repositoryId: "repo-main" }, "b1")).ok);
+      const one = await task(c, owner, project, 1, "repo-main");
+      assert.deepEqual((await c.dispatch!.dispatcher.tick()).started, [one.attemptId]);
+      const host = await c.services.principals.authenticate((await c.services.principals.issueCredential(owner, "host:w1")).token);
+      assert.ok((await c.services.continuations.capture(host, { commandId: "cap1", taskId: one.taskId, ...capture } as never)).id);
+      assert.ok((await call("resume.dependencies.record", { taskId: one.taskId, dependencies: [{ kind: "file", key: "src/a.ts", hash: "d".repeat(64) }] }, "dep1")).ok);
+      await c.close();
+      // A controller whose dispatcher starts the check and sends it to the reviewer, then stops while the review is out: the check is left in the store, mid-review.
+      const asked1: string[] = [];
+      c = await open(db.storage, holdingWorker(), { reviewerModel: gated(asked1), dispatch: { timer: new ManualTimer(), manual: true, workers: [holdingWorker()], dispatcher: { resumeShutdownMs: 50 } } });
+      await c.services.configuration.change(owner, { commandId: "route", layer: "installation", set: { "resume.reviewerRoute": "gpu2/qwen" } } as never);
+      await within(8000, c.dispatch!.dispatcher.tick(), "the tick");
+      for (let i = 0; i < 200 && asked1.length === 0; i++) await pause(20);
+      assert.equal(asked1.length, 1, "the first controller's review is out");
+      assert.equal((await call("resume.for-task", { taskId: one.taskId })).result.item.phase, "reviewing");
+      // The task is paused, so the next controller's dispatcher does not take it: only the resume sweep (a loop of the tick) carries the check on.
+      assert.ok((await call("lifecycle.pause", { scope: { kind: "task", id: one.taskId }, reason: "held for the test" }, "pz1")).ok);
+      await within(8000, c.close(), "the close");
+      const asked2: string[] = [];
+      c = await open(db.storage, holdingWorker(), { reviewerModel: gated(asked2) });
+      for (let i = 0; i < 40 && asked2.length === 0; i++) {
+        const t = await within(8000, c.dispatch!.dispatcher.tick(), "the tick while the sweep waits for the model");
+        assert.ok(t.loops.every((l) => l.ok), JSON.stringify(t.loops));
+        await pause(25);
+      }
+      assert.deepEqual(asked2, ["gpu2/qwen"], "the sweep asked the reviewer");
+      // The review is still out: further ticks come back at once and the sweep is not started on top of itself.
+      for (let i = 0; i < 3; i++) await within(8000, c.dispatch!.dispatcher.tick(), "a later tick");
+      assert.deepEqual(asked2, ["gpu2/qwen"], "asked once");
+      for (const r of releases) r();
+      let phase = "";
+      for (let i = 0; i < 200 && phase !== "ready"; i++) { await c.dispatch!.dispatcher.tick(); phase = (await call("resume.for-task", { taskId: one.taskId })).result.item.phase; await pause(20); }
+      assert.equal(phase, "ready");
+    } finally { for (const r of releases) r(); await c.close().catch(() => undefined); await db.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  });
+}

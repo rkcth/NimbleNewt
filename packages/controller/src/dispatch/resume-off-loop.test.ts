@@ -198,6 +198,33 @@ for (const backend of backends) {
     void real;
   });
 
+  suite("a review or an apart loop that does not end does not hold the controller's stop: shutdown waits its bound, and idle() after it (the driver's stop) returns (review)", async (c, f, real, t, go) => {
+    const gate = deferred<void>();
+    f.gates.set(t.a.taskId, gate.promise);
+    f.gates.set(t.b.taskId, gate.promise);
+    let loopRan = false;
+    const d = go({ loops: [{ name: "hung.sweep", apart: true, run: async () => { loopRan = true; await gate.promise; } }] }, { resumeInlineMs: 0, resumeShutdownMs: 50 });
+    await within(5000, d.tick(), "the tick");
+    await until("the reviews to be asked and the loop to run", () => f.reviewCalls.length >= 1 && loopRan);
+    await within(3000, d.shutdown(), "shutdown");
+    await within(3000, d.idle(), "idle after shutdown");
+    // Let the held work end before the store closes, so nothing writes to a closed store.
+    gate.resolve(undefined);
+    await until("the reviews to end", async () => (await real.forTask(c.dispatcherPrincipal, t.a.taskId))?.phase !== "reviewing");
+    await pause(100);
+  });
+
+  suite("an apart loop past its bound is reported once, not once per tick, and is not a failed loop (review)", async (c, f, real, t, go) => {
+    const gate = deferred<void>();
+    const errors: string[] = [];
+    const d = go({ heldBy: async () => "held for the test", loops: [{ name: "slow.sweep", apart: true, run: async () => { await gate.promise; } }] }, { resumeInlineMs: 0, resumeJobMs: 5, onError: (e) => errors.push(e instanceof Error ? e.message : String(e)) });
+    for (let i = 0; i < 4; i++) { const r = await within(5000, d.tick(), "the tick"); assert.ok(r.loops.every((l) => l.ok), JSON.stringify(r.loops)); await pause(20); }
+    assert.equal(errors.filter((e) => /slow\.sweep has been running apart from the tick/.test(e)).length, 1, errors.join(" | "));
+    gate.resolve(undefined);
+    await d.idle();
+    void f; void real; void t; void c;
+  });
+
   suite("a fault in the check is a wait whether it comes inside the inline wait or after it; the attempt is not failed", async (c, f, real, t, go) => {
     const errors: string[] = [];
     let fail = true;
