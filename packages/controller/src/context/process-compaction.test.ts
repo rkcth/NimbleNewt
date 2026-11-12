@@ -6,6 +6,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ContextEnforcementService, LINEAGE_KEEP, lineageDigest, type SourceRef } from "./index.js";
+import { PROCESS_SUMMARY_KIND } from "./enforcement.js";
 
 after(stopServer);
 
@@ -63,6 +64,12 @@ for (const backend of backends) {
       assert.deepEqual(rec.process, { messageCount: 70, summaryChars: 960, digest: digestOf(60) });
       assert.equal(rec.summaryId, undefined);
       assert.equal(await enf.readSummary(w.owner, ids[60]!), undefined);
+      // The owner is told plainly that this is a plain extract, not a model's summary (a process only reports a compaction it made with the extractive hook): the record says degraded, its title and its stored note say extractive.
+      assert.equal(rec.degraded, true);
+      assert.match(rec.title, /\(70 messages, extractive\)$/);
+      const stored = (await st.getAggregate({ kind: "ctx-compaction", id: ids[60]! }))!.body as unknown as { summary: string };
+      assert.ok(stored.summary.startsWith(PROCESS_SUMMARY_KIND), stored.summary);
+      assert.match(stored.summary, /made without a model.*details from the middle may be missing/);
 
       // The same key is the same compaction: answered from the record, nothing added.
       const again = await enf.recordProcessCompaction(w.owner, { taskId: t, attemptId: "att-1", key: "pc60", messageCount: 70, summaryChars: 960, digest: digestOf(60) });

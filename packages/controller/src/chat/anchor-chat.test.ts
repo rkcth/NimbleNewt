@@ -18,6 +18,8 @@ for (const backend of backends) {
   test(`${backend.name}: the owner turns the goal anchor off and sets its cap in free words; the change is shown first and applied only on yes; a cap out of bounds is refused (W12)`, async () => {
     assert.equal(CHAT_OPS["context.route.change"]?.mode, "propose", "shown first");
     assert.match(CHAT_OPS["context.route.change"]!.verb, /goal anchor/);
+    // Card C07 wording check: the owner who is asked whether to turn the anchor off or on is told that the summary after a cut is a plain extract written without a model.
+    assert.match(CHAT_OPS["context.route.change"]!.verb, /plain extract of the start and the end of what was cut, written without a model/);
     for (const k of ["enable", "disable", "set", "unset", "expectedRevision"]) assert.ok(acceptedArgs("context.route.change")!.includes(k), k);
     let settings: ContextRouteSettingsService | undefined;
     const script: Record<string, unknown> = {};
