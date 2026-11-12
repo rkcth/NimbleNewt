@@ -32,7 +32,8 @@ export function createMeetingGate(deps: MeetingGateDeps): (principal: Principal,
     const asked = deps.attendance();
     // Without a dispatcher there is no attendance service, so no meeting room can seat an agent and nothing can be near one.
     if (asked === undefined) return undefined;
-    const meeting = await asked.service.meetingOfTask(taskId, agent);
+    let meeting: Awaited<ReturnType<GateAttendance["meetingOfTask"]>>;
+    try { meeting = await asked.service.meetingOfTask(taskId, agent); } catch { return `${agent}: whether a meeting is on could not be checked, so long-running work is not started now; try again`; }
     if (meeting !== undefined) return `${agent} is in meeting ${meeting.occurrenceId} (until ${meeting.endsAt}); long-running work is not started during a meeting`;
     // Only an agent made by the controller (agt-...) can be seated in a meeting.
     if (!AGENT_PRINCIPAL.test(agent)) return undefined;

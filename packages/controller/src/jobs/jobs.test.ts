@@ -160,6 +160,79 @@ for (const backend of backends) {
     assert.deepEqual(asked, []);
   });
 
+  suite("a repeat of a restart that already succeeded is answered from its record during a meeting, and a caller that may not control the job learns nothing of the meeting (T07 follow-up review)", async (c) => {
+    let meeting = false;
+    const asked: string[] = [];
+    const jobs = c.reopen({ longRunningGate: async (p, taskId) => { asked.push(p.id); return meeting ? `agent:x is in meeting occ-secret about ${taskId}` : undefined; } });
+    const id = (await jobs.admit(c.worker, { commandId: cid("a"), taskId: c.t1, kind: "tool", label: "x", operationId: cid("op"), resumability: "tool_checkpoint" })).id;
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched", checkpoint: "ckpt-1" });
+    const first = await jobs.decide(c.boss, { commandId: "restart-once", jobId: id, decision: "restart", reason: "carry on" });
+    assert.equal(first.replayed, false);
+    meeting = true;
+    asked.length = 0;
+    // The client lost the reply and sends the same command again: it gets the original answer, and nothing changes.
+    const again = await jobs.decide(c.boss, { commandId: "restart-once", jobId: id, decision: "restart", reason: "carry on" });
+    assert.deepEqual({ id: again.id, replayed: again.replayed }, { id, replayed: true });
+    assert.equal((await jobs.get(c.owner, id))!.restarts, 1);
+    assert.deepEqual(asked, [], "a repeated command is not asked of the gate");
+    // A new restart command is held.
+    await refuses("invalid_command", () => jobs.decide(c.boss, { commandId: cid("d"), jobId: id, decision: "restart", reason: "again" }), (e) => assert.match(e.message, /occ-secret/));
+    // Who may not control the job is refused for that, and is never told whose meeting holds it.
+    asked.length = 0;
+    for (const who of [c.worker, c.reader, c.stranger]) {
+      await refuses("forbidden", () => jobs.decide(who, { commandId: cid("d"), jobId: id, decision: "restart", reason: "peek" }), (e) => assert.doesNotMatch(e.message, /occ-secret|meeting/));
+    }
+    assert.deepEqual(asked, [], "the gate is asked only after the caller is authorized");
+    // A restart refused for its own reason (no checkpoint) says so, not the meeting.
+    const plainJob = (await jobs.admit(c.worker, { commandId: cid("a"), taskId: c.t1, kind: "tool", label: "y", operationId: cid("op") })).id;
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: plainJob, state: "dispatched" });
+    await refuses("invalid_command", () => jobs.decide(c.boss, { commandId: cid("d"), jobId: plainJob, decision: "restart", reason: "go" }), (e) => assert.match(e.message, /only a tool that left a checkpoint/));
+  });
+
+  suite("a meeting made between the gate's read and the commit makes the admit or the restart be decided again, so it is refused (T07 follow-up review: the gate's locks commit with what it allowed)", async (c) => {
+    const lockRef = { kind: "test-meeting-open", id: "all" };
+    let rev = 0;
+    const bump = async (): Promise<void> => {
+      const label = cid("lk");
+      await c.storage.applyOperation({
+        operationId: label, epoch: c.epoch, actor: "test", correlationId: label, at: clock(),
+        changes: [rev === 0 ? { type: "create", ref: lockRef, body: { n: 0 } } : { type: "update", ref: lockRef, expectedRevision: rev, body: { n: rev } }],
+        audit: [{ type: "test.meeting", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+      });
+      rev++;
+    };
+    await bump();
+    // The gate answers "no meeting" from what it read, and a meeting is made right after (before the commit); asked again, it sees the meeting.
+    let meetingOn = false;
+    let racing = false;
+    const asks: string[] = [];
+    const jobs = c.reopen({
+      longRunningLocks: async () => [{ type: "check", ref: lockRef, expectedRevision: rev }],
+      longRunningGate: async (_p, taskId) => {
+        asks.push(taskId);
+        if (meetingOn) return "in a meeting";
+        if (racing) { racing = false; meetingOn = true; await bump(); }
+        return undefined;
+      },
+    });
+    racing = true;
+    await refuses("invalid_command", () => jobs.admit(c.worker, { commandId: cid("a"), taskId: c.t1, kind: "tool", label: "x", operationId: "raced", background: true }), (e) => assert.match(e.message, /in a meeting/));
+    assert.equal(await jobs.get(c.owner, JobService.jobIdOf(c.t1, "raced")), undefined, "no job was recorded");
+    assert.equal(asks.length, 2, "the gate was asked again after the lost commit");
+    meetingOn = false;
+    const id = (await jobs.admit(c.worker, { commandId: cid("a"), taskId: c.t1, kind: "tool", label: "x", operationId: cid("op"), resumability: "tool_checkpoint" })).id;
+    await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched", checkpoint: "ckpt-1" });
+    racing = true;
+    asks.length = 0;
+    await refuses("invalid_command", () => jobs.decide(c.boss, { commandId: cid("d"), jobId: id, decision: "restart", reason: "go on" }), (e) => assert.match(e.message, /in a meeting/));
+    assert.equal((await jobs.get(c.owner, id))!.restarts, 0, "the raced restart changed nothing");
+    assert.equal(asks.length, 2);
+    // Without a race the locks are simply checked and the work goes ahead.
+    meetingOn = false;
+    assert.equal((await jobs.decide(c.boss, { commandId: cid("d"), jobId: id, decision: "restart", reason: "go on" })).id, id);
+    assert.equal((await jobs.get(c.owner, id))!.restarts, 1);
+  });
+
   suite("the controller's own list of a task's unfinished jobs needs no viewer's rights, skips ended jobs and reads past one page (card L02c)", async (c) => {
     await c.admit(c.t1);
     for (let i = 0; i < JOB_LIMITS.page + 5; i++) await c.admit(c.t1);

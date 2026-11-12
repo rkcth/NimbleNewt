@@ -54,3 +54,12 @@ test("no attendance service (no dispatcher) refuses nothing; an owner that is no
   assert.equal(await odd.gate(p("service", "service:dispatcher"), "tsk-1"), undefined);
   assert.deepEqual(odd.asked.filter((x) => x.startsWith("near")), []);
 });
+
+test("a failed in-meeting check refuses in words that say to try again, for an agent and for a host credential (T07 follow-up review: it escaped as an internal error)", async () => {
+  const broken = gateWith({ meetingOfTask: async () => { throw new Error("store down at /var/secret/path"); } });
+  for (const who of [p("agent", AGENT), p("host", "host:w1")]) {
+    const said = (await broken.gate(who, "tsk-1")) ?? "";
+    assert.match(said, /could not be checked.*try again/);
+    assert.doesNotMatch(said, /store down|secret/);
+  }
+});

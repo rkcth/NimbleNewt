@@ -196,3 +196,25 @@ test("a restart decision from a checkpoint during a meeting is refused for the a
     void c;
   } finally { await w.close(); }
 });
+
+test("the composed gate's lock is the list every meeting creation rewrites: the first long job creates it empty and a meeting can still be called, and a lock read before a meeting no longer commits after it (T07 follow-up review: the gate raced a new meeting)", async () => {
+  const w = await world();
+  try {
+    const { c, s, call } = w;
+    const t = await w.task(1);
+    const host = c.dispatch!.principal;
+    const att = c.dispatch!.attendance;
+    const commit = (label: string, changes: readonly unknown[]) => c.storage.applyOperation({
+      operationId: label, epoch: c.epoch, actor: "test", correlationId: label, at: new Date().toISOString(), changes: changes as never,
+      audit: [{ type: "test.lock", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+    });
+    assert.equal((await att.meetingLocks())[0]!.type, "create", "before any meeting the list does not exist: the lock creates it empty");
+    assert.equal((await s.jobs.admit(host, { commandId: "j-first", taskId: t.taskId, kind: "tool", label: "first", operationId: "op-first", background: true } as never)).replayed, false);
+    const read = await att.meetingLocks();
+    assert.equal(read[0]!.type, "check", "the admit created the list with the job");
+    assert.ok((await call("meeting.call-urgent", { projectId: w.project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1")).ok, "a meeting is still called over the list the job made");
+    await assert.rejects(commit("stale-lock", read), "a commit carrying the lock read before the meeting is refused");
+    await assert.rejects(s.jobs.admit(host, { commandId: "j-after", taskId: t.taskId, kind: "tool", label: "after", operationId: "op-after", background: true } as never), /long-running work is not started/);
+    assert.deepEqual(w.problems, []);
+  } finally { await w.close(); }
+});

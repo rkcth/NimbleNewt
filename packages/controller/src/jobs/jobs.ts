@@ -110,6 +110,11 @@ export interface JobOptions extends RunnerOptions {
    */
   readonly longRunningGate?: (principal: Principal, taskId: string) => Promise<string | undefined>;
   /**
+   * Read just before `longRunningGate` is asked, and committed with the admit or restart it allowed: guards on the records the gate's answer rests on (the host binds it to the list every meeting creation rewrites), so a meeting made
+   * between the gate's read and the commit makes the commit fail and the gate be asked again (follow-up to T07: the check and the commit were not one step). Absent: nothing is locked.
+   */
+  readonly longRunningLocks?: () => Promise<readonly Change[]>;
+  /**
    * Told once a job has ended, with the wall-clock time from its admission to its end, so the host can charge it (card R05f). Called after the job is recorded as ended and again if the ending is repeated, so the
    * host's charge must be keyed by `commandId` (`job-use:<job>`). A failure here is for the host to handle: it does not undo the ending.
    */
@@ -200,6 +205,7 @@ export class JobService {
   readonly #background: BackgroundRecorder | undefined;
   readonly #onUsage: JobOptions["onUsage"];
   readonly #longRunningGate: JobOptions["longRunningGate"];
+  readonly #longRunningLocks: JobOptions["longRunningLocks"];
   readonly #host: string | undefined;
   readonly #onCancel: JobOptions["onCancel"];
   readonly #wakes: boolean;
@@ -211,6 +217,7 @@ export class JobService {
     this.#background = options.background;
     this.#onUsage = options.onUsage;
     this.#longRunningGate = options.longRunningGate;
+    this.#longRunningLocks = options.longRunningLocks;
     this.#host = options.host;
     this.#onCancel = options.onCancel;
     this.#wakes = options.wakes === true;
@@ -260,7 +267,10 @@ export class JobService {
         }
       }
       // Checked on every first admit, whatever the pause state: a meeting is a context switch, so the agent keeps to short work while it attends.
+      // The locks are read before the gate, so a meeting made after this read moves them and the commit is decided again.
+      let meetingLocks: readonly Change[] = [];
       if ((background || longRunning) && this.#longRunningGate !== undefined) {
+        meetingLocks = (await this.#longRunningLocks?.()) ?? [];
         const refusal = await this.#longRunningGate(principal, taskId);
         if (refusal !== undefined) throw new DomainError("invalid_command", refusal, { field: "longRunning" });
       }
@@ -275,7 +285,7 @@ export class JobService {
         taskId, projectId: task.projectId, kind, label, operationId, state: "admitted", resumability, background, ...(attemptId === undefined ? {} : { attemptId }), ...(host === undefined ? {} : { host }), ...(serverId === undefined ? {} : { serverId }),
         output: { tail: "", bytes: 0, truncated: false }, logs: [], artifacts: [], orphans: [], restarts: 0, reconciliations: [], history: [{ state: "admitted", at, by: principal.id }], admittedBy: principal.id, admittedAt: at,
       };
-      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, ...guardChanges],
+      return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, ...guardChanges, ...meetingLocks],
         // Losing the commit to the same job already existing is the replay conflict; losing it to a gate that changed means the admit is decided again.
         contention: async () => ((await this.#runner.get("job", id)) !== undefined ? new DomainError("command_conflict", "that operation already has a job", { field: "operationId" }) : new DomainError("stale_revision", "a pause gate changed while the job was admitted")),
         detail: { taskId, kind, operationId, resumability, background } };
@@ -413,14 +423,19 @@ export class JobService {
     const tracker = command.tracker === undefined ? undefined : plain(command.tracker, "tracker", 120);
     if (decision === "exception" && tracker === undefined) invalid("tracker", "a tracked exception names who tracks it");
     if (decision === "complete" && exit === undefined) invalid("exit", "completing a job needs how it ended");
-    // A restart starts long work again: it is held to the meeting rule like a new long job (follow-up to T07). Read first, outside the change, so a refusal records nothing.
-    if (decision === "restart" && this.#longRunningGate !== undefined) {
-      const found = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
-      if (found !== undefined && !TERMINAL.includes(found.state)) {
-        const refusal = await this.#longRunningGate(principal, found.taskId);
-        if (refusal !== undefined) throw new DomainError("invalid_command", refusal, { field: "longRunning" });
-      }
-    }
+    // A restart starts long work again: it is held to the meeting rule like a new long job (follow-up to T07). Asked inside the command, after the caller is authorized (so the answer, which names a meeting, reaches only who may
+    // control the job) and after the command ID is looked up (so a repeat of a restart that already succeeded is answered from its record, as every other command is); a refusal records nothing, and the gate's locks commit with the
+    // restart, so a meeting made after the gate read makes it be decided again.
+    let meetingLocks: readonly Change[] = [];
+    const meetingRule = decision === "restart" && this.#longRunningGate !== undefined ? async (job: JobBody): Promise<void> => {
+      meetingLocks = [];
+      // A restart the change refuses anyway (the job ended, left no checkpoint, or must be settled first) is refused for that reason, not the meeting.
+      if (TERMINAL.includes(job.state) || job.resumability !== "tool_checkpoint" || job.checkpoint === undefined || job.state === "outcome_unknown" || job.state === "cancellation_requested") return;
+      const locks = (await this.#longRunningLocks?.()) ?? [];
+      const refusal = await this.#longRunningGate!(principal, job.taskId);
+      if (refusal !== undefined) throw new DomainError("invalid_command", refusal, { field: "longRunning" });
+      meetingLocks = locks;
+    } : undefined;
     const done = await this.#change("job.decide", principal, command.commandId, jobId, "control", { decision, reason, exit: (exit ?? null) as unknown as JsonObject, tracker: tracker ?? null }, (job) => {
       if (TERMINAL.includes(job.state)) invalid("jobId", `job ${jobId} is ${job.state}; there is nothing to decide`);
       if (job.state === "outcome_unknown" && decision !== "exception") invalid("decision", "an outcome-unknown job is settled by reconcile, with evidence; it can only be kept as a tracked exception here");
@@ -439,7 +454,7 @@ export class JobService {
         case "exception":
           return { ...job, exception: { tracker: tracker!, reason, at }, history: this.#history(job, { state: job.state, at, by: principal.id, note: `tracked exception: ${reason}` }) };
       }
-    }, decision === "complete" ? this.#wake(jobId, "completed", "end") : undefined);
+    }, decision === "complete" ? this.#wake(jobId, "completed", "end") : meetingRule === undefined ? undefined : () => meetingLocks, meetingRule);
     if (decision === "complete") await this.#recordBackground(principal, jobId, command.commandId);
     if (decision === "cancel" && done.after?.state === "cancellation_requested") this.#told(jobId, false);
     return { id: jobId, state: done.after?.state ?? "admitted", replayed: done.replayed };
