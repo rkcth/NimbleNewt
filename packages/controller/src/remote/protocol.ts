@@ -85,7 +85,16 @@ export const REMOTE_LIMITS = {
   thinkingBytes: 640 * 1024,
   thinkingMessages: 2000,
   thinkingInFlight: 2,
+  /** Pi state in transit (card K01i): the most file bytes in one message (the body is the base64 of them), and the most a whole transfer may hold, in bytes and in files. */
+  piChunkBytes: 512 * 1024,
+  piTransferBytes: 4 * 1024 * 1024 * 1024,
+  piTransferFiles: 200_001,
 } as const;
+
+/** The ID of a transfer of conversation stores between a host and the controller (card K01i). */
+export const PI_TRANSFER_ID = /^pst-[a-z2-7]{20}$/;
+/** A file of a transfer: the index or one stored file (the names a backup's own Pi state section uses). */
+export const PI_TRANSFER_FILE = /^(index\.jsonl|f-[0-9]{1,9})$/;
 
 // ---- wire shapes -----------------------------------------------------------------------------------------------------------------
 
@@ -121,7 +130,7 @@ export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 /** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
-  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify";
+  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore";
   readonly taskId: string;
   readonly projectId: string;
   readonly reason: string;
@@ -131,6 +140,8 @@ export interface WorkspaceAsk {
   readonly landing?: import("../workspace-ops/workspace-ops.js").CarriedLanding;
   /** `verify` only (card H12a): the check of an attempt's done (card W05) asked of the host that holds the attempt. */
   readonly verify?: { readonly attemptId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number };
+  /** `pi-state-send` and `pi-state-restore` only (card K01i): the transfer the host's conversation stores travel in. `send`: the host copies its stores and uploads them under this ID; `restore`: the host fetches the stores the controller holds under this ID and puts each one back in its place. */
+  readonly piState?: { readonly transferId: string };
   /** When the controller stops waiting (an ISO time). It frees the agent then, so a host must not start the work after it. */
   readonly expiresAt?: string;
 }

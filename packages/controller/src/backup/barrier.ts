@@ -62,3 +62,45 @@ export class MaintenanceBarrier {
     try { return await Promise.race([holding, late]); } catch (error) { void holding.then((r) => r(), () => undefined); throw error; } finally { clearTimeout(timer); }
   }
 }
+
+/**
+ * The named writers that are not stores of their own (card K01i): the retention runner, the notification sweeps, the hand-off and resume sweeps and the maintenance loop each run in the dispatcher's tick or on a timer, and
+ * the barrier held them only in effect (the dispatcher was paused, commands refused). Here each one is its OWN participant: `wrap(name, fn)` returns the function the loop calls; while its group is held it does not start
+ * (the call returns `undefined`), and `participant(label, names)` holds the groups, waits for what each has in flight and lets them go again. A group whose function was never wrapped (a controller without a dispatcher has no sweeps) is simply held with nothing to wait for; a wrapped function throws what it threw.
+ */
+export class NamedWork {
+  readonly #held = new Set<string>();
+  readonly #running = new Map<string, Set<Promise<unknown>>>();
+  /** The names that were wrapped. */
+  readonly #known = new Set<string>();
+
+  isHeld(name: string): boolean { return this.#held.has(name); }
+  get names(): readonly string[] { return [...this.#known]; }
+
+  wrap<A extends unknown[], R>(name: string, fn: (...args: A) => Promise<R> | R): (...args: A) => Promise<R | undefined> {
+    this.#known.add(name);
+    return async (...args: A): Promise<R | undefined> => {
+      if (this.#held.has(name)) return undefined;
+      const run = Promise.resolve().then(() => fn(...args));
+      let set = this.#running.get(name);
+      if (set === undefined) { set = new Set(); this.#running.set(name, set); }
+      set.add(run);
+      try { return await run; } finally { set.delete(run); }
+    };
+  }
+
+  /** What is running under `name` now. */
+  inFlight(name: string): number { return this.#running.get(name)?.size ?? 0; }
+
+  participant(label: string, names: readonly string[]): BarrierParticipant {
+    return {
+      name: label,
+      hold: async () => {
+        for (const n of names) this.#held.add(n);
+        // What was started before the hold is waited for (its failure is its own: the hold is about not starting more).
+        await Promise.allSettled(names.flatMap((n) => [...(this.#running.get(n) ?? [])]));
+        return () => { for (const n of names) this.#held.delete(n); };
+      },
+    };
+  }
+}

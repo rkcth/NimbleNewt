@@ -8,8 +8,9 @@ export { BackupCipher, BackupKey, PasscodeRefused, RecoveryCodeInvalid, SealedFi
 export { BackupKeyPinService, KeyPinMismatch } from "./pin.js";
 export { SecretFileRefused, readSecretFile } from "./secret-file.js";
 export { BackupEncryption, ProofRefused, readKeyringFile, type EncryptionOptions, type EncryptionStatus, type ProofStore, type UnlockMethod } from "./encryption.js";
-export { MaintenanceBarrier, BarrierRefused, type BarrierParticipant, type BarrierState } from "./barrier.js";
+export { MaintenanceBarrier, NamedWork, BarrierRefused, type BarrierParticipant, type BarrierState } from "./barrier.js";
 export { PI_LIMITS, copyPiState, validRel, validStoreId, writePiState, type PiStateSource, type PiStateStore } from "./pi-state.js";
+export { suspendAllWork } from "./stop-work.js";
 export { acquireDataLock, acquireDataLocks, keepDataLocks, DataLockBusy, LOCK_FILE, type DataLock, type DataLockKeeper, type LockEnv } from "./data-lock.js";
 export { manifestDigestOf } from "./verify.js";
 export { BACKUP_NAME, JOURNAL_FILE, KEY_FILE, PENDING_FILE, STAGING_DIR, StagedRestore, applyPendingRestore, canon, canonSync, type ApplyOptions, type PendingRestore, type RestoreStatus, type RestorePlan, type StagedRestoreOptions } from "./staged-restore.js";

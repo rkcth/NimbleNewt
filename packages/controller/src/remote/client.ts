@@ -137,6 +137,17 @@ export class RemoteWorkerClient {
     await this.#send("POST", `/worker/session/workspace/${encodeURIComponent(requestId)}`, { body: { outcome: outcome as unknown as Json }, key: `workspace-answer:${requestId}`, session: true });
   }
 
+  /** One chunk of a file of a conversation-store transfer the controller asked for (card K01i). The same chunk sent again (a lost answer) is accepted once; a chunk out of order is refused. */
+  async piStatePut(transferId: string, chunk: { readonly name: string; readonly offset: number; readonly data: Buffer; readonly last?: { readonly sha256: string } }): Promise<void> {
+    await this.#send("POST", `/worker/session/pi-state/${encodeURIComponent(transferId)}/put`, { body: { name: chunk.name, offset: chunk.offset, data: chunk.data.toString("base64"), ...(chunk.last === undefined ? {} : { last: true, sha256: chunk.last.sha256 }) } as unknown as Json, key: `pi-put:${transferId}:${chunk.name}:${chunk.offset}`, session: true });
+  }
+
+  /** One chunk of a file the controller holds for a restore (card K01i): `eof` and, at the end, the digest of the whole file. */
+  async piStateGet(transferId: string, name: string, offset: number): Promise<{ readonly data: Buffer; readonly offset: number; readonly size: number; readonly eof: boolean; readonly sha256?: string }> {
+    const body = (await this.#send("GET", `/worker/session/pi-state/${encodeURIComponent(transferId)}/get?name=${encodeURIComponent(name)}&offset=${offset}`, { session: true })).body as unknown as { data: string; offset: number; size: number; eof: boolean; sha256?: string };
+    return { data: Buffer.from(body.data, "base64"), offset: body.offset, size: body.size, eof: body.eof, ...(body.sha256 === undefined ? {} : { sha256: body.sha256 }) };
+  }
+
   /**
    * Tells the controller of a security event this host detected (card U11d): a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched, a failed integrity check. The key
    * is the same for the same event (the controller tells the owner once); it is never a secret. Returns the owner's item; `held` is true when this host's hourly allowance was used.

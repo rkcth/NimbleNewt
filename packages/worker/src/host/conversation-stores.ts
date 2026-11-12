@@ -13,6 +13,11 @@ import { isAbsolute, join, normalize } from "node:path";
 export interface ConversationStoresOptions {
   /** An absolute, normalised folder this host owns for the agents' homes. */
   readonly root: string;
+  /**
+   * The folder inside `<root>/<key>` that is the agent's home (card K01i). The product hosts keep `<base>/attempts/<attemptId>/home` (next to the attempt's `scratch`), so they give `root = <base>/attempts` and `homeFolder = "home"`: the
+   * conversation is then at `<root>/<key>/home/pi`. Default: none (the home is `<root>/<key>` itself).
+   */
+  readonly homeFolder?: string;
 }
 
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -23,7 +28,10 @@ export const CONVERSATION_STORES_MAX = 50_000;
 
 export class LocalConversationStores {
   readonly #root: string;
+  readonly #sub: readonly string[];
   constructor(options: ConversationStoresOptions) {
+    if (options.homeFolder !== undefined && (typeof options.homeFolder !== "string" || !validConversationKey(options.homeFolder))) throw new Error("the home folder must be a plain folder name");
+    this.#sub = options.homeFolder === undefined ? [] : [options.homeFolder];
     if (typeof options.root !== "string" || !isAbsolute(options.root) || normalize(options.root) !== options.root) throw new Error("the homes root must be an absolute, normalised path");
     this.#root = options.root;
   }
@@ -31,7 +39,7 @@ export class LocalConversationStores {
   /** The home folder for a key (pass it as the attempt workspace's `home`). Throws for a key a backup could not keep. */
   home(key: string): string {
     if (!validConversationKey(key)) throw new Error("a home key must be letters, digits, '.', '_' or '-' (at most 128, starting with a letter or digit)");
-    return join(this.#root, key);
+    return join(this.#root, key, ...this.#sub);
   }
 
   /** Where the conversation store of `id` goes back on a restore; undefined for an ID that is not a key of this host. Pass it as `dispatch.local.piState.final`. */
@@ -41,8 +49,8 @@ export class LocalConversationStores {
    */
   readonly final = (id: string): string | undefined => {
     if (!validConversationKey(id)) return undefined;
-    const home = join(this.#root, id);
-    for (const p of [home, join(home, "pi")]) {
+    const home = join(this.#root, id, ...this.#sub);
+    for (const p of [join(this.#root, id), home, join(home, "pi")]) {
       let info: ReturnType<typeof lstatSync> | undefined;
       try { info = lstatSync(p); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") break; return undefined; }
       if (!info.isDirectory()) return undefined;
@@ -62,9 +70,11 @@ export class LocalConversationStores {
       const stores: { id: string; dir: string }[] = [];
       for (const name of names) {
         if (!validConversationKey(name)) continue;
-        const dir = join(this.#root, name, "pi");
-        const info = await lstat(dir).catch(() => undefined);
-        if (info === undefined || !info.isDirectory()) continue;
+        const dir = join(this.#root, name, ...this.#sub, "pi");
+        const folders = [join(this.#root, name, ...this.#sub), dir];
+        let plain = true;
+        for (const f of folders) { const i = await lstat(f).catch(() => undefined); if (i === undefined || !i.isDirectory()) { plain = false; break; } }
+        if (!plain) continue;
         if (stores.length >= CONVERSATION_STORES_MAX) throw new Error(`more than ${CONVERSATION_STORES_MAX} conversation stores on this host: too many to back up`);
         stores.push({ id: name, dir });
       }

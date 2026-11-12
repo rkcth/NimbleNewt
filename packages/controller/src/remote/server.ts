@@ -269,6 +269,20 @@ export class WorkerTransport {
       this.#key(req);
       return { status: 200, body: await svc.answerWorkspace(host, session, c, body["outcome"]) };
     }
+    // Conversation stores in transit (card K01i): a host sends the files of a backup's Pi state in chunks, or fetches the ones a restore put back in chunks. Only the host the transfer was opened for may use it.
+    if (a === "session" && b === "pi-state" && c !== undefined && d === "put" && parts.length === 5) {
+      allowed("POST");
+      const session = await this.#session(req, host);
+      const body = await this.#body(req);
+      this.#key(req);
+      return { status: 200, body: await svc.piStatePut(host, session, c, body) };
+    }
+    if (a === "session" && b === "pi-state" && c !== undefined && d === "get" && parts.length === 5) {
+      allowed("GET");
+      for (const key of url.searchParams.keys()) if (key !== "name" && key !== "offset") throw new HttpError(400, "invalid_command", `${key}: is not a parameter of this route`);
+      const session = await this.#session(req, host);
+      return { status: 200, body: { ...(await svc.piStateGet(host, session, c, url.searchParams.get("name") ?? undefined, url.searchParams.get("offset") === null ? 0 : /^\d{1,15}$/.test(url.searchParams.get("offset")!) ? Number(url.searchParams.get("offset")) : -1)) } };
+    }
     if (a === "session" && b === "security" && c === undefined && parts.length === 3) {
       allowed("POST");
       const session = await this.#session(req, host);

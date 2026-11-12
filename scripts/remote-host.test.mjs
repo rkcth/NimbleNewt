@@ -22,12 +22,14 @@ function packages() {
   }
   class WorkspaceResponder { constructor(options) { seen.responderOptions = options; } handle() {} }
   class HostPoller { constructor(options) { seen.poller = options; } run() { return new Promise((resolve) => { seen.stopPoller = resolve; }); } }
-  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, WorkspaceResponder, HostPoller };
+  class PiStateHost { constructor(options) { seen.piStateOptions = options; } async answer() { return { ok: true, summary: "x" }; } }
+  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, WorkspaceResponder, HostPoller, PiStateHost };
+  class LocalConversationStores { constructor(options) { seen.storesOptions = options; this.source = { list: async () => [] }; this.final = () => undefined; } }
   class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
   const worker = {
     SandboxLauncher: { create: async () => ({ capacity: { available: true, backend: "bubblewrap" }, stop: async () => { seen.launcherStopped = true; } }) },
     GitBridge: { create: async () => ({}) },
-    LocalWorkspaces,
+    LocalWorkspaces, LocalConversationStores,
     detectLimitCapabilities: async () => ({ platform: "linux" }),
     limitedPlan: () => ({ report: [{ limit: "cpus", enforced: "full" }, { limit: "memoryMb", enforced: "partial" }] }),
     appFromRepository: () => ({}),
@@ -196,6 +198,20 @@ test("the owner's landing policy carried in the request can only hold the host's
   assert.equal(moved.branch, undefined);
   // A protected list that is not a list of paths refuses the landing.
   for (const protectedPaths of ["docs/", [1], [""], ["x".repeat(301)], Array.from({ length: 201 }, (_, i) => `p${i}`)]) assert.match(remoteLandingPolicy(PINS, call({ branch: "trunk", protectedPaths })).refuse, /protected paths were not a list/);
+});
+
+test("the remote host keeps its agents' conversation stores in backups: the responder is given a Pi state handler over <base>/attempts/<id>/home, with the worker's busy check (card K01i)", { skip: LINUX_ONLY }, async () => {
+  const { seen, load } = packages();
+  const base = mkdtempSync(join(tmpdir(), "nn-pi-host-"));
+  try {
+    const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ base }));
+    assert.deepEqual(seen.storesOptions, { root: join(base, "attempts"), homeFolder: "home" });
+    assert.ok(seen.responderOptions.piState !== undefined, "the responder has the handler");
+    assert.equal(seen.piStateOptions.scratch, join(base, "pi-state-copies"));
+    assert.deepEqual(await seen.piStateOptions.busy(), []);
+    seen.stopPoller?.();
+    await host.stop();
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test("the remote host checks a done: its worker is given the check, and so is the responder; a check names only a real attempt ID (card H12a)", { skip: LINUX_ONLY }, async () => {
