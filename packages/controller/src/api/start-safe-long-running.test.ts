@@ -41,7 +41,7 @@ async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () =
   await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
   await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
   const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
-  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }] });
+  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }, { action: "job.control", project }] });
   const task = async (n: number): Promise<{ taskId: string; attemptId: string }> => {
     const taskId = (await s.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
     await s.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
@@ -157,5 +157,42 @@ test("the gate refuses an agent's new long job from the notice before a planned 
     assert.match(await tryJob("l0-near"), /long-running work is not started/, "half a minute before the start");
     now = Date.parse("2026-11-02T08:10:00.000Z");
     assert.match(await tryJob("l0-on"), /long-running work is not started/, "while it is on");
+  } finally { await w.close(); }
+});
+
+test("the controller's own host credential is held to the task owner's meeting like the agent (follow-up to T07: it used to skip the gate), and the owner is not", async () => {
+  const w = await world();
+  try {
+    const { c, s, owner, project, call } = w;
+    const t = await w.task(1);
+    const host = c.dispatch!.principal;
+    const tryJob = (as: typeof host, n: string, extra: object = { background: true }) => s.jobs.admit(as, { commandId: `j-${n}`, taskId: t.taskId, kind: "tool", label: n, operationId: `op-${n}`, ...extra } as never).then(() => "admitted", (e: Error) => e.message);
+    assert.equal(await tryJob(host, "free"), "admitted", "no meeting: the host admits");
+    assert.ok((await call("meeting.call-urgent", { projectId: w.project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1")).ok);
+    assert.match(await tryJob(host, "bg"), /long-running work is not started/, "background job by the host credential, meeting on");
+    assert.match(await tryJob(host, "long", { longRunning: true }), /long-running work is not started/);
+    assert.equal(await tryJob(host, "short", {}), "admitted", "short work is not held");
+    assert.equal(await tryJob(owner, "owner"), "admitted", "the owner is not held");
+    void project;
+    assert.deepEqual(w.problems, []);
+  } finally { await w.close(); }
+});
+
+test("a restart decision from a checkpoint during a meeting is refused for the agent and leaves the job as it was; the owner may (follow-up to T07)", async () => {
+  const w = await world();
+  try {
+    const { c, s, owner, call } = w;
+    const t = await w.task(1);
+    const ann = await s.principals.authenticate((await s.principals.issueCredential(owner, w.agent)).token);
+    const id = (await s.jobs.admit(ann, { commandId: "ja", taskId: t.taskId, kind: "tool", label: "build", operationId: "op-1", resumability: "tool_checkpoint" })).id;
+    await s.jobs.report(owner, { commandId: "jr", jobId: id, state: "dispatched", host: "host-1", checkpoint: "ckpt-1" });
+    assert.ok((await call("meeting.call-urgent", { projectId: w.project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1")).ok);
+    await assert.rejects(s.jobs.decide(ann, { commandId: "jd1", jobId: id, decision: "restart", reason: "go on" }), /long-running work is not started/);
+    assert.equal((await s.jobs.get(owner, id))!.restarts, 0);
+    await s.jobs.decide(ann, { commandId: "jd2", jobId: id, decision: "exception", reason: "owner follows", tracker: "owner" });
+    assert.equal((await s.jobs.decide(owner, { commandId: "jd3", jobId: id, decision: "restart", reason: "owner says so" })).id, id);
+    assert.equal((await s.jobs.get(owner, id))!.restarts, 1);
+    assert.deepEqual(w.problems, []);
+    void c;
   } finally { await w.close(); }
 });

@@ -413,6 +413,14 @@ export class JobService {
     const tracker = command.tracker === undefined ? undefined : plain(command.tracker, "tracker", 120);
     if (decision === "exception" && tracker === undefined) invalid("tracker", "a tracked exception names who tracks it");
     if (decision === "complete" && exit === undefined) invalid("exit", "completing a job needs how it ended");
+    // A restart starts long work again: it is held to the meeting rule like a new long job (follow-up to T07). Read first, outside the change, so a refusal records nothing.
+    if (decision === "restart" && this.#longRunningGate !== undefined) {
+      const found = (await this.#runner.get("job", jobId))?.body as unknown as JobBody | undefined;
+      if (found !== undefined && !TERMINAL.includes(found.state)) {
+        const refusal = await this.#longRunningGate(principal, found.taskId);
+        if (refusal !== undefined) throw new DomainError("invalid_command", refusal, { field: "longRunning" });
+      }
+    }
     const done = await this.#change("job.decide", principal, command.commandId, jobId, "control", { decision, reason, exit: (exit ?? null) as unknown as JsonObject, tracker: tracker ?? null }, (job) => {
       if (TERMINAL.includes(job.state)) invalid("jobId", `job ${jobId} is ${job.state}; there is nothing to decide`);
       if (job.state === "outcome_unknown" && decision !== "exception") invalid("decision", "an outcome-unknown job is settled by reconcile, with evidence; it can only be kept as a tracked exception here");

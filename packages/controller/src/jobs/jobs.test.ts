@@ -135,6 +135,31 @@ for (const backend of backends) {
     await refuses("invalid_command", () => go(c.t1, { longRunning: "yes" }));
   });
 
+  suite("a restart decision starts long work again, so it is asked of the host's gate; other decisions and short states are not (follow-up to T07)", async (c) => {
+    const asked: string[] = [];
+    const jobs = c.reopen({ longRunningGate: async (p, taskId) => { asked.push(`${p.id}:${taskId}`); return taskId === c.t2 ? "in a meeting" : undefined; } });
+    const mk = async (taskId: string) => {
+      const id = (await jobs.admit(c.worker, { commandId: cid("a"), taskId, kind: "tool", label: "x", operationId: cid("op"), resumability: "tool_checkpoint" })).id;
+      await jobs.report(c.worker, { commandId: cid("rp"), jobId: id, state: "dispatched", checkpoint: "ckpt-1" });
+      return id;
+    };
+    const held = await mk(c.t2);
+    const free = await mk(c.t1);
+    asked.length = 0;
+    const restart = (jobId: string) => jobs.decide(c.boss, { commandId: cid("d"), jobId, decision: "restart", reason: "carry on" });
+    await refuses("invalid_command", () => restart(held), (e) => { assert.match(e.message, /in a meeting/); assert.equal(e.field, "longRunning"); });
+    assert.equal((await jobs.get(c.owner, held))!.restarts, 0, "a refused restart changes nothing");
+    assert.equal((await jobs.get(c.owner, held))!.state, "dispatched");
+    await restart(free);
+    assert.equal((await jobs.get(c.owner, free))!.restarts, 1);
+    assert.deepEqual(asked, [`${c.boss.id}:${c.t2}`, `${c.boss.id}:${c.t1}`]);
+    // Cancelling and tracking a job are not starting work: the gate is not asked.
+    asked.length = 0;
+    await jobs.decide(c.boss, { commandId: cid("d"), jobId: held, decision: "exception", reason: "owner follows it", tracker: "owner" });
+    await jobs.decide(c.boss, { commandId: cid("d"), jobId: held, decision: "cancel", reason: "not needed" });
+    assert.deepEqual(asked, []);
+  });
+
   suite("the controller's own list of a task's unfinished jobs needs no viewer's rights, skips ended jobs and reads past one page (card L02c)", async (c) => {
     await c.admit(c.t1);
     for (let i = 0; i < JOB_LIMITS.page + 5; i++) await c.admit(c.t1);
