@@ -50,11 +50,12 @@ for (const store of stores) test(`${store.name}: a scheduled stand-up runs throu
   let skew = -30 * DAY;
   const clock = (): string => new Date(Date.now() + skew).toISOString();
   const worker = new ScriptedWorker("host:w1", async (): Promise<WorkerTurnResult> => { skew += 20 * 60_000; return { status: "completed", text: "Watered the beds.", checkpoint: { turn: 1 } }; });
+  // A controller that fails to start still has its schema and folder removed.
   const c: Controller = await startController({
     storage: db.storage, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     dispatch: { timer: new ManualTimer(), manual: true, workers: [worker], clock },
     chat: { interpreter: new ScriptedInterpreter({}) },
-  } as never);
+  } as never).catch(async (error: unknown) => { await db.close(); rmSync(d, { recursive: true, force: true }); throw error; });
   try {
     const s = c.services;
     const boot = await s.principals.bootstrapOwner({ name: "rob" });

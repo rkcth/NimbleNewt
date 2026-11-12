@@ -17,7 +17,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
-import type { Aggregate, AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { outcomeText, type ImprovementBody } from "./improvements.js";
 import { clean, cut, invalid, plain, whole, type Cite, type OutcomeSink } from "./shared.js";
 
@@ -282,7 +282,9 @@ export class StandupService {
     // A project that already holds the most stand-ups is refused before a schedule is made (an orphan schedule with no stand-up would be left otherwise). Only a caller who may manage the project's meetings is told; the meeting service refuses the rest below.
     if (allows(by, "meeting.manage", projectId)) {
       const held = (await this.#runner.get(INDEX_KIND, projectId))?.body as unknown as { ids?: string[] } | undefined;
-      if ((held?.ids?.length ?? 0) >= STANDUP_LIMITS.perProject) throw new DomainError("unavailable", `a project holds at most ${STANDUP_LIMITS.perProject} stand-ups`);
+      // A repeat of a command whose stand-up is already made is not refused: it answers with that stand-up (or mends what a crash left), as any repeat does.
+      const repeat = held?.ids !== undefined && held.ids.length >= STANDUP_LIMITS.perProject ? await this.#runner.get("meeting-schedule", derivedId("msc", scopedCommandId(by.id, command.commandId))) : undefined;
+      if ((held?.ids?.length ?? 0) >= STANDUP_LIMITS.perProject && repeat === undefined) throw new DomainError("unavailable", `a project holds at most ${STANDUP_LIMITS.perProject} stand-ups`);
     }
     // The meeting service checks authority, roster, zone and dates; it is called first so a caller without rights learns nothing about the window rules.
     const made = await this.#meetings.createSchedule(by, {
@@ -298,11 +300,19 @@ export class StandupService {
         build: async () => {
           const ref: AggregateRef = { kind: "standup-config", id: made.id };
           const body: StandupConfigBody = { scheduleId: made.id, projectId, windowFrom: window.windowFrom, windowTo: window.windowTo, coverageHours, createdBy: by.id, createdAt: this.#runner.now() };
-          return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }], detail: { projectId } };
+          // The project's index of its stand-ups is written in the same transaction (card M03h review), so a stand-up record is never without its index entry: no crash or failed write can leave a stand-up that every list
+          // misses. A project with no index yet gets one made from every stand-up it already has. A concurrent writer of the index makes this a lost race, retried below from the fresh index.
+          const iref: AggregateRef = { kind: INDEX_KIND, id: projectId };
+          const index = await this.#runner.get(INDEX_KIND, projectId);
+          const before = index === undefined ? await this.#scanIds(projectId) : (index.body as unknown as { ids: string[] }).ids;
+          const changes: Change[] = [{ type: "create", ref, body: clean(body) }];
+          if (index === undefined) changes.push({ type: "create", ref: iref, body: { ids: [...new Set([...before, made.id])].sort() } as unknown as JsonObject });
+          else if (!before.includes(made.id)) changes.push({ type: "update", ref: iref, expectedRevision: index.revision, body: { ids: [...before, made.id].sort() } as unknown as JsonObject });
+          return { ref, creates: true, changes, detail: { projectId } };
         },
       }));
     });
-    // The project's index of its stand-ups (card M03h). A crash between the two writes is mended by the replay of the same command, which comes here again.
+    // The index entry was written with the stand-up record; this only mends a stand-up record whose entry is missing anyway (it returns at once when the entry is there).
     await this.#retrying(() => this.#indexAdd(by, projectId, made.id));
     return { scheduleId: made.id, replayed: made.replayed };
   }
@@ -315,15 +325,8 @@ export class StandupService {
   async #ids(by: Principal, projectId: string): Promise<{ ids: readonly string[]; revision: number }> {
     const found = await this.#runner.get(INDEX_KIND, projectId);
     if (found !== undefined) return { ids: (found.body as unknown as { ids: string[] }).ids, revision: found.revision };
-    const ids: string[] = [];
-    for (let after: string | undefined; ;) {
-      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const c of chunk) if ((c.body as unknown as StandupConfigBody).projectId === projectId) ids.push(c.id);
-      if (chunk.length < 100) break;
-      after = chunk[chunk.length - 1]!.id;
-    }
-    ids.sort();
-    const kept = ids.slice(0, STANDUP_LIMITS.perProject);
+    // Every stand-up the project has is kept, also beyond the limit (the limit only refuses new ones), so a project with many older stand-ups loses none from its lists.
+    const kept = await this.#scanIds(projectId);
     const digest = sha256(canonicalJson(kept as unknown as JsonObject)).slice(0, 16);
     try {
       await this.#runner.command("standup.index.create", { commandId: `sxi:${projectId}:${digest}`, actor: by.id }, async () => ({
@@ -338,11 +341,23 @@ export class StandupService {
     return written === undefined ? { ids: kept, revision: 0 } : { ids: (written.body as unknown as { ids: string[] }).ids, revision: written.revision };
   }
 
+  /** The IDs of a project's stand-ups found by reading every stand-up record of the installation (sorted); used only while the project has no index. */
+  async #scanIds(projectId: string): Promise<string[]> {
+    const ids: string[] = [];
+    for (let after: string | undefined; ;) {
+      const chunk = await this.#runner.list("standup-config", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const c of chunk) if ((c.body as unknown as StandupConfigBody).projectId === projectId) ids.push(c.id);
+      if (chunk.length < 100) break;
+      after = chunk[chunk.length - 1]!.id;
+    }
+    return ids.sort();
+  }
+
   /** Puts a stand-up on its project's index (idempotent). The index is made first from what exists, when there is none, so it is complete from the start. */
   async #indexAdd(by: Principal, projectId: string, scheduleId: string): Promise<void> {
     const index = await this.#ids(by, projectId);
     if (index.ids.includes(scheduleId)) return;
-    if (index.ids.length >= STANDUP_LIMITS.perProject) throw new DomainError("unavailable", `a project holds at most ${STANDUP_LIMITS.perProject} stand-ups`);
+    // No limit here: the stand-up is already made, and leaving it off the index would hide a running stand-up from every list. The limit is checked before any schedule is made.
     if (index.revision === 0) throw new DomainError("unavailable", "the project's stand-up index could not be written");
     const ids = [...index.ids, scheduleId].sort();
     await this.#runner.command("standup.index.add", { commandId: `sxa:${scheduleId}:${index.revision}`, actor: by.id }, async () => ({
