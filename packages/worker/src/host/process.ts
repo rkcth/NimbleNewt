@@ -1,4 +1,4 @@
-import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type ThinkingReport, type HeaderList, type ToChild } from "@nimblenewt/contracts";
+import { ChannelError, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, safeTail, safeText, parseFromChild, type BridgeReplyMessage, type ChannelStart, type FromChild, type ThinkingReport, type HeaderList, type ToChild } from "@nimblenewt/contracts";
 import type { LimitEnforcement } from "../sandbox/limits.js";
 import type { LaunchRequest, RunResult, SandboxLauncher, SandboxRun } from "../sandbox/launcher.js";
 import type { RunProcess } from "../sandbox/proc.js";
@@ -35,7 +35,7 @@ export class ProcessNotEnded extends Error {}
 
 interface Waiter<T> { readonly resolve: (value: T) => void; readonly reject: (error: Error) => void }
 type Result = Extract<FromChild, { t: "result" }>;
-const message = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 1000);
+const message = (error: unknown): string => safeText(error, 1000);
 
 export class WorkerProcess {
   #run!: SandboxRun;
@@ -78,7 +78,7 @@ export class WorkerProcess {
     void process.#run.result.then((result) => {
       process.#exit = result;
       process.#endedAt = performance.now();
-      const tail = result.stderr.trim().split("\n").slice(-3).join(" | ").slice(0, 400);
+      const tail = safeTail(result.stderr, 8 * 1024).trim().split("\n").slice(-3).join(" | ").slice(0, 400);
       process.#end(new Error(`the worker process ended (${result.timedOut ? "time limit" : result.killed ? "stopped" : result.exitCode === null ? `signal ${String(result.signal)}` : `exit code ${result.exitCode}`})${tail === "" ? "" : `: ${tail}`}`));
     });
     return process;
@@ -88,7 +88,7 @@ export class WorkerProcess {
   get enforcement(): readonly LimitEnforcement[] { return this.#run.enforcement ?? []; }
 
   get exited(): Promise<RunResult> { return this.#run.result; }
-  get stderrTail(): string { return this.#exit?.stderr.trim().split("\n").slice(-5).join(" | ").slice(0, 500) ?? ""; }
+  get stderrTail(): string { return this.#exit === undefined ? "" : safeTail(this.#exit.stderr, 8 * 1024).trim().split("\n").slice(-5).join(" | ").slice(0, 500); }
 
   /** Ends the channel: everything waiting fails with `why`, and the process is stopped if it is still there. */
   #end(why: Error): void {
@@ -139,7 +139,7 @@ export class WorkerProcess {
     try {
       for (const raw of this.#decoder.push(chunk)) this.#onMessage(parseFromChild(raw));
     } catch (error) {
-      if (error instanceof ChannelError) this.kill(`the worker process broke the channel: ${error.message}`);
+      if (error instanceof ChannelError) this.kill(`the worker process broke the channel: ${message(error)}`);
       else throw error;
     }
   }
@@ -157,9 +157,9 @@ export class WorkerProcess {
       case "lease.renew": void this.#renew(m.id); return;
       case "checkpoint.ok": case "tell.ok": case "compact.ok": { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.resolve(m); return; }
       case "fault": {
-        if (m.id !== undefined) { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.reject(new Error(m.message)); return; }
+        if (m.id !== undefined) { const w = this.#asked.get(m.id); this.#asked.delete(m.id); w?.reject(new Error(message(m.message))); return; }
         // A fault with no request is the process saying it cannot start or go on; the start waits on it, a running turn fails with it.
-        const why = new Error(m.message);
+        const why = new Error(message(m.message));
         for (const w of this.#readyWaiters.splice(0)) w.reject(why);
         if (this.#resultWaiter !== undefined) { const w = this.#resultWaiter; this.#resultWaiter = undefined; w.reject(why); }
         return;

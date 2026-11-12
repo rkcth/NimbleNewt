@@ -3,17 +3,16 @@ import { DomainError } from "../domain/errors.js";
 import type { JobService, JobState } from "../jobs/jobs.js";
 import { JOB_LIMITS } from "../jobs/jobs.js";
 import type { Principal } from "../security/principals.js";
-import { redactText } from "../security/redact.js";
+import { cleanUntrusted } from "../security/clean.js";
 import type { RemoteMcpClient, RemoteToolResult } from "./http-client.js";
 
 /**
  * An error's text made fit for the job record (card T07b review 3): it may quote the MCP server's own words, so control and invisible format characters are dropped, a lone surrogate is repaired, a credential is redacted and
  * the length is bounded, so the job service never refuses the end (a refused end would leave the job running on the record for ever).
  */
-const CONTROL = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\p{Cf}]", "gu");
 const LONE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 const recordable = (s: string, max: number): string => {
-  const plain = redactText(s.replace(/\t/g, " ").replace(CONTROL, "").replace(LONE, String.fromCharCode(0xfffd)));
+  const plain = cleanUntrusted(s.replace(LONE, String.fromCharCode(0xfffd)), { lines: "keep" }).text.replace(/\t/g, " ").replace(/\n/g, "");
   let out = plain.length > max ? plain.slice(0, max) : plain;
   if (/[\ud800-\udbff]$/.test(out)) out = out.slice(0, -1);
   return out.trim() || "the call failed";

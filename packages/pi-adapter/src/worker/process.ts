@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, createProvider, type Models } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import type { Storage } from "@earendil-works/pi-durable";
-import { CHECKPOINT_DURABILITY_ERROR, ChannelError, findAnchors, stripAnchors, verifyAnchor, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
+import { CHECKPOINT_DURABILITY_ERROR, ChannelError, safeText, findAnchors, stripAnchors, verifyAnchor, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
 import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
@@ -122,7 +122,7 @@ export function contextPolicyOf(context: ChannelStart["context"], onCompacted?: 
         try { onCompacted?.({ messageCount: request.messageCount, summaryChars: summary.length, digest: createHash("sha256").update(summary).digest("hex") }); } catch { /* the compaction stands */ }
         return { summary };
       },
-      onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
+      onHookFailure: (error: unknown) => { console.error(`compaction hook failed: ${safeText(error, 300)}`); },
     } : {}),
   };
 }
@@ -135,8 +135,8 @@ export async function durabilityOf(adapter: Pick<PiAdapter, "verifyCheckpoint">,
   const why = (text: string): string => text.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, CHECKPOINT_DURABILITY_ERROR);
   try {
     const verdict = await adapter.verifyCheckpoint(checkpoint);
-    return verdict.valid ? { verified: true } : { verified: false, error: why(`the checkpoint did not read back: ${verdict.reason}: ${verdict.detail}`) };
-  } catch (error) { return { verified: false, error: why(`the checkpoint could not be read back: ${String((error as Error)?.message ?? error)}`) }; }
+    return verdict.valid ? { verified: true } : { verified: false, error: why(`the checkpoint did not read back: ${verdict.reason}: ${safeText(verdict.detail, 500)}`) };
+  } catch (error) { return { verified: false, error: why(`the checkpoint could not be read back: ${safeText(error, 1000)}`) }; }
 }
 
 /**
@@ -216,7 +216,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let checking: { readonly from: number; readonly done: Promise<void>; readonly open: () => void } | undefined;
   const endCheck = (): void => { const c = checking; checking = undefined; c?.open(); };
 
-  const fault = (message: string, id?: number): void => send({ t: "fault", ...(id === undefined ? {} : { id }), message: message.slice(0, 3900) });
+  const fault = (message: string, id?: number): void => send({ t: "fault", ...(id === undefined ? {} : { id }), message: safeText(message, 3900) });
 
   /** Authority is gone (card H08b): the turn is aborted, no further call leaves the process, and the reason is the turn's recorded result. */
   const authorityLost = async (reason: LossReason): Promise<void> => {
@@ -310,7 +310,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         if (!reply.ok || reply.result["go"] !== true || stopped()) return undefined;
         return nudgeText(answer.stopReason);
       },
-      onError: (error) => { console.error(`continuation hook failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`); },
+      onError: (error) => { console.error(`continuation hook failed: ${safeText(error, 300)}`); },
     };
     adapter = await PiAdapter.open({
       continuation,
@@ -366,9 +366,9 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
         send({ t: "result", status: "completed", text: result.text, endKind: ending.endKind, visibleChars: ending.visibleChars, nudges });
       }
       else if (result.status === "unanswered" && result.reason === "aborted") send({ t: "result", status: "cancelled", nudges });
-      else send({ t: "result", status: "failed", nudges, error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${result.detail}` : ""})` : `the turn ended as ${result.status}` });
+      else send({ t: "result", status: "failed", nudges, error: result.status === "unanswered" ? `the model did not answer (${result.reason}${"detail" in result && typeof result.detail === "string" ? `: ${safeText(result.detail, 500)}` : ""})` : `the turn ended as ${result.status}` });
     } catch (error) {
-      send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : String((error as Error)?.message ?? error).slice(0, 2000) });
+      send({ t: "result", status: "failed", error: dog !== undefined && !dog.productive ? `lease lost (${dog.reason}): the turn was stopped` : safeText(error, 2000) });
     } finally { turnOpen = false; bridge?.declarations.closeRequest(requestIdText); if (dog !== undefined && !dog.productive) dog.quiet(); }
   };
 

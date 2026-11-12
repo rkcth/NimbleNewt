@@ -198,6 +198,19 @@ test("a refused bridge call is the model's tool result, not a crash; garbage on 
   await h.done;
 });
 
+test("a fault that quotes a credential is redacted before it leaves the process", async () => {
+  // Built at run time: a push-protection scan reads every commit.
+  const key = "gh" + "p_" + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5";
+  const { hooks } = scripted();
+  const h = host({ ...hooks, models: () => { throw new Error(`provider refused ${key}`); } });
+  h.send({ t: "start", v: 1, start: offlineStart });
+  const fault = await h.next("fault");
+  assert.match(fault.message, /could not start: provider refused \[redacted\]/);
+  assert.ok(!fault.message.includes(key.slice(8)));
+  h.send({ t: "close" });
+  await h.done;
+});
+
 test("a start the process cannot honour is a fault, and the process starts only once", async () => {
   const { hooks } = scripted();
   const h = host({ ...hooks, models: () => { throw new Error("no such model"); } });

@@ -304,3 +304,28 @@ test("U09b: thinking reports are bounded; past the in-flight bound and the per-p
   assert.equal(q.alive, true);
   f.exit(); g.exit();
 });
+
+// A credential in what a worker process says (a fault, its stderr) is redacted before the host reports it. The key is built at run time: a push-protection scan reads every commit.
+const leaked = "gh" + "p_" + "Qm9sdFRlc3RLZXlWYWx1ZTEyMzQ1Njc4OTBhYmNkZWY".slice(0, 36);
+
+test("a fault and the stderr tail of an ended process hold no credential", async () => {
+  const f = fake();
+  const process = await launch(f);
+  const starting = process.start(start, 5000);
+  f.send({ t: "fault", message: `cannot start with ${leaked}` });
+  const error = await starting.catch((e: Error) => e);
+  assert.ok(error instanceof Error && !error.message.includes(leaked.slice(6)) && error.message.includes("[redacted]"), String((error as Error).message));
+  f.exit({ exitCode: 1, stderr: `warn\nusing token ${leaked}\nlast line` });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!process.stderrTail.includes(leaked.slice(6)), process.stderrTail);
+  assert.match(process.stderrTail, /last line/);
+});
+
+test("a process that dies with a key on its stderr reports it redacted", async () => {
+  const f = fake();
+  const process = await launch(f);
+  const running = process.run("r", "go").catch((e: Error) => e);
+  f.exit({ exitCode: 1, stderr: `boom ${leaked}` });
+  const error = (await running) as Error;
+  assert.ok(!error.message.includes(leaked.slice(6)) && /boom \[redacted\]/.test(error.message), error.message);
+});

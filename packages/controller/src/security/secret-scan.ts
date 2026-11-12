@@ -76,6 +76,28 @@ function joinLines(v: View): View {
   return text.length === t.length ? v : { text, start, end };
 }
 
+/**
+ * The view with a quote join between two token characters removed: `"ghp_" + "abc"`, `'sk-' 'abc'` and `"ghp_abc"."def"` read `ghp_abc`. A key written as source code, split over string literals so a
+ * scanner would not see it whole. Only the join itself goes (quotes, an optional `+`, `.` or `&`, and white space around them, line breaks included); a comma or any other character keeps two strings apart.
+ */
+const QUOTE_JOIN = /\s*["'`]\s*(?:[+.&]\s*)?["'`]\s*/y;
+function joinQuotes(v: View): View {
+  const t = v.text;
+  if (!/["'`]/.test(t)) return v;
+  const start: number[] = [];
+  const end: number[] = [];
+  let text = "";
+  for (let k = 0; k < t.length;) {
+    if (k > 0 && TOKEN_CHAR.test(t[k - 1]!) && (t[k] === '"' || t[k] === "'" || t[k] === "`" || /\s/.test(t[k]!))) {
+      QUOTE_JOIN.lastIndex = k;
+      const m = QUOTE_JOIN.exec(t);
+      if (m !== null && m[0].length > 0 && k + m[0].length < t.length && TOKEN_CHAR.test(t[k + m[0].length]!)) { k += m[0].length; continue; }
+    }
+    text += t[k]; start.push(startOf(v, k)); end.push(endOf(v, k)); k++;
+  }
+  return text.length === t.length ? v : { text, start, end };
+}
+
 /** Key prefixes matched in any letter case: a model that writes `GHP_…` or `Sk-…` still wrote the key. (The AWS pattern spells its own case-free prefix: its body stays upper case.) */
 const CASE_FREE = new Set(["API key (sk-)", "GitHub token", "GitHub fine-grained token", "Slack token", "npm token", "service token"]);
 /** Shapes with a fixed prefix and no spaces inside, looked for again with line breaks removed (with the private key block, the only shapes that may honestly cover a line break). */
@@ -104,6 +126,47 @@ function orphanEnds(text: string): { start: number; end: number }[] {
     floor = m.index + m[0].length;
   }
   return out;
+}
+
+const KEY_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g;
+const KEY_END = /-----END [A-Z ]*PRIVATE KEY-----/g;
+/** The offset in `text` just after the last private-key END line that no BEGIN of this text belongs to (seen through the folded view), or undefined: a key that began in an earlier piece of a stream ends there. */
+export function endOfEarlierKey(text: string): number | undefined {
+  const v = fold(text);
+  const at = lastOrphanEnd(v.text);
+  return at === undefined ? undefined : endOf(v, at - 1);
+}
+/** Where (in the view) the last private-key END that no BEGIN of this text belongs to stops, or undefined. */
+function lastOrphanEnd(view: string): number | undefined {
+  let floor = 0; // the end of the last complete block; an END before a BEGIN's own END is that block's
+  let last: number | undefined;
+  const begins = [...view.matchAll(KEY_BEGIN)].map((m) => m.index);
+  let b = 0;
+  for (const m of view.matchAll(KEY_END)) {
+    // Skip BEGINs that this END closes: the nearest BEGIN before it, if it is after the previous complete block.
+    while (b < begins.length && begins[b]! < m.index) b++;
+    const owner = b > 0 && begins[b - 1]! >= floor ? begins[b - 1] : undefined;
+    if (owner === undefined) last = m.index + m[0].length;
+    floor = m.index + m[0].length;
+  }
+  return last;
+}
+
+/**
+ * Whether a private-key block is OPEN at the end of the text (a BEGIN line with no END line after it), seen the way the scanner sees text (hidden characters left out, fullwidth letters folded). A stream
+ * such as a job's output uses it to know that the next piece is more of the key.
+ */
+export function privateKeyOpen(text: string): boolean {
+  const v = fold(text).text;
+  const last = [...v.matchAll(KEY_BEGIN)].at(-1);
+  return last !== undefined && !new RegExp(KEY_END.source).test(v.slice(last.index));
+}
+
+/** The offset in `text` just after the first private-key END line (seen through the folded view), or undefined when there is none. */
+export function afterPrivateKeyEnd(text: string): number | undefined {
+  const v = fold(text);
+  const m = new RegExp(KEY_END.source).exec(v.text);
+  return m === null ? undefined : endOf(v, m.index + m[0].length - 1);
 }
 
 /** A run of hex or base64 characters, not part of a longer one and not a sealed cursor (`~` + base64url). */
@@ -154,6 +217,25 @@ export function highEntropy(run: string): boolean {
 }
 
 /**
+ * An unlabelled hex run of a shown digest length (see HEX_SHOWN) is a key when the words right before it on its line say so: `the api key is 0123…`, `secret key: …`, `"key": "…"`, `password = …`. A digest label
+ * (`sha256:`, `commit`, `hash`) or any other word before the run keeps it as a digest, because the context must END with the key word (and an optional `is`, `:` or `=`).
+ */
+const KEY_WORD = "(?:secret|authorization|token|passw(?:or)?d|passwd|pwd|credential|(?:api|access|signing|private|auth|encryption|session)[-_ ]?key)";
+// A name that only begins with a key word but names something else (`secret_key_id`, `API_KEY_HASH`, `tokenizer`, `secretary`) and a key that is not secret or is an index (`public key`, `primary key`,
+// `cache key`) keep their hex: an ID, digest or public value is shown all over code review and logs.
+const NOT_SECRET_SUFFIX = "(?<!(?:id|ids|hash|digest|sum|fingerprint|count|izer|ary|length|size|type|name))";
+const NOT_SECRET_KEY = "(?<!\\b(?:public|primary|foreign|cache|host|ssh|gpg|pgp|sort|partition|idempotency)[-_ ]?)";
+const KEY_CONTEXT = new RegExp(`(?:${KEY_WORD}[A-Za-z_]{0,12}${NOT_SECRET_SUFFIX}["'\`]?\\s*(?:=>|[:=]|\\b(?:is|was)\\b)?|${NOT_SECRET_KEY}\\bkey["'\`]?\\s*(?:=>|[:=]|\\bis\\b))\\s*["'\`(]*$`, "i");
+export function keyContextHex(text: string, at: number, run: string): boolean {
+  const s = run.replace(/=+$/, "");
+  if (!HEX_SHOWN.has(s.length) || !/^[0-9a-fA-F]+$/.test(s) || !/\d/.test(s) || !/[a-f]/i.test(s)) return false;
+  // At most 80 characters back, and only on the run's own line, looked for INSIDE that window: `lastIndexOf` over the whole text walked back to its start for every run of a line with no break (one-line
+  // JSON full of digests), quadratic: 1 MB took over 4 s.
+  const window = text.slice(Math.max(0, at - 80), at);
+  return KEY_CONTEXT.test(window.slice(window.lastIndexOf("\n") + 1));
+}
+
+/**
  * A match of the line-joined view that took the next line's first word: the part before the line break is already a whole token of the same shape and what follows the break is a plain word
  * (`…sk-live-…1234⏎step 011`). The token is redacted from the plain view; the word is the next line's own. (A key whose wrapped tail happens to be a plain word keeps that tail: see the notes.)
  */
@@ -167,6 +249,14 @@ function runsOnIntoWord(text: string, start: number, end: number, pattern: RegEx
   return first.test(piece.slice(0, brk).replace(/[ \t]+$/, ""));
 }
 
+export interface ScanOptions {
+  /**
+   * Read by `redactText` (not `scanSecrets`). The text is a LATER piece of a stream (a model's thinking cut into blocks): a private key may have begun in an earlier piece, so anything up to the last private-key END line that no
+   * BEGIN in this piece belongs to is part of that key and is found as a secret.
+   */
+  readonly continues?: boolean;
+}
+
 export interface SecretSpan { readonly start: number; readonly end: number; readonly name: string }
 
 /** The secrets of `text` as spans of the original text (UTF-16 offsets, end exclusive), possibly overlapping. */
@@ -178,8 +268,10 @@ export function scanSecrets(text: string): SecretSpan[] {
   const push = (v: View, s: number, e: number, name: string): void => { if (e > s) out.push({ start: startOf(v, s), end: v.start === undefined ? endOf(v, e - 1) : markEnd(endOf(v, e - 1)), name }); };
   // Only a text with a line break can have a token split over lines.
   const b = /[\r\n]/.test(a.text) ? joinLines(a) : a;
+  // Only a text with a quote can have a token split over string literals.
+  const c = joinQuotes(a);
   for (const { name, pattern, joinable, url } of FOLDED()) {
-    for (const v of joinable && b !== a ? [a, b] : [a]) {
+    for (const v of joinable ? [a, ...(b !== a ? [b] : []), ...(c !== a ? [c] : [])] : [a]) {
       pattern.lastIndex = 0;
       for (const m of v.text.matchAll(pattern)) {
         if (v === b && runsOnIntoWord(text, startOf(b, m.index), endOf(b, m.index + m[0].length - 1), pattern)) continue;
@@ -188,7 +280,7 @@ export function scanSecrets(text: string): SecretSpan[] {
     }
   }
   for (const o of orphanEnds(a.text)) push(a, o.start, o.end, "private key block");
-  for (const m of a.text.matchAll(RUN)) if (highEntropy(m[0]) && !DIGEST_BEFORE.test(a.text.slice(Math.max(0, m.index - 8), m.index))) push(a, m.index, m.index + m[0].length, HIGH_ENTROPY);
+  for (const m of a.text.matchAll(RUN)) if ((highEntropy(m[0]) || keyContextHex(a.text, m.index, m[0])) && !DIGEST_BEFORE.test(a.text.slice(Math.max(0, m.index - 8), m.index))) push(a, m.index, m.index + m[0].length, HIGH_ENTROPY);
   return out;
 }
 

@@ -21,7 +21,7 @@ export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   { name: "AWS access key", pattern: /\b(?:[Aa][Kk][Ii][Aa]|[Aa][Ss][Ii][Aa]|ABIA|ACCA)[0-9A-Z]{16}\b/g },
   { name: "private key block", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g },
   { name: "URL with embedded password", pattern: /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@]+:[^\s@/]+@/gi },
-  { name: "JSON web token", pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+  { name: "JSON web token", pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?/g },
   { name: "Slack token", pattern: /\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,}/g },
   { name: "Google API key", pattern: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { name: "Stripe key", pattern: /\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g },

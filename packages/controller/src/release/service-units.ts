@@ -1,4 +1,5 @@
 import { posix, win32 } from "node:path";
+import { findCredentialShapes } from "../security/credential-patterns.js";
 import { SUPERVISOR_EXIT } from "./supervisor.js";
 
 /**
@@ -101,8 +102,6 @@ const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 const WIN_USER = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,62}\\)?[A-Za-z0-9][A-Za-z0-9._ -]{0,62}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
 /** A value that looks like a credential; the unit takes none (the environment file does). */
 const SECRETISH = /(secret|token|passw|api[-_]?key|credential|private[-_]?key|bearer|authorization)/i;
-/** Well-known shapes of a key itself: OpenAI-style, GitHub, AWS access key, a JSON web token. */
-const SECRET_VALUE = /(\bsk-[A-Za-z0-9_-]{10,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/;
 const SECRET_REFERENCE = /(file|path|name|dir)$/i;
 /** Lines of the install steps that could end a here-document or here-string early. */
 const HEREDOC_END = "NIMBLENEWT_UNIT_END";
@@ -145,7 +144,7 @@ function argument(field: string, value: unknown): string {
   // Node.js itself reads --env-file anywhere on its command line, so an argument like that would load a file into the launcher.
   if (/^--env-file(-if-exists)?(=|$)/.test(v)) bad(field, "Node.js would read --env-file itself; name the environment file in the service settings");
   if (SECRETISH.test(v) && !SECRET_REFERENCE.test(v.replace(/=.*$/s, ""))) bad(field, "looks like a credential or names one; put secrets in the environment file, never in a unit");
-  if (SECRET_VALUE.test(v)) bad(field, "looks like a key; put secrets in the environment file, never in a unit");
+  if (findCredentialShapes(v).length > 0) bad(field, "looks like a key; put secrets in the environment file, never in a unit");
   if (/:\/\/[^/\s@]*:[^/\s@]*@/.test(v)) bad(field, "contains a user name and password in an address; put the credential in the environment file");
   return v;
 }

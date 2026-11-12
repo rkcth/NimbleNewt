@@ -1,3 +1,4 @@
+import { findCredentialShapes } from "./credential-scan.js";
 import { MAX_DEPTH, SECRET_NAME, tooDeep, validate, type ConfigError, type Schema } from "./schema.js";
 
 /** The configuration layout this build writes and reads. Older layouts are upgraded by `migrateConfig`. */
@@ -173,17 +174,14 @@ const SCHEMA: Schema = {
   },
 };
 
-/** Strings that look like credentials. Reported by path only: the value is never echoed. */
-const SECRET_SHAPES: readonly [RegExp, string][] = [
-  [/\bsk-[A-Za-z0-9_-]{20,}/, "an API key"],
-  [/\bgh[pousr]_[A-Za-z0-9]{30,}/, "a GitHub token"],
-  [/\bAKIA[0-9A-Z]{16}\b/, "an AWS access key"],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, "a private key"],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/, "a Slack token"],
-  [/[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i, "a URL with a password in it"],
-];
-
-const shapeOf = (text: string): string | undefined => SECRET_SHAPES.find(([shape]) => shape.test(text))?.[1];
+/**
+ * Strings that look like credentials, found by the same scanner as everywhere else (`credential-scan.ts`, a generated copy of the controller's: this package may not import the controller). Reported by path only: the value is never echoed.
+ * The scanner sees through fullwidth letters, invisible characters and keys split over lines or quotes, matches key prefixes in any letter case, and also finds a named assignment (`password: ...`) and a long high-entropy run.
+ */
+const shapeOf = (text: string): string | undefined => {
+  const [name] = findCredentialShapes(text);
+  return name === undefined ? undefined : name === "URL with embedded password" ? "a URL with a password in it" : `${/^[AEIOU]/.test(name) ? "an" : "a"} ${name}`;
+};
 const WITHHELD = "<key withheld>";
 
 /**

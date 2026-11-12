@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { View } from "../domain/model.js";
 import type { Principal } from "../security/principals.js";
-import { redactText } from "../security/redact.js";
+import { cleanUntrusted } from "../security/clean.js";
 import type { ScriptLaunch } from "../toolbridge/service.js";
 import { JOB_LIMITS, type JobBody, type JobService } from "./jobs.js";
 
@@ -84,7 +84,7 @@ const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n -
  * Text from the launcher that the job's program may have shaped (an orphan's process name, a launch failure's standard error), made fit for the record: control and invisible format characters dropped, so the job service's
  * text checks never refuse the end (a refused end would leave the job running on the record forever).
  */
-const plainLine = (s: string): string => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, "").replace(/\t/g, " ");
+const plainLine = (s: string): string => cleanUntrusted(s, { lines: "keep" }).text.replace(/\t/g, " ").replace(/\n/g, "");
 
 /**
  * The jobs agents start through the bridge, run on this machine (card T07b). Each job is one process in the sandbox, started by the controller (not by the agent's worker process), so it outlives the worker and its attempt; it never
@@ -298,7 +298,7 @@ export class LocalJobRuns {
     try {
       await this.#flush(run, true);
       const job = await this.#deps.jobs.get(host, run.jobId);
-      const orphans = end.orphans.slice(0, JOB_LIMITS.orphans).map((o) => clip(redactText(plainLine(o)).trim() || "an unnamed process", JOB_LIMITS.orphan));
+      const orphans = end.orphans.slice(0, JOB_LIMITS.orphans).map((o) => clip(plainLine(o).trim() || "an unnamed process", JOB_LIMITS.orphan));
       if (job === undefined) return;
       if (job.state === "cancellation_requested") {
         await this.#deps.jobs.confirmCancel(host, { commandId: `jstop:${run.jobId}:${run.nonce}:end`, jobId: run.jobId, result: "stopped", orphans });
@@ -311,7 +311,7 @@ export class LocalJobRuns {
         : run.closing === true ? "the controller shut down and ended the job"
         : end.exitCode === 0 ? undefined
         : end.signal !== null ? `the job was ended by ${end.signal}` : `the job exited with code ${String(end.exitCode)}`;
-      const exit = { ...(end.exitCode === null ? {} : { code: end.exitCode }), ...(end.signal === null ? {} : { signal: end.signal }), ...(reason === undefined ? {} : { reason: clip(redactText(plainLine(reason)).trim() || "the job ended", JOB_LIMITS.reason) }) };
+      const exit = { ...(end.exitCode === null ? {} : { code: end.exitCode }), ...(end.signal === null ? {} : { signal: end.signal }), ...(reason === undefined ? {} : { reason: clip(plainLine(reason).trim() || "the job ended", JOB_LIMITS.reason) }) };
       await this.#deps.jobs.finish(host, { commandId: `jrun:${run.jobId}:${run.nonce}:end`, jobId: run.jobId, outcome: reason === undefined ? "completed" : "failed", exit, ...(orphans.length === 0 ? {} : { orphans }) });
     } catch (error) {
       this.#deps.onError?.(error);

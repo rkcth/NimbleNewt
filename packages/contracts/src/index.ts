@@ -351,3 +351,7 @@ export * from "./harness.js";
 export * from "./worker-channel.js";
 export * from "./anchor.js";
 export * from "./lease-watchdog.js";
+
+// The credential scanner (a generated copy of the controller's, see scripts/copy-credential-scan.mjs): the worker host and the Pi adapter run in processes that may not import the controller, and redact what they print or send.
+export { REDACTED, cleanUntrusted, findCredentialShapes, redact, redactError, redactText, type CleanOptions, type Cleaned } from "./credential-scan.js";
+export { safeTail, safeText } from "./safe-text.js";

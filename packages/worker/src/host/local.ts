@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ANCHOR_CHANNEL_MAX, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
+import { ANCHOR_CHANNEL_MAX, safeTail, safeText, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -477,7 +477,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           ...(lease === undefined ? {} : {
             renew: async () => {
               try { return { leaseMs: (await lease.renew()).leaseMs }; } catch (error) {
-                if ((error as { code?: unknown } | undefined)?.code === "fenced") return { fenced: String((error as Error).message ?? "the attempt is fenced").slice(0, 500) };
+                if ((error as { code?: unknown } | undefined)?.code === "fenced") return { fenced: safeText((error as Error).message ?? "the attempt is fenced", 500) };
                 throw error;
               }
             },
@@ -489,7 +489,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         if (gone >= 0) entry.foldedMs += entry.launched.splice(gone, 1)[0]!.windDownMs();
       } catch (error) {
         const failed = (error as { limitFailures?: NonNullable<LaunchEnforcement["failed"]> }).limitFailures;
-        try { await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs, reason: String((error as Error)?.message ?? error).slice(0, 500), ...(failed === undefined ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }) }); } catch { /* the refusal itself is what is reported */ }
+        try { await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs, reason: safeText(error, 500), ...(failed === undefined ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }) }); } catch { /* the refusal itself is what is reported */ }
         throw error;
       }
       try {
@@ -527,7 +527,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         async run(content, requestId) {
           let result;
           try { result = await process.run(requestId, content); } catch (error) {
-            const failed = { status: "failed" as const, error: String((error as Error)?.message ?? error).slice(0, 2000), endKind: "unknown" as const };
+            const failed = { status: "failed" as const, error: safeText(error, 2000), endKind: "unknown" as const };
             // The model calls a turn made before its process ended were real work: their cache figures are reported with the failure (card H12e), under a number of their own, or they would be lost with the attempt.
             // That holds for a process this host closed on purpose too (a stop, a restart for a recipe change): a restart that fails ends the attempt with this result, so figures left in the attempt's cache would never be taken.
             // After a restart that succeeds the local worker adds them to the continued turn's figures (the same number: the continued turn starts from the checkpoint's), and the cache hands each figure out once, so nothing is counted twice.
@@ -578,7 +578,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       try {
         requested = strictestLimits(strictestLimits(entry.limits, await options.limits?.(entry.order)), contractLimitsOf(entry.order)) ?? {};
         bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(entry.order)) === true;
-      } catch (error) { return { state: "not-run", reason: `the owner's limits could not be read: ${String((error as Error)?.message ?? error).slice(0, 200)}` }; }
+      } catch (error) { return { state: "not-run", reason: `the owner's limits could not be read: ${safeText(error, 200)}` }; }
       const { wallTimeMs, ...processLimits } = requested;
       const timeoutMs = Math.max(1, Math.min(MAX_RUN_MS, check.timeoutMs, wallTimeMs ?? MAX_RUN_MS));
       const directory = realpathSync(mkdtempSync(join(options.checkBase ?? tmpdir(), "nn-check-")));
@@ -588,17 +588,17 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         let run;
         try {
           run = await options.launcher.launch({ recipe: { ...entry.recipe, home, scratch }, command: [...check.run], timeoutMs, maxOutputBytes: Math.max(1, Math.min(64 * 1024 * 1024, check.maxOutputBytes)), ...(Object.keys(processLimits).length === 0 ? {} : { limits: processLimits }), requireEnforced: !bestEffort });
-        } catch (error) { return { state: "not-run", reason: `the sandbox refused the check: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
+        } catch (error) { return { state: "not-run", reason: `the sandbox refused the check: ${safeText(error, 300)}` }; }
         entry.checkRuns.add(run);
         // A sandbox closed while the launch was being made: the check is ended at once.
         if (entry.closed) run.kill();
         let result;
         try { result = await run.result; } finally { entry.checkRuns.delete(run); }
         const both = `${result.stdout}${result.stdout !== "" && result.stderr !== "" && !result.stdout.endsWith("\n") ? "\n" : ""}${result.stderr}`;
-        const output = both.length > CHECK_OUTPUT_CHARS ? both.slice(both.length - CHECK_OUTPUT_CHARS) : both;
+        const output = safeTail(both, CHECK_OUTPUT_CHARS);
         const shown = { exitCode: result.exitCode, signal: result.signal, ms: result.durationMs, ...(output === "" ? {} : { output }) };
-        if (result.releaseProblem !== undefined) return { state: "not-run", reason: `the sandbox could not be cleaned up after the check: ${result.releaseProblem.slice(0, 300)}`, ...shown };
-        if (result.exitCode === null && result.signal === null && !result.timedOut && !result.killed) return { state: "not-run", reason: `the check could not be started: ${result.stderr.replace(/^could not start: /, "").trim().slice(0, 300)}`, ms: result.durationMs };
+        if (result.releaseProblem !== undefined) return { state: "not-run", reason: `the sandbox could not be cleaned up after the check: ${safeText(result.releaseProblem, 300)}`, ...shown };
+        if (result.exitCode === null && result.signal === null && !result.timedOut && !result.killed) return { state: "not-run", reason: `the check could not be started: ${safeText(result.stderr.replace(/^could not start: /, ""), 300).trim()}`, ms: result.durationMs };
         if (result.timedOut) return { state: "failed", timedOut: true, ...shown };
         return { state: result.exitCode === 0 && !result.killed ? "passed" : "failed", ...shown };
       } finally { await removeTree(directory, undefined); }
@@ -621,7 +621,7 @@ export function doneVerifier(parts: {
     const ran: ({ name: string } & HostCheckResult)[] = [];
     for (const c of request.checks) {
       try { ran.push({ name: c.name, ...(await parts.checks.run(attemptId, { run: c.run, timeoutMs: c.timeoutMs, maxOutputBytes: request.maxOutputBytes })) }); }
-      catch (error) { ran.push({ name: c.name, state: "not-run", reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
+      catch (error) { ran.push({ name: c.name, state: "not-run", reason: safeText(error, 300) }); }
     }
     if (state === undefined) return { checkout: false, checks: ran };
     return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence, checks: ran };

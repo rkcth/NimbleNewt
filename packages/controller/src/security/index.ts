@@ -2,7 +2,8 @@ export { ACTIONS, allows, allowsExactly, covers, inTaskScope, requireAction, too
 export { hashSecret, makeToken, newSecret, parseToken, credentialIdOf, scopedCommandId, verifySecret, type StoredCredential } from "./credentials.js";
 export { PRINCIPAL_KINDS, PRINCIPAL_LIMITS, PrincipalService, grants as checkGrants, principalIdOf, type Grant, type IssuedCredential, type NoActor, type Principal, type PrincipalBody, type PrincipalKind } from "./principals.js";
 export { CREDENTIAL_PATTERNS, findCredentialShapes, type CredentialPattern } from "./credential-patterns.js";
-export { REDACTED, redact, redactText } from "./redact.js";
+export { REDACTED, redact, redactError, redactText, redactedSink } from "./redact.js";
 export { SecureApi, type SecureDependencies } from "./secured.js";
 export { GrantService, GRANT_LIMITS, IDLE_DAYS_CEILING, checkTerms, heldRecords, idleEnd, lapsedCovering, lapsedFromNonUse, recordGrantUse, useWriteInterval, within, type LapsedGrant, type DeriveInput, type GrantInput, type GrantRecordBody, type GrantSource, type GrantTerms, type ResourceRef, type RestrictInput, type RestrictionBody } from "./grants.js";
 export { DISPATCHER_PRINCIPAL, TaskCredentialService, type IssuedTaskCredential, type TaskCredentialBody } from "./task-credentials.js";
+export { cleanUntrusted, type CleanOptions, type Cleaned } from "./clean.js";

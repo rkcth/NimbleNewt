@@ -3,7 +3,7 @@
  * says "secret" are replaced whole, and anything shaped like a NimbleNewt token or a common bearer or API key is replaced wherever it appears in text.
  */
 import { CREDENTIAL_PATTERNS } from "./credential-patterns.js";
-import { replaceSpans, scanSecrets } from "./secret-scan.js";
+import { endOfEarlierKey, replaceSpans, scanSecrets, type ScanOptions } from "./secret-scan.js";
 
 export const REDACTED = "[redacted]";
 
@@ -22,12 +22,85 @@ function sensitiveName(name: string): boolean {
  * Idempotent: the result redacts to itself.
  */
 const PRIVATE_KEY_BLOCK = new RegExp(CREDENTIAL_PATTERNS.find((p) => p.name === "private key block")!.pattern.source, "g");
-export function redactText(text: string): string {
+export function redactText(text: string, options: ScanOptions = {}): string {
   // A caller's `error.message` can be anything at run time: never throw while hiding a secret.
   if (typeof text !== "string") text = String(text ?? "");
   // A whole private key block written as such is one mark (as before); every other shape is found by the scan, which matches all of CREDENTIAL_PATTERNS through its folded views (a URL keeps its scheme, user and host).
-  const out = text.replace(PRIVATE_KEY_BLOCK, REDACTED);
+  let out = text.replace(PRIVATE_KEY_BLOCK, REDACTED);
+  // A later piece of a stream: everything up to an END line that no BEGIN here belongs to is the end of a key that began earlier, one mark.
+  if (options.continues === true) { const at = endOfEarlierKey(out); if (at !== undefined) out = REDACTED + out.slice(at); }
   return replaceSpans(out, scanSecrets(out), REDACTED);
+}
+
+/**
+ * An error made safe to hand to code that logs it (an embedder's sink): its message, stack, name, cause chain, own fields and an AggregateError's `errors` go through `redactText` (fields with a sensitive
+ * name are replaced whole). When nothing in them is a secret the SAME error object is returned (identity, class and extra fields kept); otherwise a plain `Error` copy with the same name, the cleaned
+ * message, stack and cause, and the cleaned own fields (`code` among them). A thrown non-error is returned as redacted text, as a cleaned copy of an object, or as it was. Never throws; bounded work.
+ */
+export function redactError(error: unknown): unknown {
+  // Anything can be thrown: a proxy whose traps throw, getters that throw, cycles, shared references. Nothing here may throw or run long, so the walk is bounded and a fault inside it gives a plain mark.
+  try { return scrub(error, { nodes: 0 }, []); } catch { return new Error(REDACTED); }
+}
+/** How much of a thrown value is looked at: objects (and errors) visited in all, and how deep. Past either, a value is replaced by the mark (never passed on unread). */
+const SCRUB_NODES = 500;
+const SCRUB_DEPTH = 8;
+const ERROR_OWN: ReadonlySet<string> = new Set(["message", "stack", "cause", "name", "errors"]);
+const NO_FIELDS: ReadonlySet<string> = new Set();
+/**
+ * `value` with every text in it redacted: the SAME value when nothing changed, otherwise a copy. An error's message, stack, name, cause, own fields (a child process's `stdout`, a request's headers) and an
+ * `AggregateError`'s `errors` are all read. A value met again on its own path (a cycle), or past the bounds, is replaced by the mark and counts as a change, so a copy never points back into the original.
+ */
+function scrub(value: unknown, walk: { nodes: number }, path: readonly object[]): unknown {
+  if (typeof value === "string") return redactText(value);
+  if (value === null || typeof value !== "object") return value;
+  if (path.includes(value) || ++walk.nodes > SCRUB_NODES || path.length >= SCRUB_DEPTH) return REDACTED;
+  const inner = [...path, value];
+  const fields = (from: object, skip: ReadonlySet<string>): { out: Record<string, unknown>; changed: boolean } => {
+    const out: Record<string, unknown> = {};
+    let changed = false;
+    for (const [k, v] of Object.entries(from)) {
+      if (skip.has(k)) continue;
+      const c = sensitiveName(k) && v !== null && v !== undefined ? REDACTED : scrub(v, walk, inner);
+      if (c !== v) changed = true;
+      out[k] = c;
+    }
+    return { out, changed };
+  };
+  if (value instanceof Error) {
+    const raw = value as unknown as Record<string, unknown>;
+    const rawMessage = raw["message"];
+    const message = redactText(rawMessage as string);
+    const rawStack = raw["stack"];
+    const stack = typeof rawStack === "string" ? redactText(rawStack) : undefined;
+    const rawName = raw["name"];
+    const name = typeof rawName === "string" ? redactText(rawName) : "Error";
+    const hasCause = "cause" in value;
+    const rawCause = hasCause ? raw["cause"] : undefined;
+    const cause = hasCause ? scrub(rawCause, walk, inner) : undefined;
+    const rawErrors = value instanceof AggregateError ? (value.errors as unknown) : undefined;
+    const errors = Array.isArray(rawErrors) ? rawErrors.slice(0, 50).map((e: unknown) => scrub(e, walk, inner)) : undefined;
+    const own = fields(value, ERROR_OWN);
+    const same = message === rawMessage && stack === rawStack && name === rawName && cause === rawCause && !own.changed
+      && (errors === undefined || (errors.length === (rawErrors as unknown[]).length && errors.every((e, i) => e === (rawErrors as unknown[])[i])));
+    if (same) return value;
+    const copy = new Error(message, hasCause ? { cause } : undefined);
+    Object.assign(copy, own.out);
+    copy.name = name;
+    if (stack !== undefined) copy.stack = stack;
+    if (errors !== undefined) Object.defineProperty(copy, "errors", { value: errors, writable: true, configurable: true });
+    return copy;
+  }
+  if (Array.isArray(value)) {
+    const out = value.slice(0, 200).map((v: unknown) => scrub(v, walk, inner));
+    return out.length === value.length && out.every((v, i) => v === value[i]) ? value : out;
+  }
+  const own = fields(value, NO_FIELDS);
+  return own.changed ? own.out : value;
+}
+
+/** A sink for internal faults (the embedder's `onInternalError`) that receives every error through `redactError`. */
+export function redactedSink(sink: (error: unknown) => void): (error: unknown) => void {
+  return (error) => { sink(redactError(error)); };
 }
 
 /** A copy of a JSON value with sensitive fields and secret-shaped strings replaced. Depth-limited so a hostile value cannot exhaust the stack. */

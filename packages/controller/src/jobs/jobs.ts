@@ -7,6 +7,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { REDACTED, redactText } from "../security/redact.js";
+import { afterPrivateKeyEnd, privateKeyOpen } from "../security/secret-scan.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { JOB_WAKE_KIND, JOB_WAKES_INDEX, WAKING_KINDS, wakeChanges, type JobWakeBody, type JobWakesIndex } from "./wakes.js";
 
@@ -82,7 +83,6 @@ export interface ReconciliationBody { readonly jobId: string; readonly from: Job
 export const JOB_LIMITS = { label: 200, operationId: 120, tail: 8 * 1024, keyBlock: 16 * 1024, chunk: 64 * 1024, refs: 20, artifacts: 50, orphans: 20, orphan: 200, reason: 500, evidence: 1000, checkpoint: 200, host: 120, history: 32, page: 100, scan: 1000 } as const;
 /** Ends a redacted piece in which a private-key block was left open. */
 const KEY_OPEN = "\u0001key-open";
-const PRIVATE_END = /-----END [A-Z ]*PRIVATE KEY-----/;
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 const ARTIFACT_ID = /^art-[a-z2-7]{20}$/;
 const SERVER_ID = /^mcs-[a-z2-7]{20}$/;
@@ -599,8 +599,7 @@ export class JobService {
     // NUL cannot be stored by every backend and a lone surrogate is not text; both are dropped or repaired, never refused (output is whatever the process wrote).
     const clean = value.replaceAll("\u0000", "").replaceAll("\u0001", "").replace(LONE_SURROGATE, "\ufffd");
     // A private-key block that is begun and not ended is cut out by the redaction to the end of this piece; the mark tells `#append` that the next pieces are more of it.
-    const last = [...clean.matchAll(/-----BEGIN [A-Z ]*PRIVATE KEY-----/g)].at(-1);
-    const open = last !== undefined && !PRIVATE_END.test(clean.slice(last.index));
+    const open = privateKeyOpen(clean);
     return redactText(clean) + (open ? KEY_OPEN : "");
   }
   #append(before: JobOutput, chunk: string): JobOutput {
@@ -609,17 +608,15 @@ export class JobService {
     let rest = opens ? chunk.slice(0, -KEY_OPEN.length) : chunk;
     let dropped = before.keyOpen; // characters of an unended private-key block dropped so far
     if (dropped !== undefined) {
-      const end = PRIVATE_END.exec(rest);
-      if (end === null) { dropped += rest.length; rest = ""; } else { rest = rest.slice(end.index + end[0].length); dropped = undefined; }
+      const end = afterPrivateKeyEnd(rest);
+      if (end === undefined) { dropped += rest.length; rest = ""; } else { rest = rest.slice(end); dropped = undefined; }
       if (dropped !== undefined && dropped > JOB_LIMITS.keyBlock) dropped = undefined; // a block that never ends is not allowed to silence the job for ever
     } else if (before.tail.endsWith(REDACTED)) rest = rest.replace(/^\S+/, "");
     const raw = before.tail + rest;
     // A key block may begin across two pieces (the header split), so the test runs on the joined text as well as on the marked piece.
     let open = opens && dropped === undefined;
     if (!open && dropped === undefined) {
-      const begins = [...raw.matchAll(/-----BEGIN [A-Z ]*PRIVATE KEY-----/g)];
-      const last = begins.at(-1);
-      open = last !== undefined && !PRIVATE_END.test(raw.slice(last.index));
+      open = privateKeyOpen(raw);
     }
     if (open) dropped = 0;
     const joined = redactText(raw);

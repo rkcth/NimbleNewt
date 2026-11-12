@@ -425,6 +425,14 @@ for (const backend of backends) {
     for (let i = 0; i < 17; i++) await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, output: "k".repeat(1000) });
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: endless, output: "\nlater output" });
     assert.ok((await c.read(endless)).output.tail.includes("later output"), "an unended block silences the job for a bounded stretch only");
+    // The credential-redaction follow-up: the open/ended test sees through invisible and fullwidth characters, as the scanner does. A BEGIN with a zero-width character inside still opens a block
+    // for the next report, and an END with a soft hyphen inside still closes it.
+    const hid = await c.admit(c.t1, { kind: "tool" });
+    await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: hid, state: "dispatched" });
+    for (const piece of ["go\n-----BEG\u200bIN PRIVATE KEY-----\nHIDDENLEAK1", "\nHIDDENLEAK2\n-----END PRI\u00adVATE KEY-----\nvisible again", "\n-----\uff22\uff25\uff27\uff29\uff2e PRIVATE KEY-----\nHIDDENLEAK3", "\nHIDDENLEAK4"]) await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: hid, output: piece });
+    const hidTail = (await c.read(hid)).output.tail;
+    for (const gone of ["HIDDENLEAK1", "HIDDENLEAK2", "HIDDENLEAK3", "HIDDENLEAK4"]) assert.equal(hidTail.includes(gone), false, gone);
+    assert.ok(hidTail.includes("visible again"), "output after a hidden END is kept");
     await c.jobs.report(c.worker, { commandId: cid("rp"), jobId: id, output: "a".repeat(JOB_LIMITS.tail - 1) + "\u{1F600}" });
     const cut = (await c.read(id)).output.tail;
     assert.equal(cut.length <= JOB_LIMITS.tail, true);

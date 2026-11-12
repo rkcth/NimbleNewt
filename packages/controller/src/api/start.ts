@@ -102,7 +102,7 @@ import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from 
 import { canon } from "../backup/canon.js";
 import { DatabaseTransferService, assertNotFenced, expectEpochOnFirstTake, type RestartEvent, acquireStateLock, guardStart, withStateLock, postgresFingerprint, recordFirstStart, sqliteFingerprint, postgresTargetDeps, transferTargetsFromConfig, type TransferPoint, type TransferReferences, type TransferSource, type TransferTarget } from "../transfer/index.js";
 import { ConversationTransport, MCP_ENABLED_SETTING, type TransportOptions } from "../transport/index.js";
-import { redactText } from "../security/redact.js";
+import { redactedSink, redactText } from "../security/redact.js";
 
 export type StorageChoice =
   | { readonly kind: "sqlite"; readonly path: string }
@@ -401,7 +401,10 @@ export async function startController(options: StartOptions): Promise<Controller
     return box.lock;
   };
   try {
-    const controller = await startControllerWith(options, take);
+    // Whatever an internal fault says reaches the embedder's sink with credential shapes already redacted (an error can quote a command line, a header or a provider's reply).
+    const sink = options.onInternalError;
+    const safe: StartOptions = sink === undefined ? options : { ...options, onInternalError: redactedSink(sink) };
+    const controller = await startControllerWith(safe, take);
     const close = controller.close;
     return { ...controller, close: async () => { try { await close(); } finally { await box.lock?.release(); } } };
   } catch (error) { await box.lock?.release(); throw error; }

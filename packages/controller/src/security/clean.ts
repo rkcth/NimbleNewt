@@ -16,6 +16,8 @@ export interface CleanOptions {
   readonly lines: "keep" | "fold";
   /** Unicode normal form of the result. Default `none` (unchanged); matching is NFKC-folded whatever this is. */
   readonly form?: "NFKC" | "NFC" | "none";
+  /** The value is a later piece of a stream: a private key may have begun in an earlier piece, so what comes before its END line is redacted (see `ScanOptions.continues`). */
+  readonly continues?: boolean;
 }
 
 export interface Cleaned { readonly text: string; readonly redacted: boolean }
@@ -29,10 +31,11 @@ function strip(text: string, lines: "keep" | "fold"): string {
 }
 
 export function cleanUntrusted(value: string, options: CleanOptions): Cleaned {
-  const first = redactText(value);
+  const scan = { continues: options.continues === true };
+  const first = redactText(value, scan);
   const form = options.form ?? "none";
   const stripped = strip(form === "none" ? first : first.normalize(form), options.lines);
-  const text = redactText(stripped);
+  const text = redactText(stripped, scan);
   return { text, redacted: first !== value || text !== stripped };
 }
 

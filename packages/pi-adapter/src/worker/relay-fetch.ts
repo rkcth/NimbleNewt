@@ -1,4 +1,4 @@
-import type { FromChild, HeaderList, ToChild } from "@nimblenewt/contracts";
+import { safeText, type FromChild, type HeaderList, type ToChild } from "@nimblenewt/contracts";
 
 /**
  * The `fetch` of the worker process (card H12b). The sandbox has no network, so every model call is sent over the channel to the host's relay, which makes it (with the provider's credential, which this process never sees) and sends the reply back in pieces.
@@ -95,7 +95,7 @@ export function relayFetch(relayBase: string, send: (message: FromChild) => void
           const entry = pending.get(message.id);
           pending.delete(message.id);
           if (entry === undefined) return true;
-          const error = new TypeError(`fetch failed: ${message.message}`);
+          const error = new TypeError(`fetch failed: ${safeText(message.message, 1000)}`);
           entry.fail(error);
           entry.errorStream?.(error);
           return true;

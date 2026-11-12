@@ -19,6 +19,7 @@ import type { PauseGuard } from "../lifecycle/index.js";
 import { allows } from "../security/access.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { Principal } from "../security/principals.js";
+import { cleanUntrusted } from "../security/clean.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
 import type { JsonObject } from "../storage/types.js";
@@ -208,9 +209,8 @@ const CONTINUED_KINDS = new Set(["length", "empty-visible-text", "no-work-end", 
  * Control characters other than a line break or a tab (terminal escapes among them, C1 controls, the line and paragraph separators) and invisible format characters (bidirectional overrides, zero-width characters: `\p{Cf}`)
  * are dropped from a job's output before the agent reads it.
  */
-const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu;
 /** What a job's label may not hold: any control character, a line or paragraph separator, or an invisible format character (it is shown to the owner and to later attempts). */
-const plainText = (value: string): string => redactText(value).replace(CONTROL, "");
+const plainText = (value: string): string => cleanUntrusted(value, { lines: "keep" }).text;
 const LABEL_BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
 /** The most of a refused done's list of failures (card W05) the agent is given; the controller's own text stays well under it. */
 const DONE_REFUSAL_CHARS = 8000;

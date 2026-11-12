@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
-import { redactText } from "../security/redact.js";
+import { cleanUntrusted } from "../security/clean.js";
 import type { Aggregate, AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { ScratchMode } from "./cleanup-settings.js";
 
@@ -104,13 +104,13 @@ export interface ScratchRun extends ScratchRecord { readonly replayed: boolean }
 export const scratchRecordId = (attemptId: string): string => idOf(attemptId);
 const idOf = (attemptId: string): string => `scl-${createHash("sha256").update(attemptId).digest("hex").slice(0, 32)}`;
 const json = (v: object): JsonObject => v as unknown as JsonObject;
-const text = (s: unknown, n: number): string => redactText(String(s ?? "")).replace(/\s+/g, " ").trim().slice(0, n);
+const text = (s: unknown, n: number): string => cleanUntrusted(String(s ?? ""), { lines: "fold" }).text.trim().slice(0, n);
 /**
  * What the host says is untrusted text that ends up in a message to an agent: letters, marks and digits of any script, spaces and common path punctuation survive; everything else (double quotes, angle brackets, backticks, control characters,
  * line breaks) becomes `?` or a space. Consecutive spaces are kept (a path may contain them). The message's own framing (a delimiter and numbered lines) is what stops a forged line, not this filter.
  */
 export const SAFE_OUT = /[^\p{L}\p{M}\p{N} ._\-/\\:@+=,~#%()[\]'&$!;]/gu;
-const safe = (s: unknown, n: number): string => redactText(String(s ?? "")).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim().slice(0, n).replace(SAFE_OUT, "?");
+const safe = (s: unknown, n: number): string => cleanUntrusted(String(s ?? ""), { lines: "keep" }).text.replace(/[\t\n]+/g, " ").trim().slice(0, n).replace(SAFE_OUT, "?");
 const KINDS = ["installed", "running", "other"] as const;
 /** What the host said, bounded and cleaned: a host cannot make a record or a message of unbounded size. */
 function leftoversOf(v: unknown): Leftover[] {

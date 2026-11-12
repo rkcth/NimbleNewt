@@ -93,6 +93,11 @@ test("secrets and Node's own flags are refused as controller arguments (K02 serv
   for (const arg of ["--token=abc", "--api-key=abc", "--password", "--secret=x", "sk-abcdefghijklmnop", "ghp_abcdefghijklmnopqrstuvwxyz", "AKIAABCDEFGHIJKLMNOP", "https://user:hunter2@example.com/x", "Bearer abc", "--env-file=/etc/shadow", "--env-file-if-exists", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9"]) {
     assert.throws(() => generateServiceUnit({ ...POSIX, controllerArgs: [arg] }), ServiceSpecError, arg);
   }
+  // The shared credential scanner (any letter case, fullwidth letters, invisible characters, split strings, long random runs); the keys are built at run time, a push-protection scan reads every commit.
+  const gh = "gh" + "p_" + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5";
+  for (const arg of [gh.toUpperCase(), gh.replace("ghp_", "\uff47\uff48\uff50\uff3f"), `${gh.slice(0, 10)}\u200b${gh.slice(10)}`, `"${gh.slice(0, 5)}"+"${gh.slice(5)}"`, "AS" + "IAABCDEFGHIJKLMNOP", "gl" + "pat-aB3dE5gH7jK9mN1pQ3sT", "aB3dE5gH7jK9mN1pQ3sT" + "5vX7zA9cE1gI3kM5nP7r"]) {
+    assert.throws(() => generateServiceUnit({ ...POSIX, controllerArgs: [arg] }), ServiceSpecError, arg);
+  }
   // A name that points at a file is fine; the value is not a secret.
   assert.doesNotThrow(() => generateServiceUnit({ ...POSIX, controllerArgs: ["--token-file=/home/ann/t", "--serve"] }));
 });
