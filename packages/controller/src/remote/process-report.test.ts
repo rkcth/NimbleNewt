@@ -198,7 +198,9 @@ for (const backend of backends) {
   suite("a worker that said it can look is asked for a fresh look before its report is read; one that does not answer leaves its last report standing with an unknown item beside it; one that never said so is not asked (card L02e)", async (c) => {
     const r1 = await c.host("r1");
     const { attemptId, placement, attempt } = await c.started(r1);
-    const host = hostOf(c, r1.id, { lookWaitMs: 400, pollMs: 20 });
+    // The wait ends as soon as the answer is in, so the host that is answered may wait long (review of L02e: 400 ms was too tight for a loaded PostgreSQL run); the one that is not answered waits briefly.
+    const host = hostOf(c, r1.id, { lookWaitMs: 30_000, pollMs: 20 });
+    const quick = hostOf(c, r1.id, { lookWaitMs: 300, pollMs: 20 });
     const controls = async () => (await c.remote.placement(c.dispatcherPrincipal, attemptId))!.control.map((m) => m.kind);
     await attempt.reportProcesses({ seq: 1, final: false, processes: [P("old")] });
     assert.deepEqual((await host.localWork([attemptId])).processes.map((p) => p.ref), ["old"], "a worker that never said it can look is read as before");
@@ -218,7 +220,7 @@ for (const backend of backends) {
     assert.deepEqual(fresh.processes.map((p) => p.ref), ["new one"], "the report read is the one sent in answer to the look");
     assert.deepEqual(await controls(), ["look"]);
     // A worker that does not answer: its last report and one unknown item saying it is not fresh.
-    const quiet = await host.localWork([attemptId]);
+    const quiet = await quick.localWork([attemptId]);
     assert.deepEqual(quiet.processes.map((p) => [p.ref, p.state]), [["new one", "running"], [`remote:${attemptId} (no fresh report from the worker)`, "unknown"]]);
     // A final report is never asked again.
     await attempt.complete({ status: "completed", text: "done", endKind: "normal" });
@@ -283,6 +285,60 @@ for (const backend of backends) {
     assert.deepEqual(await first.attempt.reportProcesses({ seq: 2, final: true, processes: [] }), { kept: true });
     assert.deepEqual((await host.localWork([first.attemptId])).processes.map((p) => p.ref), [`remote:${first.attemptId}`]);
   });
+
+  suite("repeated looks and kills never push the worker's other control messages out of the bounded queue: one of each is kept, the newest (review of L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, attempt } = await c.started(r1);
+    await c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "tell", text: "keep the notes short" });
+    await c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "checkpoint" });
+    const rounds = REMOTE_LIMITS.control + 5;
+    for (let i = 0; i < rounds; i += 1) { await c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "look" }); await c.remote.control(c.dispatcherPrincipal, attemptId, { kind: "kill" }); }
+    const msgs = await attempt.pollControl(0);
+    assert.deepEqual(msgs.map((m) => [m.kind, m.seq]), [["tell", 1], ["checkpoint", 2], ["look", 2 + 2 * rounds - 1], ["kill", 2 + 2 * rounds]], "the note and the checkpoint are still there for a worker that was away");
+    // Through the host, as every Stop pass does it, with a worker that says it can look and never answers.
+    await attempt.reportProcesses({ seq: 1, final: false, canLook: true, processes: [P("busy")] });
+    const host = hostOf(c, r1.id, { lookWaitMs: 1, pollMs: 1 });
+    for (let i = 0; i < REMOTE_LIMITS.control + 5; i += 1) await host.localWork([attemptId]);
+    assert.deepEqual((await attempt.pollControl(0)).map((m) => m.kind), ["tell", "checkpoint", "kill", "look"]);
+  });
+
+  suite("the bound on earlier holders drops what lists nothing first, and counts a list nobody confirmed instead of losing it: Stop still reads it as unknown and its compute still counts (review of L02e)", async (c) => {
+    const r1 = await c.host("r1");
+    const r2 = await c.host("r2");
+    const first = await c.started(r1);
+    const id = first.attemptId;
+    // The attempt is moved back and forth (moves have no bound), each new holder accepting it.
+    let moves = 0;
+    const again = async () => {
+      moves += 1;
+      const to = moves % 2 === 1 ? r2 : r1;
+      await c.remote.relocate(c.owner, { commandId: `mv-${moves}`, attemptId: id, toHostId: to.id, reason: `move ${moves}` });
+      await c.tick();
+      const offer = (await to.client.offers()).find((o) => o.order.attemptId === id)!;
+      const a = to.client.attempt(id, offer.placement);
+      await a.accept(); await a.honorContract(offer.order, FULL_ABILITIES, c.clock.now());
+      return a;
+    };
+    await first.attempt.reportProcesses({ seq: 1, final: false, processes: [P("left behind")], computeMs: 50 });
+    let a = await again();
+    // Five runs that left nothing (said so, or never reported): they go first, the unconfirmed list stays.
+    for (let i = 0; i < 5; i += 1) { if (i % 2 === 0) await a.reportProcesses({ seq: 1, final: true, processes: [] }); a = await again(); }
+    let body = (await c.remote.placement(c.dispatcherPrincipal, id))!;
+    assert.equal(body.earlier!.length, 5);
+    assert.equal(body.earlier![0]!.placement, first.placement, "the list nobody confirmed is kept over the ones that list nothing");
+    assert.equal(body.earlierLost, undefined);
+    // Five runs that each leave a list: now the oldest list must go, and it is counted.
+    for (let i = 0; i < 5; i += 1) { await a.reportProcesses({ seq: 1, final: false, processes: [P(`run ${i}`)], computeMs: 10 }); a = await again(); }
+    body = (await c.remote.placement(c.dispatcherPrincipal, id))!;
+    assert.deepEqual(body.earlier!.map((e) => e.report?.processes.map((p) => p.ref)), [["run 0"], ["run 1"], ["run 2"], ["run 3"], ["run 4"]]);
+    assert.deepEqual(body.earlierLost, { placements: 1, processes: 1, computeMs: 50 });
+    const seen = [await hostOf(c, r1.id).localWork([id]), await hostOf(c, r2.id).localWork([id])];
+    const all = seen.flatMap((x) => x.processes);
+    assert.equal(all.filter((p) => p.state === "unknown" && p.ref.includes("no longer kept")).length, 1, JSON.stringify(all));
+    assert.equal(seen.flatMap((x) => x.costs ?? []).reduce((n, x) => n + (x.computeMs ?? 0), 0), 100, "the dropped run's compute still counts");
+    // Its worker can no longer give a last word for it: nothing can confirm it now.
+    await wireRefuses("fenced", () => first.attempt.reportProcesses({ seq: 2, final: true, processes: [] }), 409);
+  }, { policy: async () => ({ dataHosts: ["host:r1", "host:r2"] }) });
 }
 
 // The worker's side, without a controller: a runner over a stub attempt and a stub host.

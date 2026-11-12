@@ -109,6 +109,11 @@ export interface PlacementBody {
    * last word (a final report) is still taken for the placement it names, so a Stop reads what the old host left, not only what the current one holds.
    */
   readonly earlier?: readonly { readonly hostId: string; readonly placement: number; readonly sessionId?: string; readonly report?: StoredProcessReport }[];
+  /**
+   * What the bound on `earlier` could no longer keep (review of L02e): an attempt can be moved any number of times, and a dropped entry that still listed something must not make a Stop read clean. Entries that list nothing are dropped
+   * first; an entry that listed something is counted here (its placements, the processes it listed, its cleanup compute) and read by Stop as one unknown item that nothing can confirm any more.
+   */
+  readonly earlierLost?: { readonly placements: number; readonly processes: number; readonly computeMs: number };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -125,12 +130,28 @@ export interface PlacementBody {
 /** What a worker last reported of its processes for one placement (card L02e). */
 export interface StoredProcessReport { readonly placement: number; /** The worker session that sent it: `seq` rises within one session (absent on a record written before this was kept). */ readonly sessionId?: string; readonly seq: number; readonly at: string; readonly final: boolean; /** The worker answers `look` and `kill`. */ readonly canLook?: true; /** Cleanup compute so far, ms. */ readonly computeMs?: number; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] }
 const EARLIER = 5;
-/** The placement as a record of an earlier holder, when something ran under it (it was accepted by a worker session). */
-const earlierOf = (x: PlacementBody): PlacementBody["earlier"] => {
-  const had = x.earlier ?? [];
-  if (x.sessionId === undefined) return had.length === 0 ? undefined : had;
-  const report = x.processReport !== undefined && x.processReport.placement === x.placement ? x.processReport : undefined;
-  return [...had, { hostId: x.hostId, placement: x.placement, sessionId: x.sessionId, ...(report === undefined ? {} : { report }) }].slice(-EARLIER);
+/**
+ * The placement as a record of an earlier holder, when something ran under it (it was accepted by a worker session), with what the bound could not keep. Over the bound the entry dropped is, in this order: the oldest whose worker confirmed
+ * it left nothing (a final report listing nothing), the oldest that lists nothing, then the oldest of all, which is counted in `earlierLost` (review of L02e: a list nobody confirmed is never silently dropped).
+ */
+const earlierOf = (x: PlacementBody): { earlier?: PlacementBody["earlier"]; earlierLost?: PlacementBody["earlierLost"] } => {
+  const list = [...(x.earlier ?? [])];
+  if (x.sessionId !== undefined) {
+    const report = x.processReport !== undefined && x.processReport.placement === x.placement ? x.processReport : undefined;
+    list.push({ hostId: x.hostId, placement: x.placement, sessionId: x.sessionId, ...(report === undefined ? {} : { report }) });
+  }
+  let lost = x.earlierLost;
+  while (list.length > EARLIER) {
+    let i = list.findIndex((e) => e.report?.final === true && e.report.processes.length === 0);
+    if (i < 0) i = list.findIndex((e) => (e.report?.processes.length ?? 0) === 0);
+    if (i < 0) i = 0;
+    const e = list[i]!;
+    const listed = e.report?.processes.length ?? 0;
+    const compute = e.report?.computeMs ?? 0;
+    if (listed > 0 || compute > 0) lost = { placements: (lost?.placements ?? 0) + (listed > 0 ? 1 : 0), processes: (lost?.processes ?? 0) + listed, computeMs: Math.min(Number.MAX_SAFE_INTEGER, (lost?.computeMs ?? 0) + compute) };
+    list.splice(i, 1);
+  }
+  return { ...(list.length === 0 ? {} : { earlier: list }), ...(lost === undefined ? {} : { earlierLost: lost }) };
 };
 
 /** The native Pi store of an agent has one exclusive owner host. The record says which, and which attempt holds it right now. */
@@ -797,8 +818,8 @@ export class RemoteWorkerService {
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
         const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, withdrawn: _w, ...rest } = b; void _s; void _a; void _r; void _c; void _p; void _w;
-        const earlier = b.state === "relocating" ? b.earlier : earlierOf(b);
-        next = { ...rest, ...(earlier === undefined ? {} : { earlier }), ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        const kept = b.state === "relocating" ? { earlier: b.earlier, earlierLost: b.earlierLost } : earlierOf(b);
+        next = { ...rest, ...(kept.earlier === undefined ? {} : { earlier: kept.earlier }), ...(kept.earlierLost === undefined ? {} : { earlierLost: kept.earlierLost }), ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -991,7 +1012,10 @@ export class RemoteWorkerService {
           contract = { ...rest, reconfirmSince: this.#runner.now(), digest: restartDigest(contract.digest, msg.recipe), recipe: { revision: msg.recipe.revision, reach: [...msg.recipe.reach], ...(msg.recipe.limits === undefined ? {} : { limits: { ...msg.recipe.limits } as JsonObject }) } };
         }
       }
-      return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
+      // A `look` or a `kill` replaces one of its kind still queued (review of L02e): every Stop pass asks for a look, and a worker that is slow to read must not find its stop, checkpoint, restart or note pushed out of the bounded
+      // queue by repeated looks. The newer one says all the older one did; a worker that read the older one already is not hurt by its going.
+      const queued = msg.kind === "look" || msg.kind === "kill" ? current.body.control.filter((m) => m.kind !== msg.kind) : current.body.control;
+      return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...queued, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
     }, "control");
     return done.body.controlSeq;
   }
@@ -2036,10 +2060,10 @@ export class RemoteWorkerService {
       const storeBody = store?.body as unknown as StoreBody | undefined;
       if (storeBody !== undefined && storeBody.ownerHostId !== x.hostId) throw new DomainError("invalid_transition", `the native Pi store of ${x.agentId} belongs to ${storeBody.ownerHostId}, not to the host the attempt runs on`);
       const at = this.#runner.now();
-      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, earlier: _e, ...rest } = x; void _s; void _a; void _r; void _p; void _e;
-      const earlier = earlierOf(x);
+      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, earlier: _e, earlierLost: _l, ...rest } = x; void _s; void _a; void _r; void _p; void _e; void _l;
+      const kept = earlierOf(x);
       const next: PlacementBody = {
-        ...rest, ...(earlier === undefined ? {} : { earlier }), hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
+        ...rest, ...(kept.earlier === undefined ? {} : { earlier: kept.earlier }), ...(kept.earlierLost === undefined ? {} : { earlierLost: kept.earlierLost }), hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
         history: pushHistory(x.history, { hostId: x.hostId, placement: x.placement, at, reason: `relocated: ${reason}`, commandId }),
       };
       const storeChange: Change[] = [];

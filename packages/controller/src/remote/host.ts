@@ -142,6 +142,10 @@ export class RemoteWorkerHost implements WorkerHost {
         if (e.report.computeMs !== undefined) compute = (compute ?? 0) + e.report.computeMs;
       }
       if (placement.hostId === this.hostId) {
+        // What the bound on the earlier holders could no longer keep (review of L02e): nobody can confirm it any more, so it stays one unknown item, and its compute still counts. Read by the host that holds the attempt now, once.
+        const lost = placement.earlierLost;
+        if (lost !== undefined && lost.placements > 0) processes.push({ attemptId, ref: `remote:${attemptId} (what ${lost.placements} earlier placement(s) listed, ${lost.processes} process(es), is no longer kept)`, kind: "process", state: "unknown" });
+        if (lost !== undefined && lost.computeMs > 0) compute = (compute ?? 0) + lost.computeMs;
         const live = ["offered", "accepted", "relocating"].includes(placement.state);
         const report = placement.processReport !== undefined && placement.processReport.placement === placement.placement ? placement.processReport : undefined;
         if (live && report === undefined) processes.push({ attemptId, ref: `remote:${attemptId}`, kind: "process", state: "unknown" });

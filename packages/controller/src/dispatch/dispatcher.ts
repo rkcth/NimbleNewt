@@ -1460,9 +1460,14 @@ export class DispatcherService {
     const processes: HostLocalWork["processes"][number][] = [];
     const costs = new Map<string, { costMicros: number; computeMs: number }>();
     const asked = new Set(ids);
-    for (const host of this.#deps.workers) {
-      if (host.localWork === undefined) continue;
-      const got = await host.localWork(ids);
+    // The hosts are asked at once, at most 16 at a time (review of L02e): a remote host waits up to a few seconds for its workers' fresh looks, and one after another a Stop of many hosts would wait that long for each. The answers
+    // are read in host order, as before; one host that fails fails the look.
+    const hosts = this.#deps.workers.filter((h) => h.localWork !== undefined);
+    const answers: (HostLocalWork | undefined)[] = new Array(hosts.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(16, hosts.length) }, async () => { for (let i = next++; i < hosts.length; i = next++) answers[i] = await hosts[i]!.localWork!(ids); }));
+    for (const [i, host] of hosts.entries()) {
+      const got = answers[i];
       for (const p of (Array.isArray(got?.processes) ? got.processes : []).slice(0, 200)) {
         // A process of an attempt that was not asked about is not part of this answer (a host may know more than the caller asked for).
         if (p?.attemptId !== undefined && !asked.has(p.attemptId)) continue;
