@@ -375,3 +375,33 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+test("a supervisor the owner paused cannot decide its report's request through the started controller (the real pause gates are wired); after the resume it can (card A09 sixth slice, review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-a09h-"));
+  const applier = new FakeApplier();
+  const w = await boot(d, applier);
+  const { c, call, cid } = w;
+  try {
+    const boss = await w.agent("Bea");
+    const ann = await w.agent("Ann", boss.id);
+    assert.ok((await call(w.owner, "maintenance.settings.enable", { what: "bosses" }, cid("c"))).ok);
+    assert.ok((await call(w.owner, "maintenance.settings.set", { bossKinds: ["mount"] }, cid("c"))).ok);
+    const asked = await call(ann.token, "maintenance.request", { kind: "mount", spec: { mountPath: "/data/docs", resource: `${ann.id}.docs`, mode: "read" }, reason: "read docs", rollbackPlan: "unmount" }, "m1");
+    assert.ok(asked.ok, JSON.stringify(asked));
+    const id = asked.result.maintenanceId as string;
+    const item = (await call(boss.token, "maintenance.get", { maintenanceId: id })).result.item;
+    await c.services.pauses.pause(w.rob, { commandId: "pz-boss", scope: { kind: "agent", id: boss.id }, reason: "the owner asked" });
+    const refused = await call(boss.token, "maintenance.decide", { maintenanceId: id, verdict: "approve", specDigest: item.specDigest }, cid("d"));
+    assert.equal(refused.error?.code, "forbidden", JSON.stringify(refused));
+    assert.equal((await call(boss.token, "maintenance.revoke", { maintenanceId: id, reason: "x" }, cid("rv"))).error?.code, "forbidden", "a held supervisor does not revoke either");
+    assert.equal((await call(w.owner, "maintenance.get", { maintenanceId: id })).result.item.status, "pending");
+    assert.equal(applier.calls.length, 0);
+    await c.services.pauses.resume(w.rob, { commandId: "rs-boss", scope: { kind: "agent", id: boss.id }, reason: "go on" });
+    const decided = await call(boss.token, "maintenance.decide", { maintenanceId: id, verdict: "approve", specDigest: item.specDigest }, cid("d"));
+    assert.ok(decided.ok, JSON.stringify(decided));
+    assert.equal((await call(w.owner, "maintenance.get", { maintenanceId: id })).result.item.decision.via, "supervisor");
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});

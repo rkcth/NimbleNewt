@@ -2480,11 +2480,12 @@ export class DispatcherService {
     const credential = await this.#deps.credentials.issueForAttempt(this.#deps.principal, { commandId: `dpa-cred:${b.attemptId}`, attemptId: b.attemptId, ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }) });
     const credentialId = credential.token.slice(0, credential.token.lastIndexOf("."));
     const environment = await this.#pin(b);
+    // Pinned at the claim, once (card A09 sixth slice): a restart of the attempt reads the recorded pin, so an environment made or activated since never reaches a running attempt.
     // The limits of this launch (card A08d): the pinned environment's figures cut by the installation's. A figure that cannot be read or is not valid refuses the attempt, never lets it run with a guessed limit.
     let launch: LaunchLimitsRecord | undefined;
     let limitRefusal: string | undefined;
     try { launch = await this.#launchLimits(b, environment); } catch (error) { limitRefusal = `the limits of this launch could not be worked out (${errorText(error)}), so nothing was started`.slice(0, 400); }
-    await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? {} : { environment }) }, ...(launch === undefined ? {} : { launchLimits: launch }) }));
+    await this.#update(b.attemptId, (x) => ({ ...x, credentialId, revisions: { ...x.revisions, ...(environment === undefined ? { noEnvironment: true as const } : { environment }) }, ...(launch === undefined ? {} : { launchLimits: launch }) }));
     if (limitRefusal !== undefined) {
       await this.#end(b.attemptId, "failed", `the worker did not start: ${limitRefusal}`, { readmit: false });
       return { kind: "skipped", check: "host", reason: `the worker did not start: ${limitRefusal}` };
@@ -2497,7 +2498,7 @@ export class DispatcherService {
     // The anchor is the controller's own text about the task, so it is counted with the rules in the starting-size watch.
     const startParts = { task: taskText.length, rules: rules.length + (anchor === undefined ? 0 : anchor.block.text.length + 2), handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
     const order: WorkOrder = {
-      attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe,
+      attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe, ...(environment === undefined ? {} : { environmentRevision: environment }),
       content: (anchor === undefined ? "" : `${anchor.block.text}\n\n`) + taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}${b.wakeRound === undefined ? "" : `:wk${b.wakeRound}`}`, startParts,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,
       ...(b.resumeFrom === undefined ? {} : { resumeFrom: b.resumeFrom }), ...(b.resumeNote === undefined && reviewed === undefined ? {} : { resumeNote: [b.resumeNote, reviewed].filter((x) => x !== undefined).join("\n") }),
@@ -2780,6 +2781,8 @@ export class DispatcherService {
 
   async #pin(b: DispatchBody): Promise<number | undefined> {
     if (this.#deps.environments === undefined) return undefined;
+    // An attempt that already began without an environment stays without one; one with a recorded revision asks for exactly it (the pin is kept per attempt, so the answer is the same revision whatever the agent's environment is now).
+    if (b.revisions?.noEnvironment === true && b.revisions.environment === undefined) return undefined;
     const agent = await this.#deps.credentials.principalOf(this.#deps.principal, b.attemptId);
     try { return (await this.#deps.environments.pin(agent, { commandId: `dpa-env:${b.attemptId}`, attemptId: b.attemptId, agentId: b.agentId, kind: "attempt" })).revision; } catch (error) {
       // An agent with no environment revision runs without one; the record says so by having none.

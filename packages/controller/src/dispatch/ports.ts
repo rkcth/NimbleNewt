@@ -60,6 +60,8 @@ export interface WorkOrder {
   /** The task credential: shown here once, kept by nobody else. The worker uses it for the controller's state API; the controller does not need it for calls through the gateway. */
   readonly credential: string;
   readonly recipe: RecipeSummary;
+  /** The agent's environment revision this attempt is pinned to (card A09 sixth slice): a host that mounts the agent's environment mounts this revision, never whichever is active now. Absent: the agent has no environment. */
+  readonly environmentRevision?: number;
   /** The text of the task and the request ID of the turn: the same attempt always names the same request, so a restart finds the original. */
   readonly content: string;
   readonly requestId: string;
