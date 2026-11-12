@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { Launcher, PointerSwitcher, SimulatedCrash, SymlinkSwitcher } from "../release/index.js";
+import { LAUNCHER_FILE, Launcher, PointerSwitcher, SimulatedCrash, SymlinkSwitcher, signedText } from "../release/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -167,5 +167,103 @@ test("release staging and activation end to end: the owner's word only, bound to
     const tampered = await owner("release.activate", { candidateId: two, digest: st2.digest }, "a10");
     assert.equal(tampered.error?.code, "invalid_transition");
     assert.equal(link(), `releases/${one}`);
+  } finally { await c.close(); unlockAll(join(root, "releases")); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("signed releases, the release.manage permission, the migration plan and the target installation through the real controller, the API and chat (card K02)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k02b-"));
+  const root = join(d, "rel");
+  const say: Record<string, unknown[]> = {};
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [],
+    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) },
+    releases: { root, switcher: "pointer", platform: { os: "linux", arch: "x64" }, installationId: "home" },
+  });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    await c.services.principals.enroll(rob, { commandId: "e1", kind: "agent", name: "builder", grants: [{ action: "release.report", project: "*" }] });
+    await c.services.principals.enroll(rob, { commandId: "e2", kind: "agent", name: "mgr", grants: [{ action: "release.manage", project: "*" }] });
+    const builder = await c.services.principals.authenticate((await c.services.principals.issueCredential(rob, "agent:builder")).token);
+    const builderToken = (await c.services.principals.issueCredential(rob, "agent:builder")).token;
+    const mgrToken = (await c.services.principals.issueCredential(rob, "agent:mgr")).token;
+    const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    const owner = (op: string, args: Record<string, unknown>, id?: string) => call(boot.token, op, args, id);
+    assert.ok((await owner("release.host", { hostId: "lx", os: "linux", arch: "x64" }, "h1")).ok);
+    // The controller recorded how far the database schema has gone, for the launcher, as soon as the database was open.
+    const launcherFile = JSON.parse(readFileSync(join(root, LAUNCHER_FILE), "utf8")) as { db?: { version: number; by: string } };
+    assert.ok((launcherFile.db?.version ?? 0) >= 1, JSON.stringify(launcherFile));
+    assert.equal((await owner("release.status", {})).result.item.databaseSchema, launcherFile.db!.version);
+
+    const compat = JSON.stringify({ protocol: { min: 1, max: 1 }, schema: { min: 1, max: 99 } });
+    const digests = new Map<string, string>();
+    const candidate = async (tag: string, extra: Record<string, unknown>) => {
+      const files = { "nn.js": tag, "compat.json": compat };
+      const artifacts = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, sha(v)]));
+      const manifest = { sourceCommit: "c".repeat(40), suiteRevision: "s1", artifacts, dependencyLocks: { lock: sha("lock") }, matrix: [{ os: "linux", arch: "x64" }], ...extra };
+      const submitted = (await owner("release.submit", { manifest }, `sub-${tag}`)).result;
+      const id = submitted.candidateId as string;
+      digests.set(id, submitted.manifestDigest as string);
+      const att = (await owner("release.issue", { candidateId: id, cell: { os: "linux", arch: "x64" }, hostId: "lx", workerId: builder.id, timeoutSeconds: 600, memoryMb: 2048 }, `iss-${tag}`)).result.attemptId as string;
+      const rep = await call(builderToken, "release.report", { attemptId: att, sourceCommit: "c".repeat(40), suiteRevision: "s1", artifactHashes: artifacts, dependencyLockHashes: { lock: sha("lock") }, environment: { os: "linux", arch: "x64" }, outcome: "pass", counts: { passed: 1, failed: 0, skipped: 0 }, logDigest: sha("log"), summary: "ok" }, `rep-${tag}`);
+      assert.ok(rep.ok, JSON.stringify(rep));
+      for (const [k, v] of Object.entries(files)) { const p = join(root, "incoming", id, k); mkdirSync(join(p, ".."), { recursive: true }); writeFileSync(p, v); }
+      return id;
+    };
+    const plan = sha("add column");
+    const one = await candidate("one", { migrationPlan: plan, targets: ["home"] });
+    const elsewhere = await candidate("two", { targets: ["office"] });
+
+    // The new operations: the worker-only agent reaches none of them; the manager reads the trust root but does not change it.
+    for (const [op, args] of [["release.trust.list", {}], ["release.trust.add", { publicKey: "AAAA" }], ["release.trust.remove", { keyId: "0".repeat(16) }], ["release.trust.require", { required: true }], ["release.signature.attach", { candidateId: one, signature: "AAAA" }]] as const)
+      { const r = await call(builderToken, op, args, op === "release.trust.list" ? undefined : `b-${op}`); assert.equal(r.error?.code, "forbidden", `${op} ${JSON.stringify(r)}`); }
+    assert.ok((await call(mgrToken, "release.trust.list", {})).ok);
+    for (const [op, args] of [["release.trust.add", { publicKey: "AAAA" }], ["release.trust.remove", { keyId: "0".repeat(16) }], ["release.trust.require", { required: true }], ["release.approve", { candidateId: one }], ["release.staging.settings.set", { requireApproval: false }]] as const)
+      assert.equal((await call(mgrToken, op, args, `m-${op}`)).error?.code, "forbidden", op);
+
+    // The owner trusts a key through chat: shown first, applied on the word.
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const pub = publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const turn = async (id: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: id, text })).outcomes; };
+    // The chat refuses anything that looks like a key, so a key is pasted nowhere: the owner puts it in a file in the trust folder and names the file.
+    await assert.rejects(() => c.chat!.submit(boot.token, { messageId: "t0", text: `trust the key ${pub}` }), /looks like a credential or key/);
+    mkdirSync(join(root, "trust"), { recursive: true });
+    writeFileSync(join(root, "trust", "build.pub"), `${pub}\n`);
+    const trustText = "trust the release signing key in the file build.pub for our build machine";
+    const shown = await turn("t1", trustText, [{ kind: "command", op: "release.trust.add", args: { keyFile: "build.pub", label: "build machine" }, evidence: trustText, basis: "owner" }]);
+    assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
+    assert.equal((await owner("release.trust.list", {})).result.item.keys.length, 0, "a proposal trusts nothing");
+    const yes = await turn("t2", "yes, trust it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "trust it", basis: "owner" }]);
+    assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
+    const listed = (await owner("release.trust.list", {})).result.item;
+    assert.deepEqual([listed.keys.length, listed.required], [1, true]);
+
+    // Unsigned: not staged, by the owner or the manager. A target for another installation: not staged even once signed.
+    const sig = (id: string) => sign(null, signedText(id, digests.get(id)!), privateKey).toString("base64");
+    assert.equal((await owner("release.stage", { candidateId: one }, "s0")).error?.code, "invalid_transition");
+    const attached = await call(mgrToken, "release.signature.attach", { candidateId: one, signature: sig(one) }, "g1");
+    assert.ok(attached.ok, JSON.stringify(attached));
+    assert.equal((await call(mgrToken, "release.signature.attach", { candidateId: elsewhere, signature: sig(one) }, "g2")).error?.code, "invalid_command", "a signature over another candidate");
+    await call(mgrToken, "release.signature.attach", { candidateId: elsewhere, signature: sig(elsewhere) }, "g3");
+    assert.equal((await call(mgrToken, "release.stage", { candidateId: elsewhere }, "s1")).error?.code, "invalid_transition", "built for another installation");
+    const st = await call(mgrToken, "release.stage", { candidateId: one }, "s2");
+    assert.ok(st.ok, JSON.stringify(st));
+
+    // The manager activates only what the owner approved, with the migration plan quoted.
+    assert.equal((await call(mgrToken, "release.activate", { candidateId: one, digest: st.result.digest, migrationPlan: plan }, "a1")).error?.code, "invalid_transition", "not approved yet");
+    assert.ok((await owner("release.approve", { candidateId: one }, "ap1")).ok);
+    assert.equal((await call(mgrToken, "release.activate", { candidateId: one, digest: st.result.digest }, "a2")).error?.code, "invalid_command", "the plan is not quoted");
+    assert.equal((await owner("release.activate", { candidateId: one, digest: st.result.digest, migrationPlan: sha("other") }, "a3")).error?.code, "invalid_command", "the wrong plan, even by the owner");
+    assert.equal(existsSync(join(root, "current.json")), false);
+
+    // Chat: activation fills the plan from the candidate's record and shows it, with the signature; the interpreter's own value is dropped.
+    const actText = `activate release ${one}`;
+    const prop = await turn("a1", actText, [{ kind: "command", op: "release.activate", args: { candidateId: one, migrationPlan: sha("invented") }, evidence: actText, basis: "owner" }]);
+    assert.equal(prop[0]!.status, "proposed", JSON.stringify(prop));
+    const preview = JSON.stringify(prop[0]!.preview);
+    assert.ok(preview.includes(plan) && !preview.includes(sha("invented")) && preview.includes("home") && preview.includes("Signed by trusted key"), preview);
+    const applied = await turn("a2", "yes, activate it", [{ kind: "apply_proposal", proposalId: prop[0]!.proposalId, evidence: "activate it", basis: "owner" }]);
+    assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
+    assert.equal((JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release, one);
   } finally { await c.close(); unlockAll(join(root, "releases")); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

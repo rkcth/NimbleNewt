@@ -6,3 +6,4 @@ export * from "./heartbeat.js";
 export * from "./supervisor.js";
 export * from "./service-units.js";
 export * from "./updater.js";
+export * from "./trust.js";
