@@ -222,6 +222,9 @@ test("start binds the controller's services to the local worker's guards, offers
     await built[0]!.recordCompaction(compacted, { ...note, digest: "d".repeat(64) });
     const latest = await chain.latestCompaction(owner, task);
     assert.equal(latest?.generation, 2, "the repeat of the same compaction is one; the other follows it");
+    // Card C07q follow-up: the owner reads that what the process kept is a plain extract, not a model's summary.
+    const reported = (await chain.getCompaction(owner, latest!.id))!;
+    assert.deepEqual([reported.degraded, /\(30 messages, extractive\)$/.test(reported.title)], [true, true]);
     assert.equal(latest?.lineage.length, 1);
     await built[0]!.recordCompaction({ ...(order as object), taskId: "tsk-bbbbbbbbbbbbbbbbbbbb", attemptId: "att-none" } as never, note);
     const mcp = c.dispatch.mcp!;

@@ -47,6 +47,7 @@ import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unanswere
 import { sealContract } from "../remote/contract.js";
 import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
+import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
@@ -60,6 +61,8 @@ const NOTICE_DETAIL = 200;
 const HELD_TITLE = 40;
 /** The host that last took an attempt of a task (card H12m): where the task's checkout is when it has no live attempt. One record per task. */
 const PLACED_KIND = "task-placement";
+/** A resume check running apart from the tick (card L04d follow-up). `settledAt` is set when it ended, with `value` or `error`. */
+interface ResumeJob { promise: Promise<void>; readonly started: number; late: boolean; detached: boolean; settledAt?: number; value?: unknown; error?: unknown }
 /** Where the scan of assignments stopped (card H12c): the next tick, of this process or of one after a restart, goes on from there instead of from the beginning. */
 const CURSOR: AggregateRef = { kind: "dispatch-cursor", id: "scan" };
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
@@ -93,7 +96,15 @@ export type RouteChoice =
   | { readonly none: true; readonly reasons: readonly string[] };
 export type RouteResolver = (command: { readonly commandId: string; readonly taskId: string }) => Promise<RouteChoice>;
 
-export interface DispatcherLoop { readonly name: string; run(by: Principal): Promise<unknown> }
+export interface DispatcherLoop {
+  readonly name: string;
+  run(by: Principal): Promise<unknown>;
+  /**
+   * The loop makes model calls or other slow calls (card L04d follow-up: the resume sweep carries reviews on): it runs apart from the tick, which waits for it at most `resumeInlineMs` (default 250 ms) and goes on. It is not
+   * started again while it runs, and one that runs past `resumeJobMs` (default 5 minutes) is reported once through `onError`; a fault is reported there too. Its work is in the store, so a stop loses nothing.
+   */
+  readonly apart?: boolean;
+}
 
 /** The dispatcher's side of the fallback service (card R04c). `key` names the call an attempt begins (the same key gives the same call), so a look and the begin that follows agree on it. */
 export interface ModelCalls {
@@ -287,6 +298,18 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly endHookMs?: number;
   /** How long the ended hook may run before it is cut off (default: `endHookMs`). */
   readonly endedHookMs?: number;
+  /**
+   * Card L04d follow-up: the resume check's model calls (the second agent that reviews what changed) run apart from the tick. The tick waits at most this long (default 250 ms, 0 = do not wait) for a check that
+   * has just been started, so a quick one still proceeds in the same tick; a slower one is waited for by later ticks while the tick goes on with other attempts. The check's state is kept in the store, so a
+   * restart simply asks again (the same command answers where it stands).
+   */
+  readonly resumeInlineMs?: number;
+  /** How long a resume check may run apart from the tick before the owner's error report says it is late (default 5 minutes; 0 = never said). It is still waited for: the model call has the client's own bounds and cannot be taken back from here. */
+  readonly resumeJobMs?: number;
+  /** How many resume checks may run apart at once (default 4). A check beyond that waits for a free place; nothing is dropped. */
+  readonly resumeJobsMax?: number;
+  /** How long `shutdown` waits for resume checks and loops running apart from the tick (default 5 s). After it, neither `shutdown` nor `idle` waits for them (L04d follow-up review). */
+  readonly resumeShutdownMs?: number;
   /** Assignments looked at per tick. Default 100. */
   readonly scanPage?: number;
   /** How long the dispatcher expects an attempt to run when the contract says nothing, for the meeting check (M04). Default 30 minutes. */
@@ -424,6 +447,8 @@ export class DispatcherService {
   readonly #asking = new Set<string>();
   /** Loops that started in an earlier tick and have not ended (a hung one is not started again on top of itself). */
   readonly #loopsRunning = new Set<string>();
+  /** Loops running apart from the tick (`DispatcherLoop.apart`), by name. */
+  readonly #apartLoops = new Map<string, { readonly promise: Promise<void>; readonly started: number; late: boolean; detached: boolean }>();
   readonly #path: ToolPath;
   /** Names this dispatcher in the commands of its updates: two dispatchers that read one revision must not share a command (the second would be answered with the first's result). */
   readonly #instance = randomUUID().slice(0, 8);
@@ -449,6 +474,11 @@ export class DispatcherService {
   /** The cut-off signals of the hooks now running: `shutdown` aborts them all at once so a hook gives up its claims (an order's lease) before the store closes. */
   readonly #endedAborts = new Set<AbortController>();
   readonly #endingBy = new Map<string, Promise<{ readmitted?: string }>>();
+  /** Card L04d follow-up: the resume checks now running apart from the tick, by check command key (in memory only: the check itself is in the store, so a restart asks again). */
+  readonly #resumeJobs = new Map<string, ResumeJob>();
+  /** Set by `shutdown` once the off-tick checks had their bounded time; `#shutSignal` wakes an `idle()` that was waiting for them. */
+  #shutDown = false;
+  readonly #shutSignal: { promise: Promise<void>; resolve: () => void } = (() => { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; })();
   /** Consecutive ticks an attempt pinned to a host has waited for it (in memory: a restart starts the count again). */
   /** Per attempt: the route move the context already accepted (card C07f), so a start that waits does not rebuild the context every tick. Bounded. */
   readonly #routeOk = new Map<string, string>();
@@ -488,7 +518,23 @@ export class DispatcherService {
   async #runLoop(loop: DispatcherLoop): Promise<void> {
     const limit = this.#deps.loopTimeoutMs ?? 60_000;
     this.#loopsRunning.add(loop.name);
-    const running = loop.run(this.#deps.principal).finally(() => { this.#loopsRunning.delete(loop.name); });
+    const running = loop.run(this.#deps.principal).finally(() => { this.#loopsRunning.delete(loop.name); this.#apartLoops.delete(loop.name); });
+    if (loop.apart === true) {
+      // Run apart from the tick: waited for only briefly. A fault after that is reported (nobody awaits it), one before it is the loop's failure as for any loop.
+      const apart = { promise: running.then(() => undefined, () => undefined), started: Date.now(), late: false, detached: false };
+      this.#apartLoops.set(loop.name, apart);
+      const inline = this.#options.resumeInlineMs ?? 250;
+      let settled = false;
+      let failure: { error: unknown } | undefined;
+      void running.then(() => { settled = true; }, (error: unknown) => { settled = true; failure = { error }; if (apart.detached) this.#options.onError?.(error); });
+      if (inline > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([apart.promise, new Promise<void>((resolve) => { timer = setTimeout(resolve, inline); })]).finally(() => clearTimeout(timer));
+      }
+      if (!settled) { apart.detached = true; return; }
+      if (failure !== undefined) throw failure.error;
+      return;
+    }
     if (limit <= 0) { await running; return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${loop.name} took longer than ${Math.round(limit / 1000)} seconds; the tick went on without it`)), limit); });
@@ -609,7 +655,18 @@ export class DispatcherService {
     // 6. The loops of the services that said "the controller's loop must call it". A loop that fails is reported and does not stop the others.
     const loops: { name: string; ok: boolean; error?: string }[] = [];
     for (const loop of this.#deps.loops ?? []) {
-      if (this.#loopsRunning.has(loop.name)) { loops.push({ name: loop.name, ok: false, error: "still running from an earlier tick" }); continue; }
+      if (this.#loopsRunning.has(loop.name)) {
+        // A loop that runs apart is meant to outlast a tick: still running is not a fault, until it is past its bound (reported once).
+        const apart = this.#apartLoops.get(loop.name);
+        if (loop.apart === true && apart !== undefined) {
+          const bound = this.#options.resumeJobMs ?? 300_000;
+          if (bound > 0 && !apart.late && Date.now() - apart.started > bound) { apart.late = true; this.#options.onError?.(new Error(`${loop.name} has been running apart from the tick for more than ${Math.round(bound / 1000)} seconds; it is still waited for`)); }
+          loops.push({ name: loop.name, ok: true });
+          continue;
+        }
+        loops.push({ name: loop.name, ok: false, error: "still running from an earlier tick" });
+        continue;
+      }
       try { await this.#runLoop(loop); loops.push({ name: loop.name, ok: true }); } catch (error) {
         if (isDomainError(error, "stale_epoch")) throw error;
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
@@ -657,6 +714,11 @@ export class DispatcherService {
     // Ended hooks still running are told to stop now (they give up what they hold) and get their time (each is cut off by its own timeout too) before the process goes on to close the store.
     for (const c of this.#endedAborts) c.abort();
     await Promise.race([Promise.allSettled([...this.#endedCalls]), new Promise<void>((resolve) => { setTimeout(resolve, (this.#options.endedHookMs ?? this.#options.endHookMs ?? 30_000) + 1000).unref(); })]);
+    // Resume checks running apart from the tick get a short time to end before the store closes (they are bounded by their client; a check cut short here is asked again by the next controller, which finds it in the store).
+    if (this.#resumeRunning() > 0 || this.#apartLoops.size > 0) await Promise.race([Promise.allSettled([...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)]), new Promise<void>((resolve) => { setTimeout(resolve, this.#options.resumeShutdownMs ?? 5000).unref(); })]);
+    // From here `idle()` no longer waits for them: the driver's stop calls it after this, and a model call (or a sweep of several) must not hold the controller's stop past the bound above (L04d follow-up review).
+    this.#shutDown = true;
+    this.#shutSignal.resolve();
     await this.dropWorkers();
     return { closed, errors };
   }
@@ -686,8 +748,12 @@ export class DispatcherService {
   }
 
   /** Resolves when every turn this dispatcher started has ended. */
+  #resumeRunning(): number { let n = 0; for (const j of this.#resumeJobs.values()) if (j.settledAt === undefined) n++; return n; }
+
   async idle(): Promise<void> {
-    while (this.#live.size > 0 || this.#ending.size > 0) await Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending]);
+    // After `shutdown`, checks and loops running apart from the tick are not waited for: shutdown gave them their bounded time, and what they leave is in the store for the next controller.
+    const apart = (): boolean => !this.#shutDown && (this.#resumeRunning() > 0 || this.#apartLoops.size > 0);
+    while (this.#live.size > 0 || this.#ending.size > 0 || apart()) await Promise.race([Promise.allSettled([...[...this.#live.values()].map((l) => l.turn), ...this.#ending, ...(this.#shutDown ? [] : [...[...this.#resumeJobs.values()].map((j) => j.promise), ...[...this.#apartLoops.values()].map((l) => l.promise)])]), ...(this.#shutDown ? [] : [this.#shutSignal.promise])]);
   }
 
   /**
@@ -729,6 +795,20 @@ export class DispatcherService {
       heartbeat: () => this.heartbeat(attemptId),
       acknowledgeDecisions: () => this.acknowledgeDecisions(attemptId),
     };
+  }
+
+  /**
+   * Card G09 follow-up: the cost after a change of model route, said to the owner in the task's activity once per attempt and move. It reads the routing table (is the provider paid) and the task's budget accounting
+   * (spent against the limit); a fault in either is said as unknown figures, never a guess, and never stops the start.
+   */
+  async #costStep(attemptId: string, taskId: string, from: string, to: string): Promise<void> {
+    if (this.#deps.activity === undefined) return;
+    let table: Awaited<ReturnType<NonNullable<DispatcherDeps["routing"]>["get"]>> | typeof UNREADABLE | undefined;
+    let budget: Awaited<ReturnType<NonNullable<DispatcherDeps["budgets"]>["accounting"]>> | typeof UNREADABLE | undefined;
+    try { table = await this.#deps.routing?.get(); } catch (error) { this.#options.onError?.(error); table = UNREADABLE; }
+    try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, taskId); } catch (error) { this.#options.onError?.(error); budget = UNREADABLE; }
+    const words = routeCostWords({ table, from, to, budget });
+    await this.#stepOf(attemptId, `route-cost:${createHash("sha256").update(`${from}>${to}`).digest("hex").slice(0, 24)}`, "model-selected", `Attempt ${attemptId} moved from route ${from} to route ${to}. ${words}`, [{ kind: "dispatch", id: attemptId }]);
   }
 
   /** Records a step of an attempt in its task's activity (best effort, see `DispatcherDeps.activity`). */
@@ -1728,8 +1808,14 @@ export class DispatcherService {
         return `the resume check was cancelled ${counted} times; ${opened === undefined ? "the attempt waits" : `blocker ${opened.id} opened for the owner`}`.slice(0, 500);
       }
       const key = keys[n]!;
-      let check = await resumes.start(by, { commandId: key, taskId, attemptId, model, ...(changed === undefined ? { after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" } : { previousModel: changed, after: "model-change" }) });
-      if (check.phase === "blocked" && await resumes.retryable(check)) check = await resumes.retry(by, { checkId: check.id });
+      // The check's model calls (the second agent) do not run inside the tick (card L04d follow-up): it runs apart, and a check not finished within the short inline wait is waited for by the next ticks, so one slow review cannot hold up other attempts.
+      const got = await this.#resumeJob(key, async () => {
+        let c = await resumes.start(by, { commandId: key, taskId, attemptId, model, ...(changed === undefined ? { after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" } : { previousModel: changed, after: "model-change" }) });
+        if (c.phase === "blocked" && await resumes.retryable(c)) c = await resumes.retry(by, { checkId: c.id });
+        return c;
+      });
+      if ("wait" in got) return got.wait;
+      let check = got.done;
       if (check.phase === "ready") {
         // A check that holds changes judged to matter is not committed by the dispatcher: the owner decides (`resume.approve`). The commit itself comes last, just before the start (card L04c).
         const relevant = relevantChanges(check);
@@ -1748,6 +1834,41 @@ export class DispatcherService {
     } catch (error) {
       return `the resume check could not be run: ${errorText(error)}`.slice(0, 500);
     }
+  }
+
+  /**
+   * Runs one step of a resume check apart from the tick (card L04d follow-up). The first tick to ask starts it and waits at most `resumeInlineMs` for the answer; if it is not there, the work goes on in the background and
+   * the next ticks answer a wait until it ends; the first tick after that takes its answer (kept in memory until then, and dropped after ten minutes unread: the check itself is in the store, and asking again is the same
+   * command). At most `resumeJobsMax` run at once, and one that runs past `resumeJobMs` is reported once through `onError`. A fault ends the job and is answered as a wait, as a fault in the check always was; a fault after
+   * the inline wait is reported to `onError` too.
+   */
+  async #resumeJob<T>(key: string, run: () => Promise<T>): Promise<{ readonly done: T } | { readonly wait: string }> {
+    const limit = this.#options.resumeJobMs ?? 300_000;
+    const now = Date.now();
+    for (const [k, j] of this.#resumeJobs) if (j.settledAt !== undefined && now - j.settledAt > 600_000) this.#resumeJobs.delete(k);
+    const answer = (job: ResumeJob): { readonly done: T } | { readonly wait: string } => {
+      this.#resumeJobs.delete(key);
+      return job.error !== undefined ? { wait: `the resume check could not be run: ${errorText(job.error)}`.slice(0, 500) } : { done: job.value as T };
+    };
+    const found = this.#resumeJobs.get(key);
+    if (found !== undefined) {
+      if (found.settledAt !== undefined) return answer(found);
+      if (limit > 0 && !found.late && now - found.started > limit) { found.late = true; this.#options.onError?.(new Error(`a resume check has been running apart from the tick for more than ${Math.round(limit / 1000)} seconds; it is still waited for`)); }
+      return { wait: found.late ? "the resume check is still being run apart from the tick, longer than expected; it is waited for" : "the resume check is being run apart from the tick; it is looked at again on the next tick" };
+    }
+    const max = this.#options.resumeJobsMax ?? 4;
+    const running = [...this.#resumeJobs.values()].filter((j) => j.settledAt === undefined).length;
+    if (running >= max) return { wait: `${running} resume checks are already being run; this one waits for a free place` };
+    const job: ResumeJob = { promise: undefined as unknown as Promise<void>, started: now, late: false, detached: false };
+    job.promise = run().then((value) => { job.value = value; }, (error: unknown) => { job.error = error ?? new Error("the resume check failed"); if (job.detached) this.#options.onError?.(job.error); }).finally(() => { job.settledAt = Date.now(); });
+    this.#resumeJobs.set(key, job);
+    const inline = this.#options.resumeInlineMs ?? 250;
+    if (inline > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([job.promise, new Promise<void>((resolve) => { timer = setTimeout(resolve, inline); })]).finally(() => clearTimeout(timer));
+    }
+    if (job.settledAt === undefined) { job.detached = true; return { wait: "the resume check is being run apart from the tick; it is looked at again on the next tick" }; }
+    return answer(job);
   }
 
   /** A ready resume check that holds changes judged to matter waits for the owner. The owner is told once (the command ID is the check's), in words that match the stored check. */
@@ -2455,6 +2576,8 @@ export class DispatcherService {
     let frozen = false;
     // What the task's placement record says before this start (card H07b): a host that refuses the start took nothing, so the record goes back to this.
     const placedBefore = await this.#runner.get(PLACED_KIND, b.taskId);
+    // The route the task last ran on (card G09 follow-up): when this attempt runs on another one, the owner is told what that costs, where the move is recorded.
+    const lastRoute = (placedBefore?.body as unknown as { route?: string } | undefined)?.route;
     try {
       await this.#update(b.attemptId, (x) => {
         if (x.state !== "waiting" || x.requestId !== requestId) throw new DomainError("invalid_command", `attempt ${b.attemptId} is ${x.state} and was started by another caller`, { field: "attemptId" });
@@ -2524,6 +2647,7 @@ export class DispatcherService {
     }
     await this.#update(b.attemptId, (x) => ({ ...x, workerVersion: handle.workerVersion, recipeRevision: recipe.revision, recipe }));
     await this.#stepOf(b.attemptId, "model", "model-selected", `Attempt ${b.attemptId} runs on route ${b.route}.`, [{ kind: "dispatch", id: b.attemptId }]);
+    if (lastRoute !== undefined && lastRoute !== b.route) await this.#costStep(b.attemptId, b.taskId, lastRoute, b.route);
     if (b.harness !== undefined) await this.#stepOf(b.attemptId, "harness", "harness-selected", `Attempt ${b.attemptId} runs in the ${b.harness} harness.`, [{ kind: "dispatch", id: b.attemptId }]);
     // A stop may have landed while the worker was starting (the record says running before the host answers): the attempt is over, so the worker that came up is let go instead of left live and unowned. No await between this check and `#live.set`.
     if ((await this.#load(b.attemptId))?.body.state !== "running") {

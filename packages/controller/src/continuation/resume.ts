@@ -137,6 +137,8 @@ export interface ResumeCheckDeps {
  */
 export class ResumeCheckService {
   readonly #runner: CommandRunner;
+  /** Checks whose reviewer is being asked in this process now (card L04d follow-up): a second advance of the same check (the dispatcher's sweep while its own job waits for the model, an API call) answers where the check stands instead of asking the model again and counting its tokens twice. */
+  readonly #reviewing = new Set<string>();
   readonly #continuations: Pick<ContinuationService, "latest" | "resume">;
   readonly #dependencies: Pick<DependencyService, "check">;
   readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
@@ -386,7 +388,9 @@ export class ResumeCheckService {
       }
       if (b.phase === "reviewing") {
         const open = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id] === undefined);
+        if (this.#reviewing.has(id)) return view<ResumeCheckBody>(found);
         let got: Awaited<ReturnType<ResumePorts["review"]>>;
+        this.#reviewing.add(id);
         try { got = await this.#ports.review({ taskId: b.taskId, changes: open }); } catch (error) {
           if (error instanceof ReviewNotRun) {
             // No reviewer could be asked: recorded as not run, never as reviewed, and every open change is the owner's to accept (the rule from before a reviewer existed).
@@ -398,7 +402,7 @@ export class ResumeCheckService {
           }
           await this.#block(by, id, b, "review_failed", `the reviewer could not give a verdict: ${short(error instanceof Error ? error.message : String(error))}`);
           continue;
-        }
+        } finally { this.#reviewing.delete(id); }
         const verdicts: Record<string, ResumeVerdict> = { ...b.verdicts };
         for (const item of open) {
           const v = got[item.id];

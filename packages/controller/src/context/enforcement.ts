@@ -62,6 +62,8 @@ export interface CompactionBody {
   readonly process?: ProcessCompactionNote;
 }
 /** What the controller learns of a compaction the task's process made itself (card C07q). The summary text is not sent: it stays in the process's conversation store. */
+/** What a process's own compaction record says first: the summary is a plain extract, not a model's summary, so details from the middle of the replaced conversation may be missing. Kept as one text so the owner-facing wording is the same everywhere. */
+export const PROCESS_SUMMARY_KIND = "[Extractive summary, made without a model: the task's process kept the start and the end of what it replaced, so details from the middle may be missing.]";
 export interface ProcessCompactionNote { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }
 export interface OverflowBody { readonly taskId: string; readonly count: number; readonly total: number; readonly events: readonly string[]; readonly last?: string; readonly blockerId?: string }
 export interface HandoffBody { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly source: "attempt" | "controller"; readonly text: string; readonly endedBecause: string; readonly writtenBy: string }
@@ -690,7 +692,7 @@ export class ContextEnforcementService {
       for (let tries = 0; ; tries++) {
         const head = ((await this.#runner.get(chainRef.kind, chainRef.id))?.body as unknown as ChainBody | undefined)?.head;
         try {
-          record = await this.#begin(principal, { taskId, projectId, k, id, ref, compressorId: "process", title: `Compaction by the task's process (${process.messageCount} messages)`, process, command: { sources: [], ...(head === undefined ? {} : { parent: head }) } });
+          record = await this.#begin(principal, { taskId, projectId, k, id, ref, compressorId: "process", title: `Compaction by the task's process (${process.messageCount} messages, extractive)`, process, command: { sources: [], ...(head === undefined ? {} : { parent: head }) } });
           break;
         } catch (error) {
           // Another run of the same key began the record first (its begin had another parent, so this one's conflicts): that record is this compaction, and it is finished below (C07q review).
@@ -701,8 +703,9 @@ export class ContextEnforcementService {
         }
       }
     }
-    const full = `The task's own process compacted ${process.messageCount} earlier messages into a summary of ${process.summaryChars} characters (sha-256 ${process.digest}). The summary text stays in the process's conversation store; the controller keeps this note, not the text.`;
-    record = await this.#finish(principal, { id, ref, taskId, full, result: { route: "process", degraded: false, attempts: [] } });
+    const full = `${PROCESS_SUMMARY_KIND} The task's own process compacted ${process.messageCount} earlier messages into a summary of ${process.summaryChars} characters (sha-256 ${process.digest}). The summary text stays in the process's conversation store; the controller keeps this note, not the text.`;
+    // Degraded, because it is: a process only tells the controller of a compaction it made with the plain extract (the start and the end of what it replaced), never one a model wrote, so the record must not read as a model's summary (card C07q follow-up).
+    record = await this.#finish(principal, { id, ref, taskId, full, result: { route: "process", degraded: true, attempts: [] } });
     const body = record.body as unknown as CompactionBody;
     void attemptId;
     return body.state === "done" ? answer(body, false) : { ...answer(body, false), superseded: true };
