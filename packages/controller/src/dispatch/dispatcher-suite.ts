@@ -1433,6 +1433,53 @@ for (const backend of backendsNamed(backendName)) {
     assert.equal(pinned.revision, 1);
   });
 
+  suite("an environment revision is pinned to the attempt at its claim and travels on the order: a change or activation while the attempt is parked reaches only later attempts, a restart of the attempt keeps its pin, and an attempt that began with no environment keeps none (card A09 sixth slice)", async (c) => {
+    const { EnvironmentService } = await import("../environments/index.js");
+    const D = (ch: string): string => `sha256:${ch.repeat(64)}`;
+    const env = EnvironmentService.withEpoch(c.storage, c.epoch, { ...c.options, reservedDigest: async (name) => (name === "nimblenewt.desk" ? D("c") : undefined), skillUsable: async () => false });
+    const manifest = (digest: string) => ({ base: { name: "nimblenewt-base", version: "1.0.0", digest: D("a") }, packages: [{ name: "tool", version: "1.0.0", digest }], skills: [], capabilities: [], configuration: { installation: 1, agent: 1 }, limits: { cpus: 1, memoryMb: 512, diskMb: 1000, processes: 50 }, protectedExtensions: [{ name: "nimblenewt.desk", digest: D("c") }] });
+    const made = async (agent: string, rev: number, digest: string): Promise<void> => {
+      await env.change(c.owner, { commandId: `ec-${agent}-${rev}`, agentId: `agent:${agent}`, manifest: manifest(digest), reason: `r${rev}`, expectedRevision: rev - 1 });
+      await env.activate(c.owner, { commandId: `ea-${agent}-${rev}`, agentId: `agent:${agent}`, revision: rev, observed: { "nimblenewt.desk": D("c") } });
+    };
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    const bob = await c.agent("bob", workGrants(c.project, ["git-push"]));
+    await made("ann", 1, D("d"));
+    c.dispatcher = c.restart({ environments: env });
+    const calls = new Map<string, ToolResult>();
+    c.worker.script = async ({ order, gateway }) => {
+      if (order.resumeNote !== undefined) return { status: "completed", text: "resumed" };
+      calls.set(order.agentId, await gateway.call({ callId: "push", tool: { name: "git-push", version: "1" }, args: { b: order.agentId } }, { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: { idempotent: true, execute: async () => ({}) } }));
+      return { status: "completed", text: "waiting", checkpoint: { saved: order.agentId } };
+    };
+    const a = await c.task("a", ann);
+    const b = await c.task("b", bob);
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.equal(calls.size, 2, "both attempts started and wait for an approval");
+    const startOf = (attemptId: string) => c.worker.starts.filter((o) => o.attemptId === attemptId);
+    assert.deepEqual(startOf(a.attemptId!).map((o) => o.environmentRevision), [1], "the order names the pinned revision");
+    assert.deepEqual(startOf(b.attemptId!).map((o) => o.environmentRevision), [undefined], "an agent with no environment gets none on the order");
+    // While both are parked: ann's environment moves to revision 2, and bob gets its first environment.
+    await made("ann", 2, D("e"));
+    await made("bob", 1, D("d"));
+    for (const [agent, [, result]] of [...calls.entries()].map((e, i) => [e[0], [i, e[1]]] as const)) {
+      const review = (await c.reviews.get(c.owner, (result as { reviewId: string }).reviewId))!;
+      await c.reviews.decide(c.owner, { commandId: `dec-${agent}`, requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+    }
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.equal(startOf(a.attemptId!).length, 2, "the parked attempt started again");
+    assert.deepEqual(startOf(a.attemptId!).map((o) => o.environmentRevision), [1, 1], "the restart of the attempt keeps revision 1 although 2 is active");
+    assert.deepEqual(startOf(b.attemptId!).map((o) => o.environmentRevision), [undefined, undefined], "an attempt that began with no environment keeps none");
+    assert.equal((await c.dispatcher.get(c.owner, a.attemptId!))!.revisions.environment, 1);
+    assert.equal((await c.dispatcher.get(c.owner, b.attemptId!))!.revisions.noEnvironment, true);
+    // A later attempt of each agent gets the active revision.
+    const a2 = await c.task("a2", ann);
+    const b2 = await c.task("b2", bob);
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.deepEqual(startOf(a2.attemptId!).map((o) => o.environmentRevision), [2]);
+    assert.deepEqual(startOf(b2.attemptId!).map((o) => o.environmentRevision), [1]);
+  });
+
   suite("the inbox names the harness at every admission: with the recovery gate on, an admission that names none is refused with the reason, and one that names Pi is admitted", async (c) => {
     const { InboxService } = await import("../domain/inbox.js");
     const ann = await c.agent("ann", workGrants(c.project, []));

@@ -46,6 +46,23 @@ const WIDENING: readonly MaintenanceKind[] = ["network", "mount", "package", "ex
 const BOSS_KINDS: readonly MaintenanceKind[] = ["package", "extension", "mount", "network"];
 /** Kinds a standing permission of the owner (`approve.maintenance.<kind>`) approves without asking anyone, and only without install scripts: broader access is reviewed per change, protected changes are the owner's, and install scripts run only after an approval of the exact artifact. */
 const STANDING_KINDS: readonly MaintenanceKind[] = ["package", "extension"];
+/** Parameter names that carry a secret whatever the value looks like. A source that needs one is not a source this platform fetches on an agent's word. */
+const SECRET_PARAM = /(?:token|secret|passw|passwd|pwd|api[-_.]?key|apikey|access[-_.]?key|private[-_.]?key|auth(?:orization)?(?![a-z])|credential|signature|session|bearer|jwt|cookie|(?:^|[-_.])(?:sig|key|sas)$)/i;
+/** The query string and fragment of an address, as names and values (the fragment as a query too, since `#a=b` is used that way), each decoded once more and twice at most. */
+function secretInTail(url: string): boolean {
+  const at = url.search(/[?#]/);
+  if (at < 0) return false;
+  const tail = url.slice(at);
+  const decode = (v: string): string => { let out = v.replace(/\+/g, " "); for (let i = 0; i < 2; i++) { try { const d = decodeURIComponent(out); if (d === out) break; out = d; } catch { break; } } return out; };
+  const parts = tail.split(/[?#&;]/).filter((p) => p !== "");
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    const name = decode(eq < 0 ? part : part.slice(0, eq)), value = eq < 0 ? "" : decode(part.slice(eq + 1));
+    if (eq >= 0 && value !== "" && SECRET_PARAM.test(name)) return true;
+    for (const piece of [name, value, `${name}=${value}`]) if (piece !== "" && redactText(piece) !== piece) return true;
+  }
+  return redactText(decode(tail)) !== decode(tail);
+}
 /** A source is an https URL without credentials. The message never repeats it (it may carry a secret). */
 export function checkSource(v: unknown, field: string): string {
   const s = lone(v, field, 200);
@@ -55,6 +72,8 @@ export function checkSource(v: unknown, field: string): string {
   // An invisible or direction-changing character (a right-to-left override, a zero-width space, a C1 control) makes a reviewer read another address than the one fetched: a URL written as such never needs one.
   if ([...s].some(isHidden)) return bad(field, "must not contain invisible or direction-changing characters");
   if (u.username !== "" || u.password !== "" || /^https:\/\/[^/?#]*@/i.test(s)) return bad(field, "must not carry a user name or password");
+  // A secret in the query string or the fragment (a token, a signature, a key) would be stored, shown to the reviewer and sent to the registry as written: refused at request time, without repeating it (card A09 sixth slice).
+  if (secretInTail(s)) return bad(field, "must not carry a secret in its query string or fragment (a parameter named like a token, key, password or signature, or a value shaped like one); ask for a source that needs none");
   return s;
 }
 /** The rule that counts for a site and port: a deny on a host (or on a parent domain) wins over an allow, a deny without a port covers every port, an allow is for the exact host (or its `*.` rule) and port 443 unless a port is named. */
@@ -206,6 +225,11 @@ export interface MaintenanceOptions {
   readonly applyTimeoutMs?: number;
   /** Whether the controller that holds a claim is known to be dead. Default: an older storage epoch is fenced out of storage, so it is dead. */
   readonly claimantDead?: (epoch: number, currentEpoch: number) => boolean;
+  /**
+   * Whether a pause, suspend or stop gate holds an agent (the agent's own, its team's or the installation's). A supervisor so held does not stand in for the owner (card A09 sixth slice): a held agent is not to act, and its
+   * authority is not to be used while it is held. A lookup that throws counts as held (fail closed). Absent: no pause facility is wired, so nothing holds anyone.
+   */
+  readonly held?: (agentId: string) => Promise<boolean>;
 }
 
 const inputAgent = (v: unknown, field: string): string => { const s = typeof v === "string" ? v.trim() : ""; const id = s.startsWith("agent:") ? s : `agent:${s}`; return AGENT.test(id) ? id : bad(field, "must be an agent's principal ID such as agent:agt-..."); };
@@ -284,6 +308,8 @@ export class MaintenanceService {
   async #bossFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<boolean> {
     if (b.class === "protected" || by.taskScope !== undefined || !eff.bosses || !eff.bossKinds.includes(b.kind)) return false;
     if (!(await this.#isSupervisorOf(by, b.agentId))) return false;
+    // A supervisor that a pause, suspend or stop gate holds does not decide (fail closed, also when the gate cannot be read): its approval may not be made, and one that waited is judged again at the claim.
+    if (this.#options.held !== undefined) { let held = true; try { held = await this.#options.held(by.id.slice("agent:".length)); } catch { held = true; } if (held) return false; }
     const target = await this.#agent(b.agentId);
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // A legacy agent has no record of who chose its supervisor: that is unknown, so a boss may not decide a kind that widens the sandbox for it (the owner does).
