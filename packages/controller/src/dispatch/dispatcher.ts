@@ -2840,7 +2840,7 @@ export class DispatcherService {
         // ending is found when the attempt ends (the end hook), the run ends stopped-early and is readmitted from its checkpoint, or the task gets a blocker once the readmits are used up.
         const kind = this.#turnEnds.get(attemptId)?.endKind ?? "unknown";
         const early: EarlyStop | undefined = result.status === "completed" && kind !== "normal" ? { endKind: kind, ...(visibleChars === undefined ? {} : { visibleChars }), ...(nudges === undefined ? {} : { nudges }), ...(progress === undefined ? {} : { progress }), ...(result.text === undefined ? {} : { text: result.text }), ...(result.checkpoint === undefined ? {} : { checkpoint: result.checkpoint }) } : undefined;
-        await this.#end(attemptId, result.status === "completed" ? "succeeded" : result.status === "cancelled" ? "abandoned" : "failed", result.status === "completed" ? "the turn completed" : (result.error ?? `the turn ${result.status}`), { readmit: false, ...(early === undefined ? {} : { early }) });
+        await this.#end(attemptId, result.status === "completed" ? "succeeded" : result.status === "cancelled" ? "abandoned" : "failed", result.status === "completed" ? "the turn completed" : (result.error ?? `the turn ${result.status}`), { readmit: result.withdrawn === true, ...(early === undefined ? {} : { early }) });
       } catch (error) {
         // The attempt could not be recorded as ended (the epoch was lost, storage was unreachable): the lease will end it; nothing is thrown into the void.
         if (isDomainError(error, "stale_epoch")) return;

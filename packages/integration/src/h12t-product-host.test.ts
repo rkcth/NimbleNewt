@@ -165,10 +165,16 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.deepEqual(doneA.verifications?.map((v) => [v.state, v.checks.map((x) => [x.name, x.state])]), [["passed", [["has the module", "passed"]]]]);
     assert.ok(calls.every((x) => x.url.startsWith("http://127.0.0.1:9201/v1/")), calls.map((x) => x.url).join(", "));
 
-    // The work is committed in the task's git directory (the commit through release is H12o; here it is done as the operator would).
     const gitA = join(hostBaseOf(dir), "work", A, ta.taskId, "task.git");
-    sh(checkoutA, "--git-dir", gitA, "--work-tree", checkoutA, "add", "-A");
-    sh(checkoutA, "--git-dir", gitA, "--work-tree", checkoutA, "commit", "-q", "-m", "agent work");
+    // The work is committed in the task's own git directory by the product host's release operation (card H12o): the platform's commit, naming the attempt, with the controller's quiesce around it.
+    const releasedA = await ask("release", ta.taskId, "release-a");
+    assert.equal(releasedA.state, "done", JSON.stringify(releasedA));
+    assert.equal(releasedA.detail?.["committed"], true, JSON.stringify(releasedA));
+    assert.equal(releasedA.detail?.["attemptId"], ta.attemptId);
+    const headA = sh(checkoutA, "--git-dir", gitA, "log", "-1", "--format=%an|%ae|%B", "HEAD");
+    assert.match(headA, /^NimbleNewt release\|release@nimblenewt\.invalid\|Work of task /);
+    assert.match(headA, new RegExp(`^NimbleNewt-Attempt: ${ta.attemptId}$`, "m"));
+    assert.equal(sh(checkoutA, "--git-dir", gitA, "--work-tree", checkoutA, "status", "--porcelain"), "", "the checkout holds nothing uncommitted");
 
     // ---- the owner's landing policy: nothing named, nothing landed (no hard-coded branch) ----
     const unnamed = await api("workspace.request", { operation: "landing", taskId: ta.taskId, reason: "h12t landing" }, "land-a-0");
@@ -176,7 +182,7 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.match(JSON.stringify(unnamed), /lease|landing branch/, "no landing without a lease, and no lease covers a project with no landing branch");
     assert.ok(!existsSync(join(garden, "src", "b.ts")));
 
-    // The owner names the installation's landing branch. The commit permit is left at its default (required): the operator's commit above carries no permit, so the product host refuses the landing.
+    // The owner names the installation's landing branch. The commit permit is left at its default (required): the release commit above is the platform's and carries no review-gate permit, so the product host refuses the landing.
     const branchOnly = await s.configuration.stage(owner, { commandId: "st-0", layer: "installation", set: { "workspace.landing.branch": "main" } } as never);
     const applied0 = await s.configuration.apply(owner, { commandId: "ap-0", layer: "installation", expectedRevision: branchOnly.revision } as never);
     assert.equal(applied0.applied, true);
@@ -185,7 +191,7 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.match(JSON.stringify(unpermitted), /do not carry the commit permit/, JSON.stringify(unpermitted));
     assert.ok(!existsSync(join(garden, "src", "b.ts")), "nothing landed without the permit");
 
-    // For this test's operator commit, the owner lets a landing go without the commit permit.
+    // For the release commit (no review-gate permit exists in this composition yet), the owner lets a landing go without the commit permit.
     const staged = await s.configuration.stage(owner, { commandId: "st-1", layer: "installation", expectedRevision: applied0.revision, set: { "workspace.landing.requirePermit": false } } as never);
     assert.equal((await s.configuration.apply(owner, { commandId: "ap-1", layer: "installation", expectedRevision: staged.revision } as never)).applied, true);
 
@@ -206,8 +212,10 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     assert.equal((await attemptOf(tb.attemptId)).outcome?.status, "succeeded");
     const checkoutB = checkoutOf(B, tb.taskId);
     const gitB = join(hostBaseOf(dir), "work", B, tb.taskId, "task.git");
-    sh(checkoutB, "--git-dir", gitB, "--work-tree", checkoutB, "add", "-A");
-    sh(checkoutB, "--git-dir", gitB, "--work-tree", checkoutB, "commit", "-q", "-m", "agent work");
+    void gitB;
+    const releasedB = await ask("release", tb.taskId, "release-b");
+    assert.equal(releasedB.state, "done", JSON.stringify(releasedB));
+    assert.equal(releasedB.detail?.["attemptId"], tb.attemptId);
     // On the installation's branch alone, project B is refused: its shared tree is on trunk.
     const wrong = await ask("landing", tb.taskId, "land-b-0");
     assert.notEqual(wrong.state, "done", JSON.stringify(wrong));

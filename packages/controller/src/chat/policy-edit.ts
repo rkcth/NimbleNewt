@@ -288,7 +288,7 @@ export class PolicyEditService {
     const { change, evidence, wording } = input;
     const conditions = input.conditions.slice(0, 5);
     // Every free text of the change must be the owner's own words (or a record, or a fixed choice): a model cannot add what the owner never said.
-    const foreign = foreignValue({ tool: "tool" in change ? change.tool : undefined, approveTool: "approve" in change ? change.approve.tool : undefined, projectName: "projectName" in change ? change.projectName : undefined, grantee: "grantee" in change ? change.grantee : undefined, audiences: "audiences" in change ? change.audiences : undefined, value: "value" in change ? await this.#ownPartOf(owner, change, wording) : undefined }, wording);
+    const foreign = foreignValue({ tool: "tool" in change ? change.tool : undefined, approveTool: "approve" in change ? change.approve.tool : undefined, projectName: "projectName" in change ? change.projectName : undefined, grantee: "grantee" in change ? change.grantee : undefined, audiences: "audiences" in change ? change.audiences : undefined, value: "value" in change ? await this.#ownPartOf(owner, change, wording, input.focusProjectId) : undefined }, wording);
     if (foreign !== undefined) return { ok: false, kind: "refuse", code: "unsupported_value", message: `What was given for ${foreign} is not in your message, so it was not done. What did you mean instead?` };
     if (change.type === "grant") {
       const bad = (change.environments ?? []).find((e) => !(ENV_WORDS[e] as RegExp).test(wording));
@@ -513,7 +513,21 @@ export class PolicyEditService {
         if ("ask" in grantee) return grantee;
         return this.#revoke(change.approve, project, grantee);
       }
-      case "setting": return this.#setting(owner, change);
+      case "setting": {
+        // A project named in words belongs only to the project layer: "for the garden project" read as an installation (or team) change would reach every project (card H12u review).
+        if (change.layer !== "project" && change.projectName !== undefined) throw new Refusal("invalid_command", `a project name goes only with a project setting; a ${change.layer} setting is not for one project`);
+        if (change.layer !== "project") return this.#setting(owner, change);
+        // The project layer (card H12u) is the owner's: the project is named by ID, by the owner's own words for its name, or is the one in focus; an unclear name is asked about.
+        // Both an ID and the owner's name: the ID must be a project of that name (the owner's words decide; an ID the model picked cannot turn the change to another project, card H12u review).
+        if (change.scopeId !== undefined && change.projectName !== undefined) {
+          const byName = await this.#project({ projectName: change.projectName }, undefined);
+          const ids = "ask" in byName ? (byName.ask.kind === "ask" ? byName.ask.options : []) : [byName.id];
+          if (!ids.includes(change.scopeId)) throw new Refusal("invalid_command", `${change.scopeId} is not the project called "${change.projectName.slice(0, 80)}"`);
+        }
+        const project = await this.#project({ ...(change.scopeId === undefined ? {} : { projectId: change.scopeId }), ...(change.projectName === undefined || change.scopeId !== undefined ? {} : { projectName: change.projectName }) }, input.focusProjectId);
+        if ("ask" in project) return project;
+        return this.#setting(owner, { ...change, scopeId: project.id }, project.name);
+      }
     }
   }
 
@@ -692,34 +706,38 @@ export class PolicyEditService {
    * those are a record, not text the model added, and only the entries that are new must be in the owner's message (adding one protected path does not need every other one retyped). A protected folder may be named
    * without its trailing slash ("protect the docs folder" gives `docs/`), as a whole word of the message. Anything that cannot be read is checked in full.
    */
-  async #ownPartOf(owner: Principal, change: PolicyEditChange, wording: string): Promise<unknown> {
+  async #ownPartOf(owner: Principal, change: PolicyEditChange, wording: string, focus: string | undefined): Promise<unknown> {
     const value = "value" in change ? change.value : undefined;
     if (change.type !== "setting" || !Array.isArray(value)) return value;
-    const current = await this.#deps.configuration.layer(owner, change.layer, change.scopeId).then((l) => l?.applied[change.key]?.value, () => undefined);
+    // A project named in words is looked up first (an unclear or unknown one leaves the list to be checked in full; the build asks or refuses).
+    const scopeId = change.layer === "project" && change.scopeId === undefined ? await this.#project({ ...(change.projectName === undefined ? {} : { projectName: change.projectName }) }, focus).then((r) => ("ask" in r ? undefined : r.id), () => undefined) : change.scopeId;
+    const current = await this.#deps.configuration.layer(owner, change.layer, scopeId).then((l) => l?.applied[change.key]?.value, () => undefined);
     const inForce = new Set(Array.isArray(current) ? current.map((x) => JSON.stringify(x)) : []);
     const folderInWords = (x: unknown): boolean => change.key === "workspace.landing.protectedPaths" && typeof x === "string" && /[^/]\/+$/.test(x) && wholeWord(wording, x.replace(/\/+$/, ""));
     return value.filter((x) => !inForce.has(JSON.stringify(x)) && !folderInWords(x));
   }
 
-  async #setting(owner: Principal, change: Extract<PolicyEditChange, { type: "setting" }>): Promise<Built> {
+  async #setting(owner: Principal, change: Extract<PolicyEditChange, { type: "setting" }>, projectName?: string): Promise<Built> {
     if (change.layer === "installation" ? change.scopeId !== undefined : change.scopeId === undefined) throw new Refusal("invalid_command", change.layer === "installation" ? "the installation layer has no scope ID" : `a ${change.layer} setting needs the ID of the ${change.layer}`);
     const definitions: SettingDefinition[] = this.#deps.configuration.settings().map((d) => ({ ...d, check: (v: unknown) => v }));
     const def = definitionFor(change.key, definitions);
     if (def === undefined) throw new Refusal("unsupported", `${change.key} is not a setting this system has. Known settings: ${this.#deps.configuration.settings().map((d) => d.key).join(", ")}.`);
-    const layerName = change.layer === "installation" ? "the whole installation" : `${change.layer} ${change.scopeId as string}`;
+    const layerName = change.layer === "installation" ? "the whole installation" : change.layer === "project" ? `project ${projectName === undefined ? "" : `"${projectName}" `}(${change.scopeId as string}) only` : `${change.layer} ${change.scopeId as string}`;
     const summary = [change.remove === true ? `Remove ${change.key} from ${layerName}.` : `Set ${change.key} to ${JSON.stringify(change.value)} for ${layerName}.`];
     const layer = await this.#deps.configuration.layer(owner, change.layer, change.scopeId);
     if (def.installationOnly === true && change.layer !== "installation") throw new Refusal("invalid_command", `${change.key} can only be set for the whole installation (by the owner), not for a ${change.layer}.`);
     const explanation = [`${def.description}`, `It takes effect ${EFFECT_WORDS[def.effect] ?? def.effect}.`, def.installationOnly === true ? "It can only be set for the whole installation; no narrower layer can override it." : def.kind === "restriction" ? (def.installationMayWiden === true ? "Only the owner, for the whole installation, can set it past its default; a narrower layer can only narrow it further, and a value wider than the layers above allow is refused." : "A narrower layer can only narrow it further, and a value wider than the layers above allow is refused.") : "A narrower layer may override it.", "It is applied as a whole after the combination of settings is checked; if the check fails nothing changes."];
-    if (change.layer === "installation") {
-      const eff = await this.#deps.configuration.effective(owner);
+    if (change.layer === "project") explanation.push(change.key === "workspace.landing.protectedPaths" ? "Paths set here protect this project only, in addition to the installation's own list and the built-in list; neither of those can be taken off here." : change.key === "workspace.landing.requirePermit" ? "For this project the permit can be required where the installation does not require it; it cannot be switched off here where the installation requires it." : "This applies to this project only; the installation's value stands for every other project.");
+    if (change.layer === "installation" || change.layer === "project") {
+      const eff = await this.#deps.configuration.effective(owner, change.layer === "project" ? { projectId: change.scopeId as string } : {});
       const now = eff?.values[change.key];
       if (now !== undefined) explanation.unshift(`It is ${JSON.stringify(now.value)} now (from ${now.source.layer}).`);
-      // A list value replaces the whole list (card H12s review): an entry the new value leaves out is named, so "also protect x/" that the model wrote as ["x/"] cannot quietly unprotect what was there.
-      if (now !== undefined && now.source.layer === "installation" && Array.isArray(now.value)) {
+      // A list value replaces the whole list of the layer (card H12s review): an entry the new value leaves out is named, so "also protect x/" that the model wrote as ["x/"] cannot quietly unprotect what was there.
+      const own = layer?.applied[change.key]?.value;
+      if (Array.isArray(own)) {
         const next = change.remove === true ? [] : Array.isArray(change.value) ? change.value : undefined;
-        const dropped = next === undefined ? [] : now.value.filter((x) => !next.some((y) => JSON.stringify(y) === JSON.stringify(x)));
-        if (dropped.length > 0) explanation.splice(1, 0, `This replaces the whole list, so ${dropped.length === 1 ? "this entry is" : `these ${dropped.length} entries are`} no longer in it: ${dropped.slice(0, 20).map((x) => JSON.stringify(x)).join(", ")}${dropped.length > 20 ? ` and ${dropped.length - 20} more` : ""}.`);
+        const dropped = next === undefined ? [] : own.filter((x) => !next.some((y) => JSON.stringify(y) === JSON.stringify(x)));
+        if (dropped.length > 0) explanation.splice(1, 0, `This replaces the whole list${change.layer === "project" ? " of this project" : ""}, so ${dropped.length === 1 ? "this entry is" : `these ${dropped.length} entries are`} no longer in it: ${dropped.slice(0, 20).map((x) => JSON.stringify(x)).join(", ")}${dropped.length > 20 ? ` and ${dropped.length - 20} more` : ""}.`);
       }
     }
     return { summary, explanation, direction: "unknown", op: { kind: "setting", layer: change.layer, ...(change.scopeId === undefined ? {} : { scopeId: change.scopeId }), ...(layer === undefined ? {} : { expectedRevision: layer.revision }), key: change.key, ...(change.remove === true ? { remove: true as const } : { value: change.value }) } };

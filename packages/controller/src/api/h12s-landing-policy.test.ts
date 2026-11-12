@@ -64,6 +64,23 @@ test("the local host builder gets the landing policy from the owner's settings, 
     const other = await ask(agentToken);
     assert.match(OPERATION_BY_NAME.get("status.ask")!.summary, /`landing` \(owner only/, "status.ask describes the same kind");
     assert.equal(other.error?.code, "not_found", `an agent, even one that may read configuration, is not shown the landing view: ${JSON.stringify(other)}`);
+    // Card H12u: a project's own values appear in the view with where each comes from, and the host's policy for a task of that project follows them.
+    assert.match(text, /No project has landing values of its own/);
+    const garden = (await c.services.projects.createProject({ commandId: "p-garden", actor: owner.id, name: "Garden" })).id;
+    const plain = (await c.services.projects.createProject({ commandId: "p-plain", actor: owner.id, name: "Plain" })).id;
+    const task = (await c.services.projects.createTask({ commandId: "t-garden", actor: owner.id, projectId: garden, title: "water" })).id;
+    await c.services.configuration.change(owner, { commandId: "pl-1", layer: "project", scopeId: garden, expectedRevision: 0, set: { "workspace.landing.protectedPaths": ["secrets/"], "workspace.landing.requirePermit": true } } as never);
+    const branchSet = await c.api.handle(boot.token, { v: 1, op: "project.branches.set", commandId: "br-1", args: { project: garden, landing: "trunk" } } as never) as { ok: boolean };
+    assert.equal(branchSet.ok, true, JSON.stringify(branchSet));
+    assert.deepEqual(await policy!({ taskId: task, projectId: garden }), { branch: "trunk", requirePermit: true, protectDefaults: true, protectedPaths: ["secrets/", "x/"] }, "its own branch, and its paths added to the installation's");
+    assert.deepEqual(await policy!({ taskId: "task-zzzzzzzzzzzzzzzzzzzz", projectId: plain }), { branch: "integration", requirePermit: true, protectDefaults: true, protectedPaths: ["x/"] }, "a project with nothing of its own gets the installation's");
+    const withProject = await ask(boot.token);
+    const projectText = withProject.result!.item.lines.map((l) => l.text).join("\n");
+    assert.match(projectText, new RegExp(`Project "?Garden"? \\(${garden}\\): landing branch "?trunk"? \\(this project's own landing branch`));
+    assert.match(projectText, new RegExp(`\\(${garden}\\): review permit required \\(this project's setting\\)`));
+    assert.match(projectText, new RegExp(`\\(${garden}\\): extra protected paths in force, kept for your review: "?secrets/"?, "?x/"?; this project adds "?secrets/"?`));
+    assert.doesNotMatch(projectText, new RegExp(plain), "a project with nothing of its own is not listed");
+    assert.ok(withProject.result!.item.lines.every((l) => l.cites.length > 0), "every line cites a record");
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true });

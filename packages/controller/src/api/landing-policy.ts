@@ -1,8 +1,7 @@
 /**
  * The landing policy of a workspace host, read from the controller's settings (card H12s): `workspace.landing.branch`, `workspace.landing.requirePermit` and `workspace.landing.protectedPaths`, as they apply to the task
- * (installation, the working agent's team and agent, the task). A host composer hands this to `LocalWorkspaces`' (or `WorkspaceHost`'s) `landing` option, so the owner's chat-set values are what a landing runs under.
- * Read fresh at every landing (no copy is kept), so a change counts from the next request. The team and agent layers apply only when an agent owns the task; for a task nobody owns only the installation and task layers do. A task the configuration does not know (a stale ID) is read at the installation layer, which is where a task with no narrower layer
- * would get its values anyway. A failure to read throws; the host treats that as "no policy" and refuses the landing (nothing is guessed).
+ * (installation, the task's project (card H12u), the working agent's team and agent, the task). A host composer hands this to `LocalWorkspaces`' (or `WorkspaceHost`'s) `landing` option, so the owner's chat-set values are what a landing runs under.
+ * Read fresh at every landing (no copy is kept), so a change counts from the next request. The team and agent layers apply only when an agent owns the task; for a task nobody owns only the installation and task layers do. A task the configuration does not know (a stale ID) is read at the installation and the named project's layers. A failure to read throws; the host treats that as "no policy" and refuses the landing (nothing is guessed).
  */
 export interface LandingPolicyFigures {
   readonly branch?: string;
@@ -12,15 +11,18 @@ export interface LandingPolicyFigures {
 }
 
 export interface LandingPolicySource {
-  taskValues(keys: readonly string[], taskId: string): Promise<Readonly<Record<string, unknown>> | undefined>;
+  /** The task's values; `projectId` is the project the host's order names, and a task of another project throws. */
+  taskValues(keys: readonly string[], taskId: string, projectId?: string): Promise<Readonly<Record<string, unknown>> | undefined>;
+  /** The installation and the project's layer (card H12u), for a task the configuration does not know. Absent: the installation alone. */
+  projectValues?(keys: readonly string[], projectId: string): Promise<Readonly<Record<string, unknown>>>;
   installationValues(keys: readonly string[]): Promise<Readonly<Record<string, unknown>>>;
 }
 
 export const LANDING_SETTING_KEYS = { branch: "workspace.landing.branch", requirePermit: "workspace.landing.requirePermit", protectedPaths: "workspace.landing.protectedPaths", protectDefaults: "workspace.landing.protectDefaults" } as const;
 
 /**
- * The project's own landing branch (card H12t): the branch the owner named for the project with `project.branches.set` / `.change` (`landing`), or `undefined` when none is named. Configuration has no project layer, so this
- * owner-only project record is what lets two projects land on different branches; it wins over the installation's `workspace.landing.branch` (which is then the branch of every project that names none). A failure to read it
+ * The project's own landing branch (card H12t): the branch the owner named for the project with `project.branches.set` / `.change` (`landing`), or `undefined` when none is named. The configuration's project layer (card H12u) carries the permit and the protected paths per project; the branch stays this
+ * owner-only project record, which lets two projects land on different branches; it wins over the installation's `workspace.landing.branch` (which is then the branch of every project that names none). A failure to read it
  * throws, like the settings, and the landing is refused.
  */
 export type ProjectLandingSource = (projectId: string) => Promise<string | undefined>;
@@ -29,7 +31,7 @@ export function landingPolicyFrom(source: LandingPolicySource, projectLanding?: 
   const keys = Object.values(LANDING_SETTING_KEYS);
   return async (call) => {
     // One combination of the layers per landing, so the four values come from the same revisions.
-    const v = (await source.taskValues(keys, call.taskId)) ?? (await source.installationValues(keys));
+    const v = (await source.taskValues(keys, call.taskId, call.projectId)) ?? (source.projectValues === undefined ? await source.installationValues(keys) : await source.projectValues(keys, call.projectId));
     const own = projectLanding === undefined ? undefined : await projectLanding(call.projectId);
     const branch = own ?? v[LANDING_SETTING_KEYS.branch], permit = v[LANDING_SETTING_KEYS.requirePermit], paths = v[LANDING_SETTING_KEYS.protectedPaths], defaults = v[LANDING_SETTING_KEYS.protectDefaults];
     return {
