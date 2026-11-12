@@ -49,7 +49,7 @@ test("composed: a hand-off names the sender's integrator lease and the workspace
     // Only the owner may move the lease: the manager is refused and nothing moves.
     const refused = await call(mgr, "handoff.complete", { handoffId: prepared.result.item.id, acceptGaps: true, moveIntegratorLease: true }, "h2");
     assert.equal(refused.error?.code, "forbidden", JSON.stringify(refused));
-    assert.equal(await leases.valid(lease.leaseId, 1), true);
+    assert.equal(await leases.valid(lease.leaseId, 1, lease.holder), true);
     // Completed without moving it: the task moves, the lease is released once, the workspace operation is still the owner's and still running.
     const done = await call(mgr, "handoff.complete", { handoffId: prepared.result.item.id, acceptGaps: true }, "h3");
     assert.equal(done.result?.item.phase, "transferred", JSON.stringify(done));
@@ -73,7 +73,7 @@ test("composed: a hand-off names the sender's integrator lease and the workspace
     assert.equal(moved.result?.item.phase, "transferred", JSON.stringify(moved));
     const now = await leases.get(lease.leaseId);
     assert.deepEqual([now?.holder, now?.fence, now?.state], [a, 3, "held"]);
-    assert.equal(await leases.valid(lease.leaseId, 2), false, "the sender's fence is dead");
+    assert.equal(await leases.valid(lease.leaseId, 2, lease.holder), false, "the sender's fence is dead");
     const steps = await call(boot.token, "activity.steps", { taskId: task });
     assert.ok(steps.result.steps.some((x: { kind: string; summary: string }) => x.kind === "ownership" && x.summary.includes("Integrator leases: moved to the recipient integration")), JSON.stringify(steps.result).slice(0, 2000));
     // Nothing held any more by the sender of a third hand-off: the section says none.

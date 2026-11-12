@@ -32,6 +32,8 @@ export interface IntegratorLeaseBody {
   readonly acquiredAt: string;
   readonly expiresAt: string;
   readonly state: "held" | "released";
+  /** The controller epoch that granted this hold (card P10): a hold granted under another epoch (the controller started again, or a restore put an older store back) is not live, so a fence handed out before can never be taken for a current one. */
+  readonly epoch?: number;
   readonly releasedAt?: string;
   readonly note?: string;
 }
@@ -54,9 +56,10 @@ async function retried<T>(exhausted: string, run: () => Promise<T>): Promise<T> 
 
 export class IntegratorLeaseService {
   readonly #runner: CommandRunner;
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
+  readonly #epoch: number;
+  private constructor(runner: CommandRunner, epoch: number) { this.#runner = runner; this.#epoch = epoch; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): IntegratorLeaseService {
-    return new IntegratorLeaseService(new CommandRunner(storage, epoch, options));
+    return new IntegratorLeaseService(new CommandRunner(storage, epoch, options), epoch);
   }
 
   /** The lease record of a project's branch (one per branch, whoever holds it). */
@@ -76,11 +79,15 @@ export class IntegratorLeaseService {
       payload: { projectId, branch, holder, taskId, ttlMs },
       build: async () => {
         const ref: AggregateRef = { kind: KIND, id: leaseId };
+        // The task the hold is worked under must belong to the project whose branch it is (card P10): a lease of project A is never taken under a task of project B.
+        const owner = await this.projectOfTask(taskId);
+        if (owner === undefined) throw new DomainError("not_found", `no task ${taskId}`);
+        if (owner !== projectId) throw new DomainError("forbidden", `task ${taskId} does not belong to project ${projectId}, so it cannot hold that project's integrator lease`);
         const current = await this.#runner.get(KIND, leaseId);
         const b = current?.body as unknown as IntegratorLeaseBody | undefined;
         if (b !== undefined && this.#live(b)) throw new DomainError("unavailable", `branch ${branch} is leased to agent ${b.holder} for task ${b.taskId} until ${b.expiresAt}`);
         const now = this.#runner.now();
-        const body: IntegratorLeaseBody = { projectId, branch, holder, taskId, fence: (b?.fence ?? 0) + 1, ttlMs, acquiredAt: now, expiresAt: this.#after(now, ttlMs), state: "held" };
+        const body: IntegratorLeaseBody = { projectId, branch, holder, taskId, fence: (b?.fence ?? 0) + 1, ttlMs, acquiredAt: now, expiresAt: this.#after(now, ttlMs), state: "held", epoch: this.#epoch };
         return {
           ref, creates: current === undefined,
           changes: [current === undefined ? { type: "create", ref, body: json(body) } : { type: "update", ref, expectedRevision: current.revision, body: json(body) }, ...(await this.#index(taskId, leaseId))],
@@ -123,6 +130,9 @@ export class IntegratorLeaseService {
     const to = text(command.to, "to", { min: 1, max: 100 });
     const taskId = checkTaskId(command.taskId);
     const note = command.note === undefined ? undefined : text(command.note, "note", { min: 1, max: LEASE_LIMITS.note });
+    // The task the hold moves to must be in the lease's own project (card P10), as at `acquire`. A lease's project never changes, so reading it first is safe.
+    const known = await this.get(command.leaseId);
+    if (known !== undefined && (await this.projectOfTask(taskId)) !== known.projectId) throw new DomainError("forbidden", `task ${taskId} does not belong to project ${known.projectId}, so it cannot hold that project's integrator lease`);
     await this.#change("lease.handover", command.commandId, command.leaseId, { fence: command.fence, to, taskId, ...(note === undefined ? {} : { note }) }, (b) => {
       if (b.fence !== command.fence || b.state !== "held") throw fenced(`lease ${command.leaseId} is not held with fence ${command.fence}`);
       if (!this.#live(b)) throw fenced(`lease ${command.leaseId} expired at ${b.expiresAt}, so it is free and not handed to anyone`);
@@ -140,10 +150,35 @@ export class IntegratorLeaseService {
     return { ...b, leaseId, revision: found.revision, live: this.#live(b) };
   }
 
-  /** Whether `fence` is the live hold of the lease: what a landing checks right before it writes. */
-  async valid(leaseId: string, fence: number): Promise<boolean> {
+  /**
+   * Whether `fence` is the live hold of the lease by exactly `holder` (and, when given, under exactly `taskId`): what a landing checks right before it writes (card P10). A fence alone is not enough: after a restore the same number
+   * can be handed out again, and only the named holder's own fence counts.
+   */
+  async valid(leaseId: string, fence: number, holder: string, taskId?: string): Promise<boolean> {
     const l = await this.get(leaseId);
-    return l !== undefined && l.live && l.fence === fence;
+    return l !== undefined && l.live && l.fence === fence && l.holder === holder && (taskId === undefined || l.taskId === taskId);
+  }
+
+  /** The project a task belongs to, or undefined when there is no such task. */
+  async projectOfTask(taskId: string): Promise<string | undefined> {
+    const found = await this.#runner.get("task", checkTaskId(taskId));
+    const p = (found?.body as unknown as { projectId?: unknown } | undefined)?.projectId;
+    return typeof p === "string" ? p : undefined;
+  }
+
+  /** The leases of a project (live or not), in ID order, at most `limit` (default 100, at most 200). One per branch ever leased. */
+  async forProject(projectId: string, limit = 100): Promise<IntegratorLease[]> {
+    const out: IntegratorLease[] = [];
+    const cap = Math.min(Math.max(1, Math.floor(limit)), 200);
+    for (let after: string | undefined, pages = 0;; pages++) {
+      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const r of page) {
+        after = r.id;
+        const b = r.body as unknown as IntegratorLeaseBody;
+        if (b.projectId === projectId && out.length < cap) out.push({ ...b, leaseId: r.id, revision: r.revision, live: this.#live(b) });
+      }
+      if (page.length < 200 || out.length >= cap || pages >= 50) return out;
+    }
   }
 
   /** The live leases held for a task (by whoever holds them now), from the task's index. */
@@ -157,7 +192,8 @@ export class IntegratorLeaseService {
     return out;
   }
 
-  #live(b: IntegratorLeaseBody): boolean { return b.state === "held" && Date.parse(b.expiresAt) > Date.parse(this.#runner.now()); }
+  /** Held, granted under this controller epoch and not past its expiry on the controller's own clock (the runner's, which tests and a composed controller set). */
+  #live(b: IntegratorLeaseBody): boolean { return b.state === "held" && b.epoch === this.#epoch && Date.parse(b.expiresAt) > Date.parse(this.#runner.now()); }
   #after(at: string, ms: number): string { return new Date(Date.parse(at) + ms).toISOString(); }
   #ttl(value: unknown): number {
     if (typeof value !== "number" || !Number.isInteger(value) || value < LEASE_LIMITS.ttlMinMs || value > LEASE_LIMITS.ttlMaxMs) return invalid("ttlMs", `must be a whole number of milliseconds from ${LEASE_LIMITS.ttlMinMs} to ${LEASE_LIMITS.ttlMaxMs}`);

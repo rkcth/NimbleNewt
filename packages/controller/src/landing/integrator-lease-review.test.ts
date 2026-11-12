@@ -20,7 +20,8 @@ for (const backend of backends) {
     const project = (await projects.createProject({ commandId: "p", actor: owner, name: "A" })).id;
     const t1 = (await projects.createTask({ commandId: "t1", actor: owner, projectId: project, title: "one" })).id;
     const leases = IntegratorLeaseService.withEpoch(world.storage, projects.epoch, clock);
-    return { world, leases, project, t1, tick: (ms: number) => { now += ms; } };
+    const t2 = (await projects.createTask({ commandId: "t2", actor: owner, projectId: project, title: "two" })).id;
+    return { world, leases, project, t1, t2, tick: (ms: number) => { now += ms; } };
   };
 
   test(`${backend.name}: one task taking two different branches at the same moment gets both (a race on the task's index is not a refusal) (card L03j review)`, async () => {
@@ -54,7 +55,7 @@ for (const backend of backends) {
   test(`${backend.name}: a lease handed over to another task no longer counts against the task it left (card L03j review)`, async () => {
     const r = await rig();
     try {
-      const t2 = "task-zzzzzzzzzzzzzzzzzzzz";
+      const t2 = r.t2;
       const ids: string[] = [];
       for (let i = 0; i < LEASE_LIMITS.perTask; i++) ids.push((await r.leases.acquire({ commandId: `l${i}`, projectId: r.project, branch: `b-${i}`, holder: "agt-a", taskId: r.t1, ttlMs: 10 * MIN })).leaseId);
       await r.leases.handOver({ commandId: "ho", leaseId: ids[0]!, fence: 1, to: "agt-b", taskId: t2 });
