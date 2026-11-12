@@ -192,6 +192,11 @@ for (const backend of backends) {
     const long = await c.attendance.admission(c.owner, { agent: c.pA, expectedMinutes: 180 });
     assert.equal(long.decision, "defer");
     assert.ok(long.decision === "defer" && long.until === "2026-10-23T10:30:00.000Z" && long.meeting.occurrenceId === id);
+    // Card M04h review: the agent's own bounded meeting task for THIS meeting is how it attends and is not held back by it; any other task of the agent, or another agent's meeting task, still waits.
+    const meetingTaskOf = (who: string) => derivedId("task", `attend-task:${derivedId("mat", `${id}\0${who}`)}`);
+    assert.equal((await c.attendance.admission(c.owner, { agent: c.pA, taskId: meetingTaskOf(c.pA), expectedMinutes: 180 })).decision, "start");
+    assert.equal((await c.attendance.admission(c.owner, { agent: c.pA, taskId: derivedId("task", "other work of A"), expectedMinutes: 180 })).decision, "defer");
+    assert.equal((await c.attendance.admission(c.owner, { agent: c.pA, taskId: meetingTaskOf(c.pB), expectedMinutes: 180 })).decision, "defer");
     const yields = await c.attendance.admission(c.owner, { agent: c.pA, expectedMinutes: 180, yieldsAtBoundary: true });
     assert.equal(yields.decision, "start");
     const safe = await c.attendance.admission(c.owner, { agent: c.pA, expectedMinutes: 600, safeLongRunning: true });
