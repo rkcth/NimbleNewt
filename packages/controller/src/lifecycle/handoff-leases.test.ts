@@ -36,7 +36,7 @@ const sources: HandoffSources = { collect: async () => ({ sections: { brief: "La
 interface Faults { heldBefore: number; transfer: number; releaseAfter: number; moveAfter: number; releaseBefore: number }
 
 for (const backend of backends) {
-  interface Ctx { owner: Principal; mgr: Principal; task: string; a: { kind: string; id: string }; b: { kind: string; id: string }; c: { kind: string; id: string }; project: string; handoffs: HandoffService; leases: IntegratorLeaseService; faults: Faults; assignments: AssignmentService; told: { leases?: unknown }[] }
+  interface Ctx { owner: Principal; mgr: Principal; task: string; task2: string; a: { kind: string; id: string }; b: { kind: string; id: string }; c: { kind: string; id: string }; project: string; handoffs: HandoffService; leases: IntegratorLeaseService; faults: Faults; assignments: AssignmentService; told: { leases?: unknown }[] }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-11-11T10:00:00.000Z");
@@ -70,7 +70,8 @@ for (const backend of backends) {
         const stops = StopService.withEpoch(world.storage, epoch, pauses, new Runtime(), options);
         const told: { leases?: unknown }[] = [];
         const handoffs = HandoffService.withEpoch(world.storage, epoch, { pauses, stops, assignments, sources, leases: faulty, asker: async (id) => (id === mgr.id ? mgr : id === owner.id ? owner : undefined), onTransferred: async (_by, e) => { told.push(e); } }, options);
-        await body({ owner, mgr, task, a, b, c, project, handoffs, leases, faults, assignments: real, told });
+        const task2 = (await projects.createTask({ commandId: cid("t2"), actor: owner.id, projectId: project, title: "other" })).id;
+        await body({ owner, mgr, task, task2, a, b, c, project, handoffs, leases, faults, assignments: real, told });
       } finally { await world.close(); }
     });
   const take = (c: Ctx, holder: string, ttlMs = 30 * MIN) => c.leases.acquire({ commandId: cid("lz"), projectId: c.project, branch: "integration", holder, taskId: c.task, ttlMs });
@@ -82,19 +83,19 @@ for (const backend of backends) {
     const h0 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "leave" });
     assert.equal(h0.phase, "ready");
     await c.handoffs.cancel(c.mgr, { handoffId: h0.id });
-    assert.equal(await c.leases.valid(l.leaseId, 1), true, "a cancelled hand-off does not release the lease");
+    assert.equal(await c.leases.valid(l.leaseId, 1, l.holder), true, "a cancelled hand-off does not release the lease");
     // Crash before the plan is written: nothing moved, the lease is the sender's; the sweep finishes.
     const h1 = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "leave" });
     c.faults.heldBefore = 1;
     await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h1.id }), /before the plan/);
     let rec = (await c.handoffs.get(c.owner, h1.id))!;
-    assert.deepEqual([rec.phase, rec.leasePlan, await ownerOf(c), await c.leases.valid(l.leaseId, 1)], ["transferring", undefined, `${c.a.id}@1`, true]);
+    assert.deepEqual([rec.phase, rec.leasePlan, await ownerOf(c), await c.leases.valid(l.leaseId, 1, l.holder)], ["transferring", undefined, `${c.a.id}@1`, true]);
     // Crash after the plan, before the transfer: the plan names fence 1; still nothing moved.
     c.faults.transfer = 1;
     await assert.rejects(c.handoffs.advance(c.mgr, { handoffId: h1.id }), /before the transfer/);
     rec = (await c.handoffs.get(c.owner, h1.id))!;
     assert.deepEqual(rec.leasePlan?.entries, [{ leaseId: l.leaseId, branch: "integration", fence: 1, action: "release" }]);
-    assert.deepEqual([await ownerOf(c), await c.leases.valid(l.leaseId, 1)], [`${c.a.id}@1`, true], "the lease stays until the task really moves");
+    assert.deepEqual([await ownerOf(c), await c.leases.valid(l.leaseId, 1, l.holder)], [`${c.a.id}@1`, true], "the lease stays until the task really moves");
     // Crash after the release was written but before the hand-off recorded it.
     c.faults.releaseAfter = 1;
     await assert.rejects(c.handoffs.advance(c.mgr, { handoffId: h1.id }), /after the release/);
@@ -124,7 +125,7 @@ for (const backend of backends) {
     await assert.rejects(c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id }), /before the transfer/);
     // The sender's hold lapses and another integrator (C, on another task) takes the branch with fence 2.
     now += 6 * MIN;
-    const other = await c.leases.acquire({ commandId: cid("lz"), projectId: c.project, branch: "integration", holder: c.c.id, taskId: "task-zzzzzzzzzzzzzzzzzzzz", ttlMs: 30 * MIN });
+    const other = await c.leases.acquire({ commandId: cid("lz"), projectId: c.project, branch: "integration", holder: c.c.id, taskId: c.task2, ttlMs: 30 * MIN });
     assert.equal(other.fence, 2);
     c.faults.releaseBefore = 1;
     await assert.rejects(c.handoffs.advance(c.mgr, { handoffId: h.id }), /before the release/);
@@ -142,7 +143,7 @@ for (const backend of backends) {
     const h = await c.handoffs.prepare(c.mgr, { commandId: cid("h"), taskId: c.task, to: c.b, reason: "leave" });
     await refuses("forbidden", () => c.handoffs.complete(c.mgr, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: true }));
     await refuses("invalid_command", () => c.handoffs.complete(c.owner, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: "yes" }));
-    assert.deepEqual([(await c.handoffs.get(c.owner, h.id))!.phase, await c.leases.valid(l.leaseId, 1)], ["ready", true], "a refusal moves nothing");
+    assert.deepEqual([(await c.handoffs.get(c.owner, h.id))!.phase, await c.leases.valid(l.leaseId, 1, l.holder)], ["ready", true], "a refusal moves nothing");
     c.faults.moveAfter = 1;
     await assert.rejects(c.handoffs.complete(c.owner, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: true }), /after the move/);
     await refuses("invalid_command", () => c.handoffs.complete(c.owner, { commandId: cid("c"), handoffId: h.id, moveIntegratorLease: false }));
