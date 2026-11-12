@@ -82,6 +82,11 @@ for (const backend of backends) {
     try {
       const chat = w.chat();
       const a = "escalate after 48 hours, digest at 08:00 and 17:00";
+      // Card U14c: in the strict profile a notification change is shown first and nothing is written; the rest of this test uses the derived profile, where an explicit order applies.
+      script[a] = [cmd("notifications.configure", { escalateAfterHours: 48, digestTimes: ["08:00", "17:00"] }, a)];
+      assert.equal(only((await say(w, chat, a)).outcomes).status, "proposed");
+      assert.equal(calls.length, 0, "strict: nothing written before the owner says yes");
+      w.profile.value = "derived";
       const b = "quiet hours 22:00 to 07:00";
       script[a] = [cmd("notifications.configure", { escalateAfterHours: 48, digestTimes: ["08:00", "17:00"] }, a)];
       script[b] = [cmd("notifications.configure", { quietHours: { start: "22:00", end: "07:00" } }, b)];
@@ -175,6 +180,9 @@ for (const backend of backends) {
     script["add task X to Alpha"] = [cmd("task.create", { title: "X", projectName: "alpha" }, "add task X to Alpha")];
     const chat = w.chat();
     assert.equal(only((await say(w, chat, "add task X")).outcomes).status, "asked");
+    // Card U14c: strict shows the task first; the derived profile applies an explicit order.
+    assert.equal(only((await say(w, chat, "add task X to Alpha")).outcomes).status, "proposed");
+    w.profile.value = "derived";
     const o = only((await say(w, chat, "add task X to Alpha")).outcomes);
     assert.equal(o.status, "applied");
     assert.equal((await get(w, "task.get", { taskId: o.id! }))["projectId"], a);

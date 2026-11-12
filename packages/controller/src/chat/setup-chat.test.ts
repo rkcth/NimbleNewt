@@ -26,6 +26,21 @@ test("the interpreter prompt tells the model about the first-run setup: the setu
   assert.equal(CHAT_OPS["routing.provider.add"]?.mode, "propose", "a provider decides where data may go: shown first in every profile");
 });
 
+// Card U14c: every step of the first-run walk-through is shown to the owner first in the strict profile, so no answer is applied unasked; the interpreter prompt says so and names the steps added here.
+test("the setup steps are never applied unshown in the strict profile, and the prompt names the notification, task and budget steps and says the owner's yes comes first (card U14c)", async () => {
+  for (const op of ["project.create", "routing.provider.add", "host.local.set", "grant.create", "credential.issue", "notifications.configure", "task.create"]) {
+    assert.ok(Object.hasOwn(CHAT_OPS, op), `${op} is a chat operation`);
+    assert.notEqual(CHAT_OPS[op]?.mode, "apply", `${op} must be shown first in the strict profile`);
+  }
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+  await m.interpret({ text: "set me up", quoted: [], focus: {}, proposals: [] });
+  assert.match(system, /notifications\.configure for how they want to hear from the team/);
+  assert.match(system, /budgets and time limits are offered once and left off/);
+  assert.match(system, /nothing is applied until the owner says yes in their own words/);
+  assert.match(system, /put it in the secret store with the launcher/);
+});
+
 // Card U14b: credentials for agents and hosts and the local worker host are reachable in free words: the model is told about them from the same tables the answer is checked against.
 test("the interpreter prompt tells the model about credentials for agents and hosts (shown first, shown once, never typed into the chat) and the local worker host switch; both are always shown first (card U14b)", async () => {
   let system = "";

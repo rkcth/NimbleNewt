@@ -166,7 +166,7 @@ export const evidenceInText = (evidence: string, text: string): boolean => {
 export const evidenceStrong = (evidence: string): boolean => evidence.trim().length >= 6 && evidence.trim().split(/\s+/).length >= 2;
 
 /** A credential-shaped text is never sent to a model or stored. */
-export const refuseCredentials = (value: string, field: string): void => { if (redactText(value) !== value) invalid(field, "looks like a credential or key; it was not read or recorded"); };
+export const refuseCredentials = (value: string, field: string): void => { if (redactText(value) !== value) invalid(field, field === "text" ? "looks like a credential or key; it was not read, sent to any model or recorded. Keep keys out of the chat: put one in the secret store with `nimblenewt secret set NAME` (a prompt that does not echo) and give the chat only the NAME" : "looks like a credential or key; it was not read or recorded"); };
 
 /**
  * The scripted interpreter for tests: the output for an exact owner text, or a function of the whole input. Unscripted text yields no intents, which the service answers by asking. It records

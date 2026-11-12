@@ -24,7 +24,7 @@ export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["project.branche
 export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "project.create": { verb: "Create project", mode: "propose" },
   "project.update": { verb: "Change project", mode: "apply", revision: "project", needsProject: true },
-  "task.create": { verb: "Create task", mode: "apply", needsProject: true },
+  "task.create": { verb: "Create task", mode: "profile", needsProject: true },
   "task.update": { verb: "Change task", mode: "apply", revision: "task" },
   "task.transition": { verb: "Move task", mode: "apply", revision: "task" },
   "task.assign": { verb: "Assign task", mode: "profile", revision: "assignment", dispatch: true },
@@ -221,7 +221,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // How notifications reach the owner (card U11b): digest times, quiet hours, the hours before an unanswered item is escalated, and the channel. It only changes how the owner is told, can be set back by saying so, and applies from the next notification, so an explicit order applies at once. The settings revision is read, not quoted.
   // The critical path (card U11d, "U11f"): what the owner marks decides what is listed first and what pages them, so marking or unmarking is always shown first. The task is named by its title (taskTitle) and the project by its name (projectName).
   "critical.mark": { verb: "Mark or unmark the critical path (kind task, goal or project; marked false takes the mark off)", mode: "propose" },
-  "notifications.configure": { verb: "Change how notifications reach you", mode: "apply", revision: "notifications" },
+  "notifications.configure": { verb: "Change how notifications reach you", mode: "profile", revision: "notifications" },
   // Money (card chat-gaps). Spending more, opening or ending a budget, and a cap on all spending are decisions about money: shown first in every profile. The aggregate cap is optional and off until set; turning it off is also shown first (it lifts a limit).
   "budget.decide": { verb: "Decide a request for more budget", mode: "propose" },
   "budget.open": { verb: "Open a budget for task", mode: "propose", needsProject: true },
