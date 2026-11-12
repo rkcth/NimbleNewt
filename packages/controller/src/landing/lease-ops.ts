@@ -18,6 +18,10 @@ const refused = (what: string): DomainError => new DomainError("not_found", `${w
 export interface IntegratorLeaseOpsOptions {
   /** Whether an agent ID names an active agent (P10 review): the owner can only name one of those as the holder. Absent (unit rigs), any name is taken. */
   readonly activeAgent?: (agentId: string) => Promise<boolean>;
+  /** The landing branch the owner's policy names for the project (P10 second slice). When given, a lease is taken only on that branch (an agent with the right cannot squat other branch names), and `undefined` means no lease can be taken. */
+  readonly landingBranch?: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
+  /** Told when a lease was ended against its holder's will (the owner took it away, or its holder was retired and another agent took the branch). Best effort: a failure never undoes the release. */
+  readonly onForcedRelease?: (by: Principal, lease: IntegratorLease, why: "owner" | "retired") => Promise<void>;
 }
 
 export class IntegratorLeaseOps {
@@ -60,6 +64,20 @@ export class IntegratorLeaseOps {
     } else if (command.holder !== undefined && command.holder !== holder) {
       throw new DomainError("forbidden", "an agent holds the lease as itself; only the owner takes it for another agent");
     }
+    if (this.#options.landingBranch !== undefined) {
+      let landing: string | undefined;
+      try { landing = await this.#options.landingBranch({ taskId, projectId }); } catch { throw new DomainError("unavailable", "the landing settings could not be read, so the lease cannot be matched to the landing branch"); }
+      if (landing === undefined) throw new DomainError("forbidden", "the project names no landing branch, so no integrator lease can be taken (the owner sets the landing branch first)");
+      if (landing !== command.branch) throw new DomainError("forbidden", `an integrator lease is taken only on the project's landing branch (${landing}), not on ${command.branch}`, { field: "branch" });
+    }
+    // A retired holder (P10 second slice): a live lease whose holder is no longer an active agent is ended now, so the next integrator is not kept out until it expires.
+    if (this.#options.activeAgent !== undefined) {
+      const current = await this.#leases.get(IntegratorLeaseService.leaseIdOf(projectId, command.branch));
+      if (current !== undefined && current.live && current.holder !== holder && !(await this.#options.activeAgent(current.holder))) {
+        const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, `retired-${command.commandId}`), leaseId: current.leaseId, fence: current.fence, note: "its holder is no longer an active agent" }).catch(() => undefined);
+        if (ended !== undefined) await this.#told(by, current, "retired");
+      }
+    }
     return this.#leases.acquire({ commandId: scopedCommandId(by.id, command.commandId), projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs });
   }
 
@@ -79,7 +97,14 @@ export class IntegratorLeaseOps {
     if (by.kind !== "owner" && (holderOf(by) === undefined || holderOf(by) !== found.holder)) throw new DomainError("fenced", `lease ${found.leaseId} is not held by ${by.id}`);
     if (command.fence === undefined && by.kind !== "owner") throw new DomainError("invalid_command", "fence: is required", { field: "fence" });
     if (found.state === "released") return found;
-    return this.#leases.release({ commandId: scopedCommandId(by.id, command.commandId), leaseId: found.leaseId, fence: command.fence ?? found.fence, ...(command.note === undefined ? {} : { note: command.note }) });
+    const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, command.commandId), leaseId: found.leaseId, fence: command.fence ?? found.fence, ...(command.note === undefined ? {} : { note: command.note }) });
+    // The owner ending a live hold that is another agent's is a forced release: it is put in the task's activity (P10 second slice).
+    if (by.kind === "owner" && found.live) await this.#told(by, found, "owner");
+    return ended;
+  }
+
+  async #told(by: Principal, lease: IntegratorLease, why: "owner" | "retired"): Promise<void> {
+    try { await this.#options.onForcedRelease?.(by, lease, why); } catch { /* best effort */ }
   }
 
   /** The leases of a project, live or not (one per branch ever leased). */
@@ -113,6 +138,8 @@ export class IntegratorLeaseOps {
     // An agent lands only while it still has the right (P10 review): taking the right away stops its landings at once, not when its hold runs out (up to a day later).
     if (by.kind !== "owner" && !this.#allowed(by, found.projectId)) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
     const holder = by.kind === "owner" ? found.holder : holderOf(by);
+    // A holder that was retired or disabled lands nothing, even before its hold runs out (P10 second slice).
+    if (holder !== undefined && this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("fenced", `${holder} is no longer an active agent, so its lease cannot be used to land`);
     if (holder === undefined || !(await this.#leases.valid(leaseId, fence, holder))) throw new DomainError("fenced", `lease ${leaseId} is not held with fence ${fence} by the caller (it expired, was released, or changed hands)`);
     return { leaseId, fence };
   }

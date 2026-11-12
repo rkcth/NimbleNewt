@@ -29,6 +29,10 @@ test("the integrator lease through the state API and chat, and a landing that mu
     const bob = (await c.services.principals.issueCredential(rob, "agent:bob")).token;
     const call = (token: string, op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as never;
 
+    // P10 second slice: no lease can be taken while the project names no landing branch, nor on any other branch than that one.
+    assert.equal((await call(ann, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "a0")).error?.code, "forbidden");
+    assert.ok((await call(O, "project.branches.change", { project, landing: "main" }, "lb1")).ok);
+    assert.equal((await call(ann, "integrator.lease.acquire", { taskId: task, branch: "squat", ttlMs: 600_000 }, "a0b")).error?.code, "forbidden", "an agent cannot take a branch name that is not the landing branch");
     // The right is its own: bob can manage a checkout but not take the lease.
     assert.equal((await call(bob, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "b1")).error?.code, "not_found");
     const taken = await call(ann, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "a1");
@@ -48,8 +52,6 @@ test("the integrator lease through the state API and chat, and a landing that mu
     // A landing without the lease is refused before anything is recorded or asked of a host; with the wrong fence too; a refresh may not carry one.
     const land = (token: string, id: string, extra: Record<string, unknown> = {}) => call(token, "workspace.request", { operation: "landing", taskId: task, reason: "land it", ...extra }, id);
     assert.equal((await land(ann, "w1")).error?.code, "invalid_command");
-    assert.equal((await land(ann, "w4", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "the project names no landing branch, so no lease covers a landing");
-    assert.ok((await call(O, "project.branches.change", { project, landing: "main" }, "lb1")).ok);
     assert.equal((await land(ann, "w2", { leaseId: lease.leaseId, fence: 4 })).error?.code, "fenced");
     assert.equal((await land(bob, "w3", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "a lease is its holder's: another agent (here without the right at all) is refused");
     const past = await land(ann, "w5", { leaseId: lease.leaseId, fence: 1 });
@@ -98,5 +100,20 @@ test("the integrator lease through the state API and chat, and a landing that mu
     assert.equal(done[0]!.status, "applied", JSON.stringify(done));
     assert.deepEqual((await call(O, "integrator.lease.list", { projectId: project })).result.items.map((l: any) => [l.state, l.live]), [["released", false]]);
     assert.equal((await call(ann, "integrator.lease.renew", { leaseId: lease.leaseId, fence: 2 }, "a8")).error?.code, "fenced", "the holder it was taken from can no longer renew");
+    // P10 second slice: the owner's forced release is a line in the task's activity.
+    const steps1 = (await call(O, "activity.steps", { taskId: task })).result.steps as { summary: string }[];
+    assert.equal(steps1.filter((x) => /took the integrator lease of branch main away from ann/.test(x.summary)).length, 1, JSON.stringify(steps1));
+    // A retired holder: its lease is not usable for a landing at once, and the next agent takes the branch without waiting for expiry (that too is a line in the activity).
+    await c.services.principals.enroll(rob, { commandId: "e-cy", kind: "agent", name: "cy", grants });
+    const cy = (await c.services.principals.issueCredential(rob, "agent:cy")).token;
+    const cyLease = (await call(cy, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "c1")).result.item;
+    assert.equal((await call(ann, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "a9")).error?.code, "unavailable", "a live holder keeps the branch");
+    await c.services.principals.disable(rob, { commandId: "d-cy", principalId: "agent:cy", expectedRevision: (await c.services.principals.get("agent:cy"))!.revision });
+    assert.equal((await land(O, "wcy")).error?.code, "fenced", "the owner acting for a retired holder lands nothing");
+    const next = await call(ann, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "a10");
+    assert.equal(next.result?.item.holder, "ann", JSON.stringify(next));
+    assert.equal(next.result.item.fence, cyLease.fence + 1);
+    const steps2 = (await call(O, "activity.steps", { taskId: task })).result.steps as { summary: string }[];
+    assert.equal(steps2.filter((x) => /cy is no longer an active agent/.test(x.summary)).length, 1, JSON.stringify(steps2));
   } finally { await c.close(); }
 });

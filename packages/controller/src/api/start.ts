@@ -662,8 +662,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     let workspacePort: ((taskId: string) => Promise<WorkspacePort | undefined>) | undefined;
     // The integrator leases of landing (card P10), on the controller's own clock (the one the meetings and the dispatcher read). A landing is made only under the project's lease on the landing branch the owner's policy names.
     const integratorLeases = IntegratorLeaseService.withEpoch(storage, epoch, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) });
-    const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases, { activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; } });
     const landingBranchOf = landingPolicyFrom(configuration, (projectId) => branchSettings.landingOf(projectId));
+    const integratorLeaseOps = new IntegratorLeaseOps(integratorLeases, {
+      activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
+      landingBranch: async (call) => (await landingBranchOf(call)).branch,
+      onForcedRelease: async (_by, l, why) => { await activity.record({ id: "service:integrator-leases", kind: "service", name: "integrator-leases", grants: [] } as Principal, { commandId: `lease-force:${l.leaseId}:${l.fence}`, taskId: l.taskId, kind: "ownership", summary: why === "owner" ? `The owner took the integrator lease of branch ${l.branch} away from ${l.holder} (fence ${l.fence}).` : `The integrator lease of branch ${l.branch} held by ${l.holder} (fence ${l.fence}) was ended because ${l.holder} is no longer an active agent.`, manifest: { refs: [{ kind: "task", id: l.taskId }] } } as never); },
+    });
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
       landingLease: async (by, call) => {
         let branch: string | undefined;
