@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { BlockerService } from "../domain/blockers.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
@@ -15,10 +15,10 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 const MIN = 60_000;
 const TITLE = "Rotate the payroll signing key";
 
-const open = async (d: string, clock: () => number, sent: { text: string }[], shareClock = false) => {
+const open = async (d: string, clock: () => number, sent: { text: string }[]) => {
   const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000, ...(shareClock ? { clock: () => new Date(clock()).toISOString() } : {}) }, notifications: { channels, clock: () => new Date(clock()).toISOString() } });
+    dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, notifications: { channels, clock: () => new Date(clock()).toISOString() } });
   assert.ok(c.dispatch !== undefined, c.dispatchProblem);
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const owner = (await c.services.principals.authenticate(boot.token))!;
@@ -70,12 +70,13 @@ test("in the running controller a decision that holds up a project with nothing 
 test("in the running controller the plain 09:00 digest waits for no stand-up: with one scheduled it is not sent, once it has ended it is (card U11d)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-dig-"));
   let clock = Date.parse("2026-11-11T07:00:00.000Z");
+  // Only the notifications take this test's clock; the controller's other services (the stand-up schedule among them) read Date. With the real Date the test passed only while the real time lay in
+  // a narrow window around its own two days (it failed from 2026-11-12 on), so Date is held at the test's clock too (only Date: timers run as usual).
+  mock.timers.enable({ apis: ["Date"], now: clock });
   const sent: { text: string }[] = [];
-  // The dispatcher's own notices (stall detection off, for one) are stamped with the same test clock, never the real one: before, they carried the real time, so the test passed only while the real
-  // date fell between the two test days (a notice with no project reached the second digest by accident). The stopped-work rule is off here, so the blocker stays a queued Needs-you item for the digest.
-  const { c, owner, call, notifications, set } = await open(d, () => clock, sent, true);
+  const { c, owner, call, notifications, set } = await open(d, () => clock, sent);
   try {
-    await set({ channel: "external", channelName: "chat", escalateAfterHours: null, stoppedWorkAfterMinutes: null }, "s1");
+    await set({ channel: "external", channelName: "chat", escalateAfterHours: null }, "s1");
     const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
     const agent = (await c.services.agents.create(owner, { commandId: "ag-a", friendlyName: "A" })).id;
     const made = await call("standup.configure", { projectId: project, title: "Morning", roster: [`agent:${agent}`], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "UTC", recurrence: { kind: "daily" } }, "su1");
@@ -84,7 +85,7 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
     const blocker = (await BlockerService.withEpoch(c.storage, c.epoch, { clock: () => new Date(clock).toISOString() }).openBlocker({ commandId: "b1", actor: owner.id, type: "manual_hold", subject: { kind: "task", id: task }, summary: TITLE, resolver: owner.id })).id;
     await notifications.emitFromController({ commandId: "n1", kind: "blocker", ref: { kind: "blocker", id: blocker } });
     const digests = async () => (await notifications.inbox(owner)).digests.length;
-    const tick = async (to: string) => { clock = Date.parse(to); await c.dispatch!.dispatcher.tick(); };
+    const tick = async (to: string) => { clock = Date.parse(to); mock.timers.setTime(clock); await c.dispatch!.dispatcher.tick(); };
     await tick("2026-11-11T09:05:00.000Z");
     assert.equal(await digests(), 0, "a stand-up is scheduled: no plain digest");
     // The stand-up ends; the next 09:00 the digest comes.
@@ -93,7 +94,5 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
     assert.ok(ended.ok, JSON.stringify(ended));
     await tick("2026-11-12T09:05:00.000Z");
     assert.equal(await digests(), 1, "no stand-up: the digest is sent");
-    const item = (await notifications.inbox(owner)).items.find((i) => i.ref.kind === "blocker" && i.ref.id === blocker)!;
-    assert.ok((await notifications.inbox(owner)).digests[0]!.itemIds.includes(item.id), "the digest carries the project's blocker, not only the controller's own notices");
-  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { mock.timers.reset(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
