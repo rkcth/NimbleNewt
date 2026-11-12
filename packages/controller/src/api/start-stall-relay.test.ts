@@ -7,6 +7,7 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { ModelRelay } from "../dispatch/relay.js";
 import type { WorkerHost } from "../dispatch/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
+import { SPEED_SAMPLE } from "../health/stall.js";
 import { PI } from "../dispatch/testing/world.js";
 import { startController } from "./index.js";
 
@@ -91,7 +92,9 @@ test("a route's declared reading speed in the routing table judges the first cal
     const n = ++calls;
     return new Response(new ReadableStream({
       async start(c) {
-        if (n === 1) { c.enqueue(new TextEncoder().encode("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":10000,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":7500}}}\n\n")); c.close(); return; }
+        // The first reply reads 40 uncached tokens (160 - 120): below what a speed sample needs (SPEED_SAMPLE.minReadTokens), so it is never a measurement however slowly this machine
+        // serves it (with 2500 a slow CI runner took over a second and measured the route). Its cache served 0.75 of the prompt, which the second call is started with.
+        if (n === 1) { c.enqueue(new TextEncoder().encode("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":160,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":120}}}\n\n")); c.close(); return; }
         await new Promise<void>((resolve) => { hold.release = resolve; });
         c.close();
       },
@@ -127,10 +130,11 @@ test("a route's declared reading speed in the routing table judges the first cal
     };
     const until = async (ok: () => Promise<boolean>): Promise<void> => { for (let i = 0; i < 300 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(await ok(), "reported in time"); };
     const evidence = async () => c.services.stall.evidence(rob, task);
+    assert.ok(160 - 120 < SPEED_SAMPLE.minReadTokens, "the first reply is too small to be a speed sample, whatever its timing");
     // The first call: the route declares 20 tokens a second, nothing has been measured.
     await send(30_000);
     await until(async () => (await evidence())?.request === undefined && (await evidence())?.lastRequestMs !== undefined);
-    // The second call is started with the share the first one's cache served (7500 of 10000), and is judged at the declared speed.
+    // The second call is started with the share the first one's cache served (120 of 160), and is judged at the declared speed.
     const second = send(30_000);
     await until(async () => (await evidence())?.request !== undefined);
     const open = (await evidence())!.request!;
