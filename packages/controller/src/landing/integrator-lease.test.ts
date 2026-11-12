@@ -46,12 +46,12 @@ for (const backend of backends) {
       assert.equal((await r.leases.acquire({ commandId: "d1", projectId: r.project, branch: "release/1.0", holder: other.holder, taskId: other.taskId, ttlMs: 10 * MIN })).fence, 1);
       // The holder stops renewing: once expired, the next integrator takes it with fence 2, and the lost one's fence no longer works.
       r.tick(11 * MIN);
-      assert.equal(await r.leases.valid(held.leaseId, 1), false);
+      assert.equal(await r.leases.valid(held.leaseId, 1, held.holder), false);
       const next = await r.leases.acquire({ commandId: "c2", projectId: r.project, branch: "integration", ...other, ttlMs: 10 * MIN });
       assert.deepEqual([next.leaseId, next.fence, next.holder], [held.leaseId, 2, other.holder]);
       await refuses("fenced", () => r.leases.renew({ commandId: "rn1", leaseId: held.leaseId, fence: 1, holder: held.holder }));
       await refuses("fenced", () => r.leases.release({ commandId: "rl1", leaseId: held.leaseId, fence: 1 }));
-      assert.equal(await r.leases.valid(held.leaseId, 2), true, "the old holder's release did not touch the new hold");
+      assert.equal(await r.leases.valid(held.leaseId, 2, other.holder), true, "the old holder's release did not touch the new hold");
       // Bad input.
       await refuses("invalid_command", () => r.leases.acquire({ commandId: "e1", projectId: r.project, branch: "../x", holder: "agt-a", taskId: r.t1, ttlMs: 10 * MIN }));
       await refuses("invalid_command", () => r.leases.acquire({ commandId: "e2", projectId: r.project, branch: "main", holder: "agt-a", taskId: r.t1, ttlMs: 5 }));
