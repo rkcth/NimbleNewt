@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkRemoteConfig, readRemoteConfig, startRemoteWorker } from "./remote-host.mjs";
+import { checkRemoteConfig, readRemoteConfig, remoteLandingPolicy, startRemoteWorker } from "./remote-host.mjs";
 
 // Card L05e: what the remote worker host wires together, with stand-ins for the packages (the real composition is shown by the integration test with a real process).
 const config = (extra = {}) => ({ url: "https://controller.example:8443", token: "host-credential-0123", base: "/tmp/nn-l05e-base", routes: { "localp/small": { url: "http://127.0.0.1:1/v1", keyEnv: "L05E_STUB_KEY" } }, ...extra });
@@ -31,7 +31,8 @@ function packages() {
     detectLimitCapabilities: async () => ({ platform: "linux" }),
     limitedPlan: () => ({ report: [{ limit: "cpus", enforced: "full" }, { limit: "memoryMb", enforced: "partial" }] }),
     appFromRepository: () => ({}),
-    localWorkerParts: (options) => { seen.parts = options; return { sandbox: {}, runtimes: { open: async () => ({}) } }; },
+    localWorkerParts: (options) => { seen.parts = options; return { sandbox: {}, runtimes: { open: async () => ({}) }, checks: { run: async (attemptId, check) => { (seen.checksRun ??= []).push({ attemptId, check }); return { state: "passed", exitCode: 0 }; } } }; },
+    doneVerifier: (parts) => { seen.verifierParts = parts; return async (attemptId, scope, request) => { (seen.verified ??= []).push({ attemptId, scope, request }); return { checkout: true, checks: [] }; }; },
   };
   const piAdapter = { PINNED_PI_DURABLE_VERSION: "1.3.0" };
   return { seen, load: async (name) => ({ controller, worker, "pi-adapter": piAdapter })[name] };
@@ -164,10 +165,52 @@ test("the landing policy is the branch this host's configuration names for the p
     const { seen, load } = packages();
     const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ projects: { [A]: shared }, landing: { [A]: "trunk" } }));
     try {
-      assert.deepEqual(await seen.workspaceOptions.landing({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: A }), { branch: "trunk", requirePermit: true, protectDefaults: true });
-      assert.equal(await seen.workspaceOptions.landing({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: B }), undefined, "no branch named: the landing is refused, not sent to main");
+      const task = "task-aaaaaaaaaaaaaaaaaaaa";
+      assert.deepEqual(await seen.workspaceOptions.landing({ taskId: task, projectId: A, carried: { branch: "trunk" } }), { branch: "trunk", requirePermit: true, protectDefaults: true });
+      assert.equal(await seen.workspaceOptions.landing({ taskId: task, projectId: B, carried: { branch: "main" } }), undefined, "no branch named: the landing is refused, not sent to main");
       assert.equal(typeof seen.responderOptions.busy, "function", "the responder is given the busy check (it refuses to start without one)");
       assert.deepEqual(await seen.responderOptions.busy(), []);
     } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
   } finally { rmSync(shared, { recursive: true, force: true }); }
+});
+
+const PINS = new Map([["proj-aaaaaaaaaaaaaaaaaaaa", "trunk"]]);
+const call = (carried, projectId = "proj-aaaaaaaaaaaaaaaaaaaa") => ({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId, ...(carried === undefined ? {} : { carried }) });
+
+test("the owner's landing policy carried in the request can only hold the host's pin and make it stricter: it never moves the branch, never switches the permit or the built-in protected list off, and is required (card H12a)", () => {
+  // Agreeing: the host's own figures stand, the owner's extra protected paths are added.
+  assert.deepEqual(remoteLandingPolicy(PINS, call({ branch: "trunk", requirePermit: true, protectDefaults: true, protectedPaths: ["docs/", "secrets.txt"] })), { branch: "trunk", requirePermit: true, protectDefaults: true, protectedPaths: ["docs/", "secrets.txt"] });
+  // The owner turned the permit and the defaults off: another machine does not follow; they stay on.
+  assert.deepEqual(remoteLandingPolicy(PINS, call({ branch: "trunk", requirePermit: false, protectDefaults: false })), { branch: "trunk", requirePermit: true, protectDefaults: true });
+  // Not pinned here: never landed, whatever the owner says.
+  assert.equal(remoteLandingPolicy(PINS, call({ branch: "trunk" }, "proj-bbbbbbbbbbbbbbbbbbbb")), undefined);
+  // No policy carried, or one with no usable branch: refused, nothing guessed from the host's pin.
+  for (const carried of [undefined, null, {}, { branch: "" }, { branch: 7 }, { requirePermit: true }, "trunk", []]) {
+    const got = remoteLandingPolicy(PINS, call(carried));
+    assert.match(got.refuse, /did not send the owner's landing policy/, JSON.stringify(carried));
+    assert.equal(got.branch, undefined);
+  }
+  // The owner moved the branch: refused with both names, not landed on the old pin and not on the new name.
+  const moved = remoteLandingPolicy(PINS, call({ branch: "main" }));
+  assert.match(moved.refuse, /owner's landing branch for this project is "main" but this host is set up to land it on "trunk"/);
+  assert.equal(moved.branch, undefined);
+  // A protected list that is not a list of paths refuses the landing.
+  for (const protectedPaths of ["docs/", [1], [""], ["x".repeat(301)], Array.from({ length: 101 }, (_, i) => `p${i}`)]) assert.match(remoteLandingPolicy(PINS, call({ branch: "trunk", protectedPaths })).refuse, /protected paths were not a list/);
+});
+
+test("the remote host checks a done: its worker is given the check, and so is the responder; a check names only a real attempt ID (card H12a)", { skip: LINUX_ONLY }, async () => {
+  const { seen, load } = packages();
+  const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config());
+  try {
+    assert.equal(typeof seen.localOptions.verify, "function", "the worker has a done check (W05)");
+    assert.equal(typeof seen.responderOptions.verify, "function", "the controller reaches it over the workspace channel");
+    assert.equal(seen.verifierParts.workspaces.constructor.name, "LocalWorkspaces", "it reads the checkouts this host's port made");
+    assert.equal(typeof seen.verifierParts.checks.run, "function", "and runs the contract's checks in the attempt's sandbox here");
+    const scope = { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" };
+    const req = { checks: [], evidence: [], maxOutputBytes: 10 };
+    assert.deepEqual(await seen.responderOptions.verify("att-aaaaaaaaaaaaaaaaaaaa", scope, req), { checkout: true, checks: [] });
+    assert.deepEqual(await seen.localOptions.verify("att-aaaaaaaaaaaaaaaaaaaa", scope, req), { checkout: true, checks: [] });
+    for (const bad of ["../../etc", "att-short", "", undefined, "att-aaaaaaaaaaaaaaaaaaaa/../x"]) await assert.rejects(seen.responderOptions.verify(bad, scope, req), /not an attempt ID; nothing was checked/);
+    assert.equal(seen.verified.length, 2, "a bad attempt ID reached no check");
+  } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
 });

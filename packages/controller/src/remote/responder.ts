@@ -1,6 +1,8 @@
-import type { RemoteWorkspaceAnswer, WorkspaceAsk } from "./protocol.js";
+import { REMOTE_LIMITS, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 import type { RemoteWorkerClient } from "./client.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
+import type { DoneCheckReport, DoneCheckRequest } from "../dispatch/ports.js";
+import type { JsonObject } from "../storage/types.js";
 
 /**
  * The remote worker's side of workspace requests (card H12m): takes the requests the poller read, hands each to the host's workspace port (the worker package's `WorkspaceHost.run`) in the background, and sends the answer back.
@@ -20,11 +22,13 @@ export class WorkspaceResponder {
   readonly #withdrawn = new Set<string>();
   readonly #now: () => number;
   readonly #busy: () => readonly string[] | Promise<readonly string[]>;
+  readonly #verify: ((attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>) | undefined;
   #tail: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number }) {
+  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number; /** The host's check of an attempt's done (card H12a): the worker package's `doneVerifier` over this host's checkouts and sandbox. Absent: a check is refused, so the controller does not count the done. */ readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport> }) {
     if (typeof (options as { busy?: unknown }).busy !== "function") throw new TypeError("a workspace responder needs the host's busy check (which attempts have a call in flight here); without it no workspace request is answered");
     this.#busy = options.busy;
+    this.#verify = options.verify;
     this.#now = options.now ?? Date.now;
     this.#client = options.client; this.#port = options.port; this.#onError = options.onError;
   }
@@ -51,6 +55,12 @@ export class WorkspaceResponder {
     // Waiting behind a long request is where a request goes stale: the controller may have stopped waiting and freed the agent meanwhile. The host checks the deadline again before it starts.
     if (this.#withdrawn.has(ask.requestId)) { this.#running.delete(ask.requestId); return; }
     if (ask.expiresAt !== undefined && this.#now() >= Date.parse(ask.expiresAt)) { this.#running.delete(ask.requestId); return; }
+    // The check of an attempt's done (card H12a) changes nothing and is asked while the attempt is live at its end, so it is not held back by the busy check (the attempt asking is itself in a call); it runs checks only in that attempt's own sandbox.
+    if (ask.operation === "verify") {
+      await this.#send(ask.requestId, await this.#check(ask));
+      this.#running.delete(ask.requestId);
+      return;
+    }
     // Fail closed: a check that throws, or answers anything but a list of attempt IDs, refuses the request (and the request is still answered, so it is not left in hand here forever).
     let inFlight: readonly string[] | undefined;
     try {
@@ -63,12 +73,33 @@ export class WorkspaceResponder {
       this.#running.delete(ask.requestId);
       return;
     }
-    try { answer = await this.#port.run({ ...ask, quietAttempts: [...ask.quietAttempts] }); } catch (error) {
+    try { answer = await this.#port.run({ ...ask, operation: ask.operation, quietAttempts: [...ask.quietAttempts] }); } catch (error) {
       // The work may be half done: this is told as a failure (`failed`, recorded as such by the controller, never as a clean refusal), and the port's journal refuses to run the request again.
       answer = { ok: false, reason: `the host could not finish the request and may have done part of it: ${String((error as Error)?.message ?? error).slice(0, 300)}`, failed: true };
     }
     await this.#send(ask.requestId, answer);
     this.#running.delete(ask.requestId);
+  }
+
+  /** The host's report of a done check as an answer: the report, cut to fit the answer's limit (a check's output is cut to its end, then dropped), or a refusal that says why. Never a pass the host did not find. */
+  async #check(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> {
+    const v = ask.verify;
+    if (this.#verify === undefined) return { ok: false, reason: "this host cannot check work (it was started without a check of a done), so the work was not checked" };
+    if (v === undefined) return { ok: false, reason: "the request named nothing to check" };
+    let report: DoneCheckReport;
+    try { report = await this.#verify(v.attemptId, { taskId: ask.taskId, projectId: ask.projectId }, { checks: v.checks, evidence: v.evidence, maxOutputBytes: v.maxOutputBytes }); } catch (error) {
+      return { ok: false, reason: `this host could not check the work: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+    }
+    // A verifier that answers something that is not a report is a failed check, not a crash that leaves the request in hand (the controller reshapes and bounds the report again).
+    try {
+      if (report === null || typeof report !== "object" || !Array.isArray(report.checks)) throw new TypeError("the check gave no report");
+      for (const keep of [600, 150, 0]) {
+        const cut = { ...report, checks: report.checks.map((c) => ({ ...c, ...(typeof c.output === "string" ? { output: c.output.slice(Math.max(0, c.output.length - keep)) } : {}), ...(typeof c.reason === "string" ? { reason: c.reason.slice(0, 200) } : {}) })) };
+        const detail = JSON.parse(JSON.stringify(cut)) as JsonObject;
+        if (Buffer.byteLength(JSON.stringify(detail), "utf8") <= REMOTE_LIMITS.workspaceDetailBytes) return { ok: true, summary: "checked", detail };
+      }
+    } catch (error) { return { ok: false, reason: `this host could not check the work: ${String((error as Error)?.message ?? error).slice(0, 300)}` }; }
+    return { ok: false, reason: "the report of the check did not fit in an answer, so the work was not checked" };
   }
 
   async #send(requestId: string, answer: RemoteWorkspaceAnswer): Promise<void> {

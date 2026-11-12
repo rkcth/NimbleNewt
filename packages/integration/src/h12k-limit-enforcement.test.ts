@@ -59,7 +59,7 @@ async function rig(options: { onLaunchFails?: boolean; hang?: boolean; workspace
   const owner = await c.services.principals.bootstrapOwner({ name: "rob" });
   const call: Call = (token, op, args, commandId) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as never;
   let n = 0;
-  const order = (): HostOrder => ({ attemptId: `att-${++n}`, agentId: "agent:ann", route: "llama/local", credential: "task-credential-1", recipe: { revision: "r1", reach: [] }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+  const order = (): HostOrder => ({ attemptId: `att-${++n}`, taskId: "task-1", projectId: "proj-1", agentId: "agent:ann", route: "llama/local", credential: "task-credential-1", recipe: { revision: "r1", reach: [] }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
   /** One attempt: reserve the sandbox, then open the runtime. The fake process ends at once, so a launch that was allowed fails after the launcher call; one that was refused fails before. */
   const attempt = async (o: HostOrder = order()): Promise<{ order: HostOrder; error?: Error }> => {
     const session = await parts!.sandbox.open(o.recipe, o);
@@ -211,7 +211,7 @@ test("the real launcher refuses a disk limit it cannot enforce in full, before a
       model: () => ({ alias: "m0", provider: "llama", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
       namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: true, result: {} }), relay: async () => { throw new Error("not used"); },
     });
-    const order: HostOrder = { attemptId: "att-r", agentId: "agent:ann", route: "llama/local", credential: "c", recipe: { revision: "r1", reach: [] }, expiresAt: new Date(Date.now() + 600_000).toISOString() };
+    const order: HostOrder = { attemptId: "att-r", taskId: "task-1", projectId: "proj-1", agentId: "agent:ann", route: "llama/local", credential: "c", recipe: { revision: "r1", reach: [] }, expiresAt: new Date(Date.now() + 600_000).toISOString() };
     const session = await parts.sandbox.open(order.recipe, order);
     await assert.rejects(parts.runtimes.open(order, {} as never, undefined), SandboxError);
     await session.close();

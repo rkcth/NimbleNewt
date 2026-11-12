@@ -13,7 +13,7 @@ const dir = (name: string): string => { const d = join(root, name); mkdirSync(d,
 const node = dir("node"); writeFileSync(join(node, "marker"), "x");
 const app = { node: { root: node, executable: "bin/node" }, mounts: [] as { host: string; guest: string }[], entry: "/opt/app/main.js" };
 const work = { checkout: dir("work/checkout"), gitDir: dir("work/git"), home: dir("work/home"), scratch: dir("work/scratch"), env: { LANGUAGE_MODE: "plain" } };
-const order: HostOrder = { attemptId: "att-1", agentId: "agent:ann", route: "r", credential: "c", recipe: { revision: "r1", reach: [] } };
+const order: HostOrder = { attemptId: "att-1", taskId: "task-1", projectId: "proj-1", agentId: "agent:ann", route: "r", credential: "c", recipe: { revision: "r1", reach: [] } };
 const run = (r: Partial<RunResult>): RunResult => ({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", truncated: false, stdoutTruncated: false, durationMs: 42, ...r });
 
 function make(answer: (request: LaunchRequest) => RunResult | Promise<RunResult>, owner: { limits?: Record<string, number>; bestEffort?: boolean } = {}) {

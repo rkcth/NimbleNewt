@@ -730,7 +730,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         }).context!;
         // The first call as the controller can know it before the host's process is up, measured against the same window the guards judge it by.
         const firstCall = estimatedFirstCall(context, async (order) => usableWindow(hostWindow(order)) ?? usableWindow(await routeWindow(order)));
-        workers.push(new RemoteWorkerHost(h.hostId, remote, principal, { ...h, ownerPolicy, context: { guards, firstCall }, onGuardError: h.onGuardError ?? ((_attemptId, _what, error) => i.onError?.(error)) }));
+        workers.push(new RemoteWorkerHost(h.hostId, remote, principal, { ...h, ownerPolicy, landingPolicy: async (call) => (i.landingPolicy === undefined ? {} : i.landingPolicy(call)), context: { guards, firstCall }, onGuardError: h.onGuardError ?? ((_attemptId, _what, error) => i.onError?.(error)) }));
       }
       if (i.quietHosts !== undefined) {
         const r = remote;

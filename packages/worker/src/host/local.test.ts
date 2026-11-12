@@ -17,7 +17,7 @@ const node = dir("node"); writeFileSync(join(node, "marker"), "x");
 const inputA = dir("input-a"); const inputB = dir("input-b");
 const app = { node: { root: node, executable: "bin/node" }, mounts: [] as { host: string; guest: string }[], entry: "/opt/app/main.js" };
 const work = { checkout: dir("work/checkout"), gitDir: dir("work/git"), home: dir("work/home"), scratch: dir("work/scratch") };
-const order = (reach: string[], extra: Partial<HostOrder["recipe"]> = {}): HostOrder => ({ attemptId: "att-1", agentId: "agent:ann", route: "r", credential: "c", recipe: { revision: "r1", reach, ...extra } });
+const order = (reach: string[], extra: Partial<HostOrder["recipe"]> = {}): HostOrder => ({ attemptId: "att-1", taskId: "task-1", projectId: "proj-1", agentId: "agent:ann", route: "r", credential: "c", recipe: { revision: "r1", reach, ...extra } });
 const parts = (reach?: Parameters<typeof localWorkerParts>[0]["reach"]) => localWorkerParts<unknown>({
   launcher: { launch: async () => { throw new Error("not launched here"); } } as never, app, protectedPaths: [], workspace: () => work,
   model: () => { throw new Error("unused"); }, namespaceId: () => "abcdef0123456789", bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); },

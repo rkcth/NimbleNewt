@@ -23,6 +23,9 @@ type JsonObj = { readonly [key: string]: JsonValue };
 /** What the host needs of the dispatcher's work order. */
 export interface HostOrder {
   readonly attemptId: string;
+  /** The task and project the order is for (the controller's `WorkOrder` carries both; a host composer reads them to find the attempt's checkout, card H12a). */
+  readonly taskId: string;
+  readonly projectId: string;
   readonly agentId: string;
   readonly route: string;
   readonly credential: string;

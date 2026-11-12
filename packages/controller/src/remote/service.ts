@@ -5,7 +5,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import type { CallMonitor, RelayMonitor } from "../dispatch/relay.js";
-import { StartRefused, turnEndKindOf, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
+import { StartRefused, turnEndKindOf, type DoneCheckRequest, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
 import type { SecurityEvent } from "../notifications/urgent.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import type { EffectBridge } from "../domain/effects.js";
@@ -20,7 +20,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import { cleanProcessRef } from "./process-ref.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { WORKSPACE_OPERATIONS, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
+import { WORKSPACE_OPERATIONS, type CarriedLanding, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
@@ -175,6 +175,21 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
 
 interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void> }
 
+/** The branch names a landing policy may carry (the same shape the host's configuration accepts). */
+const LANDING_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+/** The owner's landing policy as carried to a remote host (card H12a): only the four owner-set figures, each checked and bounded; anything else is refused, so a request cannot smuggle a field. */
+function checkCarriedLanding(value: unknown): CarriedLanding {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("landing", "must be an object");
+  const o = value as Record<string, unknown>;
+  for (const key of Object.keys(o)) if (!["branch", "requirePermit", "protectedPaths", "protectDefaults"].includes(key)) invalid("landing", `${key} is not a landing figure`);
+  if (o["branch"] !== undefined && (typeof o["branch"] !== "string" || !LANDING_BRANCH.test(o["branch"]) || o["branch"].includes(".."))) invalid("landing.branch", "must be a branch name");
+  if (o["requirePermit"] !== undefined && typeof o["requirePermit"] !== "boolean") invalid("landing.requirePermit", "must be true or false");
+  if (o["protectDefaults"] !== undefined && typeof o["protectDefaults"] !== "boolean") invalid("landing.protectDefaults", "must be true or false");
+  const paths = o["protectedPaths"];
+  if (paths !== undefined && (!Array.isArray(paths) || paths.length > 100 || paths.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300 || p.includes("\0")))) invalid("landing.protectedPaths", "must be a list of at most 100 paths of 1 to 300 characters");
+  return { ...(o["branch"] === undefined ? {} : { branch: o["branch"] as string }), ...(o["requirePermit"] === undefined ? {} : { requirePermit: o["requirePermit"] as boolean }), ...(paths === undefined ? {} : { protectedPaths: [...(paths as string[])] }), ...(o["protectDefaults"] === undefined ? {} : { protectDefaults: o["protectDefaults"] as boolean }) };
+}
+
 /** The request as it is sent to a host: every field checked and bounded, nothing else carried. */
 function checkAsk(call: WorkspaceCall): WorkspaceAsk {
   if (call === null || typeof call !== "object") invalid("call", "must be an object");
@@ -186,7 +201,25 @@ function checkAsk(call: WorkspaceCall): WorkspaceAsk {
   if (typeof call.reason !== "string" || call.reason.length < 1 || call.reason.length > 500) invalid("reason", "must be 1 to 500 characters");
   if (!Array.isArray(call.quietAttempts) || call.quietAttempts.length > 50 || call.quietAttempts.some((a) => typeof a !== "string" || !ATTEMPT.test(a))) invalid("quietAttempts", "must be a short list of attempt IDs");
   if (call.assignee !== undefined && (typeof call.assignee !== "string" || !name.test(call.assignee))) invalid("assignee", "is malformed");
-  return { requestId: id, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: [...call.quietAttempts], ...(call.assignee === undefined ? {} : { assignee: call.assignee }) };
+  // The owner's landing policy rides only a landing; any other operation carrying one is a mistake and is refused rather than quietly dropped.
+  if (call.landing !== undefined && call.operation !== "landing") invalid("landing", "is carried only by a landing");
+  return { requestId: id, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: [...call.quietAttempts], ...(call.assignee === undefined ? {} : { assignee: call.assignee }), ...(call.landing === undefined ? {} : { landing: checkCarriedLanding(call.landing) }) };
+}
+
+/** The check of an attempt's done as it is sent to the host that holds the attempt (card H12a): every field bounded, nothing else carried. */
+function checkVerifyAsk(requestId: string, attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): WorkspaceAsk {
+  if (typeof requestId !== "string" || !/^wsr-[a-z2-7]{20}$/.test(requestId)) invalid("requestId", "is not a workspace request ID");
+  if (typeof attemptId !== "string" || !ATTEMPT.test(attemptId)) invalid("attemptId", "is not an attempt ID");
+  const name = /^[A-Za-z0-9._:-]{1,120}$/;
+  if (scope === null || typeof scope !== "object" || typeof scope.taskId !== "string" || !name.test(scope.taskId) || typeof scope.projectId !== "string" || !name.test(scope.projectId)) invalid("taskId", "or projectId is malformed");
+  if (request === null || typeof request !== "object" || !Array.isArray(request.checks) || request.checks.length > 20 || !Array.isArray(request.evidence) || request.evidence.length > 100) invalid("verify", "must name at most 20 checks and 100 evidence paths");
+  if (!Number.isSafeInteger(request.maxOutputBytes) || request.maxOutputBytes < 1 || request.maxOutputBytes > 1_048_576) invalid("verify.maxOutputBytes", "must be a whole number from 1 to 1048576");
+  const checks = request.checks.map((c) => {
+    if (c === null || typeof c !== "object" || typeof c.name !== "string" || c.name.length < 1 || c.name.length > 120 || !Array.isArray(c.run) || c.run.length < 1 || c.run.length > 50 || c.run.some((a) => typeof a !== "string" || a.length > 1000 || a.includes("\0")) || !Number.isSafeInteger(c.timeoutMs) || c.timeoutMs < 1 || c.timeoutMs > 3_600_000) return invalid("verify.checks", "each check needs a name, a command of at most 50 words and a timeout of up to an hour");
+    return { name: c.name, run: [...c.run], timeoutMs: c.timeoutMs };
+  });
+  const evidence = request.evidence.map((e) => (typeof e === "string" && e.length >= 1 && e.length <= 500 && !e.includes("\0") ? e : invalid("verify.evidence", "each path must be 1 to 500 characters")));
+  return { requestId, operation: "verify", taskId: scope.taskId, projectId: scope.projectId, reason: "check the work of an attempt that said it is done", quietAttempts: [], verify: { attemptId, checks, evidence, maxOutputBytes: request.maxOutputBytes } };
 }
 
 /** A host's answer, checked: the typed outcome and nothing more, with the text and the detail bounded. */
@@ -459,8 +492,19 @@ export class RemoteWorkerService {
    */
   async askWorkspace(by: Principal, hostId: string, call: WorkspaceCall, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     this.#staff(by);
-    const host = hostIdOf(hostId);
-    const wire = checkAsk(call);
+    return this.#ask(hostIdOf(hostId), checkAsk(call), options);
+  }
+
+  /**
+   * Asks the host that holds an attempt to check its work (card H12a, the remote form of the check of a done, card W05): the contract's checks run in the attempt's own sandbox on that host and the state of its checkout is read
+   * there. The same channel, limits and answer rules as a workspace request (withdrawn when the host is slow, one answer, bounded detail), but it changes nothing on the host. Only the owner and the dispatcher may ask.
+   */
+  async askVerify(by: Principal, hostId: string, requestId: string, attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
+    this.#staff(by);
+    return this.#ask(hostIdOf(hostId), checkVerifyAsk(requestId, attemptId, scope, request), options);
+  }
+
+  async #ask(host: string, wire: WorkspaceAsk, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 3_600_000) invalid("waitMs", "must be a whole number of milliseconds from 1 to 3600000");
     const earlier = this.#asks.get(wire.requestId);
     let ask: WorkspaceAskState;
