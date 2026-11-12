@@ -228,6 +228,11 @@ export interface WorkerHost {
    */
   refuses?(probe: HostProbe): Promise<{ readonly reasons: readonly string[]; /** False when every reason is a passing condition (not connected, not heard from lately): the attempt just waits and the owner is not told. */ readonly lasting: boolean }>;
   /**
+   * How many attempts are waiting on this host that it has not taken up yet (card H07b): the dispatcher tries the less loaded of several hosts first, then keeps the configuration order. A host that does not say counts as
+   * zero, and one that throws is read as zero too (the fault goes to `onError`).
+   */
+  load?(): Promise<number>;
+  /**
    * What this host still holds for these attempts, for Stop (card L02d): the local processes and child work they started (running, asked to stop and not stopped, or of unknown state), and what the cleanup after the stop has
    * cost so far, as a running total per attempt (the controller charges only what it has not charged yet). A host that cannot say leaves it out, and nothing is claimed about what is not known. It answers only for attempts it knows and
    * throws when it cannot look (the stop then shows one unknown item instead of a clean stop).

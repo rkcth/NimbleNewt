@@ -2268,6 +2268,39 @@ for (const backend of backendsNamed(backendName)) {
     assert.equal(await d.placedHostOf(c.owner, taskId), "host:w2");
   });
 
+  suite("the dispatcher asks the less loaded host first; equal loads keep the configuration order; a host that cannot say its load counts as none and one that throws is read as none (card H07b)", async (c) => {
+    const { w2, d } = await secondWorker(c);
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+    const loads: { w1: () => number; w2: () => number } = { w1: () => 0, w2: () => 0 };
+    (c.worker as unknown as { load: () => Promise<number> }).load = async () => loads.w1();
+    (w2 as unknown as { load: () => Promise<number> }).load = async () => loads.w2();
+    const run = async (title: string): Promise<string | undefined> => {
+      const { attemptId } = await c.task(title, ann);
+      const r = await d.tick();
+      assert.ok(r.started.includes(attemptId!), JSON.stringify(r.skipped));
+      await d.idle();
+      return (await d.get(c.owner, attemptId!))!.hostId;
+    };
+    assert.equal(await run("tie"), "host:w1", "equal loads: configuration order");
+    loads.w1 = () => 3; loads.w2 = () => 1;
+    assert.equal(await run("w2 lighter"), "host:w2");
+    loads.w1 = () => 1; loads.w2 = () => 1;
+    assert.equal(await run("tie again"), "host:w1");
+    // A host that throws is read as none (and the fault is reported); a host with no figure counts as none.
+    const faults: unknown[] = [];
+    const d2 = c.restart({ workers: [c.worker, w2] }, { onError: (e: unknown) => { faults.push(e); } });
+    loads.w1 = () => { throw new Error("cannot count"); }; loads.w2 = () => 2;
+    const { attemptId } = await c.task("w1 throws", ann);
+    const r = await d2.tick();
+    assert.ok(r.started.includes(attemptId!));
+    await d2.idle();
+    assert.equal((await d2.get(c.owner, attemptId!))!.hostId, "host:w1", "w1 read as none, lighter than w2's two");
+    assert.ok(faults.length > 0);
+    delete (w2 as unknown as { load?: unknown }).load;
+    loads.w1 = () => 5;
+    assert.equal(await run("w2 has no figure"), "host:w2", "no figure counts as none; w1 holds five");
+  });
+
   suite("refusals at the start are bounded: when every host has refused the attempt it fails with each host's reason, and with startTries 1 the first refusal fails it at once (card H07b)", async (c) => {
     const { w2, d } = await secondWorker(c);
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));

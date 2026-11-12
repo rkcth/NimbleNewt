@@ -7,7 +7,8 @@ import { AdmissionService } from "../admission/service.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { RemoteWorkerClient } from "../remote/index.js";
+import { request as httpRequest } from "node:http";
+import { RemoteAttempt, RemoteWorkerClient } from "../remote/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -181,5 +182,92 @@ test("a host that refuses the attempt when it is placed (the policy changed afte
     const rec = (await c.dispatch!.dispatcher.get(rob, attemptId))!;
     assert.deepEqual([rec.hostId, rec.hostChoice?.passedOver.map((p) => p.hostId), rec.startRefusals?.map((r) => [r.hostId, r.lasting])], ["host:r2", ["host:r1"], [["host:r1", true]]]);
     assert.match(rec.hostChoice!.passedOver[0]!.reason, /refused this attempt at its start .*does not list host:r1/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+const AGENTS = ["agt-cccccccccccccccccccc", "agt-dddddddddddddddddddd", "agt-eeeeeeeeeeeeeeeeeeee", "agt-ffffffffffffffffffff"];
+
+async function twoHosts(d: string) {
+  const c = await startController({
+    storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: {
+      timer: new ManualTimer(), manual: true,
+      route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
+      remote: { blobDirectory: join(d, "blobs"), hosts: ["r1", "r2"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) })) },
+    },
+  });
+  const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+  const rob = await c.services.principals.authenticate(boot.token);
+  const project = (await c.services.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+  for (const a of AGENTS) await c.services.principals.enroll(rob, { commandId: `e-${a}`, kind: "agent", name: a, grants: workGrants(project, ["read-file"]) });
+  const clients = new Map<string, RemoteWorkerClient>();
+  const tokens = new Map<string, string>();
+  for (const n of ["r1", "r2"]) {
+    await c.services.principals.enroll(rob, { commandId: `e-${n}`, kind: "host", name: n, grants: [] });
+    const token = (await c.services.principals.issueCredential(rob, `host:${n}`)).token;
+    await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: `cap-${n}`, actor: rob.id, host: `host:${n}`, capacity: { cpus: 8, memoryMb: 16_384 } });
+    const client = new RemoteWorkerClient({ url: c.dispatch!.workerUrl!, token, workerVersion: "worker-9.1.0" });
+    await client.connect(CAPS as never);
+    await client.heartbeat(1);
+    clients.set(`host:${n}`, client); tokens.set(`host:${n}`, token);
+  }
+  let n = 0;
+  const attempt = async (agent: string): Promise<string> => {
+    n++;
+    const taskId = (await c.services.projects.createTask({ commandId: `t${n}`, actor: rob.id, projectId: project, title: `Order seeds ${n}` })).id;
+    await c.services.projects.transitionTask({ commandId: `r${n}`, actor: rob.id, taskId, expectedRevision: 1, to: "ready" });
+    await c.services.assignments.assignTask({ commandId: `as${n}`, actor: rob.id, taskId, owner: { kind: "agent", id: agent } });
+    const a = (await c.services.assignments.getAssignment(taskId))!;
+    return (await c.services.assignments.admitAttempt({ commandId: `ad${n}`, actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: agent }, harness: "pi" })).id;
+  };
+  return { c, rob, clients, tokens, attempt };
+}
+
+test("attempts go to the host with fewer unaccepted offers, equal loads keep the configuration order, and a host that takes its offer up is less loaded again (card H07b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-choice-"));
+  const { c, rob, clients, attempt } = await twoHosts(d);
+  try {
+    const where = async (id: string): Promise<string | undefined> => (await c.dispatch!.remote!.placement(rob, id))?.hostId;
+    const a1 = await attempt(AGENTS[0]!);
+    assert.deepEqual((await c.dispatch!.dispatcher.tick()).started, [a1]);
+    assert.equal(await where(a1), "host:r1", "equal loads: the configuration order");
+    const a2 = await attempt(AGENTS[1]!);
+    assert.deepEqual((await c.dispatch!.dispatcher.tick()).started, [a2]);
+    assert.equal(await where(a2), "host:r2", "r1 holds an offer, r2 none: r2 first although r1 is listed first");
+    // r2 takes its offer up: it is the lighter one again (r1 still holds one), so the next attempt goes to r2 although r1 is listed first.
+    const placed = await c.dispatch!.remote!.placement(rob, a2);
+    await new RemoteAttempt(clients.get("host:r2")!, a2, placed!.placement).accept();
+    assert.equal(c.dispatch!.remote!.offerLoad(rob, "host:r1"), 1);
+    assert.equal(c.dispatch!.remote!.offerLoad(rob, "host:r2"), 0);
+    const a3 = await attempt(AGENTS[2]!);
+    const t3 = await c.dispatch!.dispatcher.tick();
+    assert.deepEqual(t3.started, [a3], JSON.stringify({ s: t3.skipped, w: t3.waiting }));
+    assert.equal(await where(a3), "host:r2");
+    // One offer each now: the tie keeps the configuration order, and it does so every time.
+    assert.equal(c.dispatch!.remote!.offerLoad(rob, "host:r2"), 1);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a held offers poll ends when its client disconnects, and frees its place, with the real listener (card H07b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-choice-"));
+  const { c, rob, clients, tokens } = await twoHosts(d);
+  try {
+    const remote = c.dispatch!.remote!;
+    const session = clients.get("host:r1")!.session!;
+    const url = new URL("/worker/session/offers?wait=20000", c.dispatch!.workerUrl!);
+    const req = httpRequest(url, { method: "GET", headers: { authorization: `Bearer ${tokens.get("host:r1")}`, "x-newt-session": session.sessionId, "x-newt-protocol": String(session.protocol) } });
+    req.on("error", () => undefined);
+    req.end();
+    for (let i = 0; i < 300 && remote.pollStats(rob).open !== 1; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(remote.pollStats(rob).open, 1, "the poll is held");
+    req.destroy();
+    for (let i = 0; i < 300 && remote.pollStats(rob).open !== 0; i++) await new Promise((r) => setTimeout(r, 20));
+    const stats = remote.pollStats(rob);
+    assert.equal(stats.open, 0, "the held poll ended without waiting for the 20 s");
+    assert.equal(stats.disconnected, 1);
+    assert.equal(stats.timedOut, 0);
+    // A normal poll that is answered is not counted as a disconnect.
+    assert.deepEqual(await clients.get("host:r1")!.offers({ waitMs: 50 }), []);
+    assert.equal(remote.pollStats(rob).disconnected, 1);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

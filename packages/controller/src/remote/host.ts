@@ -93,6 +93,9 @@ export class RemoteWorkerHost implements WorkerHost {
     return this.remote.refusals(this.by, { hostId: this.hostId, attemptId: probe.attemptId, taskId: probe.taskId, projectId: probe.projectId, agentId: probe.agentId, requirements: this.options.requirements(preview) });
   }
 
+  /** The offers made to this host that it has not accepted yet (card H07b), the same figure `candidates` orders by. */
+  async load(): Promise<number> { return this.remote.offerLoad(this.by, this.hostId); }
+
   async release(attemptId: string, reason: string): Promise<void> { await this.remote.end(this.by, attemptId, reason); }
 
   /** A new primary takes over the run of an attempt on this host (card H09b): a handle on the placement the worker accepted (or already completed), or nothing when no live run is there. */
