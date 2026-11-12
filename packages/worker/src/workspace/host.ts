@@ -64,6 +64,8 @@ export interface CheckoutLocation {
   readonly bridgeState: string;
   /** The owner-only quarantine root. */
   readonly quarantineRoot: string;
+  /** The attempt that last worked in this checkout, when the host knows (card H12o: named in the release commit). Written by the host, never by the agent; absent when unknown. */
+  readonly attemptId?: string;
 }
 
 export interface LandingPolicy {
@@ -103,6 +105,11 @@ export interface WorkspaceHostOptions {
    * dropped: reporting must not change what the request answers.
    */
   readonly security?: (event: HostSecurityEvent) => void | Promise<void>;
+  /**
+   * Whether this host commits a task's work in its own checkout when asked for `release` (card H12o). Off: `release` is answered with a typed refusal, as before (the remote host, whose landing policy is its own configuration,
+   * does not carry it yet). On: the commit is the platform's (see `GitBridge.release`), not a permit commit, and the owner's landing policy is read first (an unreadable policy refuses the release).
+   */
+  readonly release?: boolean;
   readonly attemptsQuiet?: (attemptIds: readonly string[], call: { readonly taskId: string; readonly projectId: string }) => Promise<boolean> | boolean;
 }
 
@@ -133,7 +140,7 @@ export class WorkspaceHost {
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
     if (call.assignee !== undefined && (typeof call.assignee !== "string" || !IDENT.test(call.assignee))) return no("the assignee name is malformed");
-    if (operation === "release") return no("this host does not commit reviewed work through this request: the commit needs the commit permit of the review gate (A06, H12o), which a workspace request does not carry");
+    if (operation === "release" && this.#options.release !== true) return no("this host does not commit reviewed work through this request: the commit needs the commit permit of the review gate (A06, H12o), which a workspace request does not carry");
     const where = await this.#options.locate({ taskId, projectId });
     if (where === undefined) return no("the checkout of that task is not on this host");
     for (const p of [where.shared, where.checkout, where.gitDir, where.bridgeState, where.quarantineRoot]) if (typeof p !== "string" || !isAbsolute(p)) return no("this host's location for the checkout is not an absolute path (a host fault)");
@@ -298,6 +305,31 @@ export class WorkspaceHost {
     return { ok: true, summary: `${result.count} file(s) landed in the shared workspace, uncommitted: landed changes are waiting to be committed by the integrator or owner${marked ? "" : "; the checkout could not be marked as landed"}`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, markedIntegrated: marked, changed: true, landed: marked, waitingToCommit: true } };
   }
 
+  /**
+   * A release (card H12o): the work the checkout holds is committed in the checkout's own git directory by the platform (`GitBridge.release`), so that a landing finds a commit and not loose files. The owner's landing policy is
+   * read first and a policy that cannot be read refuses the release (nothing is guessed). The commit is not a permit commit: a landing that requires the permit (the default) still refuses it, and the answer says so. Protected
+   * paths are committed like the rest (the commit is in the checkout, not in the shared tree) and named, because a landing keeps them for review. The shared tree is never read or written.
+   */
+  async #release(call: HostWorkspaceCall, where: CheckoutLocation): Promise<HostWorkspaceOutcome> {
+    const git = this.#options.git;
+    let policy: LandingPolicy | undefined;
+    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId, ...(call.landing === undefined ? {} : { carried: call.landing }) }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was committed; a release is refused until they can be read"); }
+    if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse));
+    const patterns = [...(policy?.protectDefaults === false ? [] : DEFAULT_PROTECTED_PATHS), ...(policy?.protectedPaths ?? [])];
+    let made;
+    try { made = await git.release({ gitDir: where.gitDir, checkout: where.checkout, requestId: call.requestId, taskId: call.taskId, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }) }); } catch (error) {
+      this.#flag(call, error);
+      if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
+      throw error;
+    }
+    const held = made.files.filter((f) => isProtectedPath(f.path, patterns)).map((f) => f.path.slice(0, 200));
+    const ignored = made.ignored.length;
+    if (made.commitId === undefined) return { ok: true, summary: `the checkout holds no change from its head; nothing to commit${ignored === 0 ? "" : ` (${ignored} ignored file(s) are not committed and keep a landing from starting)`}`, detail: { committed: false, files: 0, ignored, changed: false } };
+    const needsPermit = policy?.requirePermit !== false;
+    const summary = `${made.files.length} file(s) committed in the checkout as ${made.commitId.slice(0, 12)}${held.length === 0 ? "" : `; ${held.length} protected path(s) are kept for review when it lands`}${ignored === 0 ? "" : `; ${ignored} ignored file(s) are not committed and keep a landing from starting`}${needsPermit ? "; the commit is not a review-gate permit commit, so a landing that requires the permit will refuse it" : ""}`;
+    return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), changed: true } };
+  }
+
   async #do(call: HostWorkspaceCall, operation: HostOperation, where: CheckoutLocation): Promise<HostWorkspaceOutcome> {
     const git = this.#options.git;
     // The checkout and its git directory must be there: a task whose checkout was quarantined or never made is answered, not guessed at.
@@ -322,6 +354,7 @@ export class WorkspaceHost {
       return { ok: true, summary: `the checkout moved from ${before.slice(0, 12)} to ${target.slice(0, 12)}`, detail: { changed: true, before, base: target } };
     }
     if (operation === "landing") return this.#land(call, where);
+    if (operation === "release") return this.#release(call, where);
     if (operation === "integration") {
       const bridge = new WorkspaceBridge({ shared: where.shared, state: where.bridgeState, ...(this.#options.clock === undefined ? {} : { clock: this.#options.clock }) });
       const author = call.assignee ?? `workspace:${call.requestId}`;
@@ -343,7 +376,7 @@ export class WorkspaceHost {
       const summary = kept.length === 0 ? `${written} file(s) carried into the shared workspace${skipped === 0 ? "" : `, ${skipped} skipped`}` : `${written} file(s) carried, ${kept.length} kept for review because the shared file had moved since the base${skipped === 0 ? "" : `, ${skipped} skipped`}`;
       return { ok: true, summary, detail: { written, kept: kept.length, keptFiles: kept.slice(0, HOST_LIMITS.keptListed), skipped, markedIntegrated: marked, changed: written > 0 } };
     }
-    // Only a quarantine is left; anything else (release is refused before the journal) never falls through to it.
+    // Only a quarantine is left; anything else (a release a host does not carry is refused before the journal) never falls through to it.
     if (operation !== "quarantine") return no(`this host does not carry out ${operation} here`);
     try {
       const record = await quarantine({ root: where.quarantineRoot, path: where.checkout, reason: call.reason, by: call.assignee ?? `workspace:${call.requestId}`, ...(this.#options.clock === undefined ? {} : { clock: this.#options.clock }) });
