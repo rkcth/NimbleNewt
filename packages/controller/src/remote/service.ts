@@ -521,6 +521,8 @@ export class RemoteWorkerService {
 
   /** Counts the offers made to each host, so a poll can tell that one arrived between its read and its wait. */
   readonly #made = new Map<string, number>();
+  /** Attempts whose placement is being ended right now (H07b review): their offers are not handed out meanwhile. */
+  readonly #ending = new Map<string, number>();
   #closed = false;
 
   #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
@@ -904,26 +906,35 @@ export class RemoteWorkerService {
    */
   async end(by: Principal, attemptId: string, reason: string, placement?: number): Promise<void> {
     this.#staff(by);
-    return this.#endPlacement(attemptId, reason, placement, false);
+    await this.#endPlacement(attemptId, reason, placement, false);
   }
 
   /** Ends the placement; `withdrawn` marks an offer put back at delivery (card H07b), which the waiting turn is told so the dispatcher admits the task again. */
-  async #endPlacement(attemptId: string, reason: string, placement: number | undefined, withdrawn: boolean): Promise<void> {
+  async #endPlacement(attemptId: string, reason: string, placement: number | undefined, withdrawn: boolean): Promise<boolean> {
     attemptIdOf(attemptId);
     const why = text(reason, "reason", { min: 1, max: 300 });
     if (placement !== undefined && (!Number.isSafeInteger(placement) || placement < 1)) invalid("placement", "must be a whole number of at least 1");
     let ended: PlacementBody | undefined;
+    // While the ending is being written, no poll hands the offer out (it is kept in memory in case the write fails).
+    this.#ending.set(attemptId, (this.#ending.get(attemptId) ?? 0) + 1);
     try {
       const done = await this.#changePlacement(attemptId, async (current) => {
-        if (current === undefined || !LIVE.has(current.body.state) || (placement !== undefined && current.body.placement !== placement)) { ended = undefined; return undefined; }
-        this.#offers.delete(attemptId);
+        // A withdrawal ends only an offer nobody has taken up (H07b review): if the host accepted it while the policy was being read, the run is its own now and is not ended as "withdrawn before it was delivered".
+        if (current === undefined || !LIVE.has(current.body.state) || (placement !== undefined && current.body.placement !== placement) || (withdrawn && current.body.state !== "offered")) { ended = undefined; return undefined; }
         const now = this.#runner.now();
         const next: PlacementBody = { ...current.body, state: "ended", ...(withdrawn ? { withdrawn: true as const } : {}), history: pushHistory(current.body.history, { hostId: current.body.hostId, placement: current.body.placement, at: now, reason: why }) };
         return { next, extra: await this.#releaseStore(current.body) };
       }, "end");
       if (done.previous !== undefined && LIVE.has(done.previous.state) && done.body.state === "ended") ended = done.body;
-    } catch (error) { if (!isDomainError(error, "not_found")) throw error; }
+    } catch (error) { if (!isDomainError(error, "not_found")) throw error; } finally {
+      const n = (this.#ending.get(attemptId) ?? 1) - 1;
+      if (n <= 0) this.#ending.delete(attemptId); else this.#ending.set(attemptId, n);
+    }
+    // The offer (and its credential) is dropped only once the ending is written (H07b review): a write that fails leaves the placement offered, and the offer must still be there for the next poll to judge it again.
+    // Only the offer of the run that was ended: a newer placement's offer made meanwhile is kept.
+    if (ended !== undefined && this.#offers.get(attemptId)?.placement === ended.placement) this.#offers.delete(attemptId);
     if (ended !== undefined) this.#wake(attemptId, ended.placement, why, withdrawn ? { status: "cancelled", error: why.slice(0, 300), withdrawn: true } : undefined);
+    return ended !== undefined;
   }
 
   async #releaseStore(b: PlacementBody): Promise<Change[]> {
@@ -1058,7 +1069,7 @@ export class RemoteWorkerService {
   async #pending(host: Principal): Promise<Offer[]> {
     const out: Offer[] = [];
     for (const [attemptId, offer] of this.#offers) {
-      if (offer.hostId !== host.id) continue;
+      if (offer.hostId !== host.id || this.#ending.has(attemptId)) continue;
       const b = (await this.#runner.get(PLACEMENT_KIND, attemptId))?.body as unknown as PlacementBody | undefined;
       // The attempt may have been placed again while the read was under way: the offer now held is the newer one, and is neither deleted nor judged by the older read.
       const live = this.#offers.get(attemptId);
@@ -1066,7 +1077,9 @@ export class RemoteWorkerService {
       if (live !== offer) { if (b !== undefined && b.hostId === host.id && b.placement === live.placement && b.state === "offered") out.push({ placement: live.placement, order: live.order }); continue; }
       if (b === undefined || b.hostId !== host.id || b.placement !== offer.placement || b.state !== "offered") { this.#offers.delete(attemptId); continue; }
       // Card H07b: the placement policy is judged again as the host reads its offer. An offer the policy has since refused for a reason that lasts is put back, not delivered.
-      if (await this.#withdrawIfRefused(host.id, attemptId, offer, b)) continue;
+      if ((await this.#withdrawIfRefused(host.id, attemptId, offer.placement, b, "delivered")) !== "deliver") continue;
+      // Ended (or being ended) while the policy was read: not handed out.
+      if (this.#ending.has(attemptId) || this.#offers.get(attemptId) !== offer) continue;
       out.push({ placement: offer.placement, order: offer.order });
     }
     return out;
@@ -1076,21 +1089,25 @@ export class RemoteWorkerService {
    * Judges an offer again at delivery (card H07b): what the host announced and the placement policy, read now. If the host would now refuse it for a reason that lasts (the policy no longer lists it, it cannot do what the
    * attempt needs), the offer is not delivered: it is withdrawn, the placement ends with the reasons in its history, and the attempt's waiting turn ends as cancelled with the same words, so the dispatcher ends that attempt
    * and the task is admitted again and placed by the policy as it is now. A reason that passes (not heard from lately, not connected) does not withdraw: the host is reading the offer, so it is connected, and the host judges the rest.
-   * A policy that cannot be read does not withdraw (the failure goes to `onError` and the offer is delivered as before). Returns whether the offer was withdrawn.
+   * A policy (or host status) that cannot be read holds the offer back (H07b review): it is neither delivered nor withdrawn, the failure goes to `onError`, and the next poll judges it again. The policy decides who may be given the
+   * task credential and local-only data, and `place` refuses on the same failure, so a read error must not hand the credential to a host the owner may just have removed. Without a policy hook the host's capabilities and the
+   * built-in data rule are still judged, as `place` judges them. `stage` names the step in the recorded reason (`delivered` for a poll, `taken up` for an accept).
+   * Returns `deliver`, `withdrawn` (put back now or by a concurrent read) or `held` (unreadable, or taken up meanwhile).
    */
-  async #withdrawIfRefused(hostId: string, attemptId: string, offer: { readonly placement: number; readonly order: WorkOrder }, b: PlacementBody): Promise<boolean> {
-    if (this.#deps.placementPolicy === undefined) return false;
+  async #withdrawIfRefused(hostId: string, attemptId: string, placement: number, b: PlacementBody, stage: "delivered" | "taken up"): Promise<"deliver" | "withdrawn" | "held"> {
     let reasons: string[];
     try {
       const requirements = checkRequirements(b.requirements);
       reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
-      reasons.push(...policyReasons(hostId, requirements, await this.#deps.placementPolicy({ attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, requirements })));
-    } catch (error) { this.#reportError(error); return false; }
-    if (reasons.length === 0 || !lastingReasons(reasons)) return false;
-    this.#pollStats.withdrawn++;
-    const why = `withdrawn before it was delivered, ${hostId} would now refuse it: ${reasons.join("; ")}`.slice(0, 300);
-    try { await this.#endPlacement(attemptId, why, offer.placement, true); } catch (error) { this.#reportError(error); return false; }
-    return true;
+      reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, requirements })));
+    } catch (error) { this.#reportError(error); return "held"; }
+    if (reasons.length === 0 || !lastingReasons(reasons)) return "deliver";
+    const why = `withdrawn before it was ${stage}, ${hostId} would now refuse it: ${reasons.join("; ")}`.slice(0, 300);
+    let ended: boolean;
+    try { ended = await this.#endPlacement(attemptId, why, placement, true); } catch (error) { this.#reportError(error); return "held"; }
+    if (ended) { this.#pollStats.withdrawn++; return "withdrawn"; }
+    // Not ended by this call: another read withdrew it first, or the host took it up meanwhile (the accept judged it again itself). Either way it is not handed out here.
+    return "held";
   }
 
   /**
@@ -1105,6 +1122,17 @@ export class RemoteWorkerService {
     this.#holds(host, b, placement);
     if (b!.state !== "offered" && b!.state !== "accepted") throw new DomainError("fenced", `the placement of attempt ${id} is ${b!.state}`);
     if (b!.expiresAt !== undefined && b!.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
+    // H07b review: an offer is judged again when it is first taken up, not only when it is read. A host that read the offer before the policy changed could otherwise accept it later without polling again and start
+    // the attempt where the policy now refuses it. A lasting refusal withdraws it (the task is readmitted as at delivery); a policy that cannot be read is answered `unavailable`, and the host asks again.
+    if (b!.state === "offered") {
+      const verdict = await this.#withdrawIfRefused(host.id, id, b!.placement, b!, "taken up");
+      if (verdict === "withdrawn") throw new DomainError("fenced", `the offer of attempt ${id} was withdrawn: the placement policy no longer allows ${host.id}`);
+      if (verdict === "held") {
+        const now = (await this.#runner.get(PLACEMENT_KIND, id))?.body as unknown as PlacementBody | undefined;
+        if (now === undefined || now.hostId !== host.id || now.placement !== b!.placement || now.state === "ended" || now.state === "completed") throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+        if (now.state === "offered") throw new DomainError("unavailable", `the placement policy for attempt ${id} could not be read; ask again`);
+      }
+    }
     const mode = await this.#reacceptMode();
     const patience = await this.#patienceMs();
     let waiting = false;
