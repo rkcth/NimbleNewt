@@ -71,7 +71,7 @@ async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T>
 export class UrgentWatch {
   readonly #n: NotificationService;
   readonly #o: UrgentWatchOptions;
-  readonly #denials = new Map<string, { times: number[]; total: number; raised: boolean; capped: boolean }>();
+  readonly #denials = new Map<string, { times: number[]; total: number; raised: boolean; capped: boolean; since: number }>();
   readonly #alerts: number[] = [];
   readonly #reports = new Map<string, number[]>();
   #nextSweepAt = 0;
@@ -301,19 +301,24 @@ export class UrgentWatch {
       const nowMs = Date.parse(this.#now());
       const prior = this.#denials.get(agentId);
       const kept = (prior?.times ?? []).filter((t) => nowMs - t < window);
-      const state = kept.length === 0 || prior === undefined ? { times: kept, total: 0, raised: false, capped: false } : prior;
+      const state = kept.length === 0 || prior === undefined ? { times: kept, total: 0, raised: false, capped: false, since: nowMs } : prior;
       kept.push(nowMs);
       if (kept.length > threshold + 1) kept.splice(0, kept.length - (threshold + 1));
-      state.times = kept; state.total += 1;
+      // Before the item is raised, only the refusals inside the window count (a slow trickle, each within the window of the one before, never adds up to a page); once raised, the run's count goes on.
+      state.times = kept; state.total = state.raised ? state.total + 1 : kept.length;
       this.#denials.delete(agentId); this.#denials.set(agentId, state);
       // Bounded memory: the agent that was quiet longest is forgotten first.
       while (this.#denials.size > URGENT_LIMITS.agentsCounted) this.#denials.delete(this.#denials.keys().next().value as string);
-      if (state.total < threshold) return { raised: false };
+      if (!state.raised && kept.length < threshold) return { raised: false };
+      if (!state.raised) state.since = kept[0]!;
       const name = code(agentId.replace(/^agent:/, ""));
       const ref = { kind: "agent", id: name };
       const project = projectId === undefined ? {} : { projectId };
+      const minutes = Math.round(window / 60_000);
       const label = (n: number): string => `Urgent: agent ${name} was refused ${n} times`;
-      const detail = `Agent ${name} was refused ${state.total} times within ${Math.round(window / 60_000)} minutes (threshold ${threshold}).`;
+      const detail = !state.raised
+        ? `Agent ${name} was refused ${state.total} times within ${minutes} minutes (threshold ${threshold}).`
+        : `Agent ${name} was refused ${threshold} times within ${minutes} minutes (threshold ${threshold}), and ${state.total} times in all since ${new Date(state.since).toISOString()} with no ${minutes}-minute gap.`;
       if (state.raised) {
         // The same run of denials: the item's count and text move on, nobody is paged again.
         await this.#n.emitFromController({ commandId: `urg-deny:${agentId}:${kept[0]}:${state.total}`, kind: "maintenance", ...(state.capped ? {} : { interrupt: true }), label: label(state.total), ref, ...project, detail });
