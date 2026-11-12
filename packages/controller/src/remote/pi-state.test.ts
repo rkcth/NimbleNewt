@@ -234,3 +234,28 @@ test("store IDs: a remote store carries its host; a bad host or key has no ID; t
   assert.equal(localOnly(undefined), undefined);
   assert.equal(combinedPiState(undefined), undefined);
 });
+
+test("a restore that is being made or waits for its start is never delivered from: staged copies, asides and a recorded restore are left alone (card K01i)", async () => {
+  const dir = tmp();
+  try {
+    const data = join(dir, "data");
+    const mk = (name: string): void => { mkdirSync(join(data, "restored-pi-state", name), { recursive: true }); writeFileSync(join(data, "restored-pi-state", name, "f.txt"), "x"); };
+    mk(`rh.r1.${A1}.nn-staged-20261112T000000Z`); mk(`rh.r1.${A1}.before-restore-20261112T000000Z`); mk(`rh.r1.${A2}`);
+    const asked: string[] = [];
+    const restore = new RemotePiRestore({ dataDirectory: data, transfers: new PiStateTransfers({ directory: join(dir, "in") }), ask: async (h, _op, _r, _t) => { asked.push(h); return { ok: false, reason: "not now" }; } });
+    // Only the finished store is waiting; staged copies and asides are not stores.
+    assert.deepEqual((await restore.state()).waiting, [{ hostId: "host:r1", stores: 1 }]);
+    // A restore recorded for the next start (its marker) or half swapped (its journal): nothing is delivered, nothing asked.
+    for (const file of ["pending-restore.json", "restore-journal.json"]) {
+      writeFileSync(join(data, file), "{}");
+      await restore.sweep();
+      assert.deepEqual(asked, [], file);
+      rmSync(join(data, file));
+    }
+    // And while the barrier is up.
+    let up = true;
+    const held = new RemotePiRestore({ dataDirectory: data, transfers: new PiStateTransfers({ directory: join(dir, "in") }), held: () => up, ask: async (h) => { asked.push(h); return { ok: false, reason: "not now" }; } });
+    await held.sweep(); assert.deepEqual(asked, []);
+    up = false; await held.sweep(); assert.deepEqual(asked, ["host:r1"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

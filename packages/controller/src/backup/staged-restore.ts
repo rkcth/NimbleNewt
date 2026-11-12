@@ -1,3 +1,4 @@
+import type { Principal } from "../security/principals.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants, createReadStream } from "node:fs";
@@ -130,7 +131,7 @@ export interface StagedRestoreOptions {
    * Stops all agent work and waits until it has settled (card K01i): called by an apply that asked for `stopAttempts`, once everything is prepared and before the barrier is raised. It must throw (typed `unavailable`, in plain words) when
    * the work did not settle. Absent: an apply that asks for it is refused, saying this controller cannot do it.
    */
-  readonly stopAttempts?: (reason: string) => Promise<void>;
+  readonly stopAttempts?: (by: Principal, reason: string) => Promise<void>;
   /** The conversation stores of remote hosts waiting for their host after a restore (card K01i): shown in the status. */
   readonly remotePiState?: () => Promise<RemotePiStateNote | undefined>;
   /** The hard link used to make the key file (tests inject one that fails the way some file systems do). */
@@ -565,7 +566,7 @@ export class StagedRestore {
     if (this.#o.piStateConfigured === false) warnings.push("Backups on this installation do not include the agents' conversation state at all (no conversation folders are set up), so the safety copy taken before the restore does not either.");
     if (this.#o.liveAttempts !== undefined) {
       const live = await this.#o.liveAttempts().catch(() => undefined);
-      if (live !== undefined && live > 0) warnings.push(`${live} agent attempt${live === 1 ? " is" : "s are"} running now, and a restore is refused while any runs. Stop the work first, or apply with stopAttempts set: that suspends all agent work (each attempt is checkpointed) and then prepares the restore.`);
+      if (live !== undefined && live > 0) warnings.push(`${live} agent attempt${live === 1 ? " is" : "s are"} running now, and a restore is refused while any runs. Stop the work first, or apply with stopAttempts set: that stops all agent work (each attempt is checkpointed, then ended) and then prepares the restore.`);
     }
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
@@ -663,7 +664,7 @@ export class StagedRestore {
   }
 
   /** Stages the restore and raises the barrier; needs the token the preview gave (the owner approved exactly that). */
-  async apply(name: unknown, confirm: unknown, method?: UnlockMethod, options: { readonly stopAttempts?: unknown } = {}): Promise<{ plan: RestorePlan; pending: PendingRestore; result: RestoreResult; safetyCopy: string; changesDiscarded?: number; restart: RestartNotice }> {
+  async apply(name: unknown, confirm: unknown, method?: UnlockMethod, options: { readonly stopAttempts?: unknown; /** The owner who asked (the stop is theirs). */ readonly by?: Principal } = {}): Promise<{ plan: RestorePlan; pending: PendingRestore; result: RestoreResult; safetyCopy: string; changesDiscarded?: number; restart: RestartNotice }> {
     if (this.#busy || this.#pending !== undefined) throw new DomainError("unavailable", "a restore is already being prepared or waits for the restart");
     if (options.stopAttempts !== undefined && typeof options.stopAttempts !== "boolean") throw new DomainError("invalid_command", "stopAttempts: must be true or false", { field: "stopAttempts" });
     if (options.stopAttempts === true && this.#o.stopAttempts === undefined) throw new DomainError("unavailable", "this controller cannot stop agent work for a restore (it has no way to); stop the work first and apply again without stopAttempts");
@@ -732,9 +733,9 @@ export class StagedRestore {
       for (const [from, to] of pairs) {
         if (await dev(from) !== await dev(to)) throw new DomainError("unavailable", `the restored data and the place it must go are on different devices (${basename(from)}); the swap would not be a single rename. Nothing was changed.`);
       }
-      // The owner asked for the work to be stopped first (card K01i): all agent work is suspended and has settled before the barrier is raised, which would otherwise refuse (an attempt is still running). The suspension is not undone if
+      // The owner asked for the work to be stopped first (card K01i): all agent work is stopped and has settled before the barrier is raised, which would otherwise refuse (an attempt is still running). The stop is not undone if
       // a later step fails: the owner asked for the work to stop, and says when it goes on again (the lifecycle controls).
-      if (options.stopAttempts === true) await this.#o.stopAttempts!(`restoring ${manifest.name}`);
+      if (options.stopAttempts === true) { if (options.by === undefined) throw new DomainError("invalid_command", "stopAttempts: the owner who asks must be known", { field: "stopAttempts" }); await this.#o.stopAttempts!(options.by, `restoring ${manifest.name}`); }
       const release = await this.#o.barrier.raise(`restoring ${manifest.name}`);
       try {
         const safety = await this.#o.backups.safetyCopy();

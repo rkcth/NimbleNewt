@@ -10,7 +10,7 @@ import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
-import { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, describeSetting, sealsBackups, type SigningSecretStore, MaintenanceBarrier, NamedWork, suspendAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
+import { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, describeSetting, sealsBackups, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile, rm, statfs } from "node:fs/promises";
 import { activeProjectIds, defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
@@ -320,7 +320,7 @@ export interface Controller {
     /** The integrator lease of each landing branch (card L03j, the first part of P10): for the code that composes the landing; a hand-off releases or (owner's choice) moves the sender's. */
     readonly integratorLeases: IntegratorLeaseService;
     /** Retention, quotas, archive, export and deletion, and their settings (card K06). */
-    readonly retention: RetentionService; readonly retentionSettings: RetentionSettingsService;
+    readonly retention: RetentionService; readonly retentionSettings: RetentionSettingsService; /** The named writers the maintenance barrier holds besides the stores (card K01i); tests read what was wrapped and what is held. */ readonly barrierWork: NamedWork;
     readonly backups?: BackupService;
     /** Reviewed environment changes (card A09). */
     readonly maintenance: MaintenanceService;
@@ -1042,7 +1042,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The maintenance barrier (card K01h): while a restore is prepared, the stores below stop writing. Added in the order they are held.
     const barrier = new MaintenanceBarrier();
     if (backups !== undefined) barrier.add({ name: "backups", hold: async () => backups.hold() });
-    barrier.add({ name: "dispatcher", hold: async () => { await dispatch?.driver.settle(); const live = dispatch === undefined ? [] : await dispatch.dispatcher.liveAttempts(dispatch.principal); if (live.length > 0) throw new Error(`${live.length} agent attempt(s) are still running: stop or pause the work first`); return () => undefined; } });
+    barrier.add({ name: "dispatcher", hold: async () => { await dispatch?.driver.settle(); const live = dispatch === undefined ? [] : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).filter((x) => x.state === "running"); if (live.length > 0) throw new Error(`${live.length} agent attempt(s) are still running: stop or pause the work first`); return () => undefined; } });
     // The remaining writers, each its OWN participant (card K01i): they used to be held only in effect (the dispatcher's tick is paused and commands are refused while the barrier is up). Each is wrapped where it is started, so a held one
     // does not start and the barrier waits for the run in flight.
     const work = new NamedWork();
@@ -1087,8 +1087,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ask: async (hostId, operation, requestId, transferId, waitMs) => dispatch!.remote!.askPiState(dispatch!.principal, hostId, operation, requestId, transferId, { waitMs }),
     });
     const stagedRestore = backups === undefined || dataDirectory === undefined ? undefined : new StagedRestore({ backups, root: options.backup!.directory, barrier,
-      liveAttempts: async () => (dispatch === undefined ? 0 : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).length),
-      stopAttempts: async (reason) => { if (dispatch === undefined || stopsLive === undefined) return; await suspendAllWork({ stops: stopsLive, by: dispatch.principal, commandId: `restore-stop-${randomUUID()}`, reason }); },
+      liveAttempts: async () => (dispatch === undefined ? 0 : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).filter((x) => x.state === "running").length),
+      stopAttempts: async (by, reason) => { if (dispatch === undefined || stopsLive === undefined) return; const d = dispatch; await stopAllWork({ stops: stopsLive, by, commandId: `restore-stop-${randomUUID()}`, reason, settle: { settled: async () => (await d.dispatcher.liveAttempts(d.principal)).every((x) => x.state !== "running"), step: () => d.driver.runOnce() } }); },
       ...(remotePiRestore === undefined ? {} : { remotePiState: async () => { const st = await remotePiRestore.state(); return st.waiting.length === 0 && st.delivered === 0 ? undefined : { ...st, note: "A restore puts each remote host's conversation stores back on this controller first; each is delivered to its host once the host is connected and its agent is not running (the controller asks again every half minute). Delivered stores are kept in restored-pi-state-delivered in the data directory." }; } }), ...restoreDatabase, dataDirectory, storage, ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(piFinal === undefined ? {} : { piFinal }), piStateConfigured: piState !== undefined, ...(dataLock === undefined ? {} : { lock: dataLock }), confirmMinutes: async () => (await retentionSettings.effective()).restoreConfirmMinutes, changeMargin: async () => (await retentionSettings.effective()).restoreChangeMargin, ...(backupEncryption === undefined ? {} : { unlock: (m) => backupEncryption!.unlock(m) }), deletions: () => new DeletionLedger(join(options.backup!.directory, LEDGER_FILE)).read(), ...(backupSigning === undefined ? {} : { signatureTrust: () => backupSigning.trust() }), ...(options.backup!.restore?.onStaged === undefined ? {} : { onStaged: options.backup!.restore.onStaged }), ...(options.backup!.restore?.restart === undefined ? {} : { restart: options.backup!.restore.restart }), ...(options.backup!.now === undefined ? {} : { now: options.backup!.now }) });
     // The controller's own Urgent triggers (card U11c): no good backup in time, a silent host, repeated policy denials; swept by the dispatcher and told through the notification service.
     const urgentClock = options.notifications?.clock;
@@ -1326,9 +1326,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     let heartbeat: HeartbeatWriter | undefined;
     let maintenanceStopped = false;
     let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
+    const maintenanceTick = work.wrap("maintenance.tick", () => maintenance.tick());
     const maintenanceRound = (): void => {
       if (maintenanceStopped) return;
-      maintenance.background(work.wrap("maintenance.tick", () => maintenance.tick())().then(() => undefined));
+      maintenance.background(maintenanceTick().then(() => undefined));
       void (options.maintenance?.tickMs !== undefined ? Promise.resolve(options.maintenance.tickMs) : maintenance.tickMs()).catch(() => 30_000).then((ms) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, ms); maintenanceTimer.unref(); } });
     };
     void maintenance.tickMs().catch(() => 30_000).then((first) => { if (!maintenanceStopped) { maintenanceTimer = setTimeout(maintenanceRound, options.maintenance?.tickMs ?? first); maintenanceTimer.unref(); } });
@@ -1349,7 +1350,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       try { await activation.deliverStartNotices(); } catch (error) { say(`release activation: telling the owner about the launcher's notices failed (they stay pending): ${(error as Error).message.slice(0, 160)}`); }
     }
     return {
-      api, storage, epoch, check, filesystems, prerequisites, services: { integratorLeases, maintenance, setupProviders, localHost, environments, retention, retentionSettings, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
+      api, storage, epoch, check, filesystems, prerequisites, services: { integratorLeases, maintenance, setupProviders, localHost, environments, retention, retentionSettings, barrierWork: work, ...(backups === undefined ? {} : { backups }), acceptance, catalog: catalogService, workEnd, scratchCleanup, records, activity, continuations, resumes, handoffs, cutover, fallback, principals, taskCredentials, grants, projects, assignments, waits, stall, desks, histories, retrieval, inquiries, agents, harnesses: catalog, contracts, graph, resources, plans, responsibilities, reviews, conversations, configuration, routing, pauses, branches, jobs },
       ...(chat === undefined ? {} : { chat }), ...(coordinator === undefined ? {} : { coordinator }),
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),

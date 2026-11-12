@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { PI_FOLDER, PI_INDEX } from "../backup/format.js";
+import { JOURNAL_FILE, PENDING_FILE } from "../backup/staged-restore.js";
 import { PI_LIMITS, copyPiState, parsePiIndex, validStoreId, writePiState, type PiStateSource, type PiStateStore } from "../backup/pi-state.js";
 import { DomainError } from "../domain/errors.js";
 import { PI_TRANSFER_FILE, PI_TRANSFER_ID, REMOTE_LIMITS, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
@@ -306,10 +307,17 @@ export class RemotePiRestore {
     const entries = await readdir(join(this.#o.dataDirectory, RESTORED), { withFileTypes: true }).catch(() => []);
     const byHost = new Map<string, string[]>();
     for (const e of entries) {
-      const parsed = e.isDirectory() ? parseRemoteStoreId(e.name) : undefined;
+      // The copies a restore is still making (`.nn-staged-<time>`), the ones it moved aside and a file being restored are not stores waiting for a host: only a name the restore ended with is.
+      const parsed = e.isDirectory() && !/\.(nn-staged-|before-restore-|nn-restoring)/.test(e.name) ? parseRemoteStoreId(e.name) : undefined;
       if (parsed !== undefined) byHost.set(parsed.hostId, [...(byHost.get(parsed.hostId) ?? []), e.name]);
     }
     return byHost;
+  }
+
+  /** A restore that waits for its start (its marker) or is half swapped (its journal): the folders it names are not touched until it is over. */
+  async #restoreRecorded(): Promise<boolean> {
+    for (const f of [PENDING_FILE, JOURNAL_FILE]) if (await access(join(this.#o.dataDirectory, f)).then(() => true, () => false)) return true;
+    return false;
   }
 
   async state(): Promise<RemotePiRestoreState> {
@@ -325,7 +333,7 @@ export class RemotePiRestore {
   }
 
   async #sweep(): Promise<RemotePiRestoreState> {
-    if (this.#o.held?.() === true) return this.state();
+    if (this.#o.held?.() === true || await this.#restoreRecorded()) return this.state();
     for (const [hostId, ids] of await this.#waiting()) {
       if (this.#o.held?.() === true) break;
       const transferId = newPiId("pst");
