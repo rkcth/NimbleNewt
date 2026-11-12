@@ -21,7 +21,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 const PATHS = "workspace.landing.protectedPaths", PERMIT = "workspace.landing.requirePermit", DEFAULTS = "workspace.landing.protectDefaults", BRANCH = "workspace.landing.branch";
 
-interface Ctx { config: ConfigurationService; owner: Principal; writer: Principal; a: string; b: string; taskA: string; taskB: string; team: string; agent: string; assignments: AssignmentService }
+interface Ctx { config: ConfigurationService; principals: PrincipalService; owner: Principal; writer: Principal; a: string; b: string; taskA: string; taskB: string; team: string; agent: string; assignments: AssignmentService }
 
 async function open(backend: Backend, body: (c: Ctx) => Promise<void>): Promise<void> {
   const world = await backend.open();
@@ -40,7 +40,7 @@ async function open(backend: Backend, body: (c: Ctx) => Promise<void>): Promise<
     const agent = (await agents.create(owner, { commandId: cid("a"), friendlyName: "A", teamId: team })).id;
     await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "writer", grants: [{ action: "config.write", project: "*" }] });
     const writer = await principals.authenticate((await principals.issueCredential(owner, "agent:writer")).token);
-    await body({ config, owner, writer, a, b, taskA, taskB, team, agent, assignments });
+    await body({ config, principals, owner, writer, a, b, taskA, taskB, team, agent, assignments });
   } finally { await world.close(); }
 }
 
@@ -151,5 +151,45 @@ for (const backend of backends) {
     assert.equal(more.truncated, true);
     const withBranch = await c.config.projectSettings(keys, [c.a]);
     assert.deepEqual(withBranch.projects.map((p) => p.projectId).sort(), [c.a, c.b].sort());
+  });
+
+  suite("H12u review: a team, agent or task layer written by a config.write holder cannot loosen what a project requires, an installation lock wins over a project, path tricks are refused, and an agent reading its own scope cannot name a project", async (c) => {
+    await change(c, c.owner, "installation", undefined, { [PATHS]: ["inst/"], [PERMIT]: false });
+    await change(c, c.owner, "project", c.a, { [PATHS]: ["a-only/"], [PERMIT]: true });
+    await c.assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: c.taskA, owner: { kind: "agent", id: c.agent } });
+    // The writer's team and agent layers are checked only against the installation when written, so these writes go through; the combination still keeps the project's permit and paths.
+    await change(c, c.writer, "team", c.team, { [PERMIT]: false, [PATHS]: [] });
+    await change(c, c.writer, "agent", c.agent, { [PERMIT]: false, [PATHS]: [] });
+    await refuses("invalid_command", () => change(c, c.writer, "task", c.taskA, { [PERMIT]: false }), (e) => assert.match(e.message, /wider than the layers above allow/));
+    await change(c, c.writer, "task", c.taskA, { [PATHS]: [] });
+    const v = (await c.config.taskValues([PERMIT, PATHS], c.taskA, c.a))!;
+    assert.equal(v[PERMIT], true, "a later layer cannot switch off the project's permit");
+    assert.deepEqual(v[PATHS], ["a-only/", "inst/"], "a later layer's empty list takes nothing off");
+    const policy = landingPolicyFrom(c.config);
+    assert.deepEqual(await policy({ taskId: c.taskA, projectId: c.a }), { requirePermit: true, protectDefaults: true, protectedPaths: ["a-only/", "inst/"] });
+    // The writer cannot lock, nor write the project layer through stage, apply or discard.
+    await refuses("forbidden", () => c.config.stage(c.writer, { commandId: cid("st"), layer: "team", scopeId: c.team, lock: [PERMIT] }));
+    await c.config.stage(c.owner, { commandId: cid("st"), layer: "project", scopeId: c.a, expectedRevision: 1, set: { [PATHS]: ["a-only/", "more/"] } });
+    await refuses("forbidden", () => c.config.apply(c.writer, { commandId: cid("ap"), layer: "project", scopeId: c.a, expectedRevision: 2 }));
+    await refuses("forbidden", () => c.config.discard(c.writer, { commandId: cid("di"), layer: "project", scopeId: c.a, expectedRevision: 2 }));
+    // A project value stored while the installation did not require the permit (false, allowed then) does not switch it off once the installation requires it again: a project meets, it never replaces.
+    await change(c, c.owner, "project", c.b, { [PERMIT]: false });
+    assert.equal((await c.config.taskValues([PERMIT], c.taskB, c.b))![PERMIT], false);
+    await change(c, c.owner, "installation", undefined, { [PERMIT]: true });
+    assert.equal((await c.config.taskValues([PERMIT], c.taskB, c.b))![PERMIT], true, "the installation's requirement holds over the project's earlier false");
+    assert.equal((await c.config.projectValues([PERMIT], c.b))[PERMIT], true);
+    assert.equal((await c.config.projectSettings([PERMIT], [c.b])).projects.find((p) => p.projectId === c.b)!.values[PERMIT]!.value, true, "the owner's view says the same");
+    await change(c, c.owner, "installation", undefined, { [PERMIT]: false });
+    // Path tricks are refused at the project layer like everywhere: nothing relative, absolute or upward.
+    for (const bad of ["./x", "x/../y", "/etc", "..", "a/./b", "*"]) await refuses("invalid_command", () => change(c, c.owner, "project", c.b, { [PATHS]: [bad] }));
+    // An installation lock wins: the project cannot set the locked value, and a value stored before the lock does not count.
+    await change(c, c.owner, "project", c.b, { [PERMIT]: true });
+    const staged = await c.config.stage(c.owner, { commandId: cid("st"), layer: "installation", expectedRevision: (await c.config.layer(c.owner, "installation"))!.revision, lock: [PATHS] });
+    await c.config.apply(c.owner, { commandId: cid("ap"), layer: "installation", expectedRevision: staged.revision });
+    await refuses("invalid_command", () => change(c, c.owner, "project", c.b, { [PATHS]: ["b/"] }), (e) => assert.match(e.message, /locked by the installation layer/));
+    // An agent reading its own scope (no configuration grant) cannot add a project to it: another project's layer is not its to see.
+    const self = await c.principals.authenticate((await c.principals.issueCredential(c.owner, `agent:${c.agent}`)).token);
+    assert.ok((await c.config.effective(self, { agentId: c.agent })) !== undefined, "its own scope is readable");
+    assert.equal(await c.config.effective(self, { agentId: c.agent, projectId: c.a }), undefined, "with a project it is not");
   });
 }

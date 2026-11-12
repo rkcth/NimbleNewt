@@ -352,7 +352,8 @@ export class ConfigurationService {
     if (scope.agentId !== undefined && !AGENT_ID.test(scope.agentId)) invalid("agentId", "is not an agent ID");
     if (scope.taskId !== undefined && !TASK_ID.test(scope.taskId)) invalid("taskId", "is not a task ID");
     const fresh = await this.#fresh(by.id, by.taskScope);
-    const ownScope = scope.agentId !== undefined && fresh?.kind === "agent" && by.taskScope === undefined && by.id === `agent:${scope.agentId}`;
+    // An agent reading its own scope without a configuration grant reads no project layer it names itself: another project's settings are not its to see (card H12u review).
+    const ownScope = scope.agentId !== undefined && scope.projectId === undefined && fresh?.kind === "agent" && by.taskScope === undefined && by.id === `agent:${scope.agentId}`;
     if (!(by.kind === "owner" || ownScope || (fresh !== undefined && (allows(fresh, "config.read", "*") || allows(fresh, "config.write", "*"))))) return undefined;
     const built = await this.#chainOf(scope);
     if (built === undefined) return undefined;

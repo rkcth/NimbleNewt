@@ -979,6 +979,26 @@ for (const backend of backends) {
     assert.equal((await c.configuration.layer(c.w.owner, "project", c.a))!.applied["workspace.landing.requirePermit"], undefined, "the permit was not switched off");
   });
 
+  suite("H12u review: the owner's project name decides which project a setting is for (an ID that is another project is refused) and a project name never goes with a wider layer", async (c) => {
+    const key = "workspace.landing.protectedPaths";
+    const prep = (change: Record<string, unknown>, wording: string) => c.edits.prepare(c.w.owner, { change: { type: "setting", key, ...change } as never, conditions: [], evidence: wording, wording, quoted: false, forwarded: false });
+    const refused = (r: unknown): boolean => { const x = r as { ok: boolean; draft?: { status?: string } }; return !x.ok || x.draft?.status === "refused"; };
+    // The owner said project A; an ID of project B (for example taken from quoted text) does not turn the change to B.
+    const swapped = await prep({ layer: "project", projectName: "A", scopeId: c.b, value: ["x/"] }, "Protect x/ in project A.");
+    assert.ok(refused(swapped), JSON.stringify(swapped));
+    assert.match(JSON.stringify(swapped), /is not the project called/);
+    // The same ID as the name: accepted, for project A.
+    const agreed = await prep({ layer: "project", projectName: "A", scopeId: c.a, value: ["x/"] }, "Protect x/ in project A.");
+    assert.ok(!refused(agreed), JSON.stringify(agreed));
+    assert.ok(JSON.stringify(agreed).includes(`(${c.a}) only`), JSON.stringify(agreed));
+    // "For project A" is never read as the whole installation or a team.
+    for (const layer of ["installation", "team"] as const) {
+      const wide = await prep({ layer, ...(layer === "team" ? { scopeId: "team-aaaaaaaaaaaaaaaaaaaa" } : {}), projectName: "A", value: ["x/"] }, "Protect x/ in project A.");
+      assert.ok(refused(wide), JSON.stringify(wide));
+      assert.match(JSON.stringify(wide), /a project name goes only with a project setting/);
+    }
+  });
+
   suite("a grant with no end is a proposal that says it never ends; it is not applied unseen, a replay makes one grant, and only the owner can apply it", async (c, script) => {
     const ann = "agent:ann";
     script[`Let ${ann} commit in development permanently.`] = [pe({ type: "grant", grantee: ann, approve: { class: "commit" }, lengthDays: null }, "commit in development permanently")];

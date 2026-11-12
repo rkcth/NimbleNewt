@@ -514,8 +514,16 @@ export class PolicyEditService {
         return this.#revoke(change.approve, project, grantee);
       }
       case "setting": {
+        // A project named in words belongs only to the project layer: "for the garden project" read as an installation (or team) change would reach every project (card H12u review).
+        if (change.layer !== "project" && change.projectName !== undefined) throw new Refusal("invalid_command", `a project name goes only with a project setting; a ${change.layer} setting is not for one project`);
         if (change.layer !== "project") return this.#setting(owner, change);
         // The project layer (card H12u) is the owner's: the project is named by ID, by the owner's own words for its name, or is the one in focus; an unclear name is asked about.
+        // Both an ID and the owner's name: the ID must be a project of that name (the owner's words decide; an ID the model picked cannot turn the change to another project, card H12u review).
+        if (change.scopeId !== undefined && change.projectName !== undefined) {
+          const byName = await this.#project({ projectName: change.projectName }, undefined);
+          const ids = "ask" in byName ? (byName.ask.kind === "ask" ? byName.ask.options : []) : [byName.id];
+          if (!ids.includes(change.scopeId)) throw new Refusal("invalid_command", `${change.scopeId} is not the project called "${change.projectName.slice(0, 80)}"`);
+        }
         const project = await this.#project({ ...(change.scopeId === undefined ? {} : { projectId: change.scopeId }), ...(change.projectName === undefined || change.scopeId !== undefined ? {} : { projectName: change.projectName }) }, input.focusProjectId);
         if ("ask" in project) return project;
         return this.#setting(owner, { ...change, scopeId: project.id }, project.name);
