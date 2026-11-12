@@ -321,7 +321,8 @@ test("a FIFO or a socket in the checkout does not hang or enter the release, and
   } finally { await w.done(); }
 });
 
-test("a file name that is not valid UTF-8 refuses the release cleanly (a typed refusal, not an uncertain failure)", { skip: posix }, async () => {
+// macOS's file system (APFS) keeps names as UTF-8 and refuses this one itself (EILSEQ), so no checkout there can hold it: the refusal is tested where such a name can exist.
+test("a file name that is not valid UTF-8 refuses the release cleanly (a typed refusal, not an uncertain failure)", { skip: posix || (process.platform === "darwin" && "APFS refuses a file name that is not valid UTF-8 (EILSEQ), so a checkout there cannot hold one") }, async () => {
   const w = await world();
   try {
     await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
