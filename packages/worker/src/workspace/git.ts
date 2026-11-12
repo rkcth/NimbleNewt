@@ -411,11 +411,14 @@ export class GitBridge {
     let seen = 0;
     const walk = async (dir: string, depth: number): Promise<void> => {
       if (depth > 64) throw new WorkspaceError("invalid_path", "the checkout is nested too deeply");
-      for (const name of await readdir(dir)) {
+      for (const raw of await readdir(dir, { encoding: "buffer" })) {
         if (++seen > 200_000) throw new WorkspaceError("invalid_path", "the checkout holds too many files to check");
+        // A name that is not UTF-8 cannot be named back to the file system from text (H12o review: it used to end the walk with an untyped error, leaving the request uncertain).
+        const name = raw.toString("utf8");
+        if (!Buffer.from(name, "utf8").equals(raw)) throw new WorkspaceError("invalid_path", "the checkout holds a file name that is not valid UTF-8; the whole change was refused");
         if (touchesGit([name])) throw new WorkspaceError("protected_path", `the checkout holds ${JSON.stringify(name.slice(0, 40))}, which is Git's own name; the whole change was refused`);
-        const info = await lstat(join(dir, name));
-        if (info.isDirectory()) await walk(join(dir, name), depth + 1);
+        const info = await lstat(join(dir, name)).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+        if (info?.isDirectory() === true) await walk(join(dir, name), depth + 1);
       }
     };
     await walk(checkout, 0);

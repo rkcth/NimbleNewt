@@ -320,3 +320,16 @@ test("a FIFO or a socket in the checkout does not hang or enter the release, and
     assert.equal(execFileSync("git", ["--git-dir", w.made.gitDir, "cat-file", "blob", "HEAD:src/crlf.txt"], { encoding: "utf8" }), "one\r\n$Id$\r\n");
   } finally { await w.done(); }
 });
+
+test("a file name that is not valid UTF-8 refuses the release cleanly (a typed refusal, not an uncertain failure)", { skip: posix }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(Buffer.concat([Buffer.from(join(w.made.checkout, "bad")), Buffer.from([0xff]), Buffer.from(".txt")]), "x\n");
+    const head = w.head();
+    const r = await w.ws.port.run(call("release"));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /not valid UTF-8/);
+    assert.equal(w.head(), head);
+  } finally { await w.done(); }
+});
