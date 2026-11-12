@@ -3,14 +3,16 @@ import { DomainError } from "../domain/errors.js";
 import type { CommandRunner } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import type { AggregateRef, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
+import { RELEASE_KINDS, candidateIdOf, manifestDigestOf, type CandidateBody } from "./release.js";
 
 /**
  * The trust root for signed release artifact sets (card K02, K02b).
  *
- * What is signed: the candidate's ID, which is the digest of its manifest, which names the sha256 of every artifact. A signature over the ID therefore covers exactly the artifact set, and a staged
- * directory is verified against that manifest at staging, at activation and at launch, so "signed" means "the owner's chosen publisher vouched for exactly these bytes". The signed text is
- * `nimblenewt-release-v1\n<candidate id>\n` (a fixed prefix so the signature cannot be replayed for another purpose). Algorithm: Ed25519 only (no negotiation).
+ * What is signed: the candidate's ID and the FULL sha256 of its canonical manifest, which names the sha256 of every artifact. The ID alone is only the first 96 bits of that digest, short enough that two
+ * manifests made to share an ID are within reach (a birthday search of about 2^48), so the signature covers the whole digest: it covers exactly the artifact set. A staged directory is verified against that
+ * manifest at staging, at activation and at launch, so "signed" means "the owner's chosen publisher vouched for exactly these bytes". The signed text is
+ * `nimblenewt-release-v1\n<candidate id>\n<manifest sha256>\n` (a fixed prefix so the signature cannot be replayed for another purpose; release.verify shows the manifest digest). Algorithm: Ed25519 only (no negotiation).
  *
  * The trust root is the list of public keys the OWNER registered (`release.trust.add`, owner only, shown first in chat). A key is a base64 DER SubjectPublicKeyInfo; its ID is the first 16 hex characters of the
  * sha256 of that DER. Signatures are attached by whoever holds them (`release.signature.attach`); an attached signature is verified against the trust root when attached and again at every use, so removing a
@@ -35,8 +37,8 @@ const bad = (field: string, message: string): never => { throw new DomainError("
 const known = (command: object, fields: readonly string[]): void => { const u = Object.keys(command).filter((k) => !fields.includes(k)); if (u.length > 0) bad(u[0]!, "is not a field of this command"); };
 const sha = (v: string | Uint8Array): string => createHash("sha256").update(v).digest("hex");
 
-/** The text a signature covers. */
-export const signedText = (candidateId: string): Buffer => Buffer.from(`${SIGNING.prefix}${candidateId}\n`, "utf8");
+/** The text a signature covers: the candidate ID and the full digest of its manifest (`manifestDigestOf`). */
+export const signedText = (candidateId: string, manifestDigest: string): Buffer => Buffer.from(`${SIGNING.prefix}${candidateId}\n${manifestDigest}\n`, "utf8");
 
 /**
  * The text a signature over a STAGED release covers when the separate updater installs it (no database, so no candidate record to check): `nimblenewt-release-digest-v1`, a line break, the staged manifest's digest and a line break.
@@ -64,11 +66,11 @@ export function parsePublicKey(text: unknown): { key: KeyObject; publicKey: stri
   return { key, publicKey: Buffer.from(der).toString("base64"), keyId: sha(der).slice(0, 16) };
 }
 /** Whether `signature` (base64, 64 bytes) is the key's signature over the candidate's signed text. */
-export function checkSignature(key: KeyObject, candidateId: string, signature: string): boolean {
+export function checkSignature(key: KeyObject, candidateId: string, manifestDigest: string, signature: string): boolean {
   if (!B64.test(signature) || signature.length > 100) return false;
   const raw = Buffer.from(signature, "base64");
   if (raw.length !== SIGNING.signatureBytes) return false;
-  try { return verify(null, signedText(candidateId), key, raw); } catch { return false; }
+  try { return verify(null, signedText(candidateId, manifestDigest), key, raw); } catch { return false; }
 }
 
 /** Authority is checked by the caller (`ReleaseActivationService`): the owner for the trust root and its setting, the owner or a holder of `release.manage` for attaching a signature. */
@@ -86,6 +88,15 @@ export class ReleaseTrust {
     return { revision, keys, require: body?.require ?? null, required: body?.require ?? keys.length > 0 };
   }
   async required(): Promise<boolean> { return (await this.list()).required; }
+  /** The full manifest digest of the candidate, read from its record; undefined when there is no record or it does not hash to its ID (a damaged record is never signed). */
+  async #manifestDigest(candidateId: string): Promise<string | undefined> {
+    if (!CANDIDATE_ID.test(candidateId)) return undefined;
+    const m = ((await this.#runner.get(RELEASE_KINDS.candidate, candidateId))?.body as unknown as CandidateBody | undefined)?.manifest;
+    if (m === undefined) return undefined;
+    try { return candidateIdOf(m) === candidateId ? manifestDigestOf(m) : undefined; } catch { return undefined; }
+  }
+  /** The full digest a publisher signs for this candidate (shown by release.verify), or undefined. */
+  manifestDigest(candidateId: string): Promise<string | undefined> { return this.#manifestDigest(candidateId); }
 
   async #write(by: Principal, op: string, commandId: string | undefined, expectedRevision: number | undefined, payload: JsonObject, next: (b: TrustBody | undefined) => TrustBody, detail: JsonObject): Promise<{ revision: number }> {
     const r = await this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
@@ -139,9 +150,11 @@ export class ReleaseTrust {
     const id = command.candidateId;
     if (typeof command.signature !== "string") bad("signature", "must be the base64 of an Ed25519 signature");
     const sig = command.signature as string;
+    const digest = await this.#manifestDigest(id);
+    if (digest === undefined) throw new DomainError("not_found", "no such release candidate");
     const { body } = await this.#body();
     let match: TrustedKey | undefined;
-    for (const k of body?.keys ?? []) if (checkSignature(parsePublicKey(k.publicKey).key, id, sig)) { match = k; break; }
+    for (const k of body?.keys ?? []) if (checkSignature(parsePublicKey(k.publicKey).key, id, digest, sig)) { match = k; break; }
     if (match === undefined) throw new DomainError("invalid_command", "signature: is not a valid signature of this candidate by a trusted key", { field: "signature" });
     const ref: AggregateRef = { kind: SIGNATURE, id: `sig-${sha(`${id}|${match.keyId}`).slice(0, 24)}` };
     const keyId = match.keyId;
@@ -159,14 +172,40 @@ export class ReleaseTrust {
 
   /** Whether a trusted key's signature over this candidate is on record and still verifies. Read afresh each time, so a removed key or a changed record counts at once. */
   async check(candidateId: string): Promise<SignatureCheck> {
+    const r = await this.#find(candidateId);
+    return r.ok ? { ok: true, keyId: r.keyId } : r;
+  }
+  async #find(candidateId: string): Promise<{ ok: true; keyId: string; revision: number } | { ok: false; reason: string }> {
     const { body } = await this.#body();
     if ((body?.keys ?? []).length === 0) return { ok: false, reason: "no signing key is trusted (release.trust.add)" };
     if (!CANDIDATE_ID.test(candidateId)) return { ok: false, reason: "not a candidate ID" };
+    const digest = await this.#manifestDigest(candidateId);
+    if (digest === undefined) return { ok: false, reason: "the candidate's record is missing or does not match its ID, so no signature over it can be checked" };
     for (const k of body!.keys) {
       const rec = await this.#runner.get(SIGNATURE, `sig-${sha(`${candidateId}|${k.keyId}`).slice(0, 24)}`);
       const s = rec?.body as unknown as SignatureBody | undefined;
-      if (s !== undefined && s.candidateId === candidateId && s.keyId === k.keyId && checkSignature(parsePublicKey(k.publicKey).key, candidateId, s.signature)) return { ok: true, keyId: k.keyId };
+      let good = false;
+      try { good = s !== undefined && s.candidateId === candidateId && s.keyId === k.keyId && typeof s.signature === "string" && checkSignature(parsePublicKey(k.publicKey).key, candidateId, digest, s.signature); } catch { good = false; }
+      if (good) return { ok: true, keyId: k.keyId, revision: rec!.revision };
     }
     return { ok: false, reason: "the release has no valid signature from a trusted key (release.signature.attach)" };
+  }
+
+  /**
+   * For the commit point of a switch (activation, rollback): decides again whether a signature is needed and present, and returns revision checks of the trust root and of the signature record that decided it,
+   * to be committed in the same operation as the switch's journal. A key removed (or the setting changed) after the checks before the switch but before its commit then makes the commit fail instead of
+   * switching to a release that no longer counts as signed. Throws `invalid_transition` when a needed signature is missing. (With no trust root at all there is nothing to pin; a first key added at that very
+   * moment is not raced against.)
+   */
+  async guard(candidateId: string): Promise<Change[]> {
+    const root = await this.#runner.get(TRUST.kind, TRUST.id);
+    if (root === undefined) return [];
+    const pin: Change = { type: "check", ref: TRUST, expectedRevision: root.revision };
+    const body = root.body as unknown as TrustBody;
+    const required = body.require ?? (body.keys ?? []).length > 0;
+    if (!required) return [pin];
+    const r = await this.#find(candidateId);
+    if (!r.ok) throw new DomainError("invalid_transition", `the release is not signed as this installation requires: ${r.reason}`);
+    return [pin, { type: "check", ref: { kind: SIGNATURE, id: `sig-${sha(`${candidateId}|${r.keyId}`).slice(0, 24)}` }, expectedRevision: r.revision }];
   }
 }

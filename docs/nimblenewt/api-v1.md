@@ -2240,7 +2240,7 @@ Result: `{ item: { revision, keys, require, required } }`.
 
 #### `release.status`
 
-Owner only: the current and previous release, the last known good and whether the current release has confirmed a healthy start, releases the launcher found failing to start, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
+Owner, or an agent granted exactly `release.manage`: the current and previous release, the last known good and whether the current release has confirmed a healthy start, releases the launcher found failing to start, an open or interrupted switch, what the launcher's pointer says now (and `diverged` when it is not the current release), the recent history, the staged releases (up to 50) and the staging settings.
 
 Arguments:
 
@@ -2250,13 +2250,13 @@ Result: `{ item }`.
 
 #### `release.verify`
 
-Owner only: checks the current release's files (or a named staged release's) against the manifest digest the activation record keeps, the check the launcher makes at launch. Reports every problem found (up to 10).
+Owner, or an agent granted exactly `release.manage`: checks the current release's files (or a named staged release's) against the manifest digest the activation record keeps, the check the launcher makes at launch. Reports every problem found (up to 10), and what an activation's word also covers: the candidate's migration plan, its target installations and the trusted key whose signature is on it now.
 
 Arguments:
 
 - `releaseId` (optional): default: the current release
 
-Result: `{ releaseId, digest, ok, problems }`.
+Result: `{ releaseId, digest, ok, problems, manifestDigest?, migrationPlan?, targets?, signedBy }`.
 
 #### `release.staging.settings.get`
 
@@ -6108,10 +6108,10 @@ Owner only: submits an immutable release candidate: source commit, built artifac
 
 Arguments:
 
-- `manifest`: { sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}] }
+- `manifest`: { sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}], migrationPlan?: sha256, targets?: [installation name] }
 - `commandId`: required
 
-Result: `{ candidateId, replayed }`.
+Result: `{ candidateId, manifestDigest, replayed }`: `manifestDigest` is the full SHA-256 of the canonical manifest (the ID is its first 96 bits); a release signature covers both.
 
 #### `release.host`
 
@@ -6258,7 +6258,7 @@ Result: `{ ok }`.
 
 #### `release.stage`
 
-Owner only: copies the artifacts of a candidate from its incoming folder under the release root into a new read-only versioned directory, refusing any file whose digest is not the one the candidate's manifest names. The owner names no path. Staging changes nothing that is running. The same candidate again is the same release.
+Owner, or an agent granted exactly `release.manage`: copies the artifacts of a candidate from its incoming folder under the release root into a new read-only versioned directory, refusing any file whose digest is not the one the candidate's manifest names. The owner names no path. Staging changes nothing that is running. The same candidate again is the same release.
 
 Arguments:
 
@@ -6271,7 +6271,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.activate`
 
-Owner only: makes a staged release the current one. The word is bound to the candidate, to the digest of what was staged (so a changed directory is refused) and to this installation's platform (the candidate must have been tested for it); the candidate must be approved unless the owner switched that requirement off. The files are verified again, then the switch is one atomic step recorded in a journal, so an interruption ends at the old release or the new, never between. A candidate that names target installations is activated only on one of them, one that carries a migration plan only by a word that quotes its digest, and with a trusted signing key on record only when a valid signature from it is attached. Who: the owner, or an agent the owner granted exactly `release.manage` (never through `*`; it needs the owner's approval of the candidate whatever the approval setting says). Candidates are submitted and approved by the owner alone, so an agent-built candidate cannot stage or activate itself.
+Owner, or an agent granted exactly `release.manage`: makes a staged release the current one. The word is bound to the candidate, to the digest of what was staged (so a changed directory is refused) and to this installation's platform (the candidate must have been tested for it); the candidate must be approved unless the owner switched that requirement off. The files are verified again, then the switch is one atomic step recorded in a journal, so an interruption ends at the old release or the new, never between. A candidate that names target installations is activated only on one of them, one that carries a migration plan only by a word that quotes its digest, and with a trusted signing key on record only when a valid signature from it is attached. Who: the owner, or an agent the owner granted exactly `release.manage` (never through `*`; it needs the owner's approval of the candidate whatever the approval setting says). Candidates are submitted and approved by the owner alone, so an agent-built candidate cannot stage or activate itself.
 
 Arguments:
 
@@ -6287,7 +6287,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.rollback`
 
-Owner only: goes back to the release that was current before the last activation, named by its ID (so a record that moved cannot send it elsewhere). Its files are verified first; the switch is journalled like an activation.
+Owner, or an agent granted exactly `release.manage`: goes back to the release that was current before the last activation, named by its ID (so a record that moved cannot send it elsewhere). Its files are verified first; the switch is journalled like an activation.
 
 Arguments:
 
@@ -6359,7 +6359,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.signature.attach`
 
-Owner or a holder of `release.manage`: keeps a signature (base64 Ed25519) over a candidate after checking it against the trust root; one that no trusted key made is refused and kept nowhere. The signed text is `nimblenewt-release-v1`, a line break, the candidate ID and a line break. Changes nothing that runs.
+Owner or a holder of `release.manage`: keeps a signature (base64 Ed25519) over a candidate after checking it against the trust root; one that no trusted key made is refused and kept nowhere. The signed text is `nimblenewt-release-v1`, a line break, the candidate ID, a line break, the full manifest digest (release.submit's `manifestDigest`) and a line break. Changes nothing that runs.
 
 Arguments:
 
@@ -6374,7 +6374,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.stage.remove`
 
-Owner only: removes a staged release (its record and files) so the staging cap does not fill for good. Refused for the current release, the previous one (the rollback target), either end of an open switch and whatever the launcher's pointer names.
+Owner, or an agent granted exactly `release.manage`: removes a staged release (its record and files) so the staging cap does not fill for good. Refused for the current release, the previous one (the rollback target), either end of an open switch and whatever the launcher's pointer names.
 
 Arguments:
 

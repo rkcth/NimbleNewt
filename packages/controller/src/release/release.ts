@@ -208,7 +208,9 @@ export function checkManifest(value: unknown): Manifest {
   };
 }
 
-export const candidateIdOf = (manifest: Manifest): string => `rcn-${sha(canonicalJson(manifest as unknown as JsonObject)).slice(0, 24)}`;
+/** The full sha256 of a candidate's canonical manifest. The candidate ID is its first 24 hexadecimal characters (96 bits); a release signature covers the whole digest (K02b), so a manifest made to share an ID with another does not share its signature. */
+export const manifestDigestOf = (manifest: Manifest): string => sha(canonicalJson(manifest as unknown as JsonObject));
+export const candidateIdOf = (manifest: Manifest): string => `rcn-${manifestDigestOf(manifest).slice(0, 24)}`;
 const attemptIdOf = (candidateId: string, cell: Cell, n: number): string => `rat-${sha(`${candidateId}|${cellKey(cell)}|${n}`).slice(0, 24)}`;
 
 /** The payload a worker is handed for one attempt (pure: no clock, no randomness). */
@@ -230,7 +232,7 @@ export class ReleaseService {
   private constructor(runner: CommandRunner) { this.#runner = runner; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): ReleaseService { return new ReleaseService(new CommandRunner(storage, epoch, options)); }
 
-  async submit(owner: Principal, command: NoActor & { manifest: unknown }): Promise<{ candidateId: string; replayed: boolean }> {
+  async submit(owner: Principal, command: NoActor & { manifest: unknown }): Promise<{ candidateId: string; manifestDigest: string; replayed: boolean }> {
     this.#owner(owner, "submit a release candidate");
     onlyKnown(command, ["commandId", "manifest"]);
     const manifest = checkManifest(command.manifest);
@@ -246,7 +248,8 @@ export class ReleaseService {
         return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { candidateId, platforms: manifest.matrix.length } };
       },
     }));
-    return { candidateId, replayed: done.replayed };
+    // The full manifest digest is what a release signature covers with the ID (K02b), so the publisher signs exactly what was submitted.
+    return { candidateId, manifestDigest: manifestDigestOf(manifest), replayed: done.replayed };
   }
 
   /**

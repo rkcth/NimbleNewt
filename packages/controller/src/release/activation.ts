@@ -9,7 +9,7 @@ import { allowsExactly } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
 import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type LauncherNotice } from "./launcher.js";
 import { DEFAULT_START_FAILURE_LEVEL, type StartFailureLevel, type StartNoticeSink } from "./start-notices.js";
@@ -480,7 +480,7 @@ export class ReleaseActivationService {
       if (!candidate.manifest.matrix.some((c) => c.os === p.os && c.arch === p.arch)) throw new DomainError("invalid_transition", `the release was not tested for this installation's platform (${p.os}/${p.arch})`);
       // A holder of release.manage never activates what the owner has not approved, whatever the owner's setting says about their own activations: switching the requirement off is the owner's convenience for the owner.
       if (((await this.#settings()).requireApproval || !isOwner(owner)) && ((await this.#runner.get(RELEASE_KINDS.approval, id))?.body as unknown as ApprovalBody | undefined)?.candidateId !== id) throw new DomainError("invalid_transition", "the release is not approved (release.approve)" + (isOwner(owner) ? "; the owner may switch that requirement off" : "; a holder of release.manage needs the owner's approval"));
-      return this.#transition(owner, "activate", command.commandId, { id, digest: sb.digest }, command.expectedRevision);
+      return this.#transition(owner, "activate", command.commandId, { id, digest: sb.digest }, command.expectedRevision, () => this.#trust.guard(id));
     });
   }
 
@@ -499,7 +499,7 @@ export class ReleaseActivationService {
       const cand = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined;
       if (cand !== undefined) this.#target(cand.manifest);
       await this.#signed(id);
-      return this.#transition(owner, "rollback", command.commandId, body.previous, command.expectedRevision);
+      return this.#transition(owner, "rollback", command.commandId, body.previous, command.expectedRevision, () => this.#trust.guard(id));
     });
   }
 
@@ -542,7 +542,11 @@ export class ReleaseActivationService {
     await this.#launcher.expect({ id: ref.id, digest: ref.digest, ...(protocol === undefined ? {} : { protocol }) });
   }
 
-  async #transition(owner: Principal, kind: "activate" | "rollback", commandId: string | undefined, to: ReleaseRef, expectedRevision: number | undefined): Promise<{ revision: number; replayed: boolean }> {
+  /**
+   * `guard` (K02b) runs inside the operation that opens the journal and returns revision checks committed with it: the signature decision is made again at the commit point and pinned there, so a trusted key
+   * withdrawn (or the signing setting changed) between the checks above and this commit refuses the switch instead of letting it through. Trust-root changes do not take the switch lock.
+   */
+  async #transition(owner: Principal, kind: "activate" | "rollback", commandId: string | undefined, to: ReleaseRef, expectedRevision: number | undefined, guard: () => Promise<Change[]> = async () => []): Promise<{ revision: number; replayed: boolean }> {
     const op = kind === "activate" ? "release.activate" : "release.rollback";
     let began = false;
     const begun = await this.#runner.command(op, { commandId: scopedCommandId(owner.id, commandId), actor: owner.id }, async () => ({
@@ -558,7 +562,12 @@ export class ReleaseActivationService {
         const journal: JournalBody = { kind, ...(b?.current === undefined ? {} : { from: { id: b.current.id, digest: b.current.digest } }), to, by: owner.id, startedAt: this.#runner.now() };
         const next: ActivationBody = { ...(b?.current === undefined ? {} : { current: b.current }), ...(b?.previous === undefined ? {} : { previous: b.previous }), ...(b?.lastKnownGood === undefined ? {} : { lastKnownGood: b.lastKnownGood }), journal, history: b?.history ?? [], updatedAt: this.#runner.now() };
         const change = state === undefined ? { type: "create" as const, ref: STATE, body: next as unknown as JsonObject } : { type: "update" as const, ref: STATE, expectedRevision: state.revision, body: next as unknown as JsonObject };
-        return { ref: STATE, creates: state === undefined, changes: [change], detail: { kind, from: journal.from?.id ?? null, to: to.id } };
+        const pinned = await guard();
+        return {
+          ref: STATE, creates: state === undefined, changes: [change, ...pinned], detail: { kind, from: journal.from?.id ?? null, to: to.id },
+          // Lost to a concurrent writer: when the trust root or the signature changed, say what the decision is now; otherwise the activation record moved.
+          contention: async () => { try { await guard(); } catch (error) { if (error instanceof DomainError) return error; } const now = await this.#runner.get(STATE.kind, STATE.id); return new DomainError("stale_revision", `the activation record or the trust root changed at the same moment; read release.status and try again`, { currentRevision: now?.revision ?? 0 }); },
+        };
       },
     }));
     if (!began) {
@@ -799,7 +808,7 @@ export class ReleaseActivationService {
   }
 
   /** Owner only. Checks the current release's files (or the named staged release's) against the manifest digest the record keeps, as the launcher does at launch. */
-  async verify(owner: Principal, command: { releaseId?: string } = {}): Promise<{ releaseId: string | null; digest: string | null; ok: boolean; problems: string[]; migrationPlan?: string; targets?: readonly string[]; signedBy?: string | null }> {
+  async verify(owner: Principal, command: { releaseId?: string } = {}): Promise<{ releaseId: string | null; digest: string | null; ok: boolean; problems: string[]; manifestDigest?: string; migrationPlan?: string; targets?: readonly string[]; signedBy?: string | null }> {
     mayManage(owner, "verify a release");
     const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
     const id = command.releaseId === undefined ? body?.current?.id : idOf(command.releaseId);
@@ -810,7 +819,8 @@ export class ReleaseActivationService {
     // What the owner's word on an activation also covers (K02): the migration plan and the installations the release is for, from the candidate record, and whether a trusted key's signature is on it now.
     const manifest = ((await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined)?.manifest;
     const sig = await this.#trust.check(id);
-    return { releaseId: id, digest, ok: problems.length === 0, problems, ...(manifest?.migrationPlan === undefined ? {} : { migrationPlan: manifest.migrationPlan }), ...(manifest?.targets === undefined ? {} : { targets: manifest.targets }), signedBy: sig.ok ? sig.keyId : null };
+    const manifestDigest = await this.#trust.manifestDigest(id);
+    return { releaseId: id, digest, ok: problems.length === 0, problems, ...(manifestDigest === undefined ? {} : { manifestDigest }), ...(manifest?.migrationPlan === undefined ? {} : { migrationPlan: manifest.migrationPlan }), ...(manifest?.targets === undefined ? {} : { targets: manifest.targets }), signedBy: sig.ok ? sig.keyId : null };
   }
 
   /**

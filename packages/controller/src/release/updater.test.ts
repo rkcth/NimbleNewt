@@ -385,7 +385,7 @@ test("signed artifact sets: with trusted keys the release is installed only when
     await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(b, signedDigestText(s.digest)) } })));
     await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(a, signedDigestText(sha256("another"))) } })), /no valid signature/);
     // The candidate-ID signature of the controller's path is not a signature over the digest.
-    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(a, signedText(s.id)) } })));
+    await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: sig(a, signedText(s.id, s.digest)) } })));
     await refused("signature", stageRelease(opts(root, s, { trust: { keys: [], signature: good } })), /no valid signature/);
     await refused("signature", stageRelease(opts(root, s, { trust: { keys: ["not a key", der(b)], signature: good } })));
     for (const bad of ["", "AAAA", "!!", "A".repeat(200)]) await refused("signature", stageRelease(opts(root, s, { trust: { keys: [der(a)], signature: bad } })));

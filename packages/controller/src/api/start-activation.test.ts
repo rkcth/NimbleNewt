@@ -196,11 +196,14 @@ test("signed releases, the release.manage permission, the migration plan and the
     assert.equal((await owner("release.status", {})).result.item.databaseSchema, launcherFile.db!.version);
 
     const compat = JSON.stringify({ protocol: { min: 1, max: 1 }, schema: { min: 1, max: 99 } });
+    const digests = new Map<string, string>();
     const candidate = async (tag: string, extra: Record<string, unknown>) => {
       const files = { "nn.js": tag, "compat.json": compat };
       const artifacts = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, sha(v)]));
       const manifest = { sourceCommit: "c".repeat(40), suiteRevision: "s1", artifacts, dependencyLocks: { lock: sha("lock") }, matrix: [{ os: "linux", arch: "x64" }], ...extra };
-      const id = (await owner("release.submit", { manifest }, `sub-${tag}`)).result.candidateId as string;
+      const submitted = (await owner("release.submit", { manifest }, `sub-${tag}`)).result;
+      const id = submitted.candidateId as string;
+      digests.set(id, submitted.manifestDigest as string);
       const att = (await owner("release.issue", { candidateId: id, cell: { os: "linux", arch: "x64" }, hostId: "lx", workerId: builder.id, timeoutSeconds: 600, memoryMb: 2048 }, `iss-${tag}`)).result.attemptId as string;
       const rep = await call(builderToken, "release.report", { attemptId: att, sourceCommit: "c".repeat(40), suiteRevision: "s1", artifactHashes: artifacts, dependencyLockHashes: { lock: sha("lock") }, environment: { os: "linux", arch: "x64" }, outcome: "pass", counts: { passed: 1, failed: 0, skipped: 0 }, logDigest: sha("log"), summary: "ok" }, `rep-${tag}`);
       assert.ok(rep.ok, JSON.stringify(rep));
@@ -236,7 +239,7 @@ test("signed releases, the release.manage permission, the migration plan and the
     assert.deepEqual([listed.keys.length, listed.required], [1, true]);
 
     // Unsigned: not staged, by the owner or the manager. A target for another installation: not staged even once signed.
-    const sig = (id: string) => sign(null, signedText(id), privateKey).toString("base64");
+    const sig = (id: string) => sign(null, signedText(id, digests.get(id)!), privateKey).toString("base64");
     assert.equal((await owner("release.stage", { candidateId: one }, "s0")).error?.code, "invalid_transition");
     const attached = await call(mgrToken, "release.signature.attach", { candidateId: one, signature: sig(one) }, "g1");
     assert.ok(attached.ok, JSON.stringify(attached));

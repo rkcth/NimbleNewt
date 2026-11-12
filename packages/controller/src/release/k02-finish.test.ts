@@ -9,6 +9,7 @@ import { CommandRunner, type Built } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import type { ControllerStorage, OperationInput } from "../storage/types.js";
 import { LAUNCHER_FILE, Launcher, ReleaseActivationService, ReleaseService, checkManifest, parseCompat, signedText, type ActivationOptions } from "./index.js";
 
 after(stopServer);
@@ -21,14 +22,16 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
 const unlockAll = (dir: string): void => { try { chmodSync(dir, 0o700); for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) unlockAll(join(dir, e.name)); } catch { /* gone */ } };
 const linux = { os: "linux" as const, arch: "x64" as const };
+/** Candidate ID -> full manifest digest (from release.submit), the second half of what a release signature covers. */
+const digests = new Map<string, string>();
 const keypair = (): { publicKey: string; sign: (id: string) => string; key: KeyObject } => {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return { key: publicKey, publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64"), sign: (id) => sign(null, signedText(id), privateKey).toString("base64") };
+  return { key: publicKey, publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64"), sign: (id) => sign(null, signedText(id, digests.get(id)!), privateKey).toString("base64") };
 };
 const compat = (schema?: { min: number; max: number }): string => JSON.stringify({ protocol: { min: 1, max: 1 }, ...(schema === undefined ? {} : { schema }) });
 
 interface W {
-  make: (o?: Partial<ActivationOptions>) => ReleaseActivationService; owner: Principal; manager: Principal; plain: Principal; root: string; runner: CommandRunner; principals: PrincipalService; rel: ReleaseService;
+  make: (o?: Partial<ActivationOptions>) => ReleaseActivationService; storage: ControllerStorage; epoch: number; owner: Principal; manager: Principal; plain: Principal; root: string; runner: CommandRunner; principals: PrincipalService; rel: ReleaseService;
   candidate: (files: Record<string, string>, extra?: { migrationPlan?: string; targets?: string[]; compatText?: string }) => Promise<string>;
   approve: (id: string) => Promise<void>;
   go: (act: ReleaseActivationService, by: Principal, id: string, extra?: { migrationPlan?: string }) => Promise<{ digest: string }>;
@@ -52,7 +55,8 @@ for (const backend of backends) {
         const candidate: W["candidate"] = async (files, extra = {}) => {
           const all = { "compat.json": extra.compatText ?? compat(), ...files };
           const artifacts = Object.fromEntries(Object.entries(all).map(([k, v]) => [k, sha(v)]));
-          const { candidateId } = await rel.submit(owner, { commandId: cid("s"), manifest: { sourceCommit: "a".repeat(40), suiteRevision: "s1", artifacts, dependencyLocks: { lock: sha("lock") }, matrix: [linux], ...(extra.migrationPlan === undefined ? {} : { migrationPlan: extra.migrationPlan }), ...(extra.targets === undefined ? {} : { targets: extra.targets }) } });
+          const { candidateId, manifestDigest } = await rel.submit(owner, { commandId: cid("s"), manifest: { sourceCommit: "a".repeat(40), suiteRevision: "s1", artifacts, dependencyLocks: { lock: sha("lock") }, matrix: [linux], ...(extra.migrationPlan === undefined ? {} : { migrationPlan: extra.migrationPlan }), ...(extra.targets === undefined ? {} : { targets: extra.targets }) } });
+          digests.set(candidateId, manifestDigest);
           for (const [k, v] of Object.entries(all)) { const p = join(root, "incoming", candidateId, ...k.split("/")); mkdirSync(join(p, ".."), { recursive: true }); writeFileSync(p, v); }
           return candidateId;
         };
@@ -64,7 +68,7 @@ for (const backend of backends) {
           await act.activate(by, { commandId: cid("a"), candidateId: id, digest: s.digest, ...extra });
           return { digest: s.digest };
         };
-        await body({ make, owner, manager, plain, root, runner, principals, rel, candidate, approve, go });
+        await body({ make, storage: world.storage, epoch: projects.epoch, owner, manager, plain, root, runner, principals, rel, candidate, approve, go });
       } finally { await world.close(); unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
     });
   };
@@ -115,6 +119,17 @@ for (const backend of backends) {
     // The owner's explicit word that digests are enough, and the opposite, with no key at all.
     await act.requireSignature(c.owner, { commandId: cid("t"), required: true });
     await refuses("invalid_transition", () => act.rollback(c.owner, { commandId: cid("rb"), releaseId: first }), /not signed/);
+    // The owner's explicit "always" outlives the keys: removing the last key leaves the requirement on (nothing staged, nothing rolled back), and adding and removing keys keeps the setting.
+    const spare = keypair();
+    const spareId = (await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: spare.publicKey })).keyId;
+    for (const x of (await act.trust(c.owner)).keys) await act.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: x.keyId });
+    assert.deepEqual([(await act.trust(c.owner)).require, (await act.trust(c.owner)).required, (await act.trust(c.owner)).keys.length], [true, true, 0]);
+    await refuses("invalid_transition", () => act.rollback(c.owner, { commandId: cid("rb"), releaseId: first }), /no signing key is trusted/);
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: spare.publicKey });
+    await act.requireSignature(c.owner, { commandId: cid("t"), required: false });
+    await act.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: spareId });
+    assert.equal((await act.trust(c.owner)).require, false, "the owner's 'never' is kept too");
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: other.publicKey });
     await act.requireSignature(c.owner, { commandId: cid("t"), required: null });
     // Following the root, with the last key gone, is the owner's explicit step back to digests alone.
     await act.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: (await act.trust(c.owner)).keys[0]!.keyId });
@@ -123,6 +138,63 @@ for (const backend of backends) {
     const t = await act.trust(c.owner);
     assert.deepEqual([t.keys.length, t.require, t.required], [0, null, false]);
   });
+  suite("signing: the signature covers the full manifest digest, not only the 96-bit candidate ID; the old ID-only text, another digest and a record that no longer hashes to its ID are refused", async (c) => {
+    const act = c.make();
+    const k = keypair();
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k.publicKey });
+    const id = await c.candidate({ "nn.js": "full" });
+    const priv = generateKeyPairSync("ed25519");
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: priv.publicKey.export({ format: "der", type: "spki" }).toString("base64") });
+    const raw = (text: string): string => sign(null, Buffer.from(text, "utf8"), priv.privateKey).toString("base64");
+    // Over the ID alone (what a signature covered before), over the ID with another digest, over the digest without the ID: none counts.
+    for (const text of [`nimblenewt-release-v1\n${id}\n`, `nimblenewt-release-v1\n${id}\n${sha("other manifest")}\n`, `nimblenewt-release-v1\n${digests.get(id)!}\n`, `nimblenewt-release-digest-v1\n${digests.get(id)!}\n`]) {
+      await refuses("invalid_command", () => act.attachSignature(c.owner, { commandId: cid("g"), candidateId: id, signature: raw(text) }), /trusted key/);
+    }
+    await act.attachSignature(c.owner, { commandId: cid("g"), candidateId: id, signature: raw(`nimblenewt-release-v1\n${id}\n${digests.get(id)!}\n`) });
+    const st = await act.stage(c.owner, { commandId: cid("st"), candidateId: id });
+    assert.equal((await act.verify(c.owner, { releaseId: id })).manifestDigest, digests.get(id));
+    // The candidate record is rewritten to another manifest under the same ID (a store edited behind the controller's back): its signature no longer counts.
+    const cand = await c.runner.get("release-candidate", id);
+    await c.runner.command("test.tamper", { commandId: cid("tm"), actor: c.owner.id }, async () => ({ payload: {}, build: async (): Promise<Built> => ({ ref: { kind: "release-candidate", id }, creates: false, changes: [{ type: "update", ref: { kind: "release-candidate", id }, expectedRevision: cand!.revision, body: { ...(cand!.body as object), manifest: { ...((cand!.body as { manifest: object }).manifest), suiteRevision: "s2" } } }], detail: {} }) }));
+    assert.equal((await act.verify(c.owner, { releaseId: id })).signedBy, null);
+    await c.approve(id);
+    await refuses("invalid_transition", () => act.activate(c.owner, { commandId: cid("a"), candidateId: id, digest: st.digest }));
+  });
+
+  suite("signing: a key withdrawn after an activation's checks but before its commit refuses the switch (the decision is pinned at the commit point); an unrelated trust-root change at that moment refuses too, and nothing switches", async (c) => {
+    const act = c.make();
+    const k = keypair(), other = keypair(), spare = keypair();
+    const added = await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k.publicKey });
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: other.publicKey });
+    // A storage that runs one trust-root change just before the activation's own operation reaches it.
+    const racing = (change: () => Promise<unknown>): { service: ReleaseActivationService; fired: () => boolean } => {
+      let fired = false;
+      const storage = new Proxy(c.storage, { get(t, prop) {
+        const v = Reflect.get(t, prop, t) as unknown;
+        if (prop === "applyOperation") return async (input: OperationInput) => { if (!fired && (input.audit[0]?.type === "release.activate" || input.audit[0]?.type === "release.rollback")) { fired = true; await change(); } return (v as (i: OperationInput) => Promise<unknown>).call(t, input); };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      } });
+      return { service: ReleaseActivationService.withEpoch(storage, c.epoch, { root: c.root, switcher: "pointer", platform: linux, runner: options }), fired: () => fired };
+    };
+    const id = await c.candidate({ "nn.js": "race" });
+    await act.attachSignature(c.owner, { commandId: cid("g"), candidateId: id, signature: k.sign(id) });
+    const st = await act.stage(c.owner, { commandId: cid("st"), candidateId: id });
+    await c.approve(id);
+    const r1 = racing(() => act.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: added.keyId }));
+    await refuses("invalid_transition", () => r1.service.activate(c.owner, { commandId: cid("a"), candidateId: id, digest: st.digest }), /not signed/);
+    assert.equal(r1.fired(), true);
+    assert.equal(pointerOf(c.root), undefined, "nothing switched");
+    assert.equal((await act.status(c.owner)).current, undefined);
+    assert.equal((await act.status(c.owner)).journal, undefined, "no switch was opened");
+    // Signed by a key that stays: an unrelated key added at that moment still refuses (the root changed under the decision); asked again, it switches.
+    await act.attachSignature(c.owner, { commandId: cid("g"), candidateId: id, signature: other.sign(id) });
+    const r2 = racing(() => act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: spare.publicKey }));
+    await refuses("stale_revision", () => r2.service.activate(c.owner, { commandId: cid("a"), candidateId: id, digest: st.digest }), /trust root/);
+    assert.equal(pointerOf(c.root), undefined);
+    await act.activate(c.owner, { commandId: cid("a"), candidateId: id, digest: st.digest });
+    assert.equal(pointerOf(c.root), id);
+  });
+
   const go0 = async (c: W, act: ReleaseActivationService, id: string): Promise<void> => { const s = await act.stage(c.owner, { commandId: cid("st"), candidateId: id }); await c.approve(id); await act.activate(c.owner, { commandId: cid("a"), candidateId: id, digest: s.digest }); };
 
   suite("signing: a forged signature record does not count (checked again at every use), the key list is bounded and strict, and only the owner changes the trust root", async (c) => {
@@ -217,7 +289,7 @@ for (const backend of backends) {
     const base = { sourceCommit: "a".repeat(40), suiteRevision: "s1", artifacts: { x: sha("x") }, dependencyLocks: { lock: sha("lock") }, matrix: [linux] };
     for (const bad of [{ migrationPlan: "nope" }, { migrationPlan: 5 }, { targets: [] }, { targets: ["A"] }, { targets: "main" }, { targets: ["a", "a"] }, { targets: Array.from({ length: 21 }, (_, i) => `i${i}`) }]) assert.throws(() => checkManifest({ ...base, ...bad }), DomainError);
     assert.deepEqual(checkManifest({ ...base, targets: ["b", "a"] }).targets, ["a", "b"], "sorted");
-    const plan = sha("alter table accounts add column tier text");
+    const plan = sha("migration plan: accounts gain a tier");
     const act = c.make({ installationId: "home" });
     const plain = await c.candidate({ "nn.js": "p" });
     const planned = await c.candidate({ "nn.js": "p" }, { migrationPlan: plan });
@@ -254,6 +326,18 @@ for (const backend of backends) {
     await act.stage(c.owner, { commandId: cid("st"), candidateId: free });
     const freeDigest = (await act.verify(c.owner, { releaseId: free })).digest!;
     await refuses("invalid_transition", () => stray.activate(c.owner, { commandId: cid("a"), candidateId: free, digest: freeDigest }), /for home, not for this installation \(elsewhere\)/);
+    // A rollback goes back only to a release made for this installation: `planned` (no targets) became current at "home", then `mine` at "office";
+    // going back from `mine` is fine anywhere `planned` may run, and a release whose targets exclude the installation is not gone back to.
+    const back = await c.candidate({ "nn.js": "home-only" }, { targets: ["home"] });
+    await c.approve(back);
+    const sb = await act.stage(c.owner, { commandId: cid("st"), candidateId: back });
+    await act.activate(c.owner, { commandId: cid("a"), candidateId: back, digest: sb.digest });
+    await act.activate(c.owner, { commandId: cid("a"), candidateId: free, digest: freeDigest });
+    assert.equal(pointerOf(c.root), free);
+    await refuses("invalid_transition", () => stray.rollback(c.owner, { commandId: cid("rb"), releaseId: back }), /for home, not for this installation \(elsewhere\)/);
+    await refuses("invalid_transition", () => c.make().rollback(c.owner, { commandId: cid("rb"), releaseId: back }), /no name configured/);
+    await act.rollback(c.owner, { commandId: cid("rb"), releaseId: back });
+    assert.equal(pointerOf(c.root), back);
   });
 
   // ---- K02d: database schema compatibility of the fall-back and of a rollback --------------------------------------------------------------------------------------------------------
