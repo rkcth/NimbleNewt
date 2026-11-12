@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, taskId as checkTaskId, text } from "../domain/model.js";
 import { allowsExactly, inTaskScope } from "../security/access.js";
@@ -22,6 +23,11 @@ export interface IntegratorLeaseOpsOptions {
   readonly landingBranch?: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
   /** Told when a lease was ended against its holder's will (the owner took it away, or its holder was retired and another agent took the branch). Best effort: a failure never undoes the release. */
   readonly onForcedRelease?: (by: Principal, lease: IntegratorLease, why: "owner" | "retired") => Promise<void>;
+  /**
+   * Whether an agent still has the right `integration.lease` on the project, from its effective grants now (P10 second slice review). When given, a holder whose right was taken away is treated like a retired one: the owner
+   * cannot name it, cannot land for it, and the next integrator ends its lease instead of waiting for the expiry (it could neither renew nor land with it). Absent (unit rigs), the right of a holder is not looked at.
+   */
+  readonly holderMayLand?: (agentId: string, projectId: string) => Promise<boolean>;
 }
 
 export class IntegratorLeaseOps {
@@ -59,6 +65,7 @@ export class IntegratorLeaseOps {
       holder = text(command.holder, "holder", { min: 1, max: 100 });
       // The holder must be an active agent (P10 review): a lease named for nobody (a typo, `agent:` written in, a retired agent) would block the branch until it expires and no one could renew or land with it.
       if (this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("invalid_command", `holder: ${holder} is not an active agent (name the agent by its ID, without "agent:")`, { field: "holder" });
+      if (this.#options.holderMayLand !== undefined && !(await this.#options.holderMayLand(holder, projectId))) throw new DomainError("invalid_command", `holder: ${holder} does not have the right integration.lease on this project, so it could neither renew nor land with the lease`, { field: "holder" });
     } else if (holder === undefined) {
       throw new DomainError("forbidden", `${by.id} is not an agent, so it cannot hold an integrator lease`);
     } else if (command.holder !== undefined && command.holder !== holder) {
@@ -71,14 +78,16 @@ export class IntegratorLeaseOps {
       if (landing !== command.branch) throw new DomainError("forbidden", `an integrator lease is taken only on the project's landing branch (${landing}), not on ${command.branch}`, { field: "branch" });
     }
     // A retired holder (P10 second slice): a live lease whose holder is no longer an active agent is ended now, so the next integrator is not kept out until it expires.
-    if (this.#options.activeAgent !== undefined) {
-      const current = await this.#leases.get(IntegratorLeaseService.leaseIdOf(projectId, command.branch));
-      if (current !== undefined && current.live && current.holder !== holder && !(await this.#options.activeAgent(current.holder))) {
-        const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, `retired-${command.commandId}`), leaseId: current.leaseId, fence: current.fence, note: "its holder is no longer an active agent" }).catch(() => undefined);
+    // The same for a holder whose right was taken away. The release is its own command, named from the taker's (hashed to a fixed length, so it is a valid command ID whatever the length of the taker's own, as long as that one is).
+    const acquireId = scopedCommandId(by.id, command.commandId);
+    if (this.#options.activeAgent !== undefined || this.#options.holderMayLand !== undefined) {
+      const current = typeof command.branch === "string" ? await this.#leases.get(IntegratorLeaseService.leaseIdOf(projectId, command.branch)) : undefined;
+      if (current !== undefined && current.live && current.holder !== holder && (await this.#gone(current.holder, projectId)) !== undefined) {
+        const ended = await this.#leases.release({ commandId: scopedCommandId(by.id, `retired:${createHash("sha256").update(String(command.commandId)).digest("hex")}`), leaseId: current.leaseId, fence: current.fence, note: "its holder is no longer an active agent with the right to land" }).catch(() => undefined);
         if (ended !== undefined) await this.#told(by, current, "retired");
       }
     }
-    return this.#leases.acquire({ commandId: scopedCommandId(by.id, command.commandId), projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs });
+    return this.#leases.acquire({ commandId: acquireId, projectId, branch: command.branch, holder, taskId, ttlMs: command.ttlMs });
   }
 
   /** Extends the hold. Only the holder, with its current fence. */
@@ -101,6 +110,13 @@ export class IntegratorLeaseOps {
     // The owner ending a live hold that is another agent's is a forced release: it is put in the task's activity (P10 second slice).
     if (by.kind === "owner" && found.live) await this.#told(by, found, "owner");
     return ended;
+  }
+
+  /** Why `agentId` can no longer use a lease of the project (retired or disabled, or the right taken away), or undefined while it still can. */
+  async #gone(agentId: string, projectId: string): Promise<"inactive" | "no-right" | undefined> {
+    if (this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(agentId))) return "inactive";
+    if (this.#options.holderMayLand !== undefined && !(await this.#options.holderMayLand(agentId, projectId))) return "no-right";
+    return undefined;
   }
 
   async #told(by: Principal, lease: IntegratorLease, why: "owner" | "retired"): Promise<void> {
@@ -139,7 +155,10 @@ export class IntegratorLeaseOps {
     if (by.kind !== "owner" && !this.#allowed(by, found.projectId)) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
     const holder = by.kind === "owner" ? found.holder : holderOf(by);
     // A holder that was retired or disabled lands nothing, even before its hold runs out (P10 second slice).
-    if (holder !== undefined && this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("fenced", `${holder} is no longer an active agent, so its lease cannot be used to land`);
+    // The owner acting for a holder whose right was taken away lands nothing either (the review of the second slice): the right stops the holder's landings at once, whoever asks.
+    const gone = holder === undefined ? undefined : await this.#gone(holder, found.projectId);
+    if (gone === "inactive") throw new DomainError("fenced", `${holder} is no longer an active agent, so its lease cannot be used to land`);
+    if (gone === "no-right") throw new DomainError("forbidden", `${holder} no longer has the right integration.lease on this project, so its lease cannot be used to land`);
     if (holder === undefined || !(await this.#leases.valid(leaseId, fence, holder))) throw new DomainError("fenced", `lease ${leaseId} is not held with fence ${fence} by the caller (it expired, was released, or changed hands)`);
     return { leaseId, fence };
   }
