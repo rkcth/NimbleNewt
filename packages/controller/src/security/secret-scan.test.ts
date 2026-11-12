@@ -197,6 +197,27 @@ test("no false positives over the product's own strings: SHAs, digests, UUIDs, U
   }
 });
 
+test("CI platform repair: macOS's temporary folders are paths, not keys, while a key that is one name of a path, or a key that only starts with a slash, is still found", () => {
+  // The shapes the exhaustive run's macOS jobs used for checkouts (os.tmpdir() under /var/folders, mkdtemp suffixes), once realpath'd under /private too.
+  const paths = [
+    "/var/folders/0t/k_8g3pzs4gn5b0g8l2h6xw8m0000gn/T/nn-tv-AbC123",
+    "/private/var/folders/0t/k_8g3pzs4gn5b0g8l2h6xw8m0000gn/T/nn-chat-Q7xZpL/repo2",
+    "/var/folders/x1/tq9_7k2m4r8w1zc5d0yb3s6h0000gn/T/nn-start-rck-9fGh2K/checkouts/main",
+    "/Users/runner/work/NimbleNewt/NimbleNewt/packages/controller/dist/api/Fixture2Kq",
+  ];
+  for (const p of paths) {
+    const said = `bind the repository at ${p} as src`;
+    assert.equal(redactText(said), said, p);
+    assert.deepEqual(findCredentialShapes(p), [], p);
+    assert.doesNotThrow(() => refuseCredentials(p, "locator"), p);
+  }
+  // A key that is one name of such a path is a key.
+  const key = "q8Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6Lw2";
+  assert.equal(redactText(`/var/folders/0t/${key}/T/x`).includes(key), false, "a key as one name of a path");
+  // A key that starts with "/" is not a path: its first name is not a word, or it has fewer than three names.
+  for (const k of ["/q8Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6Lw2/Pq", "/Zt3VvKpR0aW7yX2mN5bC9dE1fG4hJ6Lw2Ab", "/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]) assert.equal(highEntropy(k), true, k);
+});
+
 test("no false positives over the product's own text: no non-test source file of any package and no document holds a run the high-entropy rule takes", () => {
   const root = fileURLToPath(new URL("../../../../", import.meta.url));
   const files: string[] = [];

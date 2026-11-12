@@ -14,6 +14,9 @@ import { directoryArtifactSource, httpsArtifactSource, SourceError, type Artifac
 import { fixture } from "./testing/tar.js";
 import { realIo, scanTree, type FileIo } from "./tree.js";
 
+/** The tests below that build real revisions run where the runtime does: it is Linux only (host.ts), and on Windows its store's links, locks and renames behave otherwise. */
+const POSIX_STORE = process.platform === "win32" && "the environment runtime is Linux only (host.ts refuses it elsewhere); its store's links, locks and renames are POSIX";
+
 const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const top = realpathSync(mkdtempSync(join(tmpdir(), "nn-a09r-")));
 after(() => { try { chmodSync(top, 0o700); } catch { /* gone */ } rmSync(top, { recursive: true, force: true }); });
@@ -51,7 +54,7 @@ const ref = (f: { name: string; version: string; digest: string }) => ({ name: f
 const noTemp = (root: string): void => { for (const d of ["tmp", "trials"]) assert.deepEqual(existsSync(join(root, d)) ? readdirSync(join(root, d)) : [], [], `${d} holds no leftovers`); };
 
 describe("the local environment runtime: a package goes in through a trial, a staged revision and an atomic switch", () => {
-  test("the full cycle: trial, reload on a new revision, validate, a second package, a rollback reload; digests, links and files are what they should be", async () => {
+  test("the full cycle: trial, reload on a new revision, validate, a second package, a rollback reload; digests, links and files are what they should be", { skip: POSIX_STORE }, async () => {
     const w = world();
     const ext = join(fresh("ext"), "exts"); mkdirSync(ext); writeFileSync(join(ext, "guard"), "protected extension v1");
     const runtime = new LocalEnvironmentRuntime({ root: w.root, worker: hooks(w.worker), source: w.source, extensions: { directory: ext } });
@@ -169,7 +172,7 @@ describe("install scripts: off unless approved, and only inside the sandbox port
     assert.equal(existsSync(join(w.runtime.environments.revisionDir(AGENT, 2), "packages", "native", "built.txt")), false);
   });
 
-  test("approved with scripts: they run in the trial and in the reload (in order), the result is part of the revision, and a later revision keeps it without running them again", async () => {
+  test("approved with scripts: they run in the trial and in the reload (in order), the result is part of the revision, and a later revision keeps it without running them again", { skip: POSIX_STORE }, async () => {
     const port = new Scripts(); const w = world({ scripts: port }); const a = w.add("native", "1.0.0", scripted);
     const t = await trialOf(w, a, true);
     assert.deepEqual(t, { ok: true, digestVerified: true, scriptsDeclared: true, scriptsRan: true, notes: "install scripts ran in the sandbox" });
@@ -207,7 +210,7 @@ describe("install scripts: off unless approved, and only inside the sandbox port
     noTemp(w.root);
   });
 
-  test("a failing script, and a script that leaves a link, a set-user-ID file or too much behind, fail the change with the environment untouched", async () => {
+  test("a failing script, and a script that leaves a link, a set-user-ID file or too much behind, fail the change with the environment untouched", { skip: POSIX_STORE }, async () => {
     for (const [label, behave] of [
       ["fails", () => { throw new Error("boom"); }],
       ["symlink", (dir: string) => symlinkSync("/etc/passwd", join(dir, "link"))],
