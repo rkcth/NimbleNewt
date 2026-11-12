@@ -76,7 +76,9 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
   const sent: { text: string }[] = [];
   const { c, owner, call, notifications, set } = await open(d, () => clock, sent);
   try {
-    await set({ channel: "external", channelName: "chat", escalateAfterHours: null }, "s1");
+    // The stopped-work rule is off here (card U14c review): with it on, the blocker became Urgent and left the digest, so the second digest held only the controller's own notice (stall detection
+    // off, no project) and came even when an ended stand-up still held the digest back. That notice is a plain Notice here, which the stand-up rule leaves aside, and the digest must carry the blocker.
+    await set({ channel: "external", channelName: "chat", escalateAfterHours: null, stoppedWorkAfterMinutes: null, levelByKind: { maintenance: "notice" } }, "s1");
     const project = (await call("project.create", { name: "Garden" }, "p1")).result.id as string;
     const agent = (await c.services.agents.create(owner, { commandId: "ag-a", friendlyName: "A" })).id;
     const made = await call("standup.configure", { projectId: project, title: "Morning", roster: [`agent:${agent}`], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "UTC", recurrence: { kind: "daily" } }, "su1");
@@ -94,5 +96,8 @@ test("in the running controller the plain 09:00 digest waits for no stand-up: wi
     assert.ok(ended.ok, JSON.stringify(ended));
     await tick("2026-11-12T09:05:00.000Z");
     assert.equal(await digests(), 1, "no stand-up: the digest is sent");
+    const inbox = await notifications.inbox(owner);
+    const item = inbox.items.find((i) => i.ref.kind === "blocker" && i.ref.id === blocker)!;
+    assert.ok(inbox.digests[0]!.itemIds.includes(item.id), "the digest carries the project's blocker, not only the controller's own notices");
   } finally { mock.timers.reset(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
