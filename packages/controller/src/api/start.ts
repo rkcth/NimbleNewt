@@ -603,7 +603,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Suspected stalls: a task under a pause is assessed as paused, never as stalled (card L01).
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
-    const setupReadiness = SetupReadinessService.withEpoch(storage, epoch);
+    const setupReadiness = SetupReadinessService.withEpoch(storage, epoch, { startedAt: new Date().toISOString() }); // the local host setting is recorded on the system clock
     const setupProviders = SetupProviderService.withEpoch(storage, epoch, {}, {});
     const localHost = LocalHostSettingService.withEpoch(storage, epoch);
     // A speed given in the start options wins; otherwise the reading speed a route declares in the routing table is used until the route has been measured (card V01c).
