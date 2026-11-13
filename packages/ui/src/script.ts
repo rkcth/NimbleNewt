@@ -540,7 +540,7 @@ export const APP_JS = String.raw`(function (root) {
         var m = list(r.body.search && r.body.search.matches, 20);
         if (!m.length) note(found, 'No step matches.');
         m.forEach(function (e) { found.appendChild(el('div', 'card-line', stepWords(e) + ': ' + clip(e.summary, 200))); });
-      });
+      }, function () { note(found, 'Offline. Try again when the connection is back.'); });
     });
     drawSimulation(body);
   }
@@ -576,7 +576,7 @@ export const APP_JS = String.raw`(function (root) {
         } else ls.appendChild(el('div', 'card-line', head + ' - ' + clip(res.note || (i.note ? i.note : 'a reference'), 200)));
       });
       drawThinking(sec, d, labels);
-    });
+    }, function () { sec.removeChild(loading); note(sec, 'Offline. Try again when the connection is back.'); });
   }
   function drawThinking(sec, d, labels) {
     var t = region(sec, 'The model\'s thinking');
@@ -594,7 +594,7 @@ export const APP_JS = String.raw`(function (root) {
         note(out, clip(x.label || labels.thinking, 300));
         list(x.blocks, 20).forEach(function (blk) { out.appendChild(el('div', 'card-line', clip(blk.text !== undefined ? blk.text : '(kept without text)', 700))); });
         if (x.state === 'stored' && !list(x.blocks, 1).length) note(out, 'Nothing more is kept.');
-      });
+      }, function () { b.disabled = false; note(out, 'Offline. Try again when the connection is back.'); });
     });
     t.appendChild(b); t.appendChild(out);
   }
@@ -613,7 +613,7 @@ export const APP_JS = String.raw`(function (root) {
         note(out, clip(sim.label, 300));
         list(sim.steps, 200).forEach(function (s) { out.appendChild(el('div', 'card-line', 'Simulated: step ' + s.seq + ' would ' + clip(s.would, 120) + ' (recorded: ' + clip(s.recordedOutcome, 20) + ')')); });
         if (sim.truncated) note(out, 'Only the first steps were walked.');
-      });
+      }, function () { b.disabled = false; note(out, 'Offline. Try again when the connection is back.'); });
     });
     sec.appendChild(b); sec.appendChild(out);
   }

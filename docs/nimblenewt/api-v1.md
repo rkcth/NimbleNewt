@@ -3692,7 +3692,7 @@ Arguments:
 - `summary`: one line
 - `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
 - `payload` (optional): { text, sensitive? } or { missing: true, reason }
-- `outcome` (optional): proposed, dispatched, confirmed or uncertain; leave out when not known
+- `outcome` (optional): proposed, dispatched, confirmed, failed (came back without taking effect) or uncertain; leave out when not known
 - `branch` (optional): the branch line the step belongs to (leave out for the main line)
 - `supersedes` (optional): the number of an earlier step this one replaces
 - `commandId`: required

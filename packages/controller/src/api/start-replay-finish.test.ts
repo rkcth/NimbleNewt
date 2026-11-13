@@ -56,7 +56,7 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.ok(branch.ok, JSON.stringify(branch));
     const lane = branch.result.id as string;                                                                                                              // 4 the real producer
     assert.ok((await rec(ann, "s5", { kind: "tool-call", summary: "ran the cache probe", outcome: "dispatched", branch: lane })).ok);              // 5 an agent's own claim on the lane
-    assert.ok((await rec(ann, "s6", { kind: "tool-call", summary: "the probe failed: connection refused", outcome: "confirmed", branch: lane })).ok);  // 6 a failed tool call is an answer that came back
+    assert.ok((await rec(ann, "s6", { kind: "tool-call", summary: "the probe failed: connection refused", outcome: "failed", branch: lane })).ok);  // 6 a failed tool call came back without taking effect
     const rq = await c.services.reviews.request({ ...(await c.services.principals.authenticate(ann)) }, { commandId: "rq1", taskId: task, operation: { name: "git-commit", args: { n: 1 } as never, target: { kind: "repository", id: "main" } }, context: { toolVersion: "1.0", authoritySource: "task grant", expectedEffects: ["commits"] } });
     await c.services.reviews.decide(owner, { commandId: "dc1", requestId: rq.id, expectedRevision: (await c.services.reviews.get(owner, rq.id))!.revision, verdict: "allow", reason: "fine, the commit is small" });  // 7 the real producer
     await built[0]!.recordThinking(order, [{ entryId: 1, block: 0, provider: "llama", model: "local-m", text: "the cache looks stale; check the probe first", opaque: false }] as never);
@@ -75,7 +75,7 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     const steps = open.entries.filter((e: { seq: number; authority?: string }) => e.authority !== undefined) as { seq: number; kind: string; actor: string; outcome: string; outcomeNote?: string; lane: string; laneStatus: string; authority: string; supersededBy?: number[] }[];
     const at = (seq: number) => steps.find((s) => s.seq === seq)!;
     assert.deepEqual(steps.map((s) => s.kind), ["instruction", "model-selected", "compression", "branch", "tool-call", "tool-call", "approval", "instruction"]);
-    assert.deepEqual(steps.map((s) => s.outcome), ["confirmed", "confirmed", "confirmed", "confirmed", "dispatched", "confirmed", "confirmed", "confirmed"]);
+    assert.deepEqual(steps.map((s) => s.outcome), ["confirmed", "confirmed", "confirmed", "confirmed", "dispatched", "failed", "confirmed", "confirmed"]);
     assert.ok(at(3).actor !== owner.id && !at(3).actor.startsWith("agent:"), `the compaction is written by the controller's own identity, not by an agent or the owner: ${at(3).actor}`);
     assert.equal(at(4).lane, lane); assert.equal(at(4).laneStatus, "controller", "a step a controller service wrote on the line");
     assert.equal(at(5).laneStatus, "verified", "an agent's step on a line the branch registry knows");
@@ -83,7 +83,7 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal(at(7).outcomeNote, undefined, "the controller's own outcome carries no such note");
     assert.deepEqual([at(1).authority, at(1).supersededBy], ["superseded", [8]]);
     assert.deepEqual(open.summary.lanes.map((l: { lane: string }) => l.lane), ["main", lane]);
-    assert.ok(open.summary.byOutcome.dispatched === 1 && open.summary.byOutcome.confirmed === 7);
+    assert.ok(open.summary.byOutcome.dispatched === 1 && open.summary.byOutcome.failed === 1 && open.summary.byOutcome.confirmed === 6, JSON.stringify(open.summary.byOutcome));
 
     // ---- links resolved for the reader: the approval, the side line; a kind with no reader stays a reference ----
     const approval = (await call(boot.token, "activity.replay.links", { taskId: task, seq: 7 })).result;
@@ -94,6 +94,21 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     const compaction = (await call(boot.token, "activity.replay.links", { taskId: task, seq: 3 })).result.items.find((i: { kind: string }) => i.kind === "compaction");
     assert.equal(compaction.resolution.state, "no-reader");
     assert.equal((await call(ann, "activity.replay.links", { taskId: task, seq: 7 })).result.items.find((i: { kind: string }) => i.kind === "review").resolution.state, "readable", "the requester reads its own approval");
+    // Review: nobody else reads this task's replay, links or simulation. A task credential for ANOTHER task of the same project, and an agent of another project with full history rights there, are refused on
+    // the new reads exactly as on the old ones, and neither can start a simulation.
+    const task2 = (await c.services.projects.createTask({ commandId: "t2", actor: owner.id, projectId: project, title: "another task" })).id;
+    const cred2 = (await c.services.taskCredentials.issue(owner, { commandId: "tc-ann-2", taskId: task2, agentId: "agent:ann" })).token;
+    for (const op of ["activity.replay.links", "activity.replay.step", "activity.replay.led"]) assert.equal((await call(cred2, op, { taskId: task, seq: 7 })).error?.code, "forbidden", `${op} through another task's credential`);
+    assert.equal((await call(cred2, "activity.replay.simulate", { taskId: task }, "sm-tc")).error?.code, "forbidden");
+    assert.equal((await call(cred2, "activity.replay.simulate", { taskId: task2 }, "sm-tc2")).error?.code, "forbidden", "not even on its own task: a simulation is the owner's");
+    assert.equal((await call(cred2, "activity.replay.thinking", { taskId: task2, reason: "peek" }, "pk-tc")).error?.code, "not_found");
+    const elsewhere = (await c.services.projects.createProject({ commandId: "p2", actor: owner.id, name: "Elsewhere" })).id;
+    await c.services.principals.enroll(owner, { commandId: "e-zed", kind: "agent", name: "zed", grants: [{ action: "history.read", project: elsewhere }, { action: "history.append", project: elsewhere }, { action: "task.read", project: elsewhere }] });
+    const zed = (await c.services.principals.issueCredential(owner, "agent:zed")).token;
+    for (const op of ["activity.replay.links", "activity.replay.step"]) { const r = await call(zed, op, { taskId: task, seq: 7 }); assert.ok(r.ok === false && ["forbidden", "not_found"].includes(r.error.code), `${op} for another project's agent: ${JSON.stringify(r)}`); }
+    assert.equal((await call(zed, "activity.replay.simulate", { taskId: task }, "sm-z")).error?.code, "forbidden");
+    assert.equal((await call(zed, "activity.correct", { taskId: task, seq: 1, note: "no", replaces: true }, "cz")).error?.code, "forbidden");
+    assert.equal((await call(ann, "activity.correct", { taskId: task, seq: 2, note: "it was wrong", replaces: true }, "ca")).error?.code, "forbidden", "an agent with history rights still cannot replace a step");
     // The chat's step view quotes what the step cites.
     say["show step 7"] = [{ kind: "status", request: { kind: "replay", taskId: task, seq: 7 }, evidence: "show step 7", basis: "owner" }];
     assert.match(JSON.stringify(await c.chat!.submit(boot.token, { messageId: "m2", text: "show step 7" })), /Approval request for git-commit/);
@@ -153,6 +168,13 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal((await call(boot.token, "activity.replay.rerun", { taskId: task }, "rr1")).error?.code, "forbidden");
     assert.equal((await call(ann, "activity.replay.simulate", { taskId: task }, "sm0")).error?.code, "forbidden");
     const audit1 = (await auditAll()).length;
+    assert.equal((await http("POST", `/web/replay/${task}/simulate`, { cookie: sess.cookie, body: {}, key: "sim-x" })).status, 403, "no CSRF header");
+    assert.equal((await http("POST", `/web/replay/${task}/simulate`, { cookie: sess.cookie, csrf: `${sess.csrf}x`, body: {}, key: "sim-x" })).status, 403, "a wrong CSRF header");
+    assert.equal((await http("POST", `/web/replay/${task}/thinking`, { cookie: sess.cookie, csrf: "not-the-token", body: {}, key: "k-x" })).status, 403, "a wrong CSRF header");
+    assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: {} })).status, 400, "no Idempotency-Key");
+    assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: {}, key: "bad key!" })).status, 400, "an Idempotency-Key that is not a plain name");
+    assert.equal((await http("GET", `/web/replay/${task}/simulate`, sess)).status, 405);
+    assert.equal((await auditAll()).length, audit1, "nothing refused was written");
     const sim = await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: { failAt: 5 }, key: "sim-1" });
     assert.equal(sim.status, 200, sim.text);
     assert.match(sim.body.simulation.label, /^Simulated\. Nothing was run, sent, spent or changed/);

@@ -139,3 +139,54 @@ test("a failed read says so in the controller's words and a signed-out page says
   button(view, /Replay the task/).click(); await settle();
   assert.match(text(view), /Could not load: no right to read that task/);
 });
+
+// Review (card U09b): the confirmed simulation sends exactly one POST with the session's CSRF header and its own Idempotency-Key, and a body of nothing but what the page chose; the search and the next-steps button ask
+// for the right window; the chips for an agent and "Show everything" set and clear the filters; and a dropped connection never leaves a button disabled or a step loading for ever.
+test("the confirmed simulation, the search, the next steps, the chips and an offline answer, as the page sends them", async () => {
+  const keys = new Set<string>();
+  let offline = false;
+  const page = boot(handler((call) => {
+    if (offline && call.path.startsWith(`/web/replay/${TASK}/`)) throw new Error("offline");
+    if (call.method === "POST" && call.path === `/web/replay/${TASK}/simulate`) { keys.add(call.headers["idempotency-key"]!); return { status: 200, body: { observedAt: "x", id: "sim-1", replayed: false, simulation: { label: "Simulated.", truncated: true, steps: [{ seq: 1, would: HOSTILE, recordedOutcome: "failed", simulated: true }] } } }; }
+    if (call.method === "GET" && call.path.startsWith(`/web/replay/${TASK}/search?`)) return { status: 200, body: { observedAt: "x", search: { matches: [step(5, { summary: HOSTILE })], scanLimited: false } } };
+    return undefined;
+  }));
+  await settle(); tab(page.doc, "replay").click(); await settle();
+  const view = page.doc.byId.get("view")!;
+  button(view, /Replay the task/).click(); await settle();
+  // Two confirmed clicks are two simulations, each under its own key; each POST carries the CSRF header and an empty body.
+  button(view, /^Simulate a rerun$/).click(); await settle();
+  button(view, /^Simulate a rerun$/).click(); await settle();
+  const posts = page.calls.filter((c) => c.method === "POST" && c.path.endsWith("/simulate"));
+  assert.equal(posts.length, 2);
+  for (const p of posts) { assert.equal(p.headers["x-nn-csrf"], "csrf-1"); assert.deepEqual(p.body, {}); assert.match(p.headers["idempotency-key"]!, /^[A-Za-z0-9._-]{1,100}$/); }
+  assert.equal(keys.size, 2, "a new key for each confirmed click");
+  assert.match(text(view), /Only the first steps were walked\./);
+  assert.ok(text(view).includes(`Simulated: step 1 would ${HOSTILE.slice(0, 30)}`), "the simulation's words are text");
+  // The search sends the words as one encoded query parameter and shows the matches as text.
+  const input = view.find((e) => e.tag === "input" && e.getAttribute("aria-label") === "Words to look for in the steps")[0]!;
+  (input as unknown as { value: string }).value = "probe & <b>x</b>";
+  button(view, /^Search$/).click(); await settle();
+  assert.ok(page.calls.some((c) => c.method === "GET" && c.path === `/web/replay/${TASK}/search?q=${encodeURIComponent("probe & <b>x</b>")}`), JSON.stringify(page.calls.map((c) => c.path)));
+  assert.match(text(view), /Step 5 - tool-call/);
+  // The next steps, then an agent's chip, then everything again.
+  button(view, /Show the next steps \(from step 7\)/).click(); await settle();
+  assert.ok(page.calls.some((c) => c.path === `/web/replay/${TASK}?from=7`), JSON.stringify(page.calls.map((c) => c.path)));
+  button(view, /Show only the steps of owner:rob/).click(); await settle();
+  assert.ok(page.calls.some((c) => c.path === `/web/replay/${TASK}?from=7&actor=${encodeURIComponent("owner:rob")}`), JSON.stringify(page.calls.map((c) => c.path)));
+  assert.match(text(view), /Showing only: from 7, actor owner:rob\./);
+  button(view, /Remove the filters/).click(); await settle();
+  assert.equal(page.calls.at(-1)!.path, `/web/replay/${TASK}`);
+  // Offline: opening a step, searching, expanding the thinking and simulating each say so, and the buttons can be pressed again.
+  button(view, /Open Step 2 /).click(); await settle();
+  offline = true;
+  button(view, /Expand the model's thinking/).click(); await settle();
+  assert.equal(button(view, /Expand the model's thinking/).disabled, false, "the thinking button is usable again");
+  button(view, /^Simulate a rerun$/).click(); await settle();
+  assert.equal(button(view, /^Simulate a rerun$/).disabled, false, "the simulate button is usable again");
+  button(view, /^Search$/).click(); await settle();
+  button(view, /Open Step 1 /).click(); await settle();
+  assert.ok((text(view).match(/Offline\. Try again when the connection is back\./g) ?? []).length >= 4, text(view).slice(-600));
+  assert.ok(!/Step 1 in full\s*Loading\.\.\./.test(text(view)), "no step is left loading");
+  assert.deepEqual(page.doc.violations, []);
+});

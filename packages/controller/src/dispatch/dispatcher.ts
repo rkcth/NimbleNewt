@@ -202,8 +202,8 @@ export interface DispatcherDeps {
    * Best effort: a step that cannot be recorded never stops the attempt or changes a call's result.
    */
   readonly activity?: (step: { commandId: string; taskId: string; kind: "model-selected" | "harness-selected" | "tool-call"; summary: string; refs: readonly { kind: string; id: string }[];
-    /** Where the step stands (card U09b): `confirmed` when the controller knows the answer (a tool call that came back, even with a failure, which the summary says), `dispatched` when it was sent and has not answered, `proposed` when it was asked for and not carried out (refused, waiting for approval), `uncertain` when it may or may not have happened. */
-    outcome: "proposed" | "dispatched" | "confirmed" | "uncertain";
+    /** Where the step stands (card U09b): `confirmed` when the call came back as a success, `failed` when it came back and did not take effect (failed, cancelled or refused; the summary says which), `dispatched` when it was sent and has not answered, `proposed` when it waits for approval, `uncertain` when it may or may not have happened. */
+    outcome: "proposed" | "dispatched" | "confirmed" | "failed" | "uncertain";
     /** The record this step finishes: an earlier step of the same writer that cited it and still stands as proposed, dispatched or uncertain is marked replaced by this one. */
     finishes?: { kind: string; id: string } }) => Promise<void>;
   /** `settleFromController` (optional) closes the owner's notice that a resume is held once the check is done or cancelled (card L04c). */
@@ -436,8 +436,11 @@ export type DoneVerdict =
 /** An evidence item the agent names in work.end (card W05): the item as the contract says it, and the file of the checkout that holds it. */
 export interface DoneEvidence { readonly item: string; readonly path: string }
 
-/** What a tool call's state means for a replay (card U09b): the answer is known (`confirmed`, also for a failure or a cancel, which the step's words say), still running, asked for but not carried out, or unknown. */
-export const toolOutcome = (state: string): "proposed" | "dispatched" | "confirmed" | "uncertain" => state === "confirmed" || state === "failed" || state === "cancelled" ? "confirmed" : state === "uncertain" ? "uncertain" : state === "in-progress" ? "dispatched" : "proposed";
+/**
+ * What a tool call's state means for a replay (card U09b): a success is `confirmed`; a call that came back without taking effect (failed, cancelled, refused) is `failed`, never confirmed; still running is `dispatched`;
+ * waiting for approval is `proposed`; an unknown result, and any state nobody has classified, is `uncertain`.
+ */
+export const toolOutcome = (state: string): "proposed" | "dispatched" | "confirmed" | "failed" | "uncertain" => state === "confirmed" ? "confirmed" : state === "failed" || state === "cancelled" || state === "refused" ? "failed" : state === "in-progress" ? "dispatched" : state === "awaiting-approval" ? "proposed" : "uncertain";
 
 export class DispatcherService {
   readonly #runner: CommandRunner;
@@ -857,7 +860,7 @@ export class DispatcherService {
   }
 
   /** Records a step of an attempt in its task's activity (best effort, see `DispatcherDeps.activity`). */
-  async #stepOf(attemptId: string, key: string, kind: "model-selected" | "harness-selected" | "tool-call", summary: string, refs: readonly { kind: string; id: string }[], outcome: "proposed" | "dispatched" | "confirmed" | "uncertain" = "confirmed", finishes?: { kind: string; id: string }): Promise<void> {
+  async #stepOf(attemptId: string, key: string, kind: "model-selected" | "harness-selected" | "tool-call", summary: string, refs: readonly { kind: string; id: string }[], outcome: "proposed" | "dispatched" | "confirmed" | "failed" | "uncertain" = "confirmed", finishes?: { kind: string; id: string }): Promise<void> {
     if (this.#deps.activity === undefined) return;
     try {
       const taskId = (await this.#load(attemptId))?.body.taskId;

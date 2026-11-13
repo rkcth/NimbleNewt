@@ -9891,12 +9891,30 @@ Merged origin/main 8f62a2f1 first (notes only conflicted; both sides kept).
 
 **What is NOT done / cannot be met offline.** P07 proper (a simulation scope with simulated tools, events and competing edits) is not built; the simulation here is a labelled walk through recorded steps only. Live thinking from a real model, the Pi-side store copy of K06c and anything on real hardware cannot be checked offline. Agent-message steps have no composed test (they need the tool bridge with a real host); they are covered by resolver unit tests only.
 
-ASSUMPTION: "confirmed" means the answer is known, including a failed call; the summary words say it failed.
-ASSUMPTION: a refused call and one awaiting approval map to "proposed" (nothing happened yet).
+ASSUMPTION (corrected by the review below): a call that came back without taking effect (failed, cancelled, refused) is the new outcome "failed", never "confirmed"; "confirmed" is a success only.
+ASSUMPTION: a call awaiting approval maps to "proposed" (nothing happened yet); a state nobody has classified maps to "uncertain".
 ASSUMPTION: the minimal isolated simulation stands in for P07 until P07 is built; it is labelled so everywhere it shows.
 ASSUMPTION: a link to a diff shows identity only, never the diff lines.
 ASSUMPTION: the new replay-simulation records, and the "submission" and "context-branch" references, are small, bounded and owner-created, so K06 retention holds do not cover them.
 ASSUMPTION: an agent's own claim of an outcome stays marked "reported by agent"; only a controller service's own step is unmarked.
+
+### U09b (finish) review (Claude agent, Opus, 2026-11-13)
+
+Plain words first. The replay told the owner that a tool call which failed was "confirmed", and counted it with the successes in the summary. That is now its own outcome, "failed". A few smaller things were fixed too, and the gaps in the tests the slice listed were filled.
+
+**Fixed.**
+- *Honest outcomes.* `STEP_OUTCOMES` gains `failed`: the answer came back and the action did not take effect (failed, cancelled or refused; the step's words say which). The dispatcher maps a success to confirmed, failed/cancelled/refused to failed, in progress to dispatched, awaiting approval to proposed, and anything else to uncertain (was: failed and cancelled confirmed, refused and unknown states proposed). A meeting decision that could not change a task is failed (was proposed). A failed step is terminal: a later step never marks it replaced.
+- *Owner correction at the command-ID limit.* The replacing step's command was `<commandId>-replaces`; a command ID of 112 to 120 characters made it too long, so the correction was written and the replacing step failed with an internal error on every retry. It is now derived at a fixed length (`rpl:` and a digest), and a retry completes it.
+- *The tool path is not slowed by the finish lookup.* `recordFinishing` looked back over up to 200 steps one read at a time on every recorded tool call (the common case finds nothing and reads all 200). It now reads them in parallel chunks of 25, newest first, and stops at the first deciding step; the rule is unchanged (test: an open step found behind 60 other steps).
+- *Link text.* The server-side cleaner now also removes direction-changing and invisible characters (U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to U+2069, U+FEFF), never cuts a character in half, and treats a resolver that does not say otherwise as untrusted. The page already removed these; other API readers did not.
+- *The simulation walk.* A recorded step with a missing or odd field (no kind, a number as summary, an object as outcome, a non-number seq, a kind named like an object member) is shown as "unknown"/empty and never stops the walk; a page that does not move forward ends it.
+- *The page offline.* Opening a step, searching, expanding the thinking and simulating each say "Offline" when the connection drops, and their buttons can be pressed again (before: a button stayed disabled, a step stayed "Loading...").
+
+**Tests added.** Composed: a task credential for another task and another project's agent are refused on `activity.replay.links/step/led`, neither can simulate (a task credential not even on its own task), neither can correct with `replaces`; simulate refuses a missing and a wrong CSRF header, a missing or malformed Idempotency-Key and GET, writing nothing. Activity (four backends): a failed step is not replaced; an agent cannot claim to replace another writer's step on any line (the old check used two services, which may, and passed only because of the line); the 200-step bound and `truncated` with a later `from`; a 120-character command ID correction and its retry; bidirectional and surrogate text; another project's reader gets nothing and no resolver is asked. Unit: odd stored steps in the walk. UI: the confirmed Simulate click (one POST each, CSRF header, a fresh Idempotency-Key per click, empty body), the search query encoding, the next-steps button and the agent and "Show everything" chips, and offline recovery.
+
+**Checked and found sound (no change).** The web routes are behind the owner session (a non-owner credential ends the session), the same-origin check and the CSRF header on every POST; the thinking look carries a fixed reason the page cannot change; the page sets text only and builds no link from a stored ID. Every producer hook is wrapped so its failure never fails the operation (branches, submissions, dispatcher, tool bridge, compaction). A crash between an operation and its step leaves the step missing until the same command is told again (the hooks are keyed by the command or record, so a retry records it once); nothing reconciles a step lost without a retry, as before. The hooks are awaited after the operation commits, so a hanging activity write still delays the caller's answer, as with C09d's existing steps.
+
+**Mutation checks (each alone on the built files, restored):** `replaces` allowed for a non-owner; a confirmed step superseded by a finishing step; the message resolver returning another task's record; the page fetching and showing the thinking without a click; a failed call mapped to confirmed; direction-changing characters kept in link text; the old `-replaces` command ID; the offline simulate button left disabled. All eight were caught.
 
 ## M04h (final offline slice): a caller for `carriesOnDuringMeeting`, the idle signal, and a left seat no longer holds work back (Claude agent, 2026-11-13)
 

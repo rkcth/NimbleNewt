@@ -46,7 +46,7 @@ async function world(backend: (typeof backends)[number]) {
 
 for (const backend of backends) {
   test(`${backend.name}: a later step finishes an earlier one of the same writer and line, never a confirmed one, another writer's or another line's, and telling either again is harmless (card U09b)`, async () => {
-    const { w, projects, owner, project, task } = await world(backend);
+    const { w, projects, owner, make, project, task } = await world(backend);
     try {
       const svc = ActivityService.withEpoch(w.storage, projects.epoch, options);
       const replay = ReplayService.withEpoch(w.storage, projects.epoch, svc, {}, options);
@@ -62,21 +62,31 @@ for (const backend of backends) {
       await f(disp, { commandId: "c2", manifest: op("op3"), outcome: "confirmed" }, "op3");    // 8 on the main line: not the same line
       await f(disp, { commandId: "d1", manifest: op("op4"), outcome: "uncertain" }, "op4");    // 9
       await f(disp, { commandId: "d2", manifest: op("op4"), outcome: "confirmed" }, "op4");    // 10 an uncertain step is finished by the answer
+      await f(disp, { commandId: "e1", manifest: op("op5"), outcome: "failed" }, "op5");       // 11 a call that came back failed is an answer, not an open step
+      await f(disp, { commandId: "e2", manifest: op("op5"), outcome: "confirmed" }, "op5");    // 12 so a later step never replaces it
       const v = await replay.open(owner, task, { limit: 50 });
       const steps = v.entries.filter((e): e is Extract<typeof e, { seq: number; authority: string }> => "authority" in e);
       const bySeq = new Map(steps.map((s) => [s.seq, s]));
       assert.deepEqual(steps.filter((s) => s.authority === "superseded").map((s) => [s.seq, s.supersededBy]), [[1, [2]], [2, [3]], [9, [10]]]);
-      assert.deepEqual([bySeq.get(3)!.supersedes, bySeq.get(4)!.supersedes, bySeq.get(6)!.supersedes, bySeq.get(8)!.supersedes, bySeq.get(10)!.supersedes], [2, undefined, undefined, undefined, 9]);
+      assert.deepEqual([bySeq.get(3)!.supersedes, bySeq.get(4)!.supersedes, bySeq.get(6)!.supersedes, bySeq.get(8)!.supersedes, bySeq.get(10)!.supersedes, bySeq.get(12)!.supersedes], [2, undefined, undefined, undefined, 9, undefined]);
+      assert.deepEqual([bySeq.get(11)!.outcome, bySeq.get(11)!.authority], ["failed", "current"]);
       assert.equal(bySeq.get(7)!.authority, "current");
       // Telling the same thing again (a retry of the dispatcher) is the first answer, also after the step it replaced is no longer open.
       for (const [id, ref, outcome, seq] of [["a1", "op1", "proposed", 1], ["a2", "op1", "dispatched", 2], ["a3", "op1", "confirmed", 3], ["d2", "op4", "confirmed", 10]] as const) {
         const again = await f(disp, { commandId: id, manifest: op(ref), outcome }, ref);
         assert.deepEqual([again.replayed, again.seq], [true, seq], id);
       }
-      assert.equal((await replay.open(owner, task)).summary.total, 10, "nothing was added");
-      // A step that is not a service's cannot replace another writer's step by reference either: the explicit claim keeps its own rule (record).
-      await refuses("forbidden", () => svc.record(other, { commandId: cid("z"), taskId: task, kind: "tool-call", summary: "y", supersedes: 6 } as never).then(() => svc.record(other, { commandId: cid("z2"), taskId: task, kind: "tool-call", summary: "y", supersedes: 5, branch: "side" } as never)));
-      void project;
+      assert.equal((await replay.open(owner, task)).summary.total, 12, "nothing was added");
+      // An agent's explicit claim keeps its own rule (record): it cannot replace a step another writer wrote, on any line, and the refusal writes nothing.
+      const agent = await make("ann", [{ action: "attempt.work", project }]);
+      await refuses("forbidden", () => svc.record(agent, { commandId: cid("z"), taskId: task, kind: "tool-call", summary: "y", supersedes: 6 } as never));
+      await refuses("forbidden", () => svc.record(agent, { commandId: cid("z2"), taskId: task, kind: "tool-call", summary: "y", supersedes: 7, branch: "side" } as never));
+      assert.equal((await replay.open(owner, task)).summary.total, 12, "the refusals wrote nothing");
+      // The window is read in chunks: a finishing step finds its open step behind more than one chunk of other steps, and not beyond the window.
+      await f(disp, { commandId: "w0", manifest: op("op-far"), outcome: "dispatched" }, "op-far");
+      for (let i = 0; i < 60; i++) await f(other, { commandId: `w-${i}`, manifest: op(`noise-${i}`), outcome: "confirmed" });
+      const far = await f(disp, { commandId: "w1", manifest: op("op-far"), outcome: "confirmed" }, "op-far");
+      assert.equal((await replay.step(owner, task, far.seq)).step.supersedes, 13);
     } finally { await w.close(); }
   });
 
@@ -99,6 +109,11 @@ for (const backend of backends) {
       const again = await svc.correct(owner, { commandId: "own-1", taskId: task, seq: 1, note: "the old API is gone; use v2", replaces: true });
       assert.deepEqual([again.replayed, again.supersededBy, again.id], [true, 3, done.id]);
       await refuses("command_conflict", () => svc.correct(owner, { commandId: "own-1", taskId: task, seq: 1, note: "the old API is gone; use v2" }));
+      // A command ID at the length limit still completes both writes (the replacing step's command is derived at a fixed length).
+      const long = `L${"x".repeat(119)}`;
+      const atLimit = await svc.correct(owner, { commandId: long, taskId: task, seq: 2, note: "the side edit was wrong", replaces: true });
+      assert.ok(atLimit.supersededBy !== undefined);
+      assert.deepEqual((await svc.correct(owner, { commandId: long, taskId: task, seq: 2, note: "the side edit was wrong", replaces: true })).supersededBy, atLimit.supersededBy, "and a retry is answered as the first time");
       const v = await replay.open(owner, task);
       const s1 = v.entries.find((e) => "seq" in e && e.seq === 1) as unknown as { authority: string; supersededBy: number[]; corrections: number; links: { relation: string; seq?: number }[] };
       assert.deepEqual([s1.authority, s1.supersededBy, s1.corrections], ["superseded", [3], 2]);
@@ -108,6 +123,7 @@ for (const backend of backends) {
       assert.match(s3.summary, /Owner correction replaces step 1: the old API is gone/);
       // A step on a side line is replaced on its own line.
       const side = await svc.correct(owner, { commandId: "own-2", taskId: task, seq: 2, note: "redo it", replaces: true });
+      assert.equal(side.supersededBy, atLimit.supersededBy! + 1);
       const s4 = (await replay.open(owner, task)).entries.find((e) => "seq" in e && e.seq === side.supersededBy) as unknown as { lane: string; supersedes: number };
       assert.deepEqual([s4.lane, s4.supersedes], ["side", 2]);
     } finally { await w.close(); }
@@ -129,7 +145,7 @@ for (const backend of backends) {
           return undefined;
         },
         submission: async (_by, ref) => ref.id === "dirty"
-          ? { title: `t\u009b2J ${"T".repeat(500)} key ${KEY}`, lines: Array.from({ length: 20 }, (_, i) => `line ${i}\u2028${"x".repeat(900)}`), untrusted: true }
+          ? { title: `t\u009b2J \u202eevil\u2066 \u200bzero ${"T".repeat(500)} key ${KEY}`, lines: Array.from({ length: 20 }, (_, i) => `line ${i}\u2028${"x".repeat(397)}\ud83d\ude00${"y".repeat(500)}`), untrusted: true }
           : { title: "Diff", lines: [], untrusted: false },
       };
       const replay = ReplayService.withEpoch(spy.storage, projects.epoch, ActivityService.withEpoch(spy.storage, projects.epoch, options), { resolvers }, options);
@@ -146,6 +162,13 @@ for (const backend of backends) {
       assert.ok(dirty.title.length <= LINK_LIMITS.title && !new RegExp("[\\u0080-\\u009f]").test(dirty.title) && !dirty.title.includes(KEY), dirty.title);
       assert.equal(dirty.lines.length, LINK_LIMITS.lines);
       assert.ok(dirty.lines.every((l) => l.length <= LINK_LIMITS.line && !new RegExp("[\\u2028\\n]").test(l)));
+      assert.ok(!new RegExp("[\\u202a-\\u202e\\u2066-\\u2069\\u200b]").test(dirty.title), `no direction-changing or invisible character: ${JSON.stringify(dirty.title.slice(0, 30))}`);
+      assert.ok(dirty.lines.every((l) => !new RegExp("[\\ud800-\\udbff]$").test(l)), "a cut never leaves half a character");
+      // Another project's agent, even with every history right there, reads nothing of this task through the links, and no resolver is asked.
+      const stranger = await make("zed", [{ action: "history.read", project: (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "B" })).id }]);
+      const asked = seen.length;
+      await assert.rejects(() => replay.links(stranger, task, 1), (e: unknown) => e instanceof DomainError && (e.code === "forbidden" || e.code === "not_found"));
+      assert.equal(seen.length, asked);
       assert.deepEqual(spy.calls(), [], "resolving links writes nothing");
       // A kind with no resolvers at all is a reference, never a guess.
       const bare = ReplayService.withEpoch(w.storage, projects.epoch, svc, {}, options);
@@ -198,7 +221,47 @@ for (const backend of backends) {
       assert.equal(SIMULATION_LIMITS.steps, 200);
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: the simulation walks at most 200 recorded steps and says it was cut short (card U09b)`, async () => {
+    const { w, projects, owner, task } = await world(backend);
+    try {
+      const svc = ActivityService.withEpoch(w.storage, projects.epoch, options);
+      for (let i = 0; i < 205; i++) await svc.record(owner, { commandId: cid("r"), taskId: task, kind: "tool-call", summary: `call ${i}`, outcome: i % 2 === 0 ? "confirmed" : "failed" } as never);
+      const sim = ReplaySimulationService.withEpoch(w.storage, projects.epoch, svc, options);
+      const all = await sim.simulate(owner, { commandId: cid("s"), taskId: task });
+      assert.equal(all.simulation.steps.length, SIMULATION_LIMITS.steps);
+      assert.equal(all.simulation.truncated, true);
+      assert.deepEqual([all.simulation.steps[0]!.seq, all.simulation.steps.at(-1)!.seq, all.simulation.steps[1]!.recordedOutcome], [1, 200, "failed"]);
+      await refuses("invalid_command", () => sim.simulate(owner, { commandId: cid("s"), taskId: task, failAt: 203 }));
+      const tail = await sim.simulate(owner, { commandId: cid("s"), taskId: task, from: 201, failAt: 203 });
+      assert.deepEqual([tail.simulation.steps.map((s) => s.simulatedOutcome), tail.simulation.truncated], [["as-recorded", "as-recorded", "failed-injected", "not-reached", "not-reached"], false]);
+    } finally { await w.close(); }
+  });
 }
+
+test("a recorded step with a missing or odd field never stops the simulation's walk, and a page that does not move forward ends it (card U09b)", async () => {
+  const w = await backends[0]!.open();
+  try {
+    const projects = await ProjectService.open(w.storage, { holder: "c1", ...options });
+    const principals = PrincipalService.withEpoch(w.storage, projects.epoch, options);
+    const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "A" })).id;
+    const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "one" })).id;
+    let reads = 0;
+    const odd = { steps: async () => { reads++; return { steps: [
+      { seq: 1, kind: "tool-call", summary: "fine", outcome: "confirmed" }, { seq: 2 }, { seq: 3, kind: "constructor", summary: 7, outcome: { x: 1 } }, { seq: 4, kind: null, summary: null }, null, { unavailable: "gone", seq: 5 }, { seq: "6" },
+      { seq: 7, kind: "x".repeat(500), summary: `secret ${KEY}`, outcome: "y".repeat(500) },
+    ], next: 0 }; } } as never;
+    const sim = ReplaySimulationService.withEpoch(w.storage, projects.epoch, odd, options);
+    const got = await sim.simulate(owner, { commandId: cid("s"), taskId: task, failAt: 3 });
+    assert.equal(reads, 1, "a page that does not move forward is read once");
+    assert.deepEqual(got.simulation.steps.map((s) => [s.seq, s.kind, s.simulatedOutcome]), [[1, "tool-call", "as-recorded"], [2, "unknown", "as-recorded"], [3, "constructor", "failed-injected"], [4, "unknown", "not-reached"], [7, "x".repeat(40), "not-reached"]]);
+    assert.equal(got.simulation.steps[1]!.would, "do it again");
+    assert.deepEqual([got.simulation.steps[1]!.summary, got.simulation.steps[1]!.recordedOutcome], ["", "not-recorded"]);
+    assert.ok(!JSON.stringify(got.simulation).includes(KEY), "a summary is redacted again");
+    assert.ok(got.simulation.steps.every((s) => typeof s.would === "string" && s.recordedOutcome.length <= 20));
+  } finally { await w.close(); }
+});
 
 test("the readers behind the links ask the record's own service, as the reader, and never show a record of another task or a diff's lines (card U09b)", async () => {
   const task = { projectId: "proj-a", taskId: "task-aaaaaaaaaaaaaaaaaaaa" };

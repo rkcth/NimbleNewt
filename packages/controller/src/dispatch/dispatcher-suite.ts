@@ -2766,9 +2766,9 @@ for (const backend of backendsNamed(backendName)) {
   });
 }
 
-// Card U09b: a failed call is an answer that came back (the step's words say it failed) and names the operation its step finishes (the table of states is tested in dispatcher-outcome.test.ts).
+// Card U09b: a failed call is recorded as failed, never as confirmed (the step's words say why), and names the operation its step finishes (the table of states is tested in dispatcher-outcome.test.ts).
 for (const backend of backendsNamed(backendName)) {
-  test(`${backend.name}: a call that failed is recorded with the outcome the controller knows and names the operation it finishes (card U09b)`, async () => {
+  test(`${backend.name}: a call that failed is recorded as failed, not confirmed, and names the operation it finishes (card U09b)`, async () => {
     const store = await backend.open();
     try {
       const steps: { kind: string; summary: string; refs: readonly { kind: string; id: string }[]; outcome?: string; finishes?: { kind: string; id: string } }[] = [];
@@ -2785,7 +2785,7 @@ for (const backend of backendsNamed(backendName)) {
       const call = steps.filter((x) => x.kind === "tool-call");
       assert.equal(call.length, 1);
       assert.match(call[0]!.summary, /write-file failed/);
-      assert.equal(call[0]!.outcome, "confirmed", "the answer is known, and the words say it was a failure");
+      assert.equal(call[0]!.outcome, "failed", "a call that came back without taking effect is never shown as confirmed");
       assert.deepEqual(call[0]!.finishes, call[0]!.refs[0]);
     } finally { await store.close(); }
   });

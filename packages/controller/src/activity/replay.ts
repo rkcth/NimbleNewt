@@ -14,7 +14,7 @@ import { REPLAY_LIMIT_DEFAULTS, type EffectiveReplayLimits } from "./replay-limi
  * model: the service holds no port that could (only the activity reads, the task record and, for the owner's explicit look at stored thinking, the thinking read), and opening or stepping writes nothing.
  * A rerun or a simulation is a different command in an isolated scope (card P07) and is not offered here.
  *
- * The view shows each step as it was recorded: the context versions supplied then (never the current records), where it stood (proposed, dispatched, confirmed, uncertain, or "not recorded"), its branch lane,
+ * The view shows each step as it was recorded: the context versions supplied then (never the current records), where it stood (proposed, dispatched, confirmed, failed, uncertain, or "not recorded"), its branch lane,
  * whether it was later superseded (non-authoritative from then on), how many corrections it has, and links to what it cites. Explanations written at the time and explanations asked for afterwards are kept in
  * separate lists with their own labels.
  */
@@ -278,8 +278,9 @@ export class ReplayService {
     try {
       const got = await resolver(by, { id, ...(version === undefined ? {} : { version }) }, task);
       if (got === undefined) return { state: "not-readable", note: "not found, or you may not read it" };
-      const tidy = (t: string, max: number): string => redactText(t).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, " ").slice(0, max);
-      return { state: "readable", title: tidy(got.title, LINK_LIMITS.title), lines: got.lines.slice(0, LINK_LIMITS.lines).map((x) => tidy(x, LINK_LIMITS.line)), untrusted: got.untrusted };
+      // Control characters, line and paragraph separators, and the invisible and direction-changing ones (which could make a record's text read as something else) become spaces; a cut never leaves half a character.
+      const tidy = (t: unknown, max: number): string => { const x = redactText(typeof t === "string" ? t : "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, " ").slice(0, max); return /[\ud800-\udbff]$/.test(x) ? x.slice(0, -1) : x; };
+      return { state: "readable", title: tidy(got.title, LINK_LIMITS.title), lines: (Array.isArray(got.lines) ? got.lines : []).slice(0, LINK_LIMITS.lines).map((x) => tidy(x, LINK_LIMITS.line)), untrusted: got.untrusted !== false };
     } catch (error) {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return { state: "not-readable", note: "not found, or you may not read it" };
       throw error;

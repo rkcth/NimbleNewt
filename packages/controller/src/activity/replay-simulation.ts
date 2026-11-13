@@ -51,13 +51,17 @@ export class ReplaySimulationService {
     for (let after = from - 1; ; ) {
       const page = await this.#activity.steps(by, taskId, { after, limit: SIMULATION_LIMITS.pageRead });
       for (const s of page.steps) {
-        if ("unavailable" in s) continue;
+        if (s === null || typeof s !== "object" || "unavailable" in s || !Number.isSafeInteger(s.seq)) continue;
         if (steps.length >= SIMULATION_LIMITS.steps) { truncated = true; break; }
         const hit = failAt === s.seq;
-        steps.push({ seq: s.seq, kind: s.kind, summary: redactText(s.summary).slice(0, 200), would: hit ? "fail as a provider failure would (injected)" : failed ? "not be reached after the injected failure" : (WOULD[s.kind] ?? "do it again"), recordedOutcome: s.outcome ?? "not-recorded", simulatedOutcome: hit ? "failed-injected" : failed ? "not-reached" : "as-recorded", simulated: true });
+        // A recorded step is only read here: a field that is missing or odd is shown as such and never stops the walk.
+        const kind = typeof s.kind === "string" ? s.kind.slice(0, 40) : "unknown"; const summary = typeof s.summary === "string" ? redactText(s.summary).slice(0, 200) : "";
+        const recorded = typeof s.outcome === "string" ? s.outcome.slice(0, 20) : "not-recorded";
+        steps.push({ seq: s.seq, kind, summary, would: hit ? "fail as a provider failure would (injected)" : failed ? "not be reached after the injected failure" : (Object.hasOwn(WOULD, kind) ? WOULD[kind]! : "do it again"), recordedOutcome: recorded, simulatedOutcome: hit ? "failed-injected" : failed ? "not-reached" : "as-recorded", simulated: true });
         if (hit) failed = true;
       }
-      if (truncated || page.next === undefined) break;
+      // A page that does not move forward ends the walk (it never loops).
+      if (truncated || page.next === undefined || !Number.isSafeInteger(page.next) || page.next <= after) break;
       after = page.next;
     }
     if (failAt !== undefined && !failed) invalid("failAt", "is not a step of this task in the walked range");
