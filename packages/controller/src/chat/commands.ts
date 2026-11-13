@@ -78,6 +78,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "retention.archive": { verb: "Archive a finished task's records", mode: "propose" },
   "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
+  // Whether a due responsibility check may start agent work, and how many such tasks may be open at once in a project: reversible, and a check that is not taken stays owed (shown as not observed), so it applies at once (provisional).
+  "check.settings.set": { verb: "Turn on or off giving due responsibility checks to the agent that answers for them as small tasks, or change how many such check tasks may be open at once in one project", mode: "apply" },
   // Letting a task go on after a resume check found changes that matter to it: shown first in every profile, because the owner is accepting that the work continues on changed inputs.
   "resume.approve": { verb: "Let a task go on after a resume check found changes that matter to it", mode: "propose" },
   // Not letting it go on: the task is released (nothing works on it until it is assigned again). Shown first as well: it ends the task's waiting attempt.

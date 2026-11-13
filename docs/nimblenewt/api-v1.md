@@ -2173,6 +2173,28 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `responsibility.gaps`
+
+The times nothing was watching that touch a project: NimbleNewt was not running (`controller-down`), a model route was unavailable (`provider-outage`), an event source could not be polled (`event-source-outage`) or events were lost before they were looked at (`events-missed`). Each has a start, an end (absent while it lasts) and the reason; open ones first. A responsibility with no recent check during a gap was not neglected: the gap is why. Events recorded while NimbleNewt was down are read when it is back and each waking responsibility owes one check for them.
+
+Arguments:
+
+- `projectId`: the project
+- `open` (optional): true for only the gaps still lasting
+- `limit` (optional): 1 to 200 (default 50)
+
+Result: `{ items: [{ id, scope, reason, key, start, end?, detail, open }], truncated }`.
+
+#### `check.settings.get`
+
+Owner only: whether a due check may be given to the answerable agent as a bounded task (on by default), the most check tasks open at once in one project (default 5), and the revision to quote when changing it.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
 #### `retention.settings.get`
 
 Owner only: the retention policy in force. Everything that deletes is off until set; every limit is optional. Gives the values you set, the installation defaults, the effective values and the revision to quote when changing them.
@@ -5909,6 +5931,20 @@ Arguments:
 
 - `enabled` (optional): true or false
 - `afterMinutes` (optional): whole minutes, or null for the default
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `check.settings.set`
+
+Owner only: turns check tasks on or off (`enabled`; off leaves due checks owed and shown as not observed, and starts no agent work) and/or sets the most check tasks open at once in one project (`maxOpen`, 1 to 50; null for the default of 5). Only the fields given change. This is the form the chat uses.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `maxOpen` (optional): whole number, or null for the default
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 
 Result: `{ revision }`.
