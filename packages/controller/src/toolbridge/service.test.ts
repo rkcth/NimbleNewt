@@ -9,7 +9,7 @@ import type { Grant } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
-import { bridgeCommandId, launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
+import { bridgeCommandId, launchOf, ToolExecutionService, type BoundGateway, type BuiltinTool, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 import { RUNNING_CALL_KIND, RunningCallStore } from "./running-store.js";
 
@@ -42,6 +42,8 @@ for (const backend of backends) {
     session(body: (s: Session) => Promise<void>): WorkerScript;
     /** Registers a script tool through the bridge as the given session and returns its canonical name. */
     install(s: Session, name: string, version: string, extra?: Record<string, unknown>, source?: string): Promise<string>;
+    /** The controller's own tools (card H12i); a test pushes one here and the service sees it at once. */
+    builtins: BuiltinTool[];
     tick(): Promise<void>;
     /** What a revocation does to a call already running (T02b); the service reads it at the moment of revocation. */
     revocation: { mode: "finish" | "cancel" | "broken" };
@@ -60,15 +62,16 @@ for (const backend of backends) {
         const desks = DeskService.withEpoch(w.storage, w.epoch, w.options);
         const catalog = CatalogService.withEpoch(w.storage, w.epoch, desks, w.options);
         const runs: ScriptLaunch[] = [];
+        const builtins: BuiltinTool[] = [];
         let failure: unknown;
         const behave: Ctx["behave"] = { run: async () => ({ text: '{"ok":true}', cpuMs: 5 }) };
         const runner: ScriptRunner = { run: async (launch, signal) => { runs.push(launch); return behave.run(launch, signal); } };
         const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
         const serviceOver = (dispatcher: DispatcherService, facts?: false): ToolExecutionService =>
-          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
+          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, builtins, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
         const svc = serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never);
         const c: Ctx = Object.assign(w, {
-          desks, catalog, svc, runs, behave, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
+          desks, catalog, svc, runs, behave, builtins, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
           agentFor: async (nm: string, extra: Grant[] = []) => {
             const p = `agent:${nm}`;
             return w.agent(nm, [...workGrants(w.project), { action: "desk.write", project: w.project }, { action: "desk.read", project: w.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" },
@@ -133,6 +136,43 @@ for (const backend of backends) {
     assert.equal(usage.items.length, 1);
     const ops = await c.storage.listAggregates(`tool-op-${c.worker.starts[0]!.attemptId}`, { limit: 10 });
     assert.equal(ops.length, 2, "the parked ask and the call that ran are two calls of the attempt");
+  });
+
+  suite("H12i: a tool the controller itself runs is listed, described and invoked like a catalogue tool, through the tool grant, the arguments check and the durable call record", async (c) => {
+    const calls: Array<{ taskId: string; input: JsonObject }> = [];
+    c.builtins.push({
+      name: "nimblenewt.web-fetch", version: "1.0.0", purpose: "read a web page",
+      input: { type: "object", properties: { url: { type: "string", maxLength: 200 } }, required: ["url"], additionalProperties: false },
+      output: { type: "object", properties: { status: { type: "integer" }, text: { type: "string" } }, required: ["status", "text"] },
+      run: async (call, input) => { calls.push({ taskId: call.taskId, input }); if (input["url"] === "http://boom.example.com/") throw new Error("the page could not be fetched"); return input["url"] === "http://wrong.example.com/" ? { status: "x" } : { status: 200, text: `page ${String(input["url"])}` }; },
+    });
+    const ann = await c.agentFor("ann", [{ action: "tool.nimblenewt.web-fetch", project: c.project }]);
+    const ben = await c.agentFor("ben");
+    await c.task("research", ann);
+    let seen: { listed: JsonObject; described: JsonObject; used: JsonObject; unknown: { code: string; message: string }; mismatch: { code: string; message: string }; wrong: JsonObject; failed: JsonObject } | undefined;
+    c.worker.script = c.session(async (s) => {
+      const listed = good(await s.send("tool.discover"));
+      const described = good(await s.send("tool.describe", { tool: "nimblenewt.web-fetch" }));
+      const used = good(await s.send("tool.invoke", { tool: "nimblenewt.web-fetch", input: { url: "http://docs.example.com/" } }));
+      const unknown = bad(await s.send("tool.describe", { tool: "nimblenewt.web-fetch", version: "9.9.9" }));
+      const mismatch = bad(await s.send("tool.invoke", { tool: "nimblenewt.web-fetch", input: { url: 5, extra: true } }));
+      const wrong = await s.send("tool.invoke", { tool: "nimblenewt.web-fetch", input: { url: "http://wrong.example.com/" } });
+      const failed = await s.send("tool.invoke", { tool: "nimblenewt.web-fetch", input: { url: "http://boom.example.com/" } });
+      seen = { listed, described, used, unknown, mismatch, wrong: wrong as never, failed: failed as never };
+    });
+    await c.tick();
+    const { listed, described, used, unknown, mismatch, wrong, failed } = seen!;
+    const entry = (listed["tools"] as { name: string; layer: string }[]).find((t) => t.name === "nimblenewt.web-fetch");
+    assert.ok(entry !== undefined && entry.layer === "protected");
+    assert.equal(described["purpose"], "read a web page"); assert.deepEqual(Object.keys(described["input"] as object).includes("properties"), true);
+    assert.equal(used["state"], "confirmed", JSON.stringify(used));
+    assert.deepEqual(calls.map((x) => x.input["url"]), ["http://docs.example.com/", "http://wrong.example.com/", "http://boom.example.com/"], "the arguments that did not match the schema never reached the tool");
+    assert.ok(unknown.code.length > 0); assert.ok(mismatch.code.length > 0);
+    // A result that does not match the tool's own output schema, and a refusal thrown by the tool, are failed calls; neither is a result.
+    assert.deepEqual([(wrong["result"] as JsonObject)["state"], (failed["result"] as JsonObject)["state"]], ["failed", "failed"]);
+    assert.match(String((wrong["result"] as JsonObject)["reason"]), /does not match its manifest/);
+    assert.equal((failed["result"] as JsonObject)["reason"], "the page could not be fetched");
+    void ben;
   });
 
   suite("model-supplied text never reaches a command line: it travels as data on standard input, and the argument vector is the manifest's entry point alone", async (c) => {
@@ -997,6 +1037,9 @@ for (const backend of backends) {
       out["note-named"] = await send("work.note", { kind: "did", text: "x", attemptId: "att-other" }, "wn0");
       out["note"] = await send("work.note", { kind: "did", text: "watered" }, "wn1");
       out["answer"] = await send("work.answer", { answers: ["north and south"] }, "wa1");
+      // Card H12p: the agent's own refresh takes no argument; the attempt is the one the request came through, never one it names.
+      out["refresh-named"] = await send("work.refresh", { attemptId: "att-other" }, "wr0");
+      out["refresh"] = await send("work.refresh", {}, "wr1");
       // The step is best effort: an activity record that fails never changes the answer of the write.
       const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
       out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
@@ -1021,6 +1064,13 @@ for (const backend of backends) {
     assert.match(bad(out["workend-noreport"]!).message, / END$/, "an ending without a report is refused whole, with the notes");
     assert.equal(bad(out["note-named"]!).code, "invalid_command", "a note names no attempt");
     good(out["note"]!); good(out["answer"]!);
+    assert.equal(bad(out["refresh-named"]!).code, "invalid_command", "work.refresh names no attempt");
+    good(out["refresh"]!);
+    const refreshing = calls.filter((x) => x.raw.op === "work.refresh");
+    assert.equal(refreshing.length, 1, "only the call without a named attempt reached the API");
+    assert.deepEqual(Object.keys(refreshing[0]!.raw.args as object), ["attemptId"], "nothing but the attempt the request came through");
+    assert.match(refreshing[0]!.raw.commandId!, /^bridge:[^:]+:wr1$/);
+    assert.equal(refreshing[0]!.token, calls[0]!.token, "with the attempt's own credential");
     const w10 = calls.filter((x) => x.raw.op === "work.note" || x.raw.op === "work.answer").map((x) => [x.raw.op, x.raw.commandId?.replace(/^bridge:[^:]+:/, "bridge:A:"), JSON.stringify({ ...x.raw.args, attemptId: "A" }), x.token === calls[0]!.token]);
     assert.deepEqual(w10, [["work.note", "bridge:A:wn1", JSON.stringify({ kind: "did", text: "watered", attemptId: "A" }), true], ["work.answer", "bridge:A:wa1", JSON.stringify({ answers: ["north and south"], attemptId: "A" }), true]]);
     const ending = calls.filter((x) => x.raw.op === "work.end");
@@ -1206,6 +1256,8 @@ for (const backend of backends) {
       // Card W10: nor are its notes and answers written.
       out["work.note"] = await send("work.note", { kind: "did", text: "x" }, "w11");
       out["work.answer"] = await send("work.answer", { answers: ["x"] }, "w12");
+      // Card H12p: nor is the agent's own refresh made (it rewrites files of the checkout).
+      out["work.refresh"] = await send("work.refresh", {}, "w13");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -1216,7 +1268,7 @@ for (const backend of backends) {
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");

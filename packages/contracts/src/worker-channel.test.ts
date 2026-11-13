@@ -124,3 +124,24 @@ test("a thinking report carries bounded blocks of untrusted text and nothing els
   ]) assert.throws(() => parseFromChild(bad), ChannelError, JSON.stringify(bad).slice(0, 80));
   assert.deepEqual(parseFromChild(many.slice(0, THINKING_REPORT.blocks).length === THINKING_REPORT.blocks ? { t: "thinking", blocks: many.slice(0, THINKING_REPORT.blocks) } : {}).t, "thinking");
 });
+
+test("H12i: the network messages of both directions round-trip, and what does not fit is refused whichever side sent it", () => {
+  const decoder = new LineDecoder();
+  const data = Buffer.alloc(256 * 1024, 5).toString("base64");
+  const toChild: ToChild[] = [
+    { t: "net.opened", id: 1 }, { t: "net.refused", id: 2, message: "the task holds no grant for that destination" }, { t: "net.data", id: 3, data }, { t: "net.ack", id: 3 }, { t: "net.close", id: 3 }, { t: "net.close", id: 4, message: "the grant was revoked" },
+    { t: "start", v: 1, start: { ...start, network: { proxyPort: 3128 } } },
+  ];
+  const fromChild: FromChild[] = [{ t: "net.open", id: 1, host: "docs.example.com", port: 443 }, { t: "net.data", id: 1, data }, { t: "net.end", id: 1 }, { t: "net.close", id: 1 }, { t: "net.ack", id: 1 }];
+  for (const m of toChild) assert.deepEqual(parseToChild(decoder.push(encodeMessage(m))[0]), m);
+  for (const m of fromChild) assert.deepEqual(parseFromChild(decoder.push(encodeMessage(m))[0]), m);
+  for (const bad of [{ t: "net.open", id: 1, host: "x".repeat(261), port: 443 }, { t: "net.open", id: 1, host: "a.example.com", port: 0 }, { t: "net.open", id: 1, host: "a.example.com", port: 65536 }, { t: "net.open", id: 1, host: "a.example.com", port: "443" }, { t: "net.open", id: "1", host: "a.example.com", port: 443 }, { t: "net.open", id: 1, host: "a.example.com" }, { t: "net.data", id: 1, data: "not base64!" }, { t: "net.data", id: 1 }, { t: "net.end" }])
+    assert.throws(() => parseFromChild(bad), ChannelError, JSON.stringify(bad).slice(0, 80));
+  for (const bad of [{ t: "net.refused", id: 1 }, { t: "net.refused", id: 1, message: "x".repeat(2001) }, { t: "net.opened" }, { t: "net.data", id: 1, data: "!!" }, { t: "net.close", id: 1, message: 5 }, { t: "net.end", id: 1 }])
+    assert.throws(() => parseToChild(bad), ChannelError, JSON.stringify(bad).slice(0, 80));
+  for (const port of [0, 1023, 65536, 3128.5, "3128"]) assert.throws(() => parseToChild({ t: "start", v: 1, start: { ...start, network: { proxyPort: port } } }), ChannelError, String(port));
+  // Only the port is carried: a field a forged start adds to the route is dropped, not passed on.
+  assert.deepEqual((parseToChild({ t: "start", v: 1, start: { ...start, network: { proxyPort: 3128, host: "10.0.0.1" } } }) as { start: ChannelStart }).start.network, { proxyPort: 3128 });
+  // A line that holds one largest piece fits the channel's line limit.
+  assert.ok(encodeMessage({ t: "net.data", id: 1, data }).length < MAX_CHANNEL_LINE_BYTES);
+});

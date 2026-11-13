@@ -14,7 +14,7 @@ export const tierOf = (environment: Environment): Tier => (environment === "cust
 
 /** The tools the first release knows, by name. A project's own tools are added with `ActionCatalog.with`. */
 export const DEFAULT_TOOL_CLASSES: Readonly<Record<string, ActionClass>> = {
-  "read-file": "inspect", "list-files": "inspect", "search-files": "inspect", "grep": "inspect", "git-status": "inspect", "git-diff": "inspect", "git-log": "inspect",
+  "read-file": "inspect", "nimblenewt.web-fetch": "inspect", "list-files": "inspect", "search-files": "inspect", "grep": "inspect", "git-status": "inspect", "git-diff": "inspect", "git-log": "inspect",
   "edit-file": "workspace-edit", "write-file": "workspace-edit", "delete-file": "workspace-edit", "move-file": "workspace-edit",
   "git-commit": "commit", "git-push": "push", "git-merge": "merge", "deploy": "deploy",
   "send-message": "external-send", "send-email": "external-send", "http-post": "external-send",

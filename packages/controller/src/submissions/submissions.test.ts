@@ -46,6 +46,19 @@ for (const backend of backends) {
       } finally { await world.close(); }
     });
 
+  suite("with the controller's count of refresh rounds (card H12p review), a code submission carries that count: the agent's own number is refused when it differs and never recorded", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    let rounds = 3;
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { refreshRounds: async (taskId) => (taskId === c.task ? rounds : 0) });
+    await refuses("invalid_command", () => svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: 0 }), /refreshRound: is counted by the controller \(3/);
+    await refuses("invalid_command", () => svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: 9 }), /refreshRound/);
+    const left = await svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    assert.equal((await svc.get(ann, left.id))?.refreshRound, 3, "left out: the controller's count");
+    rounds = 4;
+    const same = await svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH, refreshRound: 4 });
+    assert.equal((await svc.get(ann, same.id))?.refreshRound, 4, "the same number as counted is accepted");
+  });
+
   suite("a role submits only its own kinds, and only a role the agent holds", async (c) => {
     const ann = await c.agent("ann", ["author"]);
     const code = { taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };

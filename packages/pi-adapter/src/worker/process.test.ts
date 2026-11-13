@@ -1051,3 +1051,44 @@ test("W12 review: the anchor is left out of a new request by its request ID, not
   const cutAway = { root: () => ({ transcript: async () => [{ id: 1, text: input, role: "user" }, { id: 2, text: "summary without it", role: "user", head: 2 }] }) } as never;
   assert.equal(await withoutShownAnchor(cutAway, input, digest, async (c: string) => (c === "Water the plants" ? "same" : "different")), "Water the plants");
 });
+
+test("H12i: a start with a route serves the proxy on the loopback and sends each connection over the channel; the host's refusal reaches the client; without a route nothing is served; a port that is taken fails the start", async () => {
+  const { createServer: netServer, connect } = await import("node:net");
+  const { request } = await import("node:http");
+  const freePort = async (): Promise<number> => { const s = netServer(); await new Promise<void>((r) => s.listen(0, "127.0.0.1", r)); const p = (s.address() as { port: number }).port; await new Promise<void>((r) => s.close(() => r())); return p; };
+  const proxyPort = await freePort();
+  const { hooks } = scripted();
+  const h = host(hooks);
+  h.send({ t: "start", v: 1, start: { ...offlineStart, network: { proxyPort } } });
+  await h.next("ready");
+  const asked = (async () => { const open = await h.next("net.open"); h.send({ t: "net.refused", id: open.id, message: "the task holds no grant for that destination" }); return open; })();
+  const status = await new Promise<{ code: number; text: string }>((resolve, reject) => {
+    const r = request({ host: "127.0.0.1", port: proxyPort, method: "CONNECT", path: "evil.example.net:443" });
+    r.on("connect", (res, _socket, head) => resolve({ code: res.statusCode ?? 0, text: head.toString() }));
+    r.on("error", reject); r.end();
+  });
+  const open = await asked;
+  assert.deepEqual({ host: open.host, port: open.port }, { host: "evil.example.net", port: 443 });
+  assert.equal(status.code, 403); assert.match(status.text, /no grant for that destination/);
+  h.end(); await h.done;
+  // The proxy goes with the process: the port is free again once the channel has closed.
+  await new Promise<void>((resolve, reject) => { const s = connect({ host: "127.0.0.1", port: proxyPort }); s.on("connect", () => { s.destroy(); reject(new Error("the proxy is still listening")); }); s.on("error", () => resolve()); });
+
+  // Without a route in the start, no port is opened at all.
+  const quiet = await freePort();
+  const g = host(scripted().hooks);
+  g.send({ t: "start", v: 1, start: offlineStart });
+  await g.next("ready");
+  await new Promise<void>((resolve, reject) => { const s = connect({ host: "127.0.0.1", port: quiet }); s.on("connect", () => { s.destroy(); reject(new Error("a port is open")); }); s.on("error", () => resolve()); });
+  g.end(); await g.done;
+
+  // A port that is taken: the start fails with a fault rather than running with a route that is not there.
+  const taken = netServer(); await new Promise<void>((r) => taken.listen(0, "127.0.0.1", r));
+  try {
+    const f = host(scripted().hooks);
+    f.send({ t: "start", v: 1, start: { ...offlineStart, network: { proxyPort: (taken.address() as { port: number }).port } } });
+    const fault = await f.next("fault");
+    assert.match(fault.message, /EADDRINUSE|in use/i);
+    f.end(); await f.done.catch(() => undefined);
+  } finally { await new Promise<void>((r) => taken.close(() => r())); }
+});

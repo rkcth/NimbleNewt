@@ -25,6 +25,8 @@ export interface LaunchRecord {
   readonly unprotectedSubpaths: readonly string[];
   /** How each limit asked for was handled (card A08b): enforced fully, partly or not at all, and by what. A limit is never absent from this list without being absent from the request. */
   readonly limits: readonly LimitEnforcement[];
+  /** The controlled route the recipe gave the sandbox (card H12i): the loopback port of the proxy the worker process serves. Absent: the sandbox had no route. */
+  readonly route?: { readonly proxyPort: number };
   /** What the backend says about itself (card A03b: the Windows backend's mode and its dependence on the signed-in session). Absent for backends with nothing to add. */
   readonly backendDetails?: Readonly<Record<string, string>>;
 }
@@ -233,6 +235,7 @@ export class SandboxLauncher {
       if (this.#backend === undefined || !this.#capacity.available) throw new SandboxError("unavailable", `no confined launch is possible: ${this.#capacity.reason ?? "no capacity"}`);
       backendName = this.#backend.name;
       const backend = this.#backend;
+      if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", `route: the ${backend.name} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`);
       makePlan = () => backend.plan(recipe, command, runId);
     }
 
@@ -247,7 +250,7 @@ export class SandboxLauncher {
     const record: LaunchRecord = {
       limits: limited.report,
       at: this.#clock(), runId, mode: recipe.mode, backend: backendName, recipeRevision: recipe.revision,
-      commandDigest: sha256(canonical(command)), ...(authority === undefined ? {} : { authority }), unprotectedSubpaths: recipe.unprotectedSubpaths,
+      commandDigest: sha256(canonical(command)), ...(authority === undefined ? {} : { authority }), unprotectedSubpaths: recipe.unprotectedSubpaths, ...(recipe.route === undefined ? {} : { route: recipe.route }),
       ...(recipe.mode === "sandboxed" && this.#backend?.auditDetails !== undefined ? { backendDetails: this.#backend.auditDetails() } : {}),
     };
     try { await this.#config.audit(record); } catch (error) { throw new SandboxError("audit_failed", `the launch could not be recorded, so it did not happen: ${(error as Error).message}`, { cause: error }); }
