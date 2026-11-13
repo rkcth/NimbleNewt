@@ -112,7 +112,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 26 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
-| State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
+| State API and MCP state | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 3 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓▓▓░░░` 80% | 16 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
@@ -328,13 +328,13 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 </details>
 
 <details>
-<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓░░░░ 2 of 3</summary>
+<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 3 of 3</summary>
 
 The versioned state API that every client uses, and the controller-backed MCP state.
 
 - [x] **U01** · P23 · Implement versioned state query/write API _(needs S01, A01, C02)_
 - [x] **T04** · P24 · Implement controller-backed MCP state adapter _(needs U01, T03)_
-- [ ] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
+- [x] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
 
 </details>
 
