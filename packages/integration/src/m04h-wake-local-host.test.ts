@@ -36,6 +36,12 @@ test("a stopped agent woken by the owner attends one meeting on the real local w
     const ok = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => { const r = await call(token, op, args, commandId); assert.ok(r.ok, `${op}: ${JSON.stringify(r)}`); return r.result; };
     await s.grants.grant(owner, { commandId: "g-hist", grantee: cat, action: "history.read", project, source: "direct", basis: "test" });
     const catToken = (await s.principals.issueCredential(owner, cat)).token;
+    // A second roster member, stopped the same way and NOT woken: the control that shows the agent's part in the meeting comes from the wake.
+    const dogId = (await s.agents.create(owner, { commandId: "ag-dog", friendlyName: "dog" })).id;
+    const dog = `agent:${dogId}`;
+    for (const g of workGrants(project)) await s.grants.grant(owner, { commandId: `wd-${g.action}`, grantee: dog, action: g.action, project, source: "direct", basis: "test" } as never);
+    await s.grants.grant(owner, { commandId: "gd-hist", grantee: dog, action: "history.read", project, source: "direct", basis: "test" });
+    const dogToken = (await s.principals.issueCredential(owner, dog)).token;
     // The agent's other work: held by the stop, never started.
     const other = await s.projects.createTask({ commandId: "t-other", actor: owner.id, projectId: project, title: "Weed the beds", description: "work" });
     await s.projects.transitionTask({ commandId: "r-other", actor: owner.id, taskId: other.id, expectedRevision: other.revision, to: "ready" });
@@ -49,8 +55,9 @@ test("a stopped agent woken by the owner attends one meeting on the real local w
     const lifecycleBefore = await stopOf();
     assert.equal(await s.pauses.availability(cat), "stopped");
     assert.equal(await s.pauses.isPaused(other.id), true);
+    assert.ok((await call(ownerToken, "lifecycle.stop", { scope: { kind: "agent", id: dogId }, mode: "stop", reason: "night" }, "st2")).ok);
 
-    const called = await ok(ownerToken, "meeting.call-urgent", { projectId: project, title: "Frost", reason: "frost tonight", roster: [cat] }, "cu1");
+    const called = await ok(ownerToken, "meeting.call-urgent", { projectId: project, title: "Frost", reason: "frost tonight", roster: [cat, dog] }, "cu1");
     const occurrenceId = called.id as string;
     await ok(ownerToken, "meeting.attend.open-room", { occurrenceId }, "or1");
     await ok(ownerToken, "meeting.attend.wake", { occurrenceId, agent: cat }, "wk1");
@@ -80,6 +87,12 @@ test("a stopped agent woken by the owner attends one meeting on the real local w
     const turn = await ok(catToken, "meeting.record.append", { recordId: rec, kind: "statement", text: "Cover the tomatoes tonight." }, "ma1");
     assert.ok(turn.id !== undefined);
     assert.equal(await s.pauses.availability(cat), "available");
+    // The member that was not woken is absent from the same record: it can neither join nor speak.
+    const dogJoin = await call(dogToken, "meeting.record.join", { recordId: rec }, "dj1");
+    assert.equal(dogJoin.ok, false, JSON.stringify(dogJoin));
+    assert.match(dogJoin.error!.message, /may not take part in that meeting/);
+    assert.equal((await call(dogToken, "meeting.record.append", { recordId: rec, kind: "statement", text: "Not here." }, "da1")).ok, false);
+    assert.equal(await s.pauses.availability(dog), "stopped");
 
     // The meeting ends: the wake ends with it.
     await ok(ownerToken, "meeting.record.finish", { recordId: rec }, "mf1");
