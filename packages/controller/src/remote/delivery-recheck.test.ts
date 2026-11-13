@@ -400,7 +400,7 @@ test("a reason lasts unless it is exactly one of the passing sentences: a lastin
     assert.equal(lastingReasons([passing]), false, passing);
   }
   // A harness or workspace named after a passing sentence, text after it, or text before it.
-  for (const lasting of ["host:a does not have the has not connected to the controller harness", "host:a has not connected to the controller, and is revoked", "the attempt's credential may not be given to host:a (host:b has not connected to the controller)", "host:a is revoked"]) {
+  for (const lasting of ["host:a does not have the has not connected to the controller harness", "host:a has not connected to the controller, and is revoked", "the attempt's credential may not be given to host:a (host:b has not connected to the controller)", "host:a is revoked", "the workspace bound to host:b has not connected to the controller", "a repository named x already has 3 offers that are not accepted"]) {
     assert.equal(lastingReasons([lasting]), true, lasting);
   }
   assert.equal(lastingReasons(["host:a has not connected to the controller", "host:a is revoked"]), true, "one lasting reason among passing ones lasts");
