@@ -3350,12 +3350,41 @@
       ],
       "deliverable": "Split from L02d (2026-11-08): L02d lists a sandbox's real processes, ends them (Force Stop kills what a close could not end) and charges winding them down as the cleanup's compute. Left: a Stop of an agent, team or the installation walks the swarm descendants of their tasks (today only a task's Stop does; `swarm.cancel` settles the rest); the stop-charge sweep's window is not starved by entries that stay only for an unfinished request (the first 2000 open entries all listing a blocked Stop keep later entries from being paid); a task's `stop_cleanup` view finds a Stop made through its agent, team, swarm parent or the installation; chat resolves an agent's or team's name for the scope form; a per-request cumulative cleanup total; a remote worker's own report of its processes (today one unknown item per live placement); a local worker whose close could not end its process is confirmed stopped once a later look finds its sandboxes empty (today it stays unconfirmed after Force Stop killed it, so its scratch is kept); a Stop or Force Stop made after such an attempt has finished still lists and reaches what its sandbox holds (today only attempts live or seen during that Stop are asked)",
       "acceptance_and_verification": "A Stop of an agent ends its tasks' swarm children's work; 2000 settled entries listing a blocked Stop do not keep a later unpaid charge from being paid by the sweep; asking about a task stopped through its agent shows that Stop's cleanup; mutation check recorded",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a0af0597",
+          "fe7569a2",
+          "17a78d92",
+          "fed086b8",
+          "04c68fce",
+          "27a23a49",
+          "64c8afae",
+          "f093c817",
+          "0007a210",
+          "752bc5ba",
+          "ddcd181f",
+          "d619f85f",
+          "67e60e49",
+          "b811aea3",
+          "1bf8310e",
+          "7f627402",
+          "13709c4a",
+          "fccd6cd8",
+          "5112e1ff"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A Stop of an agent, team or the installation walks the swarm children of the tasks it covers and holds them from restarting (tested on a real controller and dispatcher with a live swarm); settled charge entries listing only an unfinished request leave the sweep's open index, so 2000 of them do not starve a later unpaid charge; a task's stop_cleanup view answers from a Stop made through its agent, team, swarm parent (and the parent's agent or team) or the installation and names that scope; chat reads an agent's or team's name for the scope; a per-request cumulative cleanup total; a remote worker reports its processes and cleanup compute, answers a fresh look and a Force Stop kill; a local worker whose close failed is confirmed stopped once its sandboxes are empty, and a later Stop still reaches a finished unconfirmed attempt. Mutation checks recorded for every slice. Limits: a remote Force Stop reaches only a live placement whose worker knows the kill message; remote cleanup compute is the worker's own figure; the deployed remote worker was not driven through a Force Stop of a process that ignores the close; a wider scope's tasks are those with a live attempt (a child of a task with none is held, not ended); the unconfirmed-attempt list keeps 100 and is not known after a controller restart; Windows sandboxes list no processes."
+      }
     },
     {
       "id": "L03",
