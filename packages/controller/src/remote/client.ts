@@ -166,6 +166,15 @@ export class RemoteWorkerClient {
   }
 
   /** One attempt as the worker sees it, under the placement number it was offered. */
+  /** The next free time for a stream message of an attempt (card L05d finish): the messages of all the calls of one attempt are spaced `gapMs` apart as one line, whichever call sends them. Returns how long the sender must wait from `now`; the slot is taken at once, so callers that overlap get successive slots. */
+  reserveStreamSlot(attemptId: string, gapMs: number, now: number): number {
+    const slot = Math.max(now, this.#streamSlots.get(attemptId) ?? now);
+    this.#streamSlots.set(attemptId, slot + gapMs);
+    if (this.#streamSlots.size > 256) for (const [id, next] of this.#streamSlots) { if (next <= now) this.#streamSlots.delete(id); if (this.#streamSlots.size <= 128) break; }
+    return slot - now;
+  }
+  readonly #streamSlots = new Map<string, number>();
+
   attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 
   /** @internal */
@@ -346,7 +355,6 @@ export class RemoteAttempt implements ToolGateway {
           throw new ModelStreamRefused(`the controller sent batching figures that are not valid (${(error as Error).message}); the call is not sent`);
         }
         const gapMs = batchMs;
-        let sentOnce = false;
         let n = 0;
         // Events wait here and go out in few messages (a stream of single tokens would otherwise be one request each, past the transport's rate limits): when `batchChars` are waiting, when `batchMs` have passed since the last send (a timer
         // sends what waits when the model pauses), and always before a completed tool call or the end of the reply is passed on. Whether the reply must be held back is the answer to the latest message; a piece that was sent in the background
@@ -391,8 +399,9 @@ export class RemoteAttempt implements ToolGateway {
           if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
           while (pending.length > 0 && heldWhy === undefined) {
             const message = take();
-            if (sentOnce) { const wait = gapMs - (now() - lastSent); if (wait > 0) await sleep(wait); }
-            sentOnce = true;
+            // The gap is kept across ALL the calls of the attempt (the controller's bound counts the attempt's stream messages, and up to four calls are open): this message takes the next free slot of the attempt, `gapMs` after the previous one's.
+            const wait = this.client.reserveStreamSlot(this.attemptId, gapMs, now());
+            if (wait > 0) await sleep(wait);
             lastSent = now();
             try {
               const r = await this.#post("stream-events", { streamId, n: ++n, events: message as unknown as Json }) as { held?: string };

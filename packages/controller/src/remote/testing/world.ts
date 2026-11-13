@@ -15,7 +15,7 @@ import { RemoteWorkerClient, type RemoteWorkerClientOptions } from "../client.js
 import type { ThinkingAnswer, ThinkingWire, ToolBridgeAnswer, VersionRange } from "../protocol.js";
 import { WorkerTransport, type WorkerTransportOptions } from "../server.js";
 import { adoptable } from "../host.js";
-import { RemoteWorkerService, type PlacementPolicyFor, type RelocationPolicyFor, type Requirements } from "../service.js";
+import { RemoteWorkerService, type PlacementPolicyFor, type RemoteDeps, type RelocationPolicyFor, type Requirements } from "../service.js";
 
 export const REMOTE_CAPS: Capabilities = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: ["garden"] };
 
@@ -124,7 +124,7 @@ export interface RemoteWorld extends DispatchWorld {
   done(): Promise<void>;
 }
 
-export async function buildRemoteWorld(storage: ControllerStorage, o: { thinkingMessages?: number; policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner"; /** The dispatcher's goal anchor (card W12); absent: none, as before. */ anchor?: DispatcherDeps["anchor"]; /** Whether a restored conversation store waits for a host (card K01i review); absent: not judged. */ restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean> } = {}): Promise<RemoteWorld> {
+export async function buildRemoteWorld(storage: ControllerStorage, o: { thinkingMessages?: number; policy?: RelocationPolicyFor; /** The placement policy; absent: every host of the world may hold local-only data; null: no policy hook at all (the product default). */ placement?: PlacementPolicyFor | null; protocol?: VersionRange; fileBytes?: number; settleMs?: number; transport?: Partial<WorkerTransportOptions>; /** How a reconnected worker is re-accepted (card H09b); default auto, and a test may change it with `world.reaccept.mode`. */ reaccept?: "auto" | "owner"; /** The dispatcher's goal anchor (card W12); absent: none, as before. */ anchor?: DispatcherDeps["anchor"]; /** Whether a restored conversation store waits for a host (card K01i review); absent: not judged. */ restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean>; /** The recorder of a worker's model streams (card L05c); absent: not recorded. */ streams?: RemoteDeps["streams"] } = {}): Promise<RemoteWorld> {
   const w = await buildWorld(storage);
   const dir = mkdtempSync(join(tmpdir(), "nn remote-"));
   const blobs = await FileBlobStore.open({ directory: join(dir, "blobs") });
@@ -158,6 +158,7 @@ export async function buildRemoteWorld(storage: ControllerStorage, o: { thinking
     ...(o.policy === undefined ? {} : { relocationPolicy: o.policy }),
     ...(o.placement === null ? {} : { placementPolicy: o.placement ?? (async () => ({ dataHosts: workerIds() })) }),
     ...(o.restoreWaits === undefined ? {} : { restoreWaits: o.restoreWaits }),
+    ...(o.streams === undefined ? {} : { streams: o.streams }),
   }, { ...w.options, ...(o.protocol === undefined ? {} : { protocol: o.protocol }), ...(o.fileBytes === undefined ? {} : { fileBytes: o.fileBytes }), ...(o.settleMs === undefined ? {} : { settleMs: o.settleMs }) });
   const transports: WorkerTransport[] = [];
   const listen = async (options: Partial<WorkerTransportOptions> = {}): Promise<WorkerTransport> => { const t = await WorkerTransport.listen({ remote, principals: w.principals, ...o.transport, ...options }); transports.push(t); return t; };
