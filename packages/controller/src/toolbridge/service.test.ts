@@ -962,6 +962,26 @@ for (const backend of backends) {
           await new Promise((r) => setTimeout(r, 15));
           await callWith(often, "sw-3"); await until(async () => sweeps > before);
           seen["sweepsAgain"] = sweeps > before;
+          // Review: NaN and a negative interval turn it off (NaN used to sweep on every call).
+          const nan = swept(Number.NaN), neg = swept(-5);
+          try {
+            const atBad = sweeps;
+            await callWith(nan, "sw-nan-1"); await callWith(neg, "sw-neg-1");
+            await new Promise((r) => setTimeout(r, 15));
+            await callWith(nan, "sw-nan-2"); await callWith(neg, "sw-neg-2");
+            await new Promise((r) => setTimeout(r, 15));
+            seen["sweepsBad"] = sweeps - atBad;
+          } finally { nan.dispose(); neg.dispose(); }
+          // Review: a clock set back (the service was built while the clock read 30 minutes later) does not stop the sweep until the clock catches up again.
+          const realNow = Date.now;
+          let ahead: ToolExecutionService;
+          Date.now = () => realNow() + 1_800_000;
+          try { ahead = swept(600_000); } finally { Date.now = realNow; }
+          try {
+            const atBack = sweeps;
+            await callWith(ahead, "sw-back"); await until(async () => sweeps > atBack);
+            seen["sweepsClockBack"] = sweeps - atBack;
+          } finally { ahead.dispose(); }
         } finally { def.dispose(); off.dispose(); often.dispose(); }
       });
       await c.tick();
@@ -981,6 +1001,8 @@ for (const backend of backends) {
       assert.equal(seen["sweepsDefaultOff"], 0, "the default interval (10 minutes) has not passed for a fresh service, and 0 turns the sweep off");
       assert.equal(seen["sweepsOften"], 1, "a call that starts after the interval sweeps once");
       assert.equal(seen["sweepsAgain"], true, "and again after the interval has passed again");
+      assert.equal(seen["sweepsBad"], 0, "NaN and a negative interval turn the sweep off");
+      assert.equal(seen["sweepsClockBack"], 1, "a clock set back counts as due: one sweep, not none until the clock catches up");
       assert.equal(seen["swept"], 0, "a sweep that cannot reach the store answers 0, never throws");
       assert.deepEqual(seen["cutList"], { calls: [{ attemptId: "att-away", callId: "call-away", taskId: "tsk-away", agentId: ann.id, elsewhere: true }], total: 1, elsewhereUnknown: true }, "a cut record is listed as far as it was read and said to be incomplete");
     } finally { here.dispose(); there.dispose(); fragile.dispose(); }

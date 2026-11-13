@@ -402,8 +402,13 @@ export class ToolExecutionService {
   /** At most one sweep per `runRecordSweepMs`, started by a call that begins and never waited for or allowed to fail it (leftovers used to wait for the next start of the controller). */
   #sweepSometimes(): void {
     const every = this.#deps.runRecordSweepMs ?? 600_000;
-    if (this.#deps.runRecords === undefined || every <= 0 || this.#disposed || Date.now() - this.#lastSweep < every) return;
-    this.#lastSweep = Date.now();
+    // Review: a value that is not a finite positive number (NaN, Infinity, negative) turns it off, as `0` does (NaN used to sweep on every call). A clock set back (time since the last sweep below 0)
+    // counts as due, so the sweep does not stop until the clock catches up again; the next interval is then counted from the new time.
+    if (this.#deps.runRecords === undefined || !Number.isFinite(every) || every <= 0 || this.#disposed) return;
+    const now = Date.now();
+    const since = now - this.#lastSweep;
+    if (since >= 0 && since < every) return;
+    this.#lastSweep = now;
     this.sweepRunRecords().catch(() => undefined);
   }
 
