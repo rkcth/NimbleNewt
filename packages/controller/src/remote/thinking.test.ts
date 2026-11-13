@@ -268,3 +268,44 @@ test("a failing connection or a busy controller drops that message only; an atte
   assert.equal(asked, 3, "a connection trouble does not stop later reports");
   await running;
 });
+
+test("the turn's last thinking report reaches the controller before the attempt's completion; a report still on its way is waited for, and one that fails does not hold the completion (CI repair round 11)", async () => {
+  // The worker reports thinking as the turn ends and returns at once; the controller answers that report only when the test lets it. The completion must not overtake it: sent after the
+  // completion, the report is refused there (the attempt is over) and the thinking is lost.
+  const order: string[] = [];
+  let answer!: () => void;
+  const held = new Promise<void>((r) => { answer = r; });
+  let runner!: RemoteOfferRunner;
+  const attempt = {
+    thinking: async () => { order.push("thinking sent"); await held; order.push("thinking answered"); return {}; },
+    accept: async () => ({}), honorContract: async () => ({ ok: true }), pollControl: async () => [], putCheckpoint: async () => undefined,
+    complete: async () => { order.push("completed"); },
+  } as never;
+  runner = new RemoteOfferRunner({
+    client: { attempt: () => attempt } as never,
+    host: { start: async () => ({ run: async () => { void runner.thinking("att-order", [block(1)]); return { status: "completed", text: "ok" }; }, checkpoint: async () => ({}), stop: async () => undefined, restart: async () => undefined }) as never },
+    abilities: {} as never, controlMs: 20,
+  });
+  const ran = runner.run({ order: { attemptId: "att-order" }, placement: 1 } as never);
+  for (let i = 0; i < 200 && !order.includes("thinking sent"); i++) await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(order, ["thinking sent"], "the completion waits for the thinking report still on its way");
+  answer();
+  assert.equal(await ran, "completed");
+  assert.deepEqual(order, ["thinking sent", "thinking answered", "completed"]);
+  // A report that fails (a lost connection) is dropped alone and does not keep the attempt from completing.
+  const order2: string[] = [];
+  let runner2!: RemoteOfferRunner;
+  const failing = {
+    thinking: async () => { order2.push("thinking sent"); throw new WorkerRequestError(503, "unavailable", "busy"); },
+    accept: async () => ({}), honorContract: async () => ({ ok: true }), pollControl: async () => [], putCheckpoint: async () => undefined,
+    complete: async () => { order2.push("completed"); },
+  } as never;
+  runner2 = new RemoteOfferRunner({
+    client: { attempt: () => failing } as never,
+    host: { start: async () => ({ run: async () => { void runner2.thinking("att-fail", [block(1)]); return { status: "completed", text: "ok" }; }, checkpoint: async () => ({}), stop: async () => undefined, restart: async () => undefined }) as never },
+    abilities: {} as never, controlMs: 20,
+  });
+  assert.equal(await runner2.run({ order: { attemptId: "att-fail" }, placement: 1 } as never), "completed");
+  assert.deepEqual(order2, ["thinking sent", "completed"]);
+});

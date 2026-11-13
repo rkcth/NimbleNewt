@@ -42,7 +42,7 @@ export type OfferOutcome = "completed" | "refused" | "fenced" | "failed";
  */
 export class RemoteOfferRunner {
   readonly #o: RemoteOfferRunnerOptions;
-  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle; noThinking?: true }>();
+  readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle; noThinking?: true; thinkingSent?: Set<Promise<void>> }>();
 
   constructor(options: RemoteOfferRunnerOptions) { this.#o = options; }
 
@@ -90,6 +90,13 @@ export class RemoteOfferRunner {
   async thinking(attemptId: string, blocks: readonly ThinkingWire[]): Promise<void> {
     const live = this.#live.get(attemptId);
     if (live === undefined || live.noThinking === true || blocks.length === 0) return;
+    // Kept until it is answered: the attempt's completion waits for it (see `run`), so a report of the turn's last thinking reaches the controller before the attempt ends there.
+    const sending = this.#sendThinking(live, attemptId, blocks);
+    (live.thinkingSent ??= new Set()).add(sending);
+    try { await sending; } finally { live.thinkingSent.delete(sending); }
+  }
+
+  async #sendThinking(live: { readonly attempt: RemoteAttempt; noThinking?: true }, attemptId: string, blocks: readonly ThinkingWire[]): Promise<void> {
     try { await live.attempt.thinking(blocks); } catch (error) {
       // An older controller refuses the route's body ("blocks is not a field of this message") or does not know the route (404/405): it is not asked again. Any other refusal (400) is of that one message, which is dropped alone.
       if (error instanceof WorkerRequestError && (error.fenced || error.status === 404 || error.status === 405 || (error.status === 400 && error.code === "invalid_command" && error.message.startsWith("blocks is not a field")))) {
@@ -137,6 +144,10 @@ export class RemoteOfferRunner {
       } finally { over = true; await control; }
       let checkpoint: JsonObject | undefined;
       try { checkpoint = await running.checkpoint(); } catch (error) { trouble("final checkpoint", error); }
+      // The thinking reports still on their way go first (they never throw): sent after the completion, the controller refuses them as the attempt is over, and the turn's thinking was lost
+      // (CI repair round 11: "thinking report did not go through (the attempt is fenced)" on a remote host, then "completed").
+      const inFlight = this.#live.get(order.attemptId)?.thinkingSent;
+      if (inFlight !== undefined && inFlight.size > 0) await Promise.allSettled([...inFlight]);
       await attempt.complete({ ...result, ...(checkpoint === undefined || result.checkpoint !== undefined ? {} : { checkpoint }) });
       return "completed";
     } catch (error) {
