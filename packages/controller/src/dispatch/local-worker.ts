@@ -477,6 +477,8 @@ export class LocalWorker implements WorkerHost {
         }
       },
       checkpoint: () => runtime!.checkpoint(),
+      // Card M04h: idle means the turn is running, the runtime reports its open model calls (an absent count is "not known", so not idle), nothing is in flight (no tool call, no model call), and the attempt is not stopped.
+      idle: async () => !stopped && gateway !== undefined && typeof runtime?.activeModelCalls === "function" && busy() === 0,
       restart: async (recipe, resumeFrom) => {
         generation++;
         // One restart at a time, and none after the attempt was stopped: a stop that comes while the sandbox is being started again ends what the restart opened.

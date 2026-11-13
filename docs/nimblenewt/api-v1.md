@@ -4063,7 +4063,7 @@ Result: `{ startedWith, missing, fullAttendance }`.
 
 #### `meeting.attend.prepare`
 
-Asks an agent to reach a safe boundary before the meeting.
+Asks an agent to reach a safe boundary before the meeting. A named task whose attempt only waits on its background jobs is paused too; its jobs carry on under the pause (listed in `carriedOn`).
 
 Arguments:
 
@@ -4072,7 +4072,7 @@ Arguments:
 - `interrupted`: tasks the agent interrupted
 - `commandId`: required
 
-Result: `{ state, waitingOn }`.
+Result: `{ state, waitingOn, carriedOn }`.
 
 #### `meeting.attend.blocked`
 
