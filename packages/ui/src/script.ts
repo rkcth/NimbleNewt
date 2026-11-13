@@ -204,7 +204,7 @@ export const APP_JS = String.raw`(function (root) {
   var $ = function (id) { return doc.getElementById(id); };
   var client = createClient({ fetch: root.fetch.bind(root), outbox: createOutbox(root.localStorage) });
   var tab = 'chat';
-  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery' };
+  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery', setup: 'Setup' };
 
   function el(tag, cls, text) { var e = doc.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }

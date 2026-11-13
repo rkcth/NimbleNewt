@@ -98,6 +98,8 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   approvals: [{ key: "load", op: "approval.load", args: { days: 7 } }, { key: "proposals", op: "approval.proposals", args: { state: "open" } }, { key: "suggestion", op: "approval.suggestion", args: {} }],
   // Which model routes there are, with their reply limits and where each value comes from, what is switched off, and how difficulty maps to a way of running (cards R01, R06, U08b).
   models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }, { key: "thinking", op: "thinking.collection.get", args: {} }],
+  // The first-run walk-through (card U14d): what is set up, what is open and the next question, from the readiness view (owner only, records only, no secret). Answers are given in the chat, which shows each one first.
+  setup: [{ key: "setup", op: "status.ask", args: { request: { kind: "setup" } } }],
   recovery: [{ key: "attention", op: "status.attention", args: { limit: 20 } }, { key: "jobs", op: "status.ask", args: { request: { kind: "jobs", limit: 20 } } }, { key: "reconnect", op: "status.ask", args: { request: { kind: "reconnect", limit: 20 } } }],
 };
 export const WEB_VIEWS: readonly string[] = Object.keys(VIEWS);

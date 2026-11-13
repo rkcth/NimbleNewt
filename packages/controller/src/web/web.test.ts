@@ -372,13 +372,19 @@ test("the views read status, blockers, cost and recovery; an unknown view is ref
   const w = await world();
   try {
     const s = await w.signIn();
-    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "recovery"]);
+    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "setup", "recovery"]);
     for (const name of s.reply.body.views as string[]) {
       const r = await w.call("GET", `/web/views/${name}`, { cookie: s.cookie });
       assert.equal(r.status, 200, `${name}: ${r.text}`);
       assert.ok(Object.keys(r.body.parts).length >= 1, name);
       for (const [key, part] of Object.entries(r.body.parts) as [string, { error?: { code?: string } }][]) assert.ok(part.error === undefined || (name === "models" && key === "difficulty" && part.error.code === "not_found"), `${name}: ${JSON.stringify(part)}`);
     }
+    // The Setup tab (card U14d) carries the first-run list in plain lines: what is open, the next question, and no secret.
+    const setup = await w.call("GET", "/web/views/setup", { cookie: s.cookie });
+    const setupText = JSON.stringify(setup.body.parts.setup);
+    assert.match(setupText, /Owner identity and credential/);
+    assert.match(setupText, /Next to ask/);
+    assert.doesNotMatch(setupText, /Bearer |password/);
     assert.equal((await w.call("GET", "/web/views/shutdown", { cookie: s.cookie })).status, 404);
     assert.equal((await w.call("GET", "/web/views/constructor", { cookie: s.cookie })).status, 404);
     assert.equal((await w.call("GET", "/web/views/status/extra", { cookie: s.cookie })).status, 404);
