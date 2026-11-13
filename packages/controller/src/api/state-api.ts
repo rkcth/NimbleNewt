@@ -61,6 +61,7 @@ import type { StopService } from "../lifecycle/stop.js";
 import type { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
+import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { CoordinatorService } from "../chat/coordinator.js";
@@ -216,6 +217,8 @@ export interface StateApiDeps {
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
+  /** The chair's recorded reads of absent members' desks (card M05b). */
+  readonly deskReads?: Pick<MeetingDeskReadService, "reads" | "attempts">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "wakes" | "stopWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
@@ -396,6 +399,7 @@ export class StateApi {
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
         ...(this.#deps.attendance === undefined ? {} : { attendance: this.#deps.attendance }),
         ...(this.#deps.records === undefined ? {} : { records: this.#deps.records }),
+        ...(this.#deps.deskReads === undefined ? {} : { deskReads: this.#deps.deskReads }),
         ...(this.#deps.policyContext === undefined ? {} : { policyContext: this.#deps.policyContext }),
         ...(this.#deps.deliverables === undefined ? {} : { deliverables: this.#deps.deliverables }),
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
