@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
@@ -136,6 +137,13 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const url = await named(config.controller.storage.url.secret);
     if (url === undefined) throw new Error(`the configuration chooses PostgreSQL and names the secret "${config.controller.storage.url.secret}" for its address, but the secret store has none by that name; put it there first (node scripts/nimblenewt.mjs secret set ${config.controller.storage.url.secret})`);
     storage = { kind: "postgres", url, maxConnections: config.controller.storage.maxConnections, ...(config.controller.storage.schema === undefined ? {} : { schema: config.controller.storage.schema }) };
+  }
+
+  // The restart hand-over (card F04m): after a database move or rollback the authority file names the database to start on; the configuration still names the one it was written for. Follow the file, to a
+  // destination the configuration lists, so a host that restarts from its configuration comes up on the new database by itself. Anything else is left to the start guard.
+  if (config.controller.databaseTransfer !== undefined && config.controller.databaseTransfer.targets.length > 0) {
+    const followed = await storageFollowingAuthority(storage, config.controller.databaseTransfer.targets, join(dataDir, "transfer"), (name) => named(name));
+    if (followed.movedTo !== undefined) { storage = followed.storage as StorageChoice; print(`The controller database was moved to ${followed.movedTo.name} (${followed.movedTo.kind}) by a database transfer; this start uses it.`); }
   }
 
   // The chat reaches the providers through the addresses the owner recorded (guided setup keeps them in the controller's records); the credential is read from the secret store at each call.
