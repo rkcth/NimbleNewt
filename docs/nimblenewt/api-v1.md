@@ -2203,6 +2203,29 @@ Arguments:
 
 Result: `{ projectId, items, redactions, next?, partial? }`.
 
+#### `retirement.preview`
+
+Owner only: what retiring an agent or archiving a project would do, read now, and the digest that confirms it. `blockers` lists what stops it (live assignments: unfinished tasks assigned to the agent or in the project; active responsibilities the agent answers for; active agents that report to it): release or transfer those first. `release` lists what the retirement would release or revoke (maintenance leases and integrator leases held, resource bindings, responsibilities, grants and the agent's credential). Nothing is changed.
+
+Arguments:
+
+- `kind`: `agent` or `project`
+- `id`: the agent's or project's ID
+
+Result: `{ item: { kind, id, name, revision, blockers, release, digest }, shown }`.
+
+#### `retirement.list`
+
+Owner only: the retirement ledger, newest first: each retirement, archive and restore with who asked, why, when, whether it finished and what it released or revoked.
+
+Arguments:
+
+- `subjectId` (optional): only this agent or project
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
+
 #### `lease.list`
 
 The maintenance leases of a project's managed resources: who holds each, why, until when, whether it ran out unreleased (`expired`), how many times another agent was blocked and the last few blocks (who, when, why), how a holding ended (validation result and response) and from whom a lease was taken over.
@@ -5319,7 +5342,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `agent.retire`
 
-Retires an agent and disables its identity. Refused while active agents report to it. Its ID is never reused; tasks it owns stay assigned to it until explicitly transferred. Any holder of `agent.manage` may retire any agent.
+Retires an agent and disables its identity. Refused while active agents report to it and while it holds live assignments (unfinished tasks assigned to it): release or transfer them first. Its ID is never reused. This plain command releases nothing else; `retirement.agent` (owner only, confirmed and ledgered) also releases the leases it holds and revokes its grants and credential. Any holder of `agent.manage` may retire any agent.
 
 Arguments:
 
@@ -5997,6 +6020,47 @@ Arguments:
 - `taskId`: the task
 
 Result: `{ taskId, restored, conflicts, conflictDetails }` (a reason for each conflict).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.agent`
+
+Owner only: retires an agent. Refused while it holds live assignments or active responsibilities or active agents report to it (release or transfer them first). Otherwise it releases the maintenance and integrator leases the agent holds, revokes its grants and its credential, disables its identity and retires the record, and writes one ledger record of what was released. `confirm` must be the digest of a `retirement.preview` made just before, so what is done is what was shown. Nothing is deleted: the agent's records stay, searchable under the same access rules, held by retention, and its ID is never reused. A stopped retirement carries on when the same command is sent again.
+
+Arguments:
+
+- `agentId`: the agent
+- `reason`: why (recorded)
+- `confirm`: the digest of a fresh preview
+
+Result: `{ id, status, replayed, record }` (the ledger record).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.project`
+
+Owner only: archives a project. Refused while any of its tasks is assigned and unfinished (release or transfer them first). Otherwise it retires the project's responsibilities, releases its leases, unbinds its resource bindings, revokes the grants made for the project and archives the record, and writes one ledger record of what was released. `confirm` must be the digest of a `retirement.preview` made just before. Nothing is deleted: tasks, notes and history stay and stay searchable under the same access rules, held by retention and replay holds as before. `retirement.project.restore` brings the project back (what was released stays released). A stopped retirement carries on when the same command is sent again.
+
+Arguments:
+
+- `projectId`: the project
+- `reason`: why (recorded)
+- `confirm`: the digest of a fresh preview
+
+Result: `{ id, status, replayed, record }` (the ledger record).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.project.restore`
+
+Owner only: brings an archived project back to active and writes a ledger record. What the archiving released (retired responsibilities, unbound resources, revoked grants) is not brought back by itself: the record says what to bind and grant again.
+
+Arguments:
+
+- `projectId`: the archived project
+- `reason` (optional): why (recorded)
+
+Result: `{ id, status, replayed, record }`.
 
 Completion: finished when accepted (`completed: true`).
 

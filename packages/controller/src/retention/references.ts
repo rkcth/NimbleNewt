@@ -6,6 +6,7 @@ import type { Aggregate, ControllerStorage } from "../storage/types.js";
 export const REFERENCE_SCAN_LIMIT = 100_000;
 
 const TERMINAL = new Set(["done", "cancelled"]);
+const RETIREMENT_KIND = "retirement";
 
 /** The start of every reason that says a task's replay cites a record (card K06): replay holds stop the expiry rules and the user-requested deletion, but not an archive, which keeps the original and puts it back on restore. */
 export const REPLAY_REASON = "cited by the replay of task ";
@@ -32,6 +33,9 @@ export class RetainedMaterial {
 
   /** Why the record must stay, or `undefined` when no resumable task or replay needs it. An incomplete scan answers for every record. */
   why(kind: string, id: string): string[] | undefined {
+    // Card P06: the retirement ledger and the agent records are kept for good (a retired agent's ID is never reused, and what was released is the record of who did it and why), whatever a scan found.
+    if (kind === RETIREMENT_KIND) return ["a retirement ledger record is kept for good: it is the record of who retired what, why, and what was released"];
+    if (kind === "agent") return ["an agent record is kept for good: a retired agent stays as a record so its ID is never reused"];
     if (!this.#complete) return ["the check of what resumable tasks need did not finish, so nothing is treated as free to delete"];
     if (kind === "ctx-route-archive" && (!this.#archiveScanned || !this.#archiveComplete)) return ["the check of which route-change archives a resumable task cites did not run or did not finish, so they are held"];
     return this.#reasons.get(`${kind}:${id}`);
