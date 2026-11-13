@@ -51,6 +51,7 @@ import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { RemoteWorkerService } from "../remote/service.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
+import type { WipBackupService } from "../wip-backup/index.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { PolicyService } from "../policy/policy.js";
 import type { WorkingNoteService } from "../context/notes.js";
@@ -192,6 +193,8 @@ export interface StateApiDeps {
   readonly startSizes?: Pick<StartSizeService, "read" | "getSettings" | "changeSettings">;
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
+  /** The optional work-in-progress branch backup (card P02b). */
+  readonly wipBackup?: Pick<WipBackupService, "get" | "set">;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change" | "define" | "remove">;
   /** Revoking a catalogue version and listing its running calls (card T02b). */
@@ -375,6 +378,7 @@ export class StateApi {
         ...(this.#deps.startSizes === undefined ? {} : { startSizes: this.#deps.startSizes }),
         ...(this.#deps.cleanupSettings === undefined ? {} : { cleanupSettings: this.#deps.cleanupSettings }),
         ...(this.#deps.branchSettings === undefined ? {} : { branchSettings: this.#deps.branchSettings }),
+        ...(this.#deps.wipBackup === undefined ? {} : { wipBackup: this.#deps.wipBackup }),
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
         ...(this.#deps.catalogRevocation === undefined ? {} : { catalogRevocation: this.#deps.catalogRevocation }),
         ...(this.#deps.catalogPolicy === undefined ? {} : { catalogPolicy: this.#deps.catalogPolicy }),

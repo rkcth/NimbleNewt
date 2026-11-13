@@ -279,6 +279,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
+  wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
@@ -369,6 +370,7 @@ export type StatusRequest =
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
+  | { readonly kind: "wip_backup"; readonly projectId: string }
   | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
@@ -477,6 +479,8 @@ export interface StatusDeps {
     readonly budgets?: () => Promise<readonly { readonly route: string; readonly maxTokens?: number; readonly reasoningTokens?: number; /** The endpoint kind the controller's own configuration names for the route (it names the request fields); absent when the controller has none. */ readonly kind?: string }[]>;
   };
   /** The web chat listener's settings and signed-in browsers (card U07b). Absent, or no listener running: the view is not offered. */
+  /** The optional work-in-progress backup (card P02b). Absent: the view is not offered. */
+  readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
   readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
@@ -792,6 +796,7 @@ export class StatusService {
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
+      case "wip_backup": { onlyKnown(request, ["kind", "projectId"]); return this.wipBackupLines(by, request.projectId); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
@@ -967,6 +972,23 @@ export class StatusService {
       line(`${recent.length} job(s) ended most recently:`, cite("jobs", "ended")),
       ...recent.map(({ job, wake }) => line(`${job.id} ${JSON.stringify(shown(job.label, 80))} (${job.kind}) of task ${job.taskId}: ${wake.state.replaceAll("_", " ")} at ${shown(wake.at, 30)}${job.exit?.reason === undefined ? "" : ` (${shown(job.exit.reason, 120)})`}; ${woke(wake)}${wake.notice === undefined ? "" : wake.notice.sent ? "; you were told" : `; you were not told (${shown(wake.notice.why ?? "", 120)})`}.`, cite("job", job.id), cite("task", job.taskId))),
     ];
+  }
+
+  /** The work-in-progress backup of one project (card P02b): off unless the owner turned it on; what it rests on and what it has done. Owner only. */
+  async wipBackupLines(by: Principal, projectId: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.wipBackup === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.wipBackup.get(by, checkProjectId(projectId));
+    const c = cite("wip-backup-setting", projectId, got.revision === 0 ? undefined : got.revision);
+    if (got.revision === 0) return { observedAt: this.#runner.now(), lines: [line("The work-in-progress backup has never been turned on for this project; unfinished work is not copied anywhere.", c)] };
+    const out: Line[] = [got.enabled
+      ? line(`The work-in-progress backup is on: every ${got.everyMinutes ?? 15} minutes the unfinished work of the project's tasks is pushed to ${shown(got.remote ?? "", 120)}, under your standing approval of ${shown(got.approval?.approvedAt ?? "", 30)}.`, c)
+      : line(`The work-in-progress backup is off${got.approval?.revokedAt === undefined ? "" : ` (you turned it off ${shown(got.approval.revokedAt, 30)}; what was pushed earlier stays on the remote)`}.`, c)];
+    for (const t of got.tasks.slice(0, 30)) {
+      const tc = cite("wip-backup-state", t.taskId);
+      out.push(line(`Task ${shown(t.taskId, 64)}: ${t.lastSuccess === undefined ? "no backup confirmed yet" : `last backup confirmed ${shown(t.lastSuccess.at, 30)} (${t.lastSuccess.files} file(s), commit ${shown(t.lastSuccess.commitId.slice(0, 12), 12)})`}${t.lastFailure === undefined ? "" : `; the last attempt failed ${shown(t.lastFailure.at, 30)}${t.consecutiveFailures > 1 ? ` (${t.consecutiveFailures} in a row)` : ""}: ${shown(t.lastFailure.reason, 200)}, and is not counted as a backup`}.`, tc));
+      if (t.blocked.length > 0) out.push(line(`Task ${shown(t.taskId, 64)}: ${t.blocked.length} file(s) were left out because they looked like secrets or could not be carried: ${t.blocked.slice(0, 5).map((b) => `${shown(b.path, 80)} (${shown(b.reason, 80)})`).join("; ")}.`, tc));
+    }
+    return { observedAt: this.#runner.now(), lines: out };
   }
 
   /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */

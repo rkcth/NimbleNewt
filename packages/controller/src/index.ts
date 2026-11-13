@@ -40,6 +40,7 @@ export * from "./dispatch/index.js";
 export * from "./remote/index.js";
 export * from "./workspace-ops/index.js";
 export * from "./landing/index.js";
+export * from "./wip-backup/index.js";
 export * from "./toolbridge/index.js";
 export { RELEASE_LIMITS, ReleaseService, jobPayload as releaseJobPayload, type JobPayload as ReleaseJobPayload } from "./release/index.js";
 export { CATALOG_LIMITS, CatalogService, checkHost, checkManifest, personalNamespace, runAction, type HostFacts, type Manifest } from "./catalog/index.js";

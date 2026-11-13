@@ -13,6 +13,23 @@ import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
+/** Who a work-in-progress commit is by: the platform. The agent is named only in the `Developer` and `Executor` trailers. */
+export const WIP_IDENTITY = { name: "NimbleNewt", email: "controller@nimblenewt.invalid" } as const;
+/** Every work-in-progress branch lives under this prefix, so it can be told apart from every branch of the project. */
+export const WIP_REF_PREFIX = "refs/heads/nn-wip/";
+const TRAILER_VALUE = /^[A-Za-z0-9._:@-]{1,120}$/;
+const WIP_REF = /^refs\/heads\/nn-wip\/[A-Za-z0-9._-]{1,120}\/[A-Za-z0-9._-]{1,120}$/;
+/** A work-in-progress branch is a full ref under the namespace, two plain names deep (project, task); anything else, a protected or target branch included, is refused. */
+export function wipRef(ref: string): void {
+  if (!WIP_REF.test(ref) || ref.includes("..") || ref.endsWith(".lock") || ref.split("/").some((p) => p.startsWith(".") || p.endsWith("."))) throw new WorkspaceError("invalid_path", `${JSON.stringify(String(ref).slice(0, 80))} is not a work-in-progress branch (refs/heads/nn-wip/<project>/<task>)`);
+}
+/** The remote is one address or path: no option, no line break, no helper syntax. */
+export function wipRemote(remote: string): void {
+  if (typeof remote !== "string" || remote.length === 0 || remote.length > 500 || remote.startsWith("-") || /[\s\u0000-\u001f]/.test(remote) || remote.includes("::") || /^ext:/i.test(remote)) throw new WorkspaceError("invalid_path", "the backup remote must be one address or folder with no option, space or helper syntax");
+}
+/** The local ref that counts the last successful push to this remote and branch. */
+const wipLastRef = (remote: string, ref: string): string => `refs/nn/wip-last/${createHash("sha256").update(`${remote}\0${ref}`).digest("hex").slice(0, 32)}`;
+
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
 /** Bounds of `GitBridge.doneState` (card W05): the uncommitted files it names, and the evidence paths it looks at. */
@@ -637,6 +654,103 @@ export class GitBridge {
     if (head !== options.commit) return false;
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
     return true;
+  }
+
+  /**
+   * Backs up the checkout's work in progress to a work-in-progress branch on a remote the owner named (card P02b). Everything is made in the checkout's own git directory (the host's, outside every sandbox): the files go
+   * into a TEMPORARY index of its own (`nn-wip-index-*`, started from the head so a tracked file an ignore rule matches is kept), so the agent's index, HEAD, base and branches are never touched; the commit is made with
+   * `commit-tree` by the platform as author and committer (the agent's name is only a trailer), with `Developer`, `Executor`, `NimbleNewt-Task` and `NimbleNewt-WIP: unreviewed` and never a `Reviewed-by` or `Reviewed-via`.
+   * Before the push every file is read once more without following a link and handed to `scan`: a file the scan names, a link, a submodule entry, a file over the size limit and a file that changed while it was read are
+   * LEFT OUT of the commit and listed in `blocked` (a missing scan refuses the whole backup: no scan, no push). The push names one ref under `refs/heads/nn-wip/` and never forces; the remote's own answer is then read
+   * back (`ls-remote`) and must be the commit, or the backup failed. The commit is only counted (the local `refs/nn/wip-last/*` ref moves) after that read-back, so a failed push is never a backup; the next commit builds on
+   * the last counted one, so successive pushes are fast-forwards. Throws a `WorkspaceError` with a plain reason when anything fails; nothing is half-counted.
+   */
+  async backupWip(options: { gitDir: string; checkout: string; remote: string; ref: string; taskId: string; projectId: string; developer: string; executor: string; scan: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; tree: string; base: string; unchanged: boolean; files: number; blocked: { path: string; reason: string }[]; ignored: number }> {
+    if (typeof options.scan !== "function") throw new WorkspaceError("invalid_path", "a work-in-progress backup needs a scan of its files; none was given, so nothing was backed up");
+    wipRemote(options.remote);
+    wipRef(options.ref);
+    for (const [name, value] of [["task", options.taskId], ["project", options.projectId], ["developer", options.developer], ["executor", options.executor]] as const) if (!TRAILER_VALUE.test(value)) throw new WorkspaceError("invalid_path", `the ${name} of a backup is a plain name`);
+    await this.#neutralAttributes(options.gitDir);
+    await this.#refuseGitData(options.checkout);
+    const index = join(options.gitDir, `nn-wip-index-${randomBytes(6).toString("hex")}`);
+    const env = { GIT_INDEX_FILE: index };
+    try {
+      const head = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
+      const base = await this.#base(options.gitDir);
+      await this.#run(["read-tree", head], { gitDir: options.gitDir, env });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env });
+      const listing = (await this.#run(["ls-files", "-s", "-z"], { gitDir: options.gitDir, env })).stdout.split("\0").filter(Boolean);
+      if (listing.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files hold work in progress`);
+      const blocked: { path: string; reason: string }[] = [];
+      const leaveOut = async (path: string, reason: string): Promise<void> => { blocked.push({ path, reason }); await this.#run(["update-index", "--force-remove", "-z", "--stdin"], { gitDir: options.gitDir, workTree: options.checkout, env, input: `${path}\0` }); };
+      for (const line of listing) {
+        const mode = line.slice(0, 6);
+        const path = line.slice(line.indexOf("\t") + 1);
+        const blob = line.slice(7, line.indexOf(" ", 7));
+        if (mode === "120000" || mode === "160000") { await leaveOut(path, "a link or a submodule entry"); continue; }
+        // A file git saw as plain is read again without following any link: it must still be exactly what git staged.
+        const stillThere = await this.#sameAsStaged(options.checkout, path, blob).then(() => true, () => false);
+        if (!stillThere) { await leaveOut(path, "the file changed or was replaced by a link while it was read"); continue; }
+        const bytes = await this.#blobBuffer(options.gitDir, blob).catch(() => undefined);
+        if (bytes === undefined) { await leaveOut(path, `larger than the ${GIT_LIMITS.fileBytes} bytes a backup carries`); continue; }
+        let verdict: string | undefined;
+        try { verdict = await options.scan({ path, bytes }); } catch { verdict = "the scan of the file failed"; }
+        if (verdict !== undefined) await leaveOut(path, verdict);
+      }
+      const ignored = (await this.#run(["ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z"], { gitDir: options.gitDir, workTree: options.checkout, env })).stdout.split("\0").filter(Boolean).length;
+      const tree = (await this.#run(["write-tree"], { gitDir: options.gitDir, env })).stdout.trim();
+      const counted = wipLastRef(options.remote, options.ref);
+      const last = await this.#run(["rev-parse", "--verify", "-q", `${counted}^{commit}`], { gitDir: options.gitDir }).then((r) => r.stdout.trim(), () => undefined);
+      const lastTree = last === undefined ? undefined : (await this.#run(["rev-parse", "--verify", `${last}^{tree}`], { gitDir: options.gitDir })).stdout.trim();
+      let commitId: string;
+      const unchanged = last !== undefined && lastTree === tree;
+      if (unchanged) commitId = last!;
+      else {
+        const message = `Work in progress of task ${options.taskId} (not reviewed)\n\nBacked up by NimbleNewt; ${listing.length - blocked.length} file(s). Not reviewed work: never merged, integrated or landed.\n\nDeveloper: ${options.developer}\nExecutor: ${options.executor}\nNimbleNewt-Task: ${options.taskId}\nNimbleNewt-Project: ${options.projectId}\nNimbleNewt-Base: ${base}\nNimbleNewt-WIP: unreviewed\n`;
+        const who = { GIT_AUTHOR_NAME: WIP_IDENTITY.name, GIT_AUTHOR_EMAIL: WIP_IDENTITY.email, GIT_COMMITTER_NAME: WIP_IDENTITY.name, GIT_COMMITTER_EMAIL: WIP_IDENTITY.email };
+        commitId = (await this.#run(["commit-tree", tree, "-p", last ?? head, "-F", "-"], { gitDir: options.gitDir, input: message, env: who })).stdout.trim();
+        if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+      }
+      // Never forced (no plus on the refspec, no force flag): a remote that moved on its own refuses, and that is a failed backup.
+      await this.#run(["push", "--no-verify", "--no-follow-tags", "--", options.remote, `${commitId}:${options.ref}`], { gitDir: options.gitDir, allowFile: true, env: options.env ?? {} }).catch((error: unknown) => { throw new WorkspaceError("unavailable", `the push to the backup remote failed: ${(error as Error).message.replace(/^git push failed: /, "").slice(0, 180)}`, { cause: error }); });
+      const there = (await this.#run(["ls-remote", "--", options.remote, options.ref], { gitDir: options.gitDir, allowFile: true, env: options.env ?? {} }).catch(() => ({ stdout: "" }))).stdout.split("\n").map((l) => l.split("\t")).find((p) => p[1] === options.ref)?.[0];
+      if (there !== commitId) throw new WorkspaceError("unavailable", "the push was accepted but the remote does not show the commit on the work-in-progress branch; it is not counted as a backup");
+      await this.#run(["update-ref", counted, commitId], { gitDir: options.gitDir });
+      return { commitId, tree, base, unchanged, files: listing.length - blocked.length, blocked, ignored };
+    } finally { await rm(index, { force: true }); }
+  }
+
+  /**
+   * Puts a work-in-progress branch back as a workspace (card P02b): `checkout` must be an empty directory and `gitDir` a repository that does not exist yet. The branch is fetched from `remote`, its tree is written into the
+   * checkout and the checkout's base (and head) is the commit the work was based on, so `status` shows exactly the work that was backed up. Only a commit that carries `NimbleNewt-WIP: unreviewed` is restored.
+   */
+  async restoreWip(options: { remote: string; ref: string; gitDir: string; checkout: string; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; base: string; files: number }> {
+    wipRemote(options.remote);
+    wipRef(options.ref);
+    await mkdir(options.checkout, { recursive: true });
+    if ((await readdir(options.checkout)).length > 0) throw new WorkspaceError("invalid_path", "the checkout directory must be empty");
+    await this.#run(["init", "--bare", options.gitDir]);
+    await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", "--", options.remote, `${options.ref}:refs/nn/wip-restored`], { gitDir: options.gitDir, allowFile: true, env: options.env ?? {} }).catch((error: unknown) => { throw new WorkspaceError("unavailable", `the work-in-progress branch could not be fetched: ${(error as Error).message.slice(0, 180)}`, { cause: error }); });
+    const commitId = (await this.#run(["rev-parse", "--verify", "refs/nn/wip-restored^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    const message = (await this.#run(["log", "-1", "--format=%B", commitId], { gitDir: options.gitDir })).stdout;
+    if (!/^NimbleNewt-WIP: unreviewed$/m.test(message)) throw new WorkspaceError("invalid_path", "that branch does not hold a NimbleNewt work-in-progress commit; nothing was restored");
+    const base = /^NimbleNewt-Base: ([0-9a-f]{40})$/m.exec(message)?.[1];
+    if (base === undefined) throw new WorkspaceError("invalid_path", "the work-in-progress commit names no base commit; nothing was restored");
+    await this.#neutralAttributes(options.gitDir);
+    await this.#run(["read-tree", "--reset", "-u", commitId], { gitDir: options.gitDir, workTree: options.checkout });
+    await rm(join(options.checkout, ".git"), { recursive: true, force: true });
+    await this.#run(["update-ref", "refs/nn/base", base], { gitDir: options.gitDir });
+    await this.#run(["update-ref", "HEAD", base], { gitDir: options.gitDir });
+    await this.#run(["read-tree", base], { gitDir: options.gitDir });
+    const files = (await this.#run(["ls-tree", "-r", "--name-only", "-z", commitId], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean).length;
+    return { commitId, base, files };
+  }
+
+  /** A blob's bytes (never more than the file limit: a larger one is an error). */
+  async #blobBuffer(gitDir: string, sha: string): Promise<Buffer> {
+    return new Promise((resolveBlob, reject) => {
+      execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "cat-file", "blob", sha], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes + 1, windowsHide: true, cwd: this.#empty }, (error, stdout) => (error === null ? resolveBlob(stdout as unknown as Buffer) : reject(new WorkspaceError("invalid_path", "a file could not be read within the size limit"))));
+    });
   }
 
   /** The ID of a commit in the shared repository's current head (the controller's own read). */
