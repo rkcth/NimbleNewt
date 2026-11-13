@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ModelStreamRefused } from "../dispatch/model-stream.js";
 import { ModelRelay } from "../dispatch/relay.js";
 import { GenerationService } from "../generation/index.js";
 import { WorkerRequestError } from "../remote/index.js";
@@ -182,36 +183,84 @@ test("the worker's tap batches a fast token stream into few messages and splits 
   } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
-test("a worker's tap batches by the owner's figures from the controller's answer unless it was given its own; a zero is not taken as a message per piece (card L05d finish)", async () => {
+test("a worker's tap keeps the owner's gap between ANY two messages (character counts, completed tools, the end, a long text split in several), takes the owner's figures unless given its own, and floors an owner's zero (card L05d finish)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-l05d-"));
   const x = await twoAttempts(d);
   try {
     const A = await x.open(x.a.attemptId, true);
     const token = (await x.w.c.services.principals.issueCredential(x.w.rob, x.w.rob.id)).token;
     const set = async (values: Record<string, number>): Promise<void> => { assert.ok((await x.w.c.api.handle(token, { v: 1, op: "generation.stream.change", commandId: `bt-${Math.random().toString(36).slice(2, 10)}`, args: { set: values } } as never) as { ok: boolean }).ok); };
-    let posts = 0;
+    // A clock that only the tap's own waiting advances: the send times are exact and no machine speed matters.
+    let clock = 1_000;
+    const times: number[] = [];
     const send = A.holder.client.send.bind(A.holder.client);
-    A.holder.client.send = (async (method: string, path: string, call: never) => { if (path.endsWith("/stream-events")) posts++; return send(method, path, call); }) as never;
-    // The clock stands still, so only the character figure (and the end of the reply) can send: the counts do not depend on the speed of the machine.
-    const frozen = (): number => 0;
-    const feed = async (options: Parameters<typeof A.attempt.streamTap>[0], pieces: number): Promise<number> => {
-      posts = 0;
-      const call = await A.attempt.streamTap({ now: frozen, ...options }).started({ requestChars: 1 });
+    A.holder.client.send = (async (method: string, path: string, call: never) => { if (path.endsWith("/stream-events")) times.push(clock); return send(method, path, call); }) as never;
+    const feed = async (options: Record<string, unknown>, events: (call: NonNullable<Awaited<ReturnType<ReturnType<typeof A.attempt.streamTap>["started"]>>>) => Promise<void>): Promise<number[]> => {
+      times.length = 0;
+      const call = await A.attempt.streamTap({ now: () => clock, sleep: async (ms: number) => { clock += ms; }, ...options } as never).started({ requestChars: 1 });
       assert.ok(call !== undefined);
-      for (let i = 0; i < pieces; i++) assert.deepEqual(await call.events([{ kind: "text", text: "t" }]), {});
+      await events(call);
       await call.ended({ ok: true });
-      return posts;
+      return [...times];
     };
-    // The owner's batchChars of 100 (and a long time): 1000 characters go out in about ten messages.
-    await set({ batchChars: 100, batchMs: 60_000 });
-    const owners = await feed({}, 1000);
-    assert.ok(owners >= 9 && owners <= 12, `${owners} messages under the owner's 100 characters`);
-    // The worker's own option wins over the owner's: 2000 characters in one message.
-    assert.equal(await feed({ batchChars: 5000 }, 1000), 1);
-    // The owner's zero (every piece, for the controller's own batching) is held to the worker's least gap: the worker does not send a message per token.
+    const gaps = (t: number[]): number[] => t.slice(1).map((v, i) => v - t[i]!);
+    const one = (text: string) => [{ kind: "text" as const, text }];
+    // A character count that is reached by every piece, with the owner's zero for the time: no two messages are closer than 50 ms, and nothing is lost.
+    await set({ batchChars: 1, batchMs: 0 });
+    const chars = await feed({}, async (call) => { for (let i = 0; i < 40; i++) assert.deepEqual(await call.events(one("t")), {}); });
+    assert.equal(chars.length, 40, "one message per piece (the character count asks for each)");
+    assert.ok(gaps(chars).every((g) => g >= 50), `gaps ${gaps(chars).join(",")}`);
+    assert.equal((await x.w.c.dispatch!.generation.view(x.w.rob, GenerationService.runIdOf(x.a.taskId, 1)))!.run.text, "t".repeat(40), "slower, never lossy");
+    // The owner's time is kept when it is longer than the floor.
+    await set({ batchChars: 1, batchMs: 700 });
+    const slow = await feed({}, async (call) => { for (let i = 0; i < 6; i++) await call.events(one("t")); });
+    assert.ok(slow.length >= 2 && gaps(slow).every((g) => g >= 700), `gaps ${gaps(slow).join(",")}`);
+    // Completed tool calls and the end of the reply wait for the gap too (they used to go out at once).
     await set({ batchChars: 65_536, batchMs: 0 });
-    const zero = await feed({}, 1000);
-    assert.ok(zero < 50, `${zero} messages under an owner's zero`);
+    const tools = await feed({}, async (call) => { for (let i = 0; i < 5; i++) await call.events([{ kind: "tool" as const, id: `call_${i}`, name: "nimblenewt__task-get", argumentsDelta: "{}", done: true }]); await call.events([{ kind: "end" as const }]); });
+    assert.equal(tools.length, 6);
+    assert.ok(gaps(tools).every((g) => g >= 50), `gaps ${gaps(tools).join(",")}`);
+    // A long text is cut into several requests, which are spaced like any others.
+    const big = await feed({}, async (call) => { await call.events(one("é".repeat(1_000_000))); });
+    assert.ok(big.length >= 3 && gaps(big).every((g) => g >= 50), `big: ${big.length} messages, gaps ${gaps(big).join(",")}`);
+    // A figure the worker was given is its own: it wins over the owner's (here a long time and 5000 characters), and its explicit characters win over the owner's.
+    await set({ batchChars: 1, batchMs: 700 });
+    const own = await feed({ batchMs: 60_000, batchChars: 5000 }, async (call) => { for (let i = 0; i < 30; i++) await call.events(one("t")); });
+    assert.equal(own.length, 1, "30 characters under the worker's 5000: only the end sends");
+  } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("batching figures are validated, not repaired: the worker's own and the controller's, each of negative, fractional, not-a-number, infinite and oversized (card L05d finish)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l05d-"));
+  const x = await twoAttempts(d);
+  try {
+    const A = await x.open(x.a.attemptId, true);
+    // The worker's own figures: refused when the tap is made.
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 60_001, Number.MAX_SAFE_INTEGER + 2, "5" as unknown as number]) assert.throws(() => A.attempt.streamTap({ batchMs: bad }), RangeError, `batchMs ${String(bad)}`);
+    for (const bad of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 65_537, "5" as unknown as number]) assert.throws(() => A.attempt.streamTap({ batchChars: bad }), RangeError, `batchChars ${String(bad)}`);
+    assert.doesNotThrow(() => A.attempt.streamTap({ batchMs: 0, batchChars: 0 }));
+    assert.doesNotThrow(() => A.attempt.streamTap({ batchMs: 60_000, batchChars: 65_536 }));
+    // The controller's figures: a call is refused (not sent) when an answer carries an invalid one, whatever the worker's own option says, and a good one still works. The tampered answer is made at the worker's client.
+    const send = A.holder.client.send.bind(A.holder.client);
+    let tamper: Record<string, unknown> | undefined;
+    const ended: unknown[] = [];
+    A.holder.client.send = (async (method: string, path: string, call: { body?: Record<string, unknown> }) => {
+      if (path.endsWith("/stream-end")) ended.push(call.body?.["ok"]);
+      const answer = await send(method, path, call as never);
+      return path.endsWith("/stream-start") && tamper !== undefined ? { ...answer, body: { ...(answer.body as object), ...tamper } } : answer;
+    }) as never;
+    for (const [field, values] of [["batchMs", [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 60_001, "5"]], ["batchChars", [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 65_537, "5"]]] as const) {
+      for (const value of values) for (const own of [{}, { batchMs: 0, batchChars: 0 }]) {
+        tamper = { [field]: value };
+        ended.length = 0;
+        await assert.rejects(A.attempt.streamTap(own).started({ requestChars: 1 }), (e: unknown) => e instanceof ModelStreamRefused && /not valid/.test(e.message), `${field} ${String(value)}`);
+        assert.deepEqual(ended, [false], "the generation the controller began is ended as failed");
+      }
+    }
+    tamper = { batchMs: 0, batchChars: 0 };
+    const call = await A.attempt.streamTap().started({ requestChars: 1 });
+    assert.ok(call !== undefined);
+    await call.ended({ ok: true });
   } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

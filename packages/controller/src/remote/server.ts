@@ -24,10 +24,12 @@ export interface WorkerTransportLimits {
   readonly connections: number;
   /** Open connections one enrolled host may hold (a worker needs a few and holds one poll open). The listener's room for logged-in hosts is this times the hosts enrolled, so it grows with them. */
   readonly connectionsPerHost: number;
+  /** Model-stream messages (`stream-events`) one attempt may send per minute (card L05d finish). A worker that follows the owner's batching sends at most one every 50 ms (1,200 a minute); a worker that sends faster is answered `rate_limited` until the next window, and its reply is held back. */
+  readonly streamEventsPerMinute: number;
 }
 
 /** Provisional limits, adjustable. A busy worker makes several requests a second, so the per-host allowance is higher than a person's. */
-export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 3000, connections: 400, connectionsPerAddress: 100, connectionsPerHost: 8 };
+export const DEFAULT_WORKER_TRANSPORT_LIMITS: WorkerTransportLimits = { bodyBytes: REMOTE_LIMITS.bodyBytes, publishBytes: REMOTE_LIMITS.publishBytes, perPrincipalPerMinute: 6000, perAddressPerMinute: 3000, connections: 400, connectionsPerAddress: 100, connectionsPerHost: 8, streamEventsPerMinute: 1800 };
 
 export interface WorkerTransportOptions {
   readonly remote: RemoteWorkerService;
@@ -312,7 +314,7 @@ export class WorkerTransport {
         case "complete": return { status: 200, body: await svc.complete(host, session, attempt, p, { commandId: this.#key(req), result: body["result"] as never }) };
         case "launched": return { status: 200, body: await svc.launched(host, session, attempt, p, { digest: body["digest"], enforcement: body["enforcement"] ?? [] }) };
         case "stream-start": return { status: 200, body: await svc.streamStart(host, session, attempt, p, body["call"] as never, this.#key(req)) };
-        case "stream-events": return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
+        case "stream-events": this.#limit(`stream:${host.id}:${String(attempt)}`, this.#limits.streamEventsPerMinute); return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
         case "stream-end": await svc.streamEnd(host, session, attempt, p, body["streamId"], { ok: body["ok"] }); return { status: 204 };
         case "processes": return { status: 200, body: await svc.reportProcesses(host, session, attempt, p, { seq: body["seq"], final: body["final"], canLook: body["canLook"], computeMs: body["computeMs"], processes: body["processes"] }) };
         case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };

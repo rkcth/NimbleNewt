@@ -11,6 +11,13 @@ const STREAM_MESSAGE_EVENTS = 400;
 const STREAM_MESSAGE_BYTES = 700_000;
 /** The least time between two stream messages of a worker that takes the owner's batching (the owner's 0 means "every piece" for the controller's own batching only). */
 export const STREAM_MIN_BATCH_MS = 50;
+/** The figures a batching setting may take, at the worker and as the controller sends them (the owner's own ranges, `stream-settings.ts`). */
+export const STREAM_BATCH_MS_MAX = 60_000;
+export const STREAM_BATCH_CHARS_MAX = 65_536;
+function checkBatchFigure(name: string, value: unknown, max: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > max) throw new RangeError(`${name} must be a whole number from 0 to ${max}`);
+  return value;
+}
 /** A longer string is cut into slices of this many characters (an escaped slice stays under the message size). */
 const STREAM_SLICE_CHARS = 100_000;
 const safeCut = (value: string, n: number): string => (n < value.length && n > 0 && value.charCodeAt(n - 1) >= 0xd800 && value.charCodeAt(n - 1) <= 0xdbff ? value.slice(0, n - 1) : value.slice(0, n));
@@ -306,7 +313,11 @@ export class RemoteAttempt implements ToolGateway {
    * of the reply are sent in order (numbered, so a message sent again is recorded once) and the answer says whether the reply must be held back. A call the controller refuses (the task is held, the attempt is fenced) throws
    * `ModelStreamRefused`, so the request is not sent. If the controller cannot be reached the call is refused, and a reply being read is held back with the reason: nothing is passed on that was not recorded as applied.
    */
-  streamTap(options: { readonly batchMs?: number; readonly batchChars?: number; readonly now?: () => number } = {}): ModelStreamTap {
+  streamTap(options: { readonly batchMs?: number; readonly batchChars?: number; readonly now?: () => number; readonly sleep?: (ms: number) => Promise<void> } = {}): ModelStreamTap {
+    // A figure the worker is given is checked, not repaired: a negative, fractional, infinite or oversized one is a mistake of the program that made the tap.
+    if (options.batchMs !== undefined) checkBatchFigure("batchMs", options.batchMs, STREAM_BATCH_MS_MAX);
+    if (options.batchChars !== undefined) checkBatchFigure("batchChars", options.batchChars, STREAM_BATCH_CHARS_MAX);
+    const sleep = options.sleep ?? ((ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); }));
     const failure = (error: unknown): string => (error instanceof WorkerRequestError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : "the controller could not be reached").slice(0, 200);
     const ownBatchMs = options.batchMs;
     const ownBatchChars = options.batchChars;
@@ -320,10 +331,22 @@ export class RemoteAttempt implements ToolGateway {
         if (answer.refused !== undefined) throw new ModelStreamRefused(answer.refused);
         if (answer.streamId === undefined) return undefined;
         const streamId = answer.streamId;
-        // The worker's own option wins; otherwise the owner's figures from the answer (a worker never sends more often than every STREAM_MIN_BATCH_MS: a zero is the owner's wish to cut late text finely, and a request per token would pass the transport's rate limits and fail the call closed); otherwise the defaults.
-        const fromOwner = (v: unknown, floor: number, max: number): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(max, Math.max(floor, Math.floor(v))) : undefined);
-        const batchMs = ownBatchMs ?? fromOwner(answer.batchMs, STREAM_MIN_BATCH_MS, 60_000) ?? 250;
-        const batchChars = ownBatchChars ?? fromOwner(answer.batchChars, 1, STREAM_MESSAGE_BYTES) ?? 4000;
+        // The worker's own option wins; otherwise the owner's figures from the answer; otherwise the defaults. The owner's figures are validated, not repaired: an invalid one refuses the call (the controller's record of it is ended as failed).
+        // Every message after the first is sent at least `gapMs` after the one before, whatever triggers it (a time, a character count, a completed tool call, the end of the reply or a long text split into several messages). A figure the worker
+        // gives itself is its own gap (tests use 0); the owner's figures are held to STREAM_MIN_BATCH_MS, so the owner's 0 ("every piece" for the controller's own batching) does not make a request per token.
+        let batchMs: number;
+        let batchChars: number;
+        try {
+          const ownerMs = answer.batchMs === undefined ? undefined : checkBatchFigure("batchMs", answer.batchMs, STREAM_BATCH_MS_MAX);
+          const ownerChars = answer.batchChars === undefined ? undefined : checkBatchFigure("batchChars", answer.batchChars, STREAM_BATCH_CHARS_MAX);
+          batchMs = ownBatchMs ?? (ownerMs === undefined ? 250 : Math.max(STREAM_MIN_BATCH_MS, ownerMs));
+          batchChars = ownBatchChars ?? ownerChars ?? 4000;
+        } catch (error) {
+          try { await this.#post("stream-end", { streamId, ok: false }); } catch { /* ended as failed by the controller later */ }
+          throw new ModelStreamRefused(`the controller sent batching figures that are not valid (${(error as Error).message}); the call is not sent`);
+        }
+        const gapMs = batchMs;
+        let sentOnce = false;
         let n = 0;
         // Events wait here and go out in few messages (a stream of single tokens would otherwise be one request each, past the transport's rate limits): when `batchChars` are waiting, when `batchMs` have passed since the last send (a timer
         // sends what waits when the model pauses), and always before a completed tool call or the end of the reply is passed on. Whether the reply must be held back is the answer to the latest message; a piece that was sent in the background
@@ -368,6 +391,8 @@ export class RemoteAttempt implements ToolGateway {
           if (timer !== undefined) { clearTimeout(timer); timer = undefined; }
           while (pending.length > 0 && heldWhy === undefined) {
             const message = take();
+            if (sentOnce) { const wait = gapMs - (now() - lastSent); if (wait > 0) await sleep(wait); }
+            sentOnce = true;
             lastSent = now();
             try {
               const r = await this.#post("stream-events", { streamId, n: ++n, events: message as unknown as Json }) as { held?: string };

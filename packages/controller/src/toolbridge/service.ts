@@ -161,12 +161,14 @@ const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
 /**
- * The command ID of the operation a bridge call runs: `{prefix}:{attempt}:{call}`. A command ID is at most 120 characters and a call ID may be 120, so a long call ID (about 88 characters and over) would be refused as an invalid
- * command; such a call is keyed by a digest of its ID instead (the same call always gives the same key, and a short ID keeps its readable form).
+ * The command ID of the operation a bridge call runs: `{prefix}:{attempt}:{call}`. A command ID is at most 120 characters and a call ID may be 120, so a long call ID would be refused as an invalid command; such a call is keyed by a digest of
+ * its ID instead, in a form no readable one can equal: a command ID may use only letters, digits and . _ : -, and a call ID may use all of those, so no character is left over to mark the digest; the mark is the prefix instead. The readable form
+ * is `{prefix}:...` and the digest form is `{prefix}-h:...`, and the two bridge prefixes are `bridge` and `bridge-run`, so no readable ID (which has a colon right after its prefix) equals a digest one, whatever the call ID is. A short call ID's
+ * command ID is unchanged.
  */
 export function bridgeCommandId(prefix: string, attemptId: string, callId: string): string {
   const plain = `${prefix}:${attemptId}:${callId}`;
-  return plain.length <= 120 ? plain : `${prefix}:${attemptId}:h-${createHash("sha256").update(callId).digest("hex").slice(0, 40)}`;
+  return plain.length <= 120 ? plain : `${prefix}-h:${attemptId}:${createHash("sha256").update(callId).digest("hex").slice(0, 40)}`;
 }
 const STREAMING_WAIT_MS = 100;
 const STREAMING_WAIT_TOTAL_MS = 3000;
