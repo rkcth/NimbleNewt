@@ -3350,12 +3350,41 @@
       ],
       "deliverable": "Split from L02d (2026-11-08): L02d lists a sandbox's real processes, ends them (Force Stop kills what a close could not end) and charges winding them down as the cleanup's compute. Left: a Stop of an agent, team or the installation walks the swarm descendants of their tasks (today only a task's Stop does; `swarm.cancel` settles the rest); the stop-charge sweep's window is not starved by entries that stay only for an unfinished request (the first 2000 open entries all listing a blocked Stop keep later entries from being paid); a task's `stop_cleanup` view finds a Stop made through its agent, team, swarm parent or the installation; chat resolves an agent's or team's name for the scope form; a per-request cumulative cleanup total; a remote worker's own report of its processes (today one unknown item per live placement); a local worker whose close could not end its process is confirmed stopped once a later look finds its sandboxes empty (today it stays unconfirmed after Force Stop killed it, so its scratch is kept); a Stop or Force Stop made after such an attempt has finished still lists and reaches what its sandbox holds (today only attempts live or seen during that Stop are asked)",
       "acceptance_and_verification": "A Stop of an agent ends its tasks' swarm children's work; 2000 settled entries listing a blocked Stop do not keep a later unpaid charge from being paid by the sweep; asking about a task stopped through its agent shows that Stop's cleanup; mutation check recorded",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a0af0597",
+          "fe7569a2",
+          "17a78d92",
+          "fed086b8",
+          "04c68fce",
+          "27a23a49",
+          "64c8afae",
+          "f093c817",
+          "0007a210",
+          "752bc5ba",
+          "ddcd181f",
+          "d619f85f",
+          "67e60e49",
+          "b811aea3",
+          "1bf8310e",
+          "7f627402",
+          "13709c4a",
+          "fccd6cd8",
+          "5112e1ff"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A Stop of an agent, team or the installation walks the swarm children of the tasks it covers and holds them from restarting (tested on a real controller and dispatcher with a live swarm); settled charge entries listing only an unfinished request leave the sweep's open index, so 2000 of them do not starve a later unpaid charge; a task's stop_cleanup view answers from a Stop made through its agent, team, swarm parent (and the parent's agent or team) or the installation and names that scope; chat reads an agent's or team's name for the scope; a per-request cumulative cleanup total; a remote worker reports its processes and cleanup compute, answers a fresh look and a Force Stop kill; a local worker whose close failed is confirmed stopped once its sandboxes are empty, and a later Stop still reaches a finished unconfirmed attempt. Mutation checks recorded for every slice. Limits: a remote Force Stop reaches only a live placement whose worker knows the kill message; remote cleanup compute is the worker's own figure; the deployed remote worker was not driven through a Force Stop of a process that ignores the close; a wider scope's tasks are those with a live attempt (a child of a task with none is held, not ended); the unconfirmed-attempt list keeps 100 and is not known after a controller restart; Windows sandboxes list no processes."
+      }
     },
     {
       "id": "L03",
@@ -6845,32 +6874,12 @@
       ],
       "deliverable": "StateApi operations for lifecycle intent and observed execution state, checkpoints, decision records, deliverables, tool activity, message references, the project overview and event subscriptions (agent-apis 9-17; README 167-171)",
       "acceptance_and_verification": "Every listed object is readable, and writable where a command exists, with revision and provenance; the overview distinguishes paused assignee, unreachable worker, stale artifact and uncertain tool result with observation time and filters by project, task, agent, state and time under project and payload restrictions; long-running commands report accepted, queued, running, completed, blocked, failed or outcome-unknown; subscription cursors survive restart; the generated contract document stays current",
-      "status": "implemented",
+      "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
-      "progress": {
-        "commits": [
-          "ab24bfff",
-          "65aa1bf2",
-          "ff1936ea",
-          "0fa127a4",
-          "50b779c3",
-          "a2e83ec6",
-          "54b9cf79",
-          "c441bdc9",
-          "132fac69",
-          "e4901e3d"
-        ],
-        "ci_runs": [
-          "43500570685"
-        ],
-        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
-        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "State API reads with revision and provenance for lifecycle, checkpoints, decisions, deliverables (task artifacts), tool activity and message references; status.attention lists paused assignees, unreachable workers, stale artifacts and uncertain tool results with observation time, filtered by project, task, agent, state and time under the neighbouring rights; command.state follows task.assign and task.transfer through accepted, queued, running, completed, blocked, failed and outcome_unknown, and jobs and stops carry the same words; event subscription cursors survive a restart; api.test keeps api-v1.md current. Q01 (listed blocker, not flipped) does not hold this card: its acceptance service and deliverable.record reads exist, and exposing its review states is Q01's work. Limits: other commands report completed when accepted; record lists without a per-task index are scan-bounded and say partial; attention scan cursors do not survive a restart (event subscription cursors do); a project-level hold of an event stream is not consulted; no live worker, host or model was run."
-      }
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
       "id": "U14",
@@ -9836,29 +9845,12 @@
       ],
       "deliverable": "Worker three-way re-apply of the agent's work onto the current landing-branch head (conflict markers plus a list), exposed as the agent's work.refresh tool with no quiesce and recorded in the workspace record",
       "acceptance_and_verification": "Changed and new files survive; conflicts are listed and never resolved automatically; refresh rounds are counted on the submission; tested on a branch that moved in overlapping and in unrelated files",
-      "status": "implemented",
+      "status": "planned",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
-      "progress": {
-        "commits": [
-          "c21c4741",
-          "eebe3115",
-          "d61eb7f3",
-          "25446501",
-          "1f7267bb",
-          "1df72eb8",
-          "d0c33d53"
-        ],
-        "ci_runs": [
-          "43500570685"
-        ],
-        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
-        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "A running agent calls work.refresh (API, tool bridge and Pi tool) and the worker re-applies its work three ways onto the landing-branch head with no quiesce: changed and new files survive, non-overlapping edits merge, overlapping edits and delete-versus-change are listed with markers and never resolved; the request is recorded in the workspace record with the lists; a refresh that moved the base is a round, counted by the controller and carried as refreshRound on the code submission. Proven through startController with a real git checkout on branches moved in overlapping and in unrelated files. Limits: the per-project round cap and what follows it belong to P10 and are not enforced here; no real model or sandboxed agent called the tool; a crash between host and controller record undercounts one round; a host crash mid-write can leave one merged file short; a same-size rewrite within one timestamp tick on coarse-time filesystems is not detected; delete-versus-change keeps the agent side (provisional owner question)."
-      }
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
       "id": "H12o",

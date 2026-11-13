@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **268 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **267 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -109,13 +109,13 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 34% | 8 of 23 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 26 of 29 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 27 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
-| State API and MCP state | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 3 of 3 |
+| State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓▓▓░░░` 80% | 16 of 20 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 88% | 44 of 50 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 27 of 32 |
@@ -220,7 +220,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 26 of 29</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 27 of 29</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -246,7 +246,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L02d** · P35 · Finish Stop: local processes, child work, cleanup spend _(needs L02c)_
 - [x] **L03d** · P35 · Finish hand-off: chat, richer package, temporary reassignment, responsibilities _(needs L03c)_
 - [ ] **L04d** · P35 · Finish checked resume: real dependency observation, a reviewer agent and host captures _(needs L04c)_
-- [ ] **L02e** · P36 · Finish Stop: swarm children of wider scopes, charge-window starvation, the stop view through a wider scope _(needs L02d)_
+- [x] **L02e** · P36 · Finish Stop: swarm children of wider scopes, charge-window starvation, the stop view through a wider scope _(needs L02d)_
 - [x] **L03e** · P36 · Finish hand-off: chat, richer package, temporary reassignment _(needs L03d)_
 - [x] **L03f** · P37 · Finish hand-off: chat, richer package, locks, drafts _(needs L03e)_
 - [x] **L03g** · P38 · Finish hand-off: locks, drafts, responsibilities in the package _(needs L03f)_
@@ -328,13 +328,13 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 </details>
 
 <details>
-<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 3 of 3</summary>
+<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓░░░░ 2 of 3</summary>
 
 The versioned state API that every client uses, and the controller-backed MCP state.
 
 - [x] **U01** · P23 · Implement versioned state query/write API _(needs S01, A01, C02)_
 - [x] **T04** · P24 · Implement controller-backed MCP state adapter _(needs U01, T03)_
-- [x] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
+- [ ] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
 
 </details>
 
@@ -388,7 +388,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 44 of 50</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 43 of 50</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -439,7 +439,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
 - [ ] **H12n** · P38 · End agent work with work.end _(needs H12, H12l, Q01b, P08)_
 - [ ] **H12o** · P39 · Commit an approved submission exactly once _(needs H12n, A06)_
-- [x] **H12p** · P39 · Let the author refresh its own checkout before submitting _(needs H12n, H12m)_
+- [ ] **H12p** · P39 · Let the author refresh its own checkout before submitting _(needs H12n, H12m)_
 - [ ] **H12s** · P40 · Wire the landing policy from the settings into the worker host builder _(needs H12q, H12k, H12o)_
 - [ ] **H12t** · P41 · Compose the production workspace port into the product worker host _(needs H12s, H12q, H12k, H12o)_
 
