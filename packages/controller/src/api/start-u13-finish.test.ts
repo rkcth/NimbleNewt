@@ -8,6 +8,7 @@ import { EventService } from "../events/index.js";
 import { startController } from "./index.js";
 import { COMMAND_STATES, jobCommandState, stopCommandState } from "./command-state.js";
 import { JOB_STATES } from "../jobs/jobs.js";
+import { PI } from "../dispatch/testing/world.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -195,5 +196,70 @@ test("tool activity, message references and checkpoint lists are readable throug
       await assert.rejects(() => OPERATION_BY_NAME.get(op)!.run(scoped, { taskId: other }, undefined), (e: { code?: string }) => e.code === "not_found" || e.code === "forbidden", op);
       assert.ok(await OPERATION_BY_NAME.get(op)!.run(scoped, { taskId: task }, undefined), op);
     }
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("command.state follows task.assign and task.transfer through the shared words from the stored records, replays safely, and keeps to the caller's rights (card U13 finish)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-u13cmd-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (tok: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(tok, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(boot.token, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+    const other = (await call(boot.token, "task.create", { projectId: project, title: "water" }, "t2")).result.id as string;
+    await call(boot.token, "task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "t1r");
+    await call(boot.token, "task.transition", { taskId: other, to: "ready", expectedRevision: 1 }, "t2r");
+    const assigned = await call(boot.token, "task.assign", { taskId: task, owner: { kind: "agent", id: "ann" } }, "as1");
+    assert.match(assigned.awaits, /command\.state/, "the envelope points at the read");
+    const first = await call(boot.token, "command.state", { command: "as1" });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.deepEqual([first.result.item.state, first.result.item.op, first.result.item.taskId, first.result.item.generation, first.result.item.assignment.state], ["accepted", "task.assign", task, 1, "assigned"]);
+    assert.ok(typeof first.result.item.reason === "string" && first.result.item.reason.length > 0);
+    assert.equal(first.accepted, undefined, "a read carries no command envelope fields");
+    // A replay answers as recorded and changes nothing.
+    const again = await call(boot.token, "task.assign", { taskId: task, owner: { kind: "agent", id: "ann" } }, "as1");
+    assert.equal(again.result.replayed, true);
+    assert.deepEqual((await call(boot.token, "command.state", { command: "as1" })).result, first.result);
+    // The owner's attempt runs, then ends: running, completed.
+    const a = (await c.services.assignments.getAssignment(task))!;
+    const att = await c.services.assignments.admitAttempt({ commandId: "ad1", actor: rob.id, taskId: task, expectedRevision: a.revision, generation: 1, owner: { kind: "agent", id: "ann" }, harness: "pi" } as never);
+    assert.equal((await call(boot.token, "command.state", { command: "as1" })).result.item.state, "running");
+    assert.equal((await call(boot.token, "command.state", { command: "as1" })).result.item.attempt.state, "active");
+    await c.services.assignments.finishAttempt({ commandId: "fn1", actor: rob.id, taskId: task, expectedRevision: a.revision + 1, fence: { generation: 1, attemptId: att.id }, outcome: "succeeded" });
+    assert.equal((await call(boot.token, "command.state", { command: "as1" })).result.item.state, "completed");
+    // A transfer is followed the same way.
+    const tr = await call(boot.token, "task.transfer", { taskId: task, expectedRevision: a.revision + 2, to: { kind: "agent", id: "bob" } }, "tr1");
+    assert.equal(tr.ok, true, JSON.stringify(tr));
+    assert.deepEqual([(await call(boot.token, "command.state", { command: "tr1" })).result.item.state, (await call(boot.token, "command.state", { command: "tr1" })).result.item.op], ["accepted", "task.transfer"]);
+    // Not found: unknown IDs, commands that are not deferred, and bad arguments.
+    assert.equal((await call(boot.token, "command.state", { command: "nope" })).error.code, "not_found");
+    assert.equal((await call(boot.token, "command.state", { command: "t1r" })).error.code, "not_found", "a command that finished when accepted is not read here");
+    assert.equal((await call(boot.token, "command.state", { command: "as1", extra: 1 })).error.code, "invalid_command");
+    assert.equal((await call(boot.token, "command.state", {})).error.code, "invalid_command");
+    // Rights. Command IDs are kept per sender: another principal naming the owner's ID finds nothing, and a command's sender keeps to its rights.
+    await c.services.principals.enroll(rob, { commandId: "e-zed", kind: "agent", name: "zed", grants: [] });
+    const zed = (await c.services.principals.issueCredential(rob, "agent:zed")).token;
+    assert.equal((await call(zed, "command.state", { command: "as1" })).error.code, "forbidden", "an agent with no rights at all is refused at the door");
+    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "assignment.manage", project }, { action: "assignment.read", project }, { action: "task.read", project }] });
+    const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+    assert.equal((await call(ann, "command.state", { command: "as1" })).error.code, "forbidden", "the owner's command is the owner's; a refusal reads the same as a missing record");
+    const mineOther = await call(ann, "task.assign", { taskId: other, owner: { kind: "agent", id: "ann" } }, "ann-as");
+    assert.equal(mineOther.ok, true, JSON.stringify(mineOther));
+    assert.equal((await call(ann, "command.state", { command: "ann-as" })).result.item.state, "accepted");
+    assert.equal((await call(ann, "command.state", { command: "ann-as" }, "no-id")).error.code, "invalid_command", "a read takes no command ID");
+    // A task credential of ann for the first task reads nothing about ann's command on the other task.
+    const mine = (await c.services.taskCredentials.issue(rob, { commandId: "tc1", taskId: task, agentId: "agent:ann" })).token;
+    assert.equal((await call(mine, "command.state", { command: "ann-as" })).error.code, "forbidden", "a task credential reads its own task only");
+    const tcTask = await c.services.taskCredentials.issue(rob, { commandId: "tc2", taskId: other, agentId: "agent:ann" });
+    assert.equal((await call(tcTask.token, "command.state", { command: "ann-as" })).result.item.taskId, other, "the credential for that task follows it");
+    // A sender whose right was withdrawn is told nothing more.
+    const f = await c.storage.getAggregate({ kind: "principal", id: "agent:ann" });
+    await c.services.principals.setGrants(rob, { commandId: "g-none", principalId: "agent:ann", expectedRevision: f!.revision, grants: [] as never });
+    assert.equal((await call(ann, "command.state", { command: "ann-as" })).error.code, "forbidden");
+    // Nothing secret or long in the text.
+    const text = JSON.stringify((await call(boot.token, "command.state", { command: "as1" })).result);
+    assert.ok(text.length < 1200 && !/token|secret|password/i.test(text));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.js";
-import type { AssignmentService, AdmitAttempt, AssignTask, FencedTransition, FencedUpdate, FinishAttempt, ObserveActivity, ReleaseTask, TransferTask } from "../domain/assignments.js";
+import type { AssignmentService, DeferredCommandRecord, AdmitAttempt, AssignTask, FencedTransition, FencedUpdate, FinishAttempt, ObserveActivity, ReleaseTask, TransferTask } from "../domain/assignments.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import type { CommandResult } from "../domain/runner.js";
 import type { CreateProject, CreateTask, ProjectService, TransitionTask, UpdateProject, UpdateTask } from "../domain/service.js";
@@ -123,6 +123,20 @@ export class SecureApi {
       if (attempt === undefined) { this.#hide(); return undefined; }
       await this.#requireOnTask("assignment.read", attempt.taskId);
       return attempt;
+    });
+  }
+
+  /**
+   * What became of a recorded `task.assign` or `task.transfer` (card U13 finish). The command ID is the caller's own (IDs are scoped to the sender) and the caller still needs `assignment.read` on the command's task; a command ID that names nothing, names another kind of command or names a task the
+   * caller may not read all read the same (not found), and a task credential reaches only its own task.
+   */
+  deferredCommand(commandId: string): Promise<DeferredCommandRecord> {
+    return this.#run(async () => {
+      // Command IDs are kept per caller (as when the command was sent), so a caller follows its own commands.
+      const found = await this.#d.assignments.deferredCommand(scopedCommandId(this.#p.id, commandId));
+      if (found === undefined) return this.#hide();
+      await this.#requireOnTask("assignment.read", found.taskId);
+      return found;
     });
   }
 
