@@ -104,6 +104,11 @@ export interface PolicyEditDeps {
   /** For edits forwarded by an agent: the same interpreter the chat uses. */
   readonly interpreter?: ChatInterpreter;
   readonly catalog?: ActionCatalog;
+  /**
+   * Plain words the owner must read before agreeing to a setting, for a setting that the system accepts but that cannot do anything yet (card M02h: the steward switch while no model is configured for it).
+   * Called for each setting proposal with the key and the value (`undefined` when the setting is removed); a failing hook adds nothing. The words go first in the proposal's explanation.
+   */
+  readonly settingNotes?: (key: string, value: unknown) => Promise<readonly string[]>;
 }
 
 export interface PrepareInput {
@@ -727,6 +732,7 @@ export class PolicyEditService {
     const layer = await this.#deps.configuration.layer(owner, change.layer, change.scopeId);
     if (def.installationOnly === true && change.layer !== "installation") throw new Refusal("invalid_command", `${change.key} can only be set for the whole installation (by the owner), not for a ${change.layer}.`);
     const explanation = [`${def.description}`, `It takes effect ${EFFECT_WORDS[def.effect] ?? def.effect}.`, def.installationOnly === true ? "It can only be set for the whole installation; no narrower layer can override it." : def.kind === "restriction" ? (def.installationMayWiden === true ? "Only the owner, for the whole installation, can set it past its default; a narrower layer can only narrow it further, and a value wider than the layers above allow is refused." : "A narrower layer can only narrow it further, and a value wider than the layers above allow is refused.") : "A narrower layer may override it.", "It is applied as a whole after the combination of settings is checked; if the check fails nothing changes."];
+    if (this.#deps.settingNotes !== undefined) explanation.unshift(...await this.#deps.settingNotes(change.key, change.remove === true ? undefined : change.value).catch((): readonly string[] => []));
     if (change.layer === "project") explanation.push(change.key === "workspace.landing.protectedPaths" ? "Paths set here protect this project only, in addition to the installation's own list and the built-in list; neither of those can be taken off here." : change.key === "workspace.landing.requirePermit" ? "For this project the permit can be required where the installation does not require it; it cannot be switched off here where the installation requires it." : "This applies to this project only; the installation's value stands for every other project.");
     if (change.layer === "installation" || change.layer === "project") {
       const eff = await this.#deps.configuration.effective(owner, change.layer === "project" ? { projectId: change.scopeId as string } : {});

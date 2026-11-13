@@ -2048,6 +2048,13 @@ for (const backend of backends) {
     assert.deepEqual((await decideWith(c, { widening: async () => "ask" }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
     mode = "ask";
     assert.deepEqual((await decideWith(c, { widening: async () => "ask", ...on }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" }, "and its ask puts the decision back to the owner");
+    // Right after the vote, before any apply (review): a steward that may judge the class leaves the owner unasked; one that may not (the composition answers false while no model can answer) puts it to the owner at once.
+    seen.length = 0;
+    assert.equal((await (await decideWith(c, { widening: async () => "ask", ...on }, ["w-rights"], { skipApply: true })).now()).ownerResponse, "not-asked");
+    const atVote = await decideWith(c, { widening: async () => "ask", steward, stewardEnabled: async () => false }, ["w-rights"], { skipApply: true });
+    assert.equal((await atVote.now()).ownerResponse, "pending");
+    assert.equal((await atVote.svc.ownerPending(c.owner)).items.some((i) => i.id === atVote.d.id), true);
+    assert.equal(seen.length, 0);
     mode = "allow";
     // The owner's own agreement is never put to the steward.
     const held = await decideWith(c, {}, ["w-rights"]);

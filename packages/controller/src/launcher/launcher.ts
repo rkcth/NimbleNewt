@@ -5,6 +5,7 @@ import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
+import { narratorFrom, stewardFrom } from "../meetings/agents.js";
 import { chatRoutes } from "../chat/routed-model.js";
 import { DomainError } from "../domain/errors.js";
 import type { ModelEndpoint } from "../dispatch/relay.js";
@@ -213,6 +214,20 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     completeDetailed: async (route, request) => { await refresh(); return model.completeDetailed(route, request); },
   };
 
+  // The meeting steward and narrator (card M02h, wiring): the same HTTP client, on the route the coordinator's chat uses (local first, a cloud route only when no local one is there), looked up at each call from the recorded providers.
+  // ASSUMPTION: no separate route setting (`meeting.decision.stewardRoute`) is added; the owner already chooses the chat route, and a meeting summary is data of the same kind the chat sees. The calls carry no tools and the reply is only ever
+  // read as an overview text or the word allow/ask; a failing, slow or nonsense reply sends the change to the owner as before. A host that passes its own steward or narrator wins.
+  const meetingComplete = async (request: { readonly system: string; readonly user: string }): Promise<string> => {
+    const route = (await routes())[0];
+    if (route === undefined) throw new Error("no model route is available for the meeting agents");
+    return model.complete(route, request);
+  };
+  const meetingRecords: NonNullable<StartOptions["meetingRecords"]> = {
+    ...(options.start?.meetingRecords ?? {}),
+    ...(options.start?.meetingRecords?.steward === undefined ? { steward: stewardFrom(meetingComplete), stewardUnavailable: async () => ((await routes()).length === 0 ? "no model route is usable for chat yet (the steward uses the chat's route)" : undefined) } : {}),
+    ...(options.start?.meetingRecords?.narrate === undefined ? { narrate: narratorFrom(meetingComplete) } : {}),
+  };
+
   // The configuration's workspace folders reach the start-up file system check (card F04h: "the worker-side start-up and U01 must pass workspaceRoots"); an explicit option from the host wins. A relative path
   // means the data directory's, not whatever the process was started in (the release launcher starts it in the release directory). `~` is not expanded (as for the data directory), so it is said.
   const configuredWorkspaces = options.start?.workspaceRoots !== undefined ? [] : Object.entries(config.installation.workspaces ?? {}).map(([name, w]) => ({ name, path: resolve(dataDir, w.path), given: w.path }));
@@ -223,6 +238,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
     chat: { interpreter },
+    meetingRecords,
     ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),
     ...(options.serve === undefined ? {} : { conversationTransport: options.serve }),
   };
