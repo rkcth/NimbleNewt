@@ -453,7 +453,7 @@ export class PiStateHost {
       for (;;) {
         const c = await this.#o.client.piStateGet(transferId, name, at);
         if (c.offset !== at) throw new Error(`${name} came out of order`);
-        if (at + c.data.length > most) throw new Error(`${name} is longer than it may be`);
+        if (at + c.data.length > most) throw new Error(expect === undefined ? `${name} is longer than an index may be` : `${name} did not match its entry in the index (it is longer than the index lists)`);
         if (c.data.length > 0) { await h.write(c.data); hash.update(c.data); at += c.data.length; }
         if (c.eof) {
           const got = hash.digest("hex");

@@ -90,7 +90,7 @@ test("a controller that keeps sending a file, or an index, cannot fill the host'
     try {
       const answer = await r.host.answer(r.ask);
       assert.equal(answer.ok, false);
-      assert.match((answer as { reason: string }).reason, /longer than it may be/, which);
+      assert.match((answer as { reason: string }).reason, which === "file" ? /longer than the index lists/ : /longer than an index may be/, which);
       assert.equal(readFileSync(join(r.target, "log.jsonl"), "utf8"), "on the host now\n");
     } finally { r.close(); }
   }
