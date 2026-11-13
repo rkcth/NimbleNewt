@@ -13,6 +13,7 @@ import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
+import type { RetirementService } from "../retirement/index.js";
 import type { CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
@@ -182,6 +183,7 @@ export interface StateApiDeps {
   readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
+  readonly retirement?: Pick<RetirementService, "preview" | "retireAgent" | "archiveProject" | "restoreProject" | "list">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
   readonly environments?: Pick<EnvironmentService, "get">;
@@ -362,6 +364,7 @@ export class StateApi {
         ...(this.#deps.leases === undefined ? {} : { leases: this.#deps.leases }),
         ...(this.#deps.retention === undefined ? {} : { retention: this.#deps.retention }),
         ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
+        ...(this.#deps.retirement === undefined ? {} : { retirement: this.#deps.retirement }),
         ...(this.#deps.workerLimits === undefined ? {} : { workerLimits: this.#deps.workerLimits }),
         ...(this.#deps.setup === undefined ? {} : { setup: this.#deps.setup }),
         ...(this.#deps.setupProviders === undefined ? {} : { setupProviders: this.#deps.setupProviders }),
