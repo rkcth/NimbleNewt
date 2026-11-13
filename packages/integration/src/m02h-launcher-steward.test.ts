@@ -163,3 +163,78 @@ test("the launcher's own steward and narrator: switching the steward on in chat 
     assert.ok(model.of("steward").every((x) => x.url.startsWith("http://127.0.0.1:8002/")), "the steward uses the chat's local route");
   } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("the launcher with no usable model route: the steward switch set on through the configuration counts as off, so a strict policy's budget raise waits for the owner from the vote on and no model is called (card M02h review)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-m02h-noroute-"));
+  const model = fakeModel();
+  const config: LauncherConfig = { installation: { name: "test", dataDir: dir }, controller: { storage: { kind: "sqlite", path: join(dir, "controller.sqlite") } }, models: { providers: {} } };
+  const l = await launch({ config, secrets: memorySecrets({}), argv: [], env: {}, print: () => undefined, start: { facts, filesystem: ext4 }, fetch: model.fetch });
+  try {
+    const c = l.controller;
+    const rob = await c.services.principals.authenticate(l.ownerToken);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    await PolicyService.withEpoch(c.storage, c.epoch, c.services.grants, {}).set(rob, { commandId: "pol1", scope: "installation", profile: "strict" } as never);
+    const staged = await c.services.configuration.stage(rob, { commandId: "cfg1", layer: "installation", set: { "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true } as never });
+    await c.services.configuration.apply(rob, { commandId: "cfg2", layer: "installation", expectedRevision: staged.revision });
+    const project = (await call(l.ownerToken, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const t = (await call(l.ownerToken, "task.create", { projectId: project, title: "Bed" }, "t1")).result;
+    await BudgetService.withEpoch(c.storage, c.epoch, {}).open(rob, { commandId: "bo1", taskId: t.id, currency: "USD", costMicros: 1_000_000 });
+    const tok = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return (await c.services.principals.issueCredential(rob, `agent:${name}`)).token; };
+    const ann = await tok("ann", [{ action: "task.read", project }, { action: "meeting.attend", project }, { action: "budget.manage", project }]);
+    const bob = await tok("bob", [{ action: "task.read", project }, { action: "meeting.attend", project }]);
+    const urgent = await call(l.ownerToken, "meeting.call-urgent", { projectId: project, title: "Money", reason: "frost", roster: ["agent:ann", "agent:bob"] }, "mu1");
+    const rec = (await call(l.ownerToken, "meeting.record.open", { occurrenceId: urgent.result.id, chair: "agent:ann" }, "mo1")).result.id as string;
+    for (const [tk, id] of [[ann, "j1"], [bob, "j2"]] as const) await call(tk, "meeting.record.join", { recordId: rec }, id);
+    const moved = await call(ann, "meeting.record.move", { recordId: rec, text: "Raise it.", topic: "unrelated topic", changes: [{ kind: "budget.raise", agent: "agent:ann", target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { costMicros: 500_000 }, summary: "raise" }] }, "mv1");
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.ok((await call(l.ownerToken, "meeting.record.open-vote", { motionId: moved.result.id, expectedVersion: 1 }, "ov1")).ok);
+    for (const [tk, id] of [[ann, "b1"], [bob, "b2"]] as const) assert.ok((await call(tk, "meeting.record.cast-ballot", { motionId: moved.result.id, version: 1, value: "yes", reason: "agreed" }, id)).ok, id);
+    const closed = await call(l.ownerToken, "meeting.record.close-vote", { motionId: moved.result.id }, "cv1");
+    assert.equal(closed.result.state, "adopted", JSON.stringify(closed));
+    // Before anything applies the decision, it already waits for the owner (with a steward counted as able it would wait, unasked, for an apply).
+    const needs = async () => ((await call(l.ownerToken, "status.ask", { request: { kind: "needs_you" } })).result.item.lines as { text: string }[]).filter((x) => /meeting decision waits for you/.test(x.text)).length;
+    assert.equal(await needs(), 1, "the decision waits for the owner from the vote on");
+    const applied = await call(l.ownerToken, "meeting.record.apply", { decisionId: closed.result.decisionId }, "ap1");
+    assert.deepEqual([applied.result.applied, applied.result.waitingFor], [0, "owner"], JSON.stringify(applied));
+    assert.equal((await call(l.ownerToken, "budget.report", { taskId: t.id })).result.item.limit.costMicros, 1_000_000);
+    assert.equal(model.calls.length, 0, "no model is called without a route");
+  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a steward and a narrator the host passes to the launcher win over the launcher's own: the model behind the chat route is not asked for either (card M02h review)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-m02h-host-"));
+  const model = fakeModel();
+  const asked: string[] = [];
+  const steward = async (input: { kind: string }) => { asked.push(`steward:${input.kind}`); return { verdict: "allow" as const, reason: "the host's own steward" }; };
+  const narrate = async () => { asked.push("narrator"); return "The host's own overview."; };
+  const l = await launch({ config: configFor(dir), secrets: memorySecrets({ "backup-key": PROVIDER_KEY }), argv: [], env: {}, print: () => undefined, start: { facts, filesystem: ext4, meetingRecords: { steward, narrate } } as never, fetch: model.fetch });
+  try {
+    const c = l.controller;
+    const rob = await c.services.principals.authenticate(l.ownerToken);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    await PolicyService.withEpoch(c.storage, c.epoch, c.services.grants, {}).set(rob, { commandId: "pol1", scope: "installation", profile: "strict" } as never);
+    const staged = await c.services.configuration.stage(rob, { commandId: "cfg1", layer: "installation", set: { "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true } as never });
+    await c.services.configuration.apply(rob, { commandId: "cfg2", layer: "installation", expectedRevision: staged.revision });
+    assert.ok((await call(l.ownerToken, "agreed.limits.change", { set: { raiseMaxCostMicros: 500_000 } }, "lim1")).ok);
+    const project = (await call(l.ownerToken, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const t = (await call(l.ownerToken, "task.create", { projectId: project, title: "Bed" }, "t1")).result;
+    await BudgetService.withEpoch(c.storage, c.epoch, {}).open(rob, { commandId: "bo1", taskId: t.id, currency: "USD", costMicros: 1_000_000 });
+    const tok = async (name: string, grants: { action: string; project: string }[]) => { await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "agent", name, grants }); return (await c.services.principals.issueCredential(rob, `agent:${name}`)).token; };
+    const ann = await tok("ann", [{ action: "task.read", project }, { action: "meeting.attend", project }, { action: "budget.manage", project }]);
+    const bob = await tok("bob", [{ action: "task.read", project }, { action: "meeting.attend", project }]);
+    const urgent = await call(l.ownerToken, "meeting.call-urgent", { projectId: project, title: "Money", reason: "frost", roster: ["agent:ann", "agent:bob"] }, "mu1");
+    const rec = (await call(l.ownerToken, "meeting.record.open", { occurrenceId: urgent.result.id, chair: "agent:ann" }, "mo1")).result.id as string;
+    for (const [tk, id] of [[ann, "j1"], [bob, "j2"]] as const) await call(tk, "meeting.record.join", { recordId: rec }, id);
+    const moved = await call(ann, "meeting.record.move", { recordId: rec, text: "Raise it.", topic: "unrelated topic", changes: [{ kind: "budget.raise", agent: "agent:ann", target: { kind: "task", id: t.id }, expectedRevision: t.revision, patch: { costMicros: 500_000 }, summary: "raise" }] }, "mv1");
+    assert.ok((await call(l.ownerToken, "meeting.record.open-vote", { motionId: moved.result.id, expectedVersion: 1 }, "ov1")).ok);
+    for (const [tk, id] of [[ann, "b1"], [bob, "b2"]] as const) assert.ok((await call(tk, "meeting.record.cast-ballot", { motionId: moved.result.id, version: 1, value: "yes", reason: "agreed" }, id)).ok, id);
+    const closed = await call(l.ownerToken, "meeting.record.close-vote", { motionId: moved.result.id }, "cv1");
+    const applied = await call(l.ownerToken, "meeting.record.apply", { decisionId: closed.result.decisionId }, "ap1");
+    assert.equal(applied.result.applied, 1, JSON.stringify(applied));
+    assert.ok((await call(l.ownerToken, "meeting.record.finish", { recordId: rec }, "fin1")).ok);
+    assert.ok((await call(l.ownerToken, "meeting.record.summarize", { recordId: rec }, "sum1")).ok);
+    assert.equal((await call(l.ownerToken, "meeting.record.summary", { recordId: rec })).result.item.overview, "The host's own overview.");
+    assert.deepEqual(asked, ["steward:budget.raise", "narrator"]);
+    assert.equal(model.of("steward").length + model.of("narrator").length, 0, "the launcher's own helpers were not used");
+  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

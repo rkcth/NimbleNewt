@@ -1076,7 +1076,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(options.meetingRecords?.narrate === undefined ? {} : { narrate: options.meetingRecords.narrate }),
       ...(options.meetingRecords?.steward === undefined ? {} : {
         steward: options.meetingRecords.steward,
-        stewardEnabled: async (cls: "access-change" | "spend") => { const v = await configuration.installationValues(["meeting.decision.steward", "meeting.decision.stewardRights"]); return v["meeting.decision.steward"] === true && (cls === "spend" || v["meeting.decision.stewardRights"] === true); },
+        // The switch counts only while the steward can answer (card M02h, review): with no usable model route the vote puts the change to the owner at once, as with the switch off, instead of leaving it unasked until an apply
+        // finds the steward unable to answer. A check that fails counts as unable.
+        stewardEnabled: async (cls: "access-change" | "spend") => {
+          const v = await configuration.installationValues(["meeting.decision.steward", "meeting.decision.stewardRights"]);
+          if (v["meeting.decision.steward"] !== true || (cls !== "spend" && v["meeting.decision.stewardRights"] !== true)) return false;
+          const unavailable = options.meetingRecords?.stewardUnavailable;
+          return unavailable === undefined ? true : (await unavailable().catch(() => "unchecked")) === undefined;
+        },
       }),
       ...(options.meetingRecords?.autoReturnMinutes === undefined ? {} : { autoReturnMinutes: options.meetingRecords.autoReturnMinutes }),
     });
@@ -1267,7 +1274,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       const policy = PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) });
       const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter, settingNotes: async (key, value) => {
         if ((key !== "meeting.decision.steward" && key !== "meeting.decision.stewardRights") || value !== true) return [];
-        const why = options.meetingRecords?.steward === undefined ? "no steward agent is configured on this installation" : await options.meetingRecords.stewardUnavailable?.().catch(() => "its model could not be checked");
+        // The rights switch does nothing while the steward switch itself is off (card M02h, review): said, rather than accepted silently.
+        if (key === "meeting.decision.stewardRights" && (await configuration.installationValues(["meeting.decision.steward"]))["meeting.decision.steward"] !== true) return ["Heads up: this has no effect for now, because meeting.decision.steward is off; the steward may allow a grant of rights only while it is switched on as well."];
+        const why =options.meetingRecords?.steward === undefined ? "no steward agent is configured on this installation" : await options.meetingRecords.stewardUnavailable?.().catch(() => "its model could not be checked");
         return why === undefined ? [] : [`Heads up: this has no effect for now, because ${why}. Meeting decisions the approval policy leaves to you still come to you; the setting works once a model is available for the steward.`];
       } });
       policyEditsLive = policyEdits;

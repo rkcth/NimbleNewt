@@ -101,6 +101,18 @@ test("the steward agent a host provides decides a budget raise the strict policy
   mode.v = "allow";
   // The per-decision limit holds the steward too.
   await run({ "meeting.decision.maxPolicyWidening": 2, "meeting.decision.steward": true }, async (s) => assert.deepEqual([s.applied.applied, s.applied.pending], [2, 3]), "strict", extra);
+  // While the host says the steward cannot answer (no model route), the switch counts as off: the steward is not asked and the decision waits for the owner from the vote on; an availability check that fails counts the same (review).
+  for (const unavailable of [async () => "no model route", async () => { throw new Error("routing down"); }]) {
+    const before = asked.length;
+    await run({ "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true }, async (s) => {
+      assert.deepEqual([s.applied.applied, s.applied.waitingFor], [0, "owner"]);
+      assert.equal(await s.raised(), 0);
+      assert.equal(await s.needs(), 1);
+      assert.equal(asked.length, before, "a steward its host calls unavailable is not asked");
+    }, "strict", { meetingRecords: { steward, stewardUnavailable: unavailable } });
+  }
+  // Available again (the host's check answers undefined): the steward decides as before.
+  await run({ "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true }, async (s) => assert.equal(s.applied.applied, 5), "strict", { meetingRecords: { steward, stewardUnavailable: async () => undefined } });
 });
 
 test("the steward's allow never goes past the owner's ceiling on raises, and nobody but the owner can switch the steward on or change the cap and expiry (card M02h review)", async () => {
@@ -168,7 +180,7 @@ test("what the decision log suggests is read through the API and in chat's statu
 });
 
 test("switching the steward on when no steward can answer is still accepted but the proposal says plainly that it has no effect yet; with a working steward it says nothing of the kind (card M02h)", async () => {
-  const cases: { name: string; meetingRecords?: Record<string, unknown>; key: string; value: boolean; warns: RegExp | undefined }[] = [
+  const cases: { name: string; meetingRecords?: Record<string, unknown>; settings?: Record<string, unknown>; key: string; value: boolean; warns: RegExp | undefined }[] = [
     { name: "no steward configured", key: "meeting.decision.steward", value: true, warns: /no effect for now, because no steward agent is configured/ },
     { name: "rights switch, no steward", key: "meeting.decision.stewardRights", value: true, warns: /no effect for now/ },
     { name: "switching it off needs no warning", key: "meeting.decision.steward", value: false, warns: undefined },
@@ -177,6 +189,8 @@ test("switching the steward on when no steward can answer is still accepted but 
     { name: "a working steward", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => undefined }, key: "meeting.decision.steward", value: true, warns: undefined },
     { name: "a steward with no availability check", meetingRecords: { steward: async () => ({ verdict: "ask" }) }, key: "meeting.decision.steward", value: true, warns: undefined },
     { name: "another setting", key: "meeting.decision.holdExpiryDays", value: true, warns: undefined },
+    { name: "rights switch while the steward switch is off, with a working steward", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => undefined }, key: "meeting.decision.stewardRights", value: true, warns: /no effect for now, because meeting\.decision\.steward is off/ },
+    { name: "rights switch with the steward switch on and a working steward", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => undefined }, settings: { "meeting.decision.steward": true }, key: "meeting.decision.stewardRights", value: true, warns: undefined },
   ];
   for (const k of cases) {
     const d = mkdtempSync(join(tmpdir(), "nn-wsteward-"));
@@ -184,6 +198,7 @@ test("switching the steward on when no steward can answer is still accepted but 
     const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) }, ...(k.meetingRecords === undefined ? {} : { meetingRecords: k.meetingRecords }) } as never);
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      if (k.settings !== undefined) { const rob = await c.services.principals.authenticate(boot.token); const st = await c.services.configuration.stage(rob, { commandId: "pre1", layer: "installation", set: k.settings as never }); await c.services.configuration.apply(rob, { commandId: "pre2", layer: "installation", expectedRevision: st.revision }); }
       const text = `change ${k.key} please (${k.name})`;
       say[text] = [{ kind: "policy_edit", change: { type: "setting", layer: "installation", key: k.key, value: k.key === "meeting.decision.holdExpiryDays" ? 7 : k.value }, evidence: text, basis: "owner" }];
       const turn = await c.chat!.submit(boot.token, { messageId: "m1", text });
