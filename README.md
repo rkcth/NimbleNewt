@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **264 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **266 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -124,7 +124,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
-| Backup, updates and operations | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
+| Backup, updates and operations | `▓▓▓▓▓░░░░░░░` 44% | 8 of 18 |
 | Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
@@ -605,7 +605,7 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 </details>
 
 <details>
-<summary><strong>Backup, updates and operations</strong> — ▓▓▓▓░░░░░░░░ 6 of 18</summary>
+<summary><strong>Backup, updates and operations</strong> — ▓▓▓▓▓░░░░░░░ 8 of 18</summary>
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
@@ -617,8 +617,8 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 - [x] **K01f** · P34 · Finish backup: Pi state, maintenance barrier, owner restore, chat, non-blocking SQLite copy _(needs K01e)_
 - [ ] **K02** · P34 · Implement deterministic release staging and activation _(needs K01, F02, T02)_
 - [ ] **K06b** · P34 · Implement tiered retention (optional, after the first release) _(needs K06, C02)_
-- [ ] **K06c** · P34 · Delete stored model thinking at the cleanup deadline and drop chat thinking _(needs K06)_
-- [ ] **K06d** · P34 · Chat view of the retention status _(needs K06)_
+- [x] **K06c** · P34 · Delete stored model thinking at the cleanup deadline and drop chat thinking _(needs K06)_
+- [x] **K06d** · P34 · Chat view of the retention status _(needs K06)_
 - [ ] **K01d** · P35 · Implement backup scope tiers (optional, after the first release) _(needs K01c, K06b)_
 - [x] **K01g** · P35 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01f)_
 - [ ] **K03** · P35 · Implement migration recovery and rollback limits _(needs K02, G03)_
