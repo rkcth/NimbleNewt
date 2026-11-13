@@ -1270,6 +1270,12 @@ export class RemoteWorkerService {
     const done = await this.#changePlacement(id, async (current) => {
       const x = current?.body;
       if (x === undefined || x.hostId !== host.id || x.placement !== b!.placement || (x.state !== "offered" && x.state !== "accepted")) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+      // H07b review: the lease and the store claim are judged in the commit itself, not only before the policy read. An offer whose lease ran out meanwhile is no longer live, so another attempt of the agent may
+      // have taken its unused store claim on another host; taking it up then would run the agent on two hosts at once (and mark the other host's claim as used).
+      if (x.expiresAt !== undefined && x.expiresAt <= this.#runner.now()) throw new DomainError("fenced", `attempt ${id} has expired`);
+      const store = await this.#runner.get(STORE_KIND, x.agentId);
+      const storeBody = store?.body as unknown as StoreBody | undefined;
+      if (storeBody !== undefined && (storeBody.ownerHostId !== host.id || (storeBody.liveAttempt !== undefined && storeBody.liveAttempt !== id))) throw new DomainError("fenced", `the native Pi store of ${x.agentId} is no longer claimed for attempt ${id} on ${host.id}`);
       // An attempt accepted in an older session is taken up again only by the controller's decision (card H09b): `auto` is that decision made by setting (and it counts only while the setting is still `auto`), otherwise the owner's approval for this very session.
       const again = x.state === "accepted" && x.sessionId !== undefined && x.sessionId !== session.sessionId;
       if (again && mode !== "auto" && !(x.reaccept?.sessionId === session.sessionId && x.reaccept.state === "approved")) {
@@ -1282,9 +1288,7 @@ export class RemoteWorkerService {
       waiting = false;
       const { reaccept: _decided, ...rest } = x;
       // The first accept makes the agent's store real on this host: it no longer counts as an unused claim (card H07b).
-      const store = x.state === "offered" ? await this.#runner.get(STORE_KIND, x.agentId) : undefined;
-      const storeBody = store?.body as unknown as StoreBody | undefined;
-      const used: Change[] = store !== undefined && storeBody?.unused === true ? [{ type: "update", ref: { kind: STORE_KIND, id: x.agentId }, expectedRevision: store.revision, body: (({ unused: _u, ...r }) => r)(storeBody) as unknown as JsonObject }] : [];
+      const used: Change[] = x.state === "offered" && store !== undefined && storeBody?.unused === true ? [{ type: "update", ref: { kind: STORE_KIND, id: x.agentId }, expectedRevision: store.revision, body: (({ unused: _u, ...r }) => r)(storeBody) as unknown as JsonObject }] : [];
       return { next: { ...rest, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() }, ...(used.length === 0 ? {} : { extra: used }) };
     }, "accept", { actor: host.id });
     if (waiting) {

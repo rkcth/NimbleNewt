@@ -297,6 +297,97 @@ for (const backend of backends) {
     assert.deepEqual(await c.remote.storeOwner(c.dispatcherPrincipal, ann.id, "att-zzzzzzzzzzzzzzzzzzzz"), { hostId: b.id, busy: true }, "taken up, it pins the agent to b while that attempt lives");
   }, { placement: async () => ({ dataHosts: policy.hosts }) });
 
+  suite("forced race: an accept on A that began before the lease of its offer ran out is fenced once another attempt of the agent took the unused claim on B, so the agent never runs on two hosts at once (card H07b, review)", async (c) => {
+    policy.hosts = ["host:a", "host:b"]; policy.fail = false;
+    const a = await c.host("a"), b = await c.host("b");
+    a.worker.requirements = () => req; b.worker.requirements = () => req;
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file", "write-file"]));
+    c.prefer(a);
+    const first = await c.task("Order seeds", ann);
+    assert.ok((await c.tick()).started.includes(first.attemptId!));
+    const offers = await a.client.offers();
+    assert.equal(offers.length, 1);
+    // The offer carries a lease (as an attempt with a time limit has): one minute from now.
+    const ref = { kind: "remote-placement", id: first.attemptId! };
+    const found = (await c.storage.getAggregate(ref))!;
+    const expiresAt = new Date(Date.parse(c.clock.now()) + 60_000).toISOString();
+    await c.storage.applyOperation({ operationId: "op-lease", epoch: c.epoch, actor: "owner:rob", correlationId: "co-lease", at: c.clock.now(), changes: [{ type: "update", ref, expectedRevision: found.revision, body: { ...found.body, expiresAt } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    const store = async (): Promise<{ ownerHostId: string; unused?: boolean; liveAttempt?: string }> => (await c.storage.getAggregate({ kind: "remote-store", id: ann.id }))!.body as never;
+    let rival: string | undefined;
+    // A has passed the lease check of its accept and the policy is being read when the lease runs out; meanwhile another attempt of the agent is started, on B, and takes the claim nobody used.
+    race.armed = async () => {
+      race.armed = undefined;
+      c.clock.advance(61_000);
+      c.prefer(b);
+      await c.task("Water beans", ann);
+      // The dispatcher's stop of the first attempt does not reach the storage (it is told again later; here it never lands before the rival starts).
+      const service = c.remote as unknown as { end: unknown };
+      const realEnd = service.end;
+      service.end = async () => { throw new Error("injected: the stop did not reach the storage"); };
+      try {
+        for (let i = 0; i < 150 && rival === undefined; i++) { if (i > 0) await new Promise((r) => setTimeout(r, 20)); await c.tick(); const held = await store(); if (held.ownerHostId === b.id && held.liveAttempt !== undefined && held.liveAttempt !== first.attemptId) rival = held.liveAttempt; }
+      } finally { service.end = realEnd; }
+    };
+    await wireRefuses("fenced", () => a.client.attempt(first.attemptId!, offers[0]!.placement).accept());
+    assert.ok(rival !== undefined, "the rival was started meanwhile");
+    assert.equal((await c.remote.placement(c.owner, rival!))!.hostId, b.id);
+    assert.equal((await c.remote.placement(c.owner, first.attemptId!))!.state, "offered", "the late accept did not take the attempt up on A");
+    assert.deepEqual([(await store()).ownerHostId, (await store()).unused, (await store()).liveAttempt], [b.id, true, rival], "the claim is B's and still unused: A's accept did not mark it as taken up");
+  }, { placement: async () => { const hook = race.armed; if (hook !== undefined) await hook(); return { dataHosts: policy.hosts }; } });
+
+  test(`${backend.name}: forced race on the storage: a controller whose clock runs ahead places another attempt of the agent on B while A's accept is being written; the accept loses on the store's revision, is decided again and fenced by the claim, not by its own clock (card H07b, review)`, async () => {
+    const store = await backend.open();
+    // The barrier: the first time A's accept is about to be written, the step runs first (a second writer that commits in between).
+    const barrier: { attemptId?: string; step?: (() => Promise<void>) | undefined } = {};
+    const storage = new Proxy(store.storage, { get: (t, k) => {
+      const v = (t as unknown as Record<string | symbol, unknown>)[k];
+      if (k === "applyOperation") return async (...a: unknown[]) => {
+        const op = a[0] as { changes?: readonly { ref: { kind: string; id: string }; body?: { state?: string } }[] };
+        const step = barrier.step;
+        if (step !== undefined && op.changes?.some((ch) => ch.ref.kind === "remote-placement" && ch.ref.id === barrier.attemptId && ch.body?.state === "accepted") === true) { barrier.step = undefined; await step(); }
+        return (v as (...x: unknown[]) => unknown).apply(t, a);
+      };
+      return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+    } });
+    let w: Awaited<ReturnType<typeof buildRemoteWorld>> | undefined;
+    try {
+      policy.hosts = ["host:a", "host:b"]; policy.fail = false;
+      w = await buildRemoteWorld(storage, { placement: async () => ({ dataHosts: policy.hosts }) });
+      const world = w;
+      const a = await world.host("a"), b = await world.host("b");
+      a.worker.requirements = () => req; b.worker.requirements = () => req;
+      const ann = await world.agent("ann", workGrants(world.project, ["read-file", "write-file"]));
+      world.prefer(a);
+      const first = await world.task("Order seeds", ann);
+      assert.ok((await world.tick()).started.includes(first.attemptId!));
+      const offers = await a.client.offers();
+      assert.equal(offers.length, 1);
+      const ref = { kind: "remote-placement", id: first.attemptId! };
+      const found = (await storage.getAggregate(ref))!;
+      await storage.applyOperation({ operationId: "op-lease", epoch: world.epoch, actor: "owner:rob", correlationId: "co-lease", at: world.clock.now(), changes: [{ type: "update", ref, expectedRevision: found.revision, body: { ...found.body, expiresAt: new Date(Date.parse(world.clock.now()) + 60_000).toISOString() } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      const held = async (): Promise<{ ownerHostId: string; unused?: boolean; liveAttempt?: string }> => (await storage.getAggregate({ kind: "remote-store", id: ann.id }))!.body as never;
+      let rival: string | undefined;
+      barrier.attemptId = first.attemptId!;
+      barrier.step = async () => {
+        // The other writer's clock is ahead: to it the lease has run out (and its stop of the first attempt does not land); then the clocks agree again, so to A's controller the lease still runs.
+        world.clock.advance(61_000);
+        world.prefer(b);
+        await world.task("Water beans", ann);
+        const service = world.remote as unknown as { end: unknown };
+        const realEnd = service.end;
+        service.end = async () => { throw new Error("injected: the stop did not reach the storage"); };
+        try {
+          for (let i = 0; i < 150 && rival === undefined; i++) { if (i > 0) await new Promise((r) => setTimeout(r, 20)); await world.tick(); const h = await held(); if (h.ownerHostId === b.id && h.liveAttempt !== undefined && h.liveAttempt !== first.attemptId) rival = h.liveAttempt; }
+        } finally { service.end = realEnd; world.clock.advance(-61_000); }
+      };
+      await wireRefuses("fenced", () => a.client.attempt(first.attemptId!, offers[0]!.placement).accept());
+      assert.equal(barrier.step, undefined, "the accept reached the storage while the rival was placed");
+      assert.ok(rival !== undefined, "the rival was placed on B in between");
+      assert.equal((await world.remote.placement(world.owner, first.attemptId!))!.state, "offered", "not taken up on A");
+      assert.deepEqual([(await held()).ownerHostId, (await held()).unused, (await held()).liveAttempt], [b.id, true, rival]);
+    } finally { await w?.done(); await store.close(); }
+  });
+
   suite("a worker cannot mark its own result as withdrawn: the field is refused on the wire (card H07b)", async (c) => {
     const a = await c.host("a");
     const run = await c.started(a);
