@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
@@ -146,7 +146,11 @@ export class LocalWorkspaces {
     const building = inPlace ? join(root, ".making", `restore-${stamp}`) : join(root, "restored", call.projectId, `${call.taskId}-${stamp}`);
     await mkdir(building, { recursive: true });
     const target = { checkout: join(building, "checkout"), gitDir: join(building, "task.git") };
-    const abandon = async (): Promise<void> => { await rm(building, { recursive: true, force: true }); };
+    // A failed restore leaves nothing: the folder it made, and the `restored/<project>` and `restored` folders when this restore was what made them (an empty folder is removed; one with earlier restores stays).
+    const abandon = async (): Promise<void> => {
+      await rm(building, { recursive: true, force: true });
+      if (!inPlace) for (const dir of [join(root, "restored", call.projectId), join(root, "restored")]) await rmdir(dir).catch(() => undefined);
+    };
     if (!inPlace) return { ...target, ...(shared === undefined ? {} : { baseFrom: shared }), abandon, finish: async () => `into a new folder, ${building}, that nothing uses (the task's own folder is still here and was not touched)` };
     return {
       ...target, ...(shared === undefined ? {} : { baseFrom: shared }), abandon,

@@ -4,7 +4,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ProjectService } from "../domain/service.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
-import { WIP_GRANTEE, WIP_GRANT_ACTION, WipBackupService, wipBackupRouter, wipRefOf, wipTasksSource, type WipBackupCall, type WipBackupOutcome, type WipBackupPort, type WipRestoreCall, type WipRestoreOutcome } from "./index.js";
+import { WIP_GRANTEE, WIP_GRANT_ACTION, WipBackupService, wipBackupRouter, wipRefOf, wipTasksSource, type WipBackupCall, type WipBackupOutcome, type WipBackupPort, type WipGrants, type WipRestoreCall, type WipRestoreOutcome } from "./index.js";
 
 after(stopServer);
 
@@ -23,7 +23,7 @@ const refuses = async (code: string, run: () => Promise<unknown>): Promise<Domai
 };
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { svc: WipBackupService; grants: GrantService; owner: Principal; agent: Principal; project: string; clock: { ms: number } }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { svc: WipBackupService; grants: GrantService; owner: Principal; agent: Principal; project: string; clock: { ms: number }; restarted: () => WipBackupService; serviceWith: (grants: WipGrants) => WipBackupService }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -37,7 +37,10 @@ for (const backend of backends) {
         const project = (await projects.createProject({ commandId: cid("pa"), actor: "owner:rob", name: "Garden" })).id;
         const grants = GrantService.withEpoch(world.storage, projects.epoch, options);
         const svc = WipBackupService.withEpoch(world.storage, projects.epoch, { ...options, grants, ensureGrantee: async () => { if ((await principals.get(WIP_GRANTEE)) === undefined) await principals.provisionService("dispatcher"); } });
-        await body({ svc, grants, owner, agent, project, clock });
+        // Another service over the same storage: a second controller, or this one after a restart.
+        const restarted = (): WipBackupService => WipBackupService.withEpoch(world.storage, projects.epoch, { ...options, grants });
+        const serviceWith = (other: WipGrants): WipBackupService => WipBackupService.withEpoch(world.storage, projects.epoch, { ...options, grants: other });
+        await body({ svc, grants, owner, agent, project, clock, restarted, serviceWith });
       } finally { await world.close(); }
     });
 
@@ -193,6 +196,84 @@ for (const backend of backends) {
     assert.equal(replayed.message, refused.message);
     assert.equal(h.restores.length, 3, "the failed command did not ask the host again");
     await refuses("unavailable", () => restore(cid("r4"), "task-one", { restore: async () => { throw new Error("disk full"); } }));
+  });
+
+  suite("a grant that does not name this remote or this project covers no push, even when the setting refers to it", async ({ svc, grants, owner, project, serviceWith }) => {
+    await svc.set(owner, { commandId: cid("on"), projectId: project, enabled: true, remote: REMOTE });
+    assert.deepEqual(await svc.authorize(project, REMOTE, wipRefOf(project, "task-one")), { allowed: true });
+    // The same grant record read back with other terms: a record that no longer matches the setting it backs.
+    const reading = (change: (g: Record<string, unknown>) => Record<string, unknown>): WipBackupService => serviceWith({
+      grant: (o, c) => grants.grant(o, c), revoke: (o, c) => grants.revoke(o, c),
+      getGrant: async (id) => { const g = await grants.getGrant(id); return g === undefined ? undefined : change(g as unknown as Record<string, unknown>) as never; },
+    });
+    const cases: [string, (g: Record<string, unknown>) => Record<string, unknown>][] = [
+      ["another remote", (g) => ({ ...g, terms: { ...(g["terms"] as object), conditions: ["remote: https://elsewhere.example.com/x.git"] } })],
+      ["another project", (g) => ({ ...g, project: "proj-aaaaaaaaaaaaaaaaaaaa" })],
+      ["another grantee", (g) => ({ ...g, grantee: "agent:ann" })],
+      ["another action", (g) => ({ ...g, action: "recovery.other" })],
+    ];
+    for (const [label, change] of cases) {
+      const r = await reading(change).authorize(project, REMOTE, wipRefOf(project, "task-one"));
+      assert.equal(r.allowed, false, label);
+      assert.match((r as { reason: string }).reason, /does not name this remote and project/, label);
+    }
+    assert.deepEqual(await reading((g) => g).authorize(project, REMOTE, wipRefOf(project, "task-one")), { allowed: true }, "the unchanged record still covers it");
+  });
+
+  suite("a restore command is claimed before the host is asked: an overlapping ask with the same ID, or one after a restart that cut the first short, never restores a second time", async ({ svc, owner, project, clock, restarted }) => {
+    const h = host(() => good(COMMIT_A));
+    await svc.set(owner, { commandId: cid("on"), projectId: project, enabled: true, remote: REMOTE });
+    clock.ms += 16 * 60_000;
+    await svc.sweep(owner, { port: h.port, tasks: tasks("task-one") });
+    // The host answers only when the test lets it, so the second ask arrives while the first is still restoring.
+    const asked: WipRestoreCall[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    // Only the first call waits (a second one, which must not happen, answers at once so the test fails rather than hangs).
+    const slow: Pick<WipBackupPort, "restore"> = { restore: async (call) => { asked.push(call); if (asked.length === 1) await held; return { ok: true, summary: "Restored 3 file(s)", detail: { where: "into a new folder", commitId: COMMIT_A, files: 3, baseFound: true } }; } };
+    const first = svc.restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow);
+    try {
+      for (let i = 0; i < 2000 && asked.length === 0; i++) await new Promise((r) => setImmediate(r));
+      assert.equal(asked.length, 1, "the first ask reached the host");
+      const second = await refuses("unavailable", () => svc.restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow));
+      assert.match(second.message, /already under way/);
+      const other = await refuses("unavailable", () => restarted().restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow));
+      assert.match(other.message, /already under way/, "a second controller sees the claim too");
+    } finally { release(); }
+    assert.equal((await first).replayed, false);
+    assert.equal((await svc.restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow)).replayed, true);
+    assert.equal(asked.length, 1, "the host was asked once for the command");
+    // A controller that stopped while the host was restoring (the host never answered): after the restart the same command is refused in words, and the host is not asked again.
+    const never: Pick<WipBackupPort, "restore"> = { restore: async (call) => { asked.push(call); return new Promise<never>(() => undefined); } };
+    void svc.restore(owner, { commandId: "cut-short", projectId: project, taskId: "task-one" }, never);
+    for (let i = 0; i < 2000 && asked.length === 1; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(asked.length, 2);
+    const after = await refuses("unavailable", () => restarted().restore(owner, { commandId: "cut-short", projectId: project, taskId: "task-one" }, h.port));
+    assert.match(after.message, /interrupted by a restart/);
+    assert.equal(h.restores.length, 0, "the restarted controller did not ask the host again");
+    // A new command (the owner asks again) does restore.
+    assert.equal((await restarted().restore(owner, { commandId: "ask-again", projectId: project, taskId: "task-one" }, h.port)).replayed, false);
+    assert.equal(h.restores.length, 1);
+  });
+
+  suite("a task on a remote worker host is refused through the router at every sweep with the plain reason, recorded as a failure and reported to the owner once, and nothing reaches this computer's host", async ({ svc, owner, project, clock }) => {
+    const local = host(() => good(COMMIT_A));
+    const router = wipBackupRouter({ localHostId: "host:local", local: local.port, placed: async () => "host:far" });
+    await svc.set(owner, { commandId: cid("on"), projectId: project, enabled: true, remote: REMOTE });
+    const reports: { kind: string; text: string }[] = [];
+    const far = async () => [{ taskId: "task-far", developer: "agent:ann", executor: "host:far" }];
+    for (let i = 0; i < 3; i++) {
+      clock.ms += 16 * 60_000;
+      const r = await svc.sweep(owner, { port: router, tasks: far, report: async (x) => { reports.push(x); } });
+      assert.equal(r.failed, 1, `sweep ${i + 1} counted the refusal as a failure`);
+    }
+    assert.equal(local.calls.length, 0, "nothing reached this computer's host");
+    assert.equal(reports.length, 1, "the owner is told once, not at every sweep");
+    assert.match(reports[0]!.text, /task-far failed: the task works on host:far, a remote worker host, and the worker protocol cannot carry a work-in-progress backup or restore to a remote host yet/);
+    const state = (await svc.get(owner, project)).tasks.find((t) => t.taskId === "task-far");
+    assert.equal(state?.lastSuccess, undefined, "a refusal is never a backup");
+    assert.equal(state?.consecutiveFailures, 3);
+    assert.match(state?.lastFailure?.reason ?? "", /a remote worker host/);
   });
 
   test(`${backend.name}: the task source offers the open tasks some host took (with the owner's agent and that host), and the router sends a backup only to this computer's host and says why for a remote one`, async () => {

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -62,7 +62,7 @@ export interface WipSettingBody {
 }
 
 /** The answer to one restore command, kept so the same command ID never restores twice. */
-export interface WipRestoreRecord { readonly projectId: string; readonly taskId: string; readonly ok: boolean; readonly at: string; readonly reason?: string; readonly summary?: string; readonly where?: string; readonly commitId?: string; readonly files?: number; readonly baseFound?: boolean }
+export interface WipRestoreRecord { readonly projectId: string; readonly taskId: string; readonly ok: boolean; readonly at: string; /** Set while the host is being asked: the command was claimed and its outcome is not known yet (or the controller stopped before it was). */ readonly pending?: boolean; readonly reason?: string; readonly summary?: string; readonly where?: string; readonly commitId?: string; readonly files?: number; readonly baseFound?: boolean }
 export interface WipSuccess { readonly commitId: string; readonly tree: string; readonly at: string; readonly files: number; readonly unchanged: boolean }
 export interface WipBlocked { readonly path: string; readonly reason: string }
 export interface WipStateBody {
@@ -295,12 +295,16 @@ export class WipBackupService {
     const projectId = this.#project(command.projectId);
     if (typeof command.taskId !== "string" || !NAME.test(command.taskId)) invalid("taskId", "is not a task ID");
     const recordId = `wrs-${createHash("sha256").update(scopedCommandId(owner.id, command.commandId)).digest("hex").slice(0, 32)}`;
-    const earlier = (await this.#runner.get(RESTORE, recordId))?.body as unknown as WipRestoreRecord | undefined;
-    if (earlier !== undefined) {
+    const answerEarlier = (earlier: WipRestoreRecord): { restored: true; summary: string; where: string; commitId: string; files: number; baseFound: boolean; replayed: boolean } => {
       if (earlier.projectId !== projectId || earlier.taskId !== command.taskId) throw new DomainError("command_conflict", "this command ID was already used for another restore");
+      // A claimed restore whose outcome is not recorded is never started again under the same command: it is still running, or the controller stopped while the host was restoring (whatever it made is on the host).
+      if (earlier.pending === true) throw new DomainError("unavailable", "a restore under this command is already under way, or was interrupted by a restart before it reported back; it is not started a second time (ask again to try once more)");
       if (!earlier.ok) throw new DomainError("unavailable", earlier.reason ?? "the restore did not succeed");
       return { restored: true, summary: earlier.summary ?? "", where: earlier.where ?? "", commitId: earlier.commitId ?? "", files: earlier.files ?? 0, baseFound: earlier.baseFound === true, replayed: true };
-    }
+    };
+    const recorded = async (): Promise<WipRestoreRecord | undefined> => (await this.#runner.get(RESTORE, recordId))?.body as unknown as WipRestoreRecord | undefined;
+    const earlier = await recorded();
+    if (earlier !== undefined) return answerEarlier(earlier);
     const setting = (await this.#runner.get(SETTING, projectId))?.body as unknown as WipSettingBody | undefined;
     const state = (await this.#runner.get(STATE, command.taskId))?.body as unknown as WipStateBody | undefined;
     const fail = async (reason: string, code: "not_found" | "unavailable" = "unavailable"): Promise<never> => {
@@ -309,6 +313,9 @@ export class WipBackupService {
     };
     if (setting === undefined || state === undefined || state.projectId !== projectId || state.lastSuccess === undefined) return fail("there is no confirmed work-in-progress backup of this task to restore (a push that failed is never a backup)", "not_found");
     if (port?.restore === undefined) return fail("no host is set up to restore a backup here");
+    // The command is claimed BEFORE the host is asked: the record is created once, so a second ask with the same ID (at the same moment, from another controller, or after a restart) finds it and never restores again.
+    try { await this.#claimRestore(recordId, owner, { projectId, taskId: command.taskId, ok: false, pending: true, at: this.#runner.now() }); }
+    catch (error) { const now = await recorded(); if (now !== undefined) return answerEarlier(now); throw error; }
     let outcome: WipRestoreOutcome;
     try { outcome = await port.restore({ projectId, taskId: command.taskId, remote: state.remote, ref: state.ref, expectCommit: state.lastSuccess.commitId, ...(setting.credential === undefined ? {} : { credential: setting.credential }) }); } catch (error) { outcome = { ok: false, reason: `the host could not restore: ${plainText((error as Error)?.message, 160)}` }; }
     if (!outcome.ok) return fail(outcome.reason);
@@ -316,6 +323,18 @@ export class WipBackupService {
     const body: WipRestoreRecord = { projectId, taskId: command.taskId, ok: true, at: this.#runner.now(), summary: plainText(outcome.summary, 300), where: plainText(d["where"], 300), commitId: typeof d["commitId"] === "string" && /^[0-9a-f]{40}$/.test(d["commitId"]) ? d["commitId"] : state.lastSuccess.commitId, files: typeof d["files"] === "number" ? d["files"] : 0, baseFound: d["baseFound"] === true };
     await this.#recordRestore(recordId, owner, body, command.taskId);
     return { restored: true, summary: body.summary!, where: body.where!, commitId: body.commitId!, files: body.files!, baseFound: body.baseFound === true, replayed: false };
+  }
+
+  /** Creates the restore record of a command; fails when one exists (another ask with the same command ID claimed it first). The command ID of this write is unique per ask, so a duplicate is never answered as if it were this one. */
+  async #claimRestore(id: string, owner: Principal, body: WipRestoreRecord): Promise<void> {
+    await this.#runner.command("wip-backup.restore-claim", { commandId: `wip-restore-claim-${id}-${randomBytes(8).toString("hex")}`, actor: owner.id }, async () => ({
+      payload: { id, taskId: body.taskId },
+      build: async () => {
+        const ref = { kind: RESTORE, id };
+        if ((await this.#runner.get(RESTORE, id)) !== undefined) throw new DomainError("command_conflict", "this restore command was already claimed");
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { projectId: body.projectId, taskId: body.taskId, claimed: true } };
+      },
+    }));
   }
 
   async #recordRestore(id: string, owner: Principal, body: WipRestoreRecord, taskId: string): Promise<void> {

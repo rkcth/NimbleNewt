@@ -122,8 +122,21 @@ test("a restore through the local layout: a lost task folder comes back as the t
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
     const commit = detail(pushed)["commitId"] as string;
 
+    // A refused restore beside a live folder leaves nothing behind, not even the empty `restored` folders it made.
+    const refusedFirst = await host.restore({ ...base, expectCommit: "e".repeat(40) });
+    assert.equal(refusedFirst.ok, false);
+    assert.equal(existsSync(join(root, "restored")), false, "a refused restore leaves no restored folder");
+    // Names are the host's own checks: a path, a parent step, a Windows device name or the host's own folder name is refused before anything is made.
+    const before = await readdir(root);
+    for (const [taskId, projectId] of [["..", "prj-one"], ["CON", "prj-one"], ["tsk-one", "restored"], ["tsk-one", ".."], ["a/b", "prj-one"], ["tsk-one", "prj-one/../x"]] as const) {
+      const r = await host.restore({ ...base, taskId, projectId, expectCommit: commit });
+      assert.equal(r.ok, false, `${projectId}/${taskId}`);
+      assert.match((r as { reason: string }).reason, /not a plain name/, `${projectId}/${taskId}`);
+    }
+    assert.deepEqual(await readdir(root), before, "a refused name made nothing");
+
     // A folder still there is never written over: the restore goes to a new folder nothing uses.
-    const beside = await host.restore({ ...base, expectCommit: commit });
+    const beside =await host.restore({ ...base, expectCommit: commit });
     assert.equal(beside.ok, true, JSON.stringify(beside));
     const where = detail(beside)["where"] as string;
     assert.match(where, /new folder/);
