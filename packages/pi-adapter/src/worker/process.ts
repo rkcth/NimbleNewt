@@ -13,6 +13,7 @@ import { PI_AGENT_LAYOUT, sharedSystemText, volatileContext } from "../prompt-la
 import { processClock } from "./clock.js";
 import { classifyTurnEnd } from "./end-kind.js";
 import { nudgeCallId, nudgeText } from "./nudge.js";
+import { startProxy, type Proxy } from "./proxy.js";
 import { relayFetch } from "./relay-fetch.js";
 import { pendingThinking, type ThinkingMark } from "./thinking-report.js";
 
@@ -196,6 +197,8 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   let adapter: PiAdapter | undefined;
   let bridge: Bridge | undefined;
   let relay: ReturnType<typeof relayFetch> | undefined;
+  /** The proxy endpoint of the sandbox (card H12i), served only when the host started the process with a network route. */
+  let proxy: Proxy | undefined;
   let started: ChannelStart | undefined;
   let nextBridge = 0;
   let toolSchemaChars = 0;
@@ -222,6 +225,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
   const authorityLost = async (reason: LossReason): Promise<void> => {
     relay?.refuse(`the lease ended (${reason})`);
     relay?.closeAll(`the lease ended (${reason})`);
+    proxy?.close(`the lease ended (${reason})`);
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: `the lease ended (${reason})` });
     bridgeWaiting.clear();
     endCheck();
@@ -269,6 +273,11 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       hooks.lease?.onRenew?.(renewNow);
     }
     relay = relayFetch(start.relayBase, send);
+    if (start.network !== undefined) {
+      // The route out (card H12i): a proxy on this process's own loopback. A port that cannot be taken fails the start, so an attempt never runs believing it has a route it does not have.
+      proxy = startProxy({ port: start.network.proxyPort, send });
+      await proxy.listening;
+    }
     // Whatever Pi's SDK uses to reach the model goes through the relay: nothing in the process can reach anything else.
     globalThis.fetch = relay.fetch;
     const models = await (hooks.models ?? ((s) => relayModels(s)))(start, relay.fetch);
@@ -377,6 +386,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
 
   const handle = async (message: ToChild): Promise<void> => {
     if (relay?.accept(message) === true) return;
+    if (proxy?.accept(message) === true) return;
     switch (message.t) {
       case "start":
         if (message.v !== WORKER_CHANNEL_VERSION) return fault(`the channel speaks version ${WORKER_CHANNEL_VERSION}, not ${message.v}`);
@@ -459,6 +469,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     stopRenewing?.();
     endCheck();
     relay?.closeAll("the channel closed");
+    proxy?.close("the channel closed");
     for (const resolve of bridgeWaiting.values()) resolve({ ok: false, code: "unavailable", message: "the channel closed" });
     bridgeWaiting.clear();
     await adapter?.close().catch(() => undefined);

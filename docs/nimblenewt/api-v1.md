@@ -348,6 +348,31 @@ Result: `{ item: { revision, scratch, default, effective: { scratch }, damaged? 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `network.grants`
+
+A task's network grants and requests: destination, state (`requested`, `granted`, `denied`, `revoked`), who approved it and how (the owner, or the approval policy through a standing approval grant), when it ended. For the owner and for those who work or read the task. An empty list is the default: no access.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.connections`
+
+The connections a task's sandbox or web tool asked for, oldest first, allowed and refused: destination, the address it went to, outcome, why it was refused, bytes each way, who ended it. For the owner and for those who work or read the task.
+
+Arguments:
+
+- `taskId`: the task
+- `limit` (optional): at most this many (default and most 200)
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `dispatch.limits.get`
 
 The dispatcher's two limits (owner only): the owner's entries (on or off, with the kept figure), the start-up options, and what applies now. Both are off (no limit) unless set.
@@ -2840,6 +2865,56 @@ Arguments:
 - `expectedRevision` (optional): the revision of the setting you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.grant`
+
+Gives a task network access to one destination, or asks for it. A task's sandbox has no network; its only way out is the controller's relay, which connects only for a destination the task holds a live grant for. The default is none. A grant names the task and ONE destination written exactly (`host` a name or an address, `port` 1 to 65535; no wildcard, range, scheme or path). When the owner calls this the grant is made at once. When the task's own credential calls it, it is a request: the approval policy judges it as opening new outside access (tool `open-network`, class access change), and only a standing approval grant that names it lets the policy allow it; otherwise it waits as `requested` for the owner (`network.decide`). A grant ends with its task or when it is revoked. A destination that is a private, loopback or local address (a service on this machine or the owner's network) needs `allowPrivate: true`, and only the owner makes that. `credential` (owner only) names a header and the NAME of a secret that the controller's web tool, never the relay, adds when it fetches from this destination. Addresses nobody can reach (unspecified, broadcast, multicast, link-local such as 169.254.169.254) are refused whoever asks.
+
+Arguments:
+
+- `taskId`: the task
+- `host`: the destination's host name or address
+- `port`: the destination's port
+- `allowPrivate` (optional): true to allow a private, loopback or local address (owner only)
+- `reason` (optional): why it is wanted (at most 300 characters)
+- `credential` (optional): `{ header, ref }`: the header the web tool adds and the NAME of the secret (owner only)
+
+Result: `{ id, state, revision }`: `state` is `granted` or `requested`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.decide`
+
+The owner approves or refuses a task's request for network access (`network.grant` by the task). Approving makes the grant; it applies at the task's next connection, with nothing restarted.
+
+Arguments:
+
+- `grantId` (optional): the request's ID (`ngr-...`)
+- `taskId` (optional): or the task (with host and port)
+- `host` (optional): the destination's host
+- `port` (optional): the destination's port
+- `verdict`: `approve` or `deny`
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ state, revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.revoke`
+
+The owner takes network access away: one grant or request by `grantId` or by `taskId` with `host` and `port`, or every grant of a task by `taskId` alone. Connections open under it end at once and new ones are refused; nothing is restarted. Revoking what is already over changes nothing.
+
+Arguments:
+
+- `grantId` (optional): one grant or request
+- `taskId` (optional): every grant of this task (or, with host and port, one destination)
+- `host` (optional): the destination's host
+- `port` (optional): the destination's port
+- `expectedRevision` (optional): the revision you read (with one grant)
+
+Result: `{ revoked }`: how many ended.
 
 Completion: finished when accepted (`completed: true`).
 

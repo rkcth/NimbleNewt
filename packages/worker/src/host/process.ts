@@ -11,11 +11,27 @@ import type { RunProcess } from "../sandbox/proc.js";
 export interface RelayRequest { readonly url: string; readonly method: string; readonly headers: HeaderList; readonly body: Uint8Array | undefined; readonly signal: AbortSignal }
 export interface RelayResponse { readonly status: number; readonly statusText: string; readonly headers: HeaderList; readonly body: AsyncIterable<Uint8Array> | null }
 
+/** One open connection of a task through the host's network relay (card H12i). The worker package knows only this shape: the controller's `NetworkRelay` fits it. */
+export interface NetworkPipe {
+  write(chunk: Uint8Array): Promise<void>;
+  /** The process has no more to send (the destination may still answer). */
+  end(): void;
+  close(): void;
+}
+/** The route out of the sandbox for one attempt (card H12i): the controller's network relay bound to the attempt. A refusal is thrown; its message goes to the process as the reason. */
+export interface NetworkPort {
+  open(target: { readonly host: string; readonly port: number }, events: { data(chunk: Uint8Array): Promise<void> | void; closed(why: string): void }): Promise<NetworkPipe>;
+  /** Ends every connection of the attempt. */
+  closeAll(why?: string): void;
+}
+
 export interface ProcessHandlers {
   /** Answers one bridge request of the process (the controller's execution service, bound to the attempt). */
   bridge(token: string, request: { readonly op: string; readonly callId: string; readonly args?: { readonly [key: string]: unknown } }): Promise<BridgeReplyMessage>;
   /** Makes one model call for the process. It may refuse by throwing; the message goes to the process as the failure of its call. */
   relay(request: RelayRequest): Promise<RelayResponse>;
+  /** The connections the process asks for through its proxy (card H12i). Absent: every one is refused, as the process has no route out. */
+  network?: NetworkPort;
   /**
    * Renews the attempt's lease for the process (card H08b): the controller's answer as a duration, or `fenced` when the attempt is no longer the process's. A throw is "could not be asked": the process gets no answer and its lease runs on (and may end).
    * Absent: renewals are not answered.
@@ -28,7 +44,7 @@ export interface ProcessHandlers {
 }
 
 /** `killWaitMs`: how long `close` waits after the kill for the process to end before it gives up and says so (card L02d: a process the OS cannot end is reported, never waited on for ever). */
-export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, compactedInFlight: 2, compactions: 1000, thinkingInFlight: 2, thinkingMessages: 2000, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
+export const PROCESS_LIMITS = { bridgeInFlight: 16, fetchInFlight: 8, renewInFlight: 4, compactedInFlight: 2, compactions: 1000, thinkingInFlight: 2, thinkingMessages: 2000, netInFlight: 16, netChunkBytes: 256 * 1024, pendingWriteBytes: 4 * 1024 * 1024, refusals: 64, chunkBytes: 256 * 1024, readyMs: 60_000, closeGraceMs: 3000, killWaitMs: 5000 } as const;
 
 /** `close` gave up: the process was asked to end, then killed, and it is still there (card L02d). */
 export class ProcessNotEnded extends Error {}
@@ -47,6 +63,9 @@ export class WorkerProcess {
   #resultWaiter: Waiter<Result> | undefined;
   readonly #asked = new Map<number, Waiter<FromChild>>();
   readonly #fetches = new Map<number, AbortController>();
+  /** The connections the process has open through the network relay (card H12i), and the waiters for its acknowledgement of the last piece sent to it. */
+  readonly #nets = new Map<number, NetworkPipe>();
+  readonly #netAcks = new Map<number, () => void>();
   #bridges = 0;
   /** Lease renewals the host is asking the controller about now (card H08b): each is a write at the controller, so a process may not have more than a few waiting. */
   #renewals = 0;
@@ -102,6 +121,16 @@ export class WorkerProcess {
     this.#asked.clear();
     for (const c of this.#fetches.values()) c.abort();
     this.#fetches.clear();
+    this.#closeNets("the worker process ended");
+  }
+
+  /** Ends every connection the process has through the network relay (it ended, was stopped or lost its lease), and lets whatever waits for its acknowledgements go. */
+  #closeNets(why: string): void {
+    for (const pipe of [...this.#nets.values()]) { try { pipe.close(); } catch { /* already gone */ } }
+    this.#nets.clear();
+    for (const release of [...this.#netAcks.values()]) release();
+    this.#netAcks.clear();
+    try { this.#handlers.network?.closeAll(why); } catch { /* the relay is gone */ }
   }
 
   /** Kills the process now (a protocol breach, a stop). */
@@ -186,7 +215,55 @@ export class WorkerProcess {
       case "bridge": void this.#bridge(m); return;
       case "fetch": void this.#fetch(m); return;
       case "fetch.abort": this.#fetches.get(m.id)?.abort(); return;
+      case "net.open": void this.#netOpen(m); return;
+      case "net.data": void this.#netWrite(m.id, m.data); return;
+      case "net.end": this.#nets.get(m.id)?.end(); return;
+      case "net.close": { const pipe = this.#nets.get(m.id); this.#nets.delete(m.id); this.#netAcks.get(m.id)?.(); this.#netAcks.delete(m.id); try { pipe?.close(); } catch { /* already gone */ } return; }
+      case "net.ack": { const release = this.#netAcks.get(m.id); this.#netAcks.delete(m.id); release?.(); return; }
     }
+  }
+
+  /** The process asks for a connection (card H12i): the network relay decides; a refusal goes back as its reason. */
+  async #netOpen(m: Extract<FromChild, { t: "net.open" }>): Promise<void> {
+    const port = this.#handlers.network;
+    if (this.#nets.size >= PROCESS_LIMITS.netInFlight || this.#nets.has(m.id)) this.#refuse();
+    if (port === undefined) return void (await this.#send({ t: "net.refused", id: m.id, message: "this attempt has no route out of the sandbox" }));
+    if (this.#nets.size >= PROCESS_LIMITS.netInFlight || this.#nets.has(m.id)) return void (await this.#send({ t: "net.refused", id: m.id, message: "too many connections are open" }));
+    // Held while the relay decides, so the same id cannot be opened twice and the limit counts it.
+    const placeholder: NetworkPipe = { write: async () => undefined, end: () => undefined, close: () => undefined };
+    this.#nets.set(m.id, placeholder);
+    let pipe: NetworkPipe;
+    try {
+      pipe = await port.open({ host: m.host, port: m.port }, {
+        data: async (chunk) => {
+          if (this.#nets.get(m.id) === undefined) return;
+          for (let at = 0; at < chunk.length; at += PROCESS_LIMITS.netChunkBytes) {
+            const acked = new Promise<void>((resolve) => { this.#netAcks.set(m.id, resolve); });
+            await this.#send({ t: "net.data", id: m.id, data: Buffer.from(chunk.subarray(at, at + PROCESS_LIMITS.netChunkBytes)).toString("base64") });
+            await acked;
+          }
+        },
+        closed: (why) => {
+          const had = this.#nets.delete(m.id);
+          this.#netAcks.get(m.id)?.(); this.#netAcks.delete(m.id);
+          if (had) void this.#send({ t: "net.close", id: m.id, message: safeText(why, 500) });
+        },
+      });
+    } catch (error) {
+      this.#nets.delete(m.id);
+      return void (await this.#send({ t: "net.refused", id: m.id, message: message(error) }));
+    }
+    if (this.#nets.get(m.id) !== placeholder || this.#endedWith !== undefined) { try { pipe.close(); } catch { /* gone */ } this.#nets.delete(m.id); return; }
+    this.#nets.set(m.id, pipe);
+    await this.#send({ t: "net.opened", id: m.id });
+  }
+
+  /** Bytes the process sent for a connection: written to the destination, then the process is told it may send more. */
+  async #netWrite(id: number, data: string): Promise<void> {
+    const pipe = this.#nets.get(id);
+    if (pipe === undefined) return;
+    try { await pipe.write(new Uint8Array(Buffer.from(data, "base64"))); } catch { this.#nets.get(id)?.close(); return; }
+    if (this.#nets.has(id)) await this.#send({ t: "net.ack", id });
   }
 
   /** The process lost its authority: if it has not ended when the grace is over, the host ends it (the process's own termination is the first guard; this one holds when its event loop is stuck). */
