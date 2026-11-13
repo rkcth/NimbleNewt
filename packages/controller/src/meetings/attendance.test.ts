@@ -54,7 +54,7 @@ for (const backend of backends) {
     occ(occurrenceId: string): Promise<OccurrenceBody>;
     gateIntent(taskId: string): Promise<string>;
     agentGate(agentId: string): Promise<string>;
-    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink }): AttendanceService;
+    make(extra?: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink; carriesOn?: (taskId: string) => Promise<boolean> }): AttendanceService;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -103,11 +103,12 @@ for (const backend of backends) {
         const notices: Notice[] = [];
         const failNotice = { next: false };
         const windows: { key: string; phase: string; taskId: string }[] = [];
-        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink } = {}): AttendanceService =>
+        const make = (extra: { assignments?: AssignmentService; pauses?: PauseService; charge?: AttendanceDeps["charge"]; onChargeError?: (e: unknown) => void; leadMinutes?: AttendanceDeps["leadMinutes"]; notices?: NoticeSink; carriesOn?: (taskId: string) => Promise<boolean> } = {}): AttendanceService =>
           AttendanceService.withEpoch(world.storage, epoch, { meetings, pauses: extra.pauses ?? pauses, projects, assignments: extra.assignments ?? assignments, agents, histories, ...(extra.charge === undefined ? {} : { charge: extra.charge }), ...(extra.onChargeError === undefined ? {} : { onChargeError: extra.onChargeError }), ...(extra.leadMinutes === undefined ? {} : { leadMinutes: extra.leadMinutes }) }, {
             availability: pauses.availability, ...options,
             wake: { wake: async (w) => { wakes.push(w); } },
             window: { notify: async (x) => { windows.push({ key: x.key, phase: x.phase, taskId: x.taskId }); } },
+            ...(extra.carriesOn === undefined ? {} : { carriesOn: extra.carriesOn }),
             notices: extra.notices ?? { notify: async (x) => { if (failNotice.next) { failNotice.next = false; throw new Error("the delivery died"); } notices.push({ ...x }); } },
           });
         const attendance = make();
@@ -227,7 +228,7 @@ for (const backend of backends) {
     await c.room(id);
     const before = (await c.assignments.getAssignment(t1))!;
     const preparing = await c.attendance.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1] });
-    assert.deepEqual(preparing, { state: "preparing", waitingOn: [{ taskId: t1, observed: "pausing" }] });
+    assert.deepEqual(preparing, { state: "preparing", waitingOn: [{ taskId: t1, observed: "pausing" }], carriedOn: [] });
     // Not at the boundary yet: joining changes nothing and says what it waits on.
     const early = await c.attendance.join(c.owner, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
     assert.deepEqual([early.joined, early.state, early.waitingOn], [false, "preparing", [{ taskId: t1, observed: "pausing" }]]);
@@ -292,6 +293,58 @@ for (const backend of backends) {
     await c.attendance.returnToWork(c.owner, { commandId: cid("rt"), occurrenceId: id, agent: c.pA });
     const ends = c.windows.filter((w) => w.phase === "ends");
     assert.ok(ends.length >= 1 && ends.every((e) => e.key === ends[0]!.key && e.taskId === joined.meetingTaskId), JSON.stringify(c.windows));
+  });
+
+  suite("a task whose running attempt carries on is not paused for the meeting; any other task, a failing check and a task already paused are handled as before (card M04h)", async (c) => {
+    const t1 = await c.task(c.agentA);
+    const t2 = await c.task(c.agentA);
+    const asked: string[] = [];
+    const carrying = new Set<string>([t1]);
+    const att = c.make({ carriesOn: async (t) => { asked.push(t); if (t === "task-broken") throw new Error("down"); return carrying.has(t); } });
+    const id = await c.urgent([c.pA, c.pB]);
+    await c.room(id);
+    const prepared = await att.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1, t2] });
+    assert.deepEqual(prepared, { state: "preparing", waitingOn: [{ taskId: t2, observed: "pausing" }], carriedOn: [t1] });
+    assert.equal(await c.gateIntent(t1), "none", "the carrying task is not paused");
+    assert.equal(await c.gateIntent(t2), "pause", "the other task is");
+    const body = await c.att(id, c.pA);
+    assert.deepEqual([body.carriedOn, body.interrupted.map((x) => x.taskId)], [[t1], [t2]]);
+    assert.ok(body.events.some((e) => e.note?.includes(t1) === true), "the attendance says what carried on");
+    assert.deepEqual(state(await c.status(id), c.pA).carriedOn, [t1], "the room status shows it");
+    await c.boundary(t2);
+    const joined = await att.join(c.owner, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
+    assert.ok(joined.joined);
+    assert.equal(await c.gateIntent(t1), "none", "joining does not pause it either");
+    // A repeated prepare is the same: the carrying task is asked again but never paused; the task already paused for this attendance keeps its pause even if it would now carry on.
+    carrying.add(t2);
+    asked.length = 0;
+    const again = await att.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1, t2] }).catch((e: unknown) => e);
+    assert.ok(again instanceof DomainError, "an agent already in the meeting is not prepared again");
+    assert.equal(await c.gateIntent(t2), "pause");
+    // Without the hook, or when it fails, nothing carries on.
+    for (const hook of [undefined, async () => { throw new Error("store down"); }]) {
+      const t3 = await c.task(c.agentB);
+      const other = await c.urgent([c.pB]);
+      await c.room(other);
+      const r = await c.make(hook === undefined ? {} : { carriesOn: hook }).prepare(c.owner, { commandId: cid("pr"), occurrenceId: other, agent: c.pB, interrupted: [t3] });
+      assert.deepEqual(r.carriedOn, []);
+      assert.equal(await c.gateIntent(t3), "pause");
+    }
+  });
+
+  suite("an agent that has left a meeting no longer holds work back for the rest of it (card M04h)", async (c) => {
+    const led = c.make({ leadMinutes: async () => 5 });
+    await c.meetings.createSchedule(c.mgr, { commandId: cid("sc"), projectId: c.a, title: "Stand-up", roster: [c.pA, c.pB], time: "10:00", timeZone: "UTC", recurrence: { kind: "once", date: "2026-10-23" }, prepareMinutes: 5 });
+    at("2026-10-23T09:55:00.000Z");
+    const id = (await c.meetings.tick(c.host)).created[0]!.occurrenceId;
+    await c.room(id);
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "defer");
+    await c.attend(id, c.pA, []);
+    minutes(10);
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "defer", "in the meeting");
+    await c.attendance.leave(c.asA, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
+    assert.equal((await led.admission(c.owner, { agent: c.pA, expectedMinutes: 2 })).decision, "start", "it left: its work is not held back");
+    assert.equal((await led.admission(c.owner, { agent: c.pB, expectedMinutes: 2 })).decision, "defer", "another invited agent is still held");
   });
 
   suite("the status shows each invited agent as preparing, present, unavailable or blocked, and a blocked agent is one that cannot safely interrupt", async (c) => {

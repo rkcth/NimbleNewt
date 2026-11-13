@@ -41,7 +41,7 @@ async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () =
   await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
   await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
   const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
-  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }, { action: "job.control", project }] });
+  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }, { action: "job.control", project }, { action: "history.*", project }] });
   const task = async (n: number): Promise<{ taskId: string; attemptId: string }> => {
     const taskId = (await s.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
     await s.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
@@ -52,7 +52,7 @@ async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () =
   };
   const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
   const close = async () => { release(); await c.dispatch?.dispatcher.idle(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); };
-  return { c, s, owner, project, task, call, problems, close, agent: `agent:${AGENT}` };
+  return { c, s, owner, project, task, call, problems, close, worker, agent: `agent:${AGENT}` };
 }
 
 test("through the composed controller a running attempt with only background jobs carries on during a meeting, a new attempt never starts, an agent cannot admit a new long job on any task, and the setting turns the rule off (card M04g)", async () => {
@@ -215,6 +215,40 @@ test("the composed gate's lock is the list every meeting creation rewrites: the 
     assert.ok((await call("meeting.call-urgent", { projectId: w.project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1")).ok, "a meeting is still called over the list the job made");
     await assert.rejects(commit("stale-lock", read), "a commit carrying the lock read before the meeting is refused");
     await assert.rejects(s.jobs.admit(host, { commandId: "j-after", taskId: t.taskId, kind: "tool", label: "after", operationId: "op-after", background: true } as never), /long-running work is not started/);
+    assert.deepEqual(w.problems, []);
+  } finally { await w.close(); }
+});
+
+test("through the composed controller the meeting does not pause a task whose idle attempt waits only on background jobs, and pauses it when anything else holds (card M04h)", async () => {
+  const w = await world();
+  try {
+    const { c, s, owner, project, call } = w;
+    const first = await w.task(1);
+    const other = await w.task(2);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await c.dispatch!.dispatcher.get(owner, first.attemptId))!.state, "running");
+    const jobId = (await s.jobs.admit(owner, { commandId: "ja", taskId: first.taskId, kind: "tool", label: "build", operationId: "op-1", background: true, attemptId: first.attemptId })).id;
+    await s.jobs.report(owner, { commandId: "jr1", jobId, state: "dispatched", host: "host-1" });
+    await s.jobs.report(owner, { commandId: "jr2", jobId, state: "running" });
+    const handle = w.worker.handles.at(-1)!;
+    let idle = false;
+    handle.idle = async () => idle;
+    const meeting = await call("meeting.call-urgent", { projectId: project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1");
+    assert.ok(meeting.ok, JSON.stringify(meeting));
+    const occurrenceId = meeting.result.id as string;
+    await c.dispatch!.attendance.openRoom(owner, { commandId: "or1", occurrenceId });
+    const gate = async (taskId: string) => (await s.pauses.gate(owner, { kind: "task", id: taskId }))?.intent ?? "none";
+    // Idle: the task whose attempt waits only on its background job is not paused; the task with no running attempt is.
+    idle = true;
+    const first1 = await c.dispatch!.attendance.prepare(owner, { commandId: "pr1", occurrenceId, agent: w.agent, interrupted: [first.taskId, other.taskId] });
+    assert.deepEqual(first1.carriedOn, [first.taskId]);
+    assert.notEqual(await gate(first.taskId), "pause", "carries on: not paused");
+    assert.equal(await gate(other.taskId), "pause", "no running attempt: paused");
+    // The conversation becomes busy and the meeting is prepared for again: the task is paused now and no longer counted as carrying on.
+    idle = false;
+    const again = await c.dispatch!.attendance.prepare(owner, { commandId: "pr2", occurrenceId, agent: w.agent, interrupted: [first.taskId, other.taskId] });
+    assert.deepEqual(again.carriedOn, []);
+    assert.equal(await gate(first.taskId), "pause", "busy: paused like any other");
     assert.deepEqual(w.problems, []);
   } finally { await w.close(); }
 });

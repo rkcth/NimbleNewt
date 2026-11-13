@@ -1661,6 +1661,42 @@ for (const backend of backendsNamed(backendName)) {
     assert.deepEqual(calls, []);
   });
 
+  suite("a task carries on during a meeting only when every live attempt is running, has nothing in flight, its worker says its conversation is idle and the job predicate agrees (card M04h)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const { attemptId, taskId } = await c.task("t", ann);
+    const meetings = {
+      revalidation: async () => ({ required: false, entries: [] }),
+      admission: async () => ({ decision: "start" as const, reason: "meeting", meeting: { occurrenceId: "mto-x", startsAt: "2026-01-01T00:00:00.000Z", endsAt: "2026-01-01T01:00:00.000Z" } }),
+    };
+    let jobsOnly = true;
+    const hold = deferred<void>();
+    c.worker.script = async () => { await hold.promise; return { status: "completed" }; };
+    const d = c.restart({ meetings: meetings as never }, { safeLongRunning: async () => jobsOnly });
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "no running attempt");
+    await d.tick();
+    assert.equal((await d.get(c.owner, attemptId!))!.state, "running");
+    const handle = c.worker.handles.at(-1)!;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "a worker that cannot say whether it is idle is never idle");
+    let idle = false;
+    handle.idle = async () => idle;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "the conversation is still working");
+    idle = true;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), true);
+    assert.equal(await d.carriesOnTask(c.owner, taskId), true, "the owner may ask too");
+    assert.equal(await d.carriesOnTask({ kind: "agent", id: `agent:${ann.id}` } as never, taskId), false, "an agent may not ask");
+    jobsOnly = false;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "foreground work remains");
+    jobsOnly = true;
+    handle.idle = async () => { throw new Error("worker gone"); };
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "a failing worker is not idle");
+    handle.idle = async () => true;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, "tsk-nothing"), false, "another task");
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, undefined as never), false);
+    hold.resolve();
+    await d.idle();
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "an ended attempt does not carry on");
+  });
+
   suite("an effect call recorded on the ledger is never run again outside it: asked again with a local executor, or through begin, after a restart, it is settled from the ledger", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
     const { attemptId } = await c.task("push", ann);

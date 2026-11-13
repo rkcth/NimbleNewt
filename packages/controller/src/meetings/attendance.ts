@@ -67,6 +67,8 @@ export interface AttendanceBody {
   /** `prepare` has been called (with the tasks the agent leaves, or an explicit empty list). A join needs it. */
   readonly prepared?: boolean;
   readonly interrupted: readonly InterruptedWork[];
+  /** Card M04h: tasks named in `prepare` that were not paused because their running attempt carries on during the meeting (idle, waiting on background jobs only). Nothing was interrupted, so nothing is resumed for them. */
+  readonly carriedOn?: readonly string[];
   readonly meetingTaskId?: string;
   readonly joinedAt?: string;
   readonly joinedLate?: boolean;
@@ -168,6 +170,8 @@ export interface AttendanceOptions extends RunnerOptions {
   readonly notices?: NoticeSink;
   /** Warnings about the no-long-running-work period of a meeting. */
   readonly window?: WindowSink;
+  /** Card M04h: whether the running work on a task carries on during a meeting (the dispatcher's `carriesOnTask`), so `prepare` does not pause it. Absent, or a failure: the task is paused as before. */
+  readonly carriesOn?: (taskId: string) => Promise<boolean>;
 }
 
 export const ATTENDANCE_LIMITS = {
@@ -210,6 +214,8 @@ export interface ParticipantView {
   readonly leftAt?: string;
   /** The interrupted tasks that have not yet reached a safe boundary, with what the executor reports. */
   readonly waitingOn: readonly { readonly taskId: string; readonly observed: string }[];
+  /** Card M04h: tasks that were not paused because their running attempt carries on during the meeting. */
+  readonly carriedOn?: readonly string[];
   /** An unavailable participant whose presence matters (everyone is required, or an agenda item names it): the question for the owner. */
   readonly ownerQuestion?: string;
   readonly meetingTaskId?: string;
@@ -262,6 +268,7 @@ export class AttendanceService {
   readonly #wakeControl: WakeControl | undefined;
   readonly #notices: NoticeSink | undefined;
   readonly #window: WindowSink | undefined;
+  readonly #carriesOn: AttendanceOptions["carriesOn"];
 
   private constructor(runner: CommandRunner, deps: AttendanceDeps, options: AttendanceOptions) {
     this.#runner = runner;
@@ -279,6 +286,7 @@ export class AttendanceService {
     this.#wakeControl = options.wakeControl;
     this.#notices = options.notices;
     this.#window = options.window;
+    this.#carriesOn = options.carriesOn;
   }
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: AttendanceDeps, options: AttendanceOptions): AttendanceService {
@@ -312,6 +320,8 @@ export class AttendanceService {
         if (body === undefined || body.state !== "planned" || body.mode !== "live" || ms(body.endsAt) <= nowMs) continue;
         const seat = body.participants.find((p) => p.id === agent);
         if (seat === undefined || !(live === "available" || (live === "paused" && seat.status === "owner-invited"))) continue;
+        // An agent that has left this meeting is not attending it any more (a left seat is final), so the rest of the meeting no longer holds its work back (card M04h).
+        if ((await this.#attendance(id, agent))?.body.leftAt !== undefined) continue;
         // The agent's bounded meeting task for this very meeting is how it attends; it is never held back by the meeting it is for.
         if (typeof query.taskId === "string" && query.taskId === derivedId("task", `attend-task:${attendanceIdOf(id, agent)}`)) continue;
         // The work would still be running when the meeting starts (or the meeting is on): that is the conflict. The occurrence exists from its preparation lead, so the lead is how far ahead this can see.
@@ -328,6 +338,11 @@ export class AttendanceService {
     if (query.safeLongRunning === true) return { decision: "start", reason: "a safe long-running operation carries on while the agent attends", meeting, continuesDuringMeeting: true };
     if (query.yieldsAtBoundary === true) return { decision: "start", reason: "the work reaches a safe boundary on request, so it can yield to the meeting", meeting };
     return { decision: "defer", reason: "the work cannot yield before the meeting and would not finish first", until: nearest.body.endsAt, meeting };
+  }
+
+  /** Whether the work on a task carries on during a meeting (card M04h). Any failure reads as "no": the task is paused as before. */
+  async #carries(taskId: string): Promise<boolean> {
+    try { return (await this.#carriesOn?.(taskId)) === true; } catch { return false; }
   }
 
   async #lead(): Promise<number> {
@@ -569,6 +584,7 @@ export class AttendanceService {
         who: w, isOwner: att.body.isOwner, state: effective.state, ...(effective.reason === undefined ? {} : { reason: effective.reason }), bounded: att.body.bounded,
         ...(att.body.joinedAt === undefined ? {} : { joinedAt: att.body.joinedAt }), ...(att.body.joinedLate === true ? { joinedLate: true } : {}), ...(att.body.leftAt === undefined ? {} : { leftAt: att.body.leftAt }),
         waitingOn: waitingOn.map((x) => ({ taskId: x.taskId, observed: x.observed })),
+        ...(att.body.carriedOn === undefined || att.body.carriedOn.length === 0 ? {} : { carriedOn: att.body.carriedOn }),
         ...(necessary ? { ownerQuestion: `${w} cannot attend (${effective.reason ?? effective.state}). Its participation matters here: authorize waking or recovering it, or go ahead without it?` } : {}),
         ...(att.body.meetingTaskId === undefined ? {} : { meetingTaskId: att.body.meetingTaskId }), returned: att.body.returned, interrupted: att.body.interrupted, eventCount: att.body.eventCount,
       });
@@ -637,7 +653,7 @@ export class AttendanceService {
    * Asks an agent to come to a safe boundary: pauses the tasks it will leave at task scope only (L01 `pause`, with the caller's own authority, never Suspend), and records for each whether this attendance made the pause. Up to five tasks, each assigned to
    * the agent. Repeating it after a crash finishes what is missing. The agent's runtime then reports the boundary (`PauseService.observe`); `join` waits for it. Needs `meeting.manage` (or the owner, host or service) and the pause authority of L01.
    */
-  async prepare(by: Principal, command: NoActor & { occurrenceId: string; agent: string; interrupted?: readonly string[] }): Promise<{ state: AttendanceState; waitingOn: readonly { taskId: string; observed: string }[] }> {
+  async prepare(by: Principal, command: NoActor & { occurrenceId: string; agent: string; interrupted?: readonly string[] }): Promise<{ state: AttendanceState; waitingOn: readonly { taskId: string; observed: string }[]; carriedOn: readonly string[] }> {
     onlyKnown(command, ["commandId", "occurrenceId", "agent", "interrupted"]);
     const occurrenceId = this.#occurrenceId(command.occurrenceId);
     const agent = typeof command.agent === "string" ? command.agent : invalid("agent", "is not an agent principal");
@@ -658,10 +674,13 @@ export class AttendanceService {
       throw new DomainError("invalid_command", `${agent} is unavailable: ${decided.reason ?? "not reachable"}`, { field: "agent" });
     }
     const plan: InterruptedWork[] = [];
+    const carried: string[] = [];
     for (const taskId of tasks) {
       const asg = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as unknown as AssignmentBody | undefined;
       if (asg === undefined || asg.state !== "assigned" || asg.owner?.kind !== "agent" || asg.owner.id !== agentId) invalid("interrupted", `${taskId} is not assigned to ${agent}`);
       const keep = current.body.interrupted.find((x) => x.taskId === taskId);
+      // Card M04h: a task whose running attempt is idle and waits only on background jobs carries on; it is not paused. One already paused for this attendance stays as it is (a pause is never lifted here).
+      if (keep === undefined && await this.#carries(taskId)) { carried.push(taskId); continue; }
       plan.push(keep ?? { taskId, generation: (asg as AssignmentBody).generation, pausedByUs: false });
     }
     const done: InterruptedWork[] = [];
@@ -686,11 +705,12 @@ export class AttendanceService {
       ...b, state: decided.state, bounded: decided.bounded, prepared: true, ...(decided.reason === undefined ? {} : { reason: decided.reason }),
       // A concurrent prepare may have recorded the pause as ours already: that record wins.
       interrupted: [...b.interrupted.filter((x) => !done.some((d) => d.taskId === x.taskId)), ...done.map((d) => b.interrupted.find((x) => x.taskId === d.taskId && x.pauseRequestId !== undefined) ?? d)],
-    }), "preparing");
+      ...(carried.length === 0 && b.carriedOn === undefined ? {} : { carriedOn: [...new Set([...(b.carriedOn ?? []).filter((x) => !done.some((d) => d.taskId === x)), ...carried])] }),
+    }), "preparing", carried.length === 0 ? undefined : `carries on during the meeting, not paused: ${carried.join(", ")}`);
     const after = (await this.#attendance(occurrenceId, agent))!;
-    if (tasks[0] !== undefined) await this.#warn("ahead", after.id, agent, occurrenceId, tasks[0]);
+    if (plan[0] !== undefined) await this.#warn("ahead", after.id, agent, occurrenceId, plan[0].taskId);
     const waitingOn = await this.#waiting(after.body);
-    return { state: this.#effective(after.body, waitingOn).state, waitingOn: waitingOn.map((x) => ({ taskId: x.taskId, observed: x.observed })) };
+    return { state: this.#effective(after.body, waitingOn).state, waitingOn: waitingOn.map((x) => ({ taskId: x.taskId, observed: x.observed })), carriedOn: after.body.carriedOn ?? [] };
   }
 
   /**
