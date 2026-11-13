@@ -206,6 +206,50 @@ test("a restart request closes the controller and exits 75; a signal already giv
   } finally { inst.cleanup(); }
 });
 
+test("a database move under the launcher ends with exit 75, and the entry started again from the SAME configuration comes up on the new database by itself (entry, F04m)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "nn-entry-"));
+  const moved = join(base, "elsewhere", "moved.sqlite");
+  const inst = installation((c) => ({ ...c, controller: { ...c.controller, databaseTransfer: { targets: [{ name: "moved", kind: "sqlite", path: moved }] } } }));
+  try {
+    const { ownerSecretName } = await dist("controller", "index.js");
+    const env = { NIMBLENEWT_RELEASE_ROOT: join(inst.base, "rel"), NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+    const c = capture();
+    let seen;
+    const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, ready: (handle) => { seen = handle; } });
+    await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+    const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+    const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+    assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
+    const preview = await call("database.transfer.preview", { target: "moved" });
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    const applied = await call("database.transfer.apply", { target: "moved", confirm: preview.result.item.token }, "move-1");
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    assert.equal(await done, 75, c.text);
+    assert.match(c.text, /exiting 75/);
+    assert.equal(existsSync(moved), true, "the new database file exists");
+    // The same configuration (it still names controller.sqlite) and no hand edit: the start follows the authority file.
+    // The same configuration (it still names controller.sqlite) and no hand edit: the start follows the authority file. The rollback (also asked for under the launcher) leads back by the same road.
+    const c2 = capture();
+    let seen2;
+    const done2 = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c2.stderr, env, ready: (handle) => { seen2 = handle; } });
+    await Promise.race([until("the second controller", () => seen2 !== undefined), done2.then((code) => { throw new Error(`exited ${code} before it was up:\n${c2.text}`); })]);
+    assert.match(c2.text, /The controller database was moved to moved \(sqlite\) by a database transfer; this start uses it\./);
+    const t2 = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+    const call2 = (op, args, commandId) => seen2.controller.api.handle(t2, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+    assert.match(JSON.stringify(await call2("project.list", {})), /Garden/, "the data is on the database it started on");
+    assert.match(JSON.stringify(await call2("database.transfer.status", {})), /moved/);
+    const back = await call2("database.transfer.rollback", {}, "back-1");
+    assert.equal(back.ok, true, JSON.stringify(back));
+    assert.equal(await done2, 75, c2.text);
+    const third = await runEntry(["--data", inst.dataDir], {}, async ({ controller }) => {
+      const t = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+      assert.match(JSON.stringify(await controller.api.handle(t, { v: 1, op: "project.list", args: {} })), /Garden/);
+    });
+    assert.equal(third.code, 0, third.log);
+    assert.doesNotMatch(third.log, /was moved to/, "back on the configured database: nothing to follow");
+  } finally { inst.cleanup(); rmSync(base, { recursive: true, force: true }); }
+});
+
 test("a close that does not finish is given up after the timeout and the entry exits 1, not 0 (entry review)", async () => {
   const inst = installation();
   let real;
