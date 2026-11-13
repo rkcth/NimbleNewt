@@ -279,3 +279,25 @@ test("the newest good backup for the Urgent watch is the one the nightly run cou
     assert.equal((await new BackupService(store, { root: file, version: "t" }).lastGood()).unreadable, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("two restores prepared within one second each get a safety copy, also where a taken name fails a rename with EPERM (Windows); an EPERM where the name is free is not hidden (CI repair round 9)", async () => {
+  const store = new MemoryStorage(); const root = tmp();
+  try {
+    await populate(store);
+    // Windows answers a rename onto a folder that exists with EPERM, where POSIX says ENOTEMPTY.
+    const windowsLike = async (from: string, to: string): Promise<void> => {
+      if (existsSync(to)) throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: "EPERM", syscall: "rename" });
+      const { rename } = await import("node:fs/promises");
+      await rename(from, to);
+    };
+    const service = new BackupService(store, { root, version: "t", now: () => new Date(AT), renameFolder: windowsLike });
+    const first = await service.safetyCopy();
+    const second = await service.safetyCopy();
+    assert.notEqual(second.manifest.name, first.manifest.name, "the second is stamped a second on");
+    assert.deepEqual(readdirSync(root).filter((n) => n.endsWith("-pre-restore")).sort(), [first.manifest.name, second.manifest.name].sort());
+    assert.deepEqual(readdirSync(root).filter((n) => n.endsWith(".partial")), [], "nothing half-written stays");
+    // A rename that fails while the name is free is the real failure, passed on as it came.
+    const refusing = new BackupService(store, { root: join(root, "other"), version: "t", now: () => new Date(AT), renameFolder: async () => { throw Object.assign(new Error("EPERM: a scanner holds the folder"), { code: "EPERM" }); } });
+    await assert.rejects(refusing.safetyCopy(), (e: NodeJS.ErrnoException) => e.code === "EPERM" && /scanner/.test(e.message));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

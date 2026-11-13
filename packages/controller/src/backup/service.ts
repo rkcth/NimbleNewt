@@ -35,6 +35,8 @@ export interface BackupServiceOptions {
   readonly signer?: BackupSigner;
   /** The agents' own conversation stores on this machine (card K01h): copied into each backup. */
   readonly piState?: PiStateSource;
+  /** Tests only: passed to `createBackup` (the rename that puts a finished backup in place). */
+  readonly renameFolder?: (from: string, to: string) => Promise<void>;
 }
 
 export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; /** Whether backups made here include the agents' conversation state (Pi state). False: it is NOT included, and a restore leaves the conversation memory as it is. */ readonly piStateIncluded: boolean; readonly lastError?: { at: string; message: string } }
@@ -91,7 +93,7 @@ export class BackupService {
     await this.finish();
     // Two restores prepared within one second would share a name: the later one is stamped a second on.
     for (let skew = 0; ; skew++) {
-      try { return await createBackup(this.#storage, { root: this.#options.root, kind: "pre-restore", version: this.#options.version, now: () => new Date(this.#now().getTime() + skew * 1000), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) }) }
+      try { return await createBackup(this.#storage, { root: this.#options.root, kind: "pre-restore", version: this.#options.version, now: () => new Date(this.#now().getTime() + skew * 1000), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }), ...(this.#options.renameFolder === undefined ? {} : { renameFolder: this.#options.renameFolder }) }) }
       catch (error) { if (skew >= 30 || !["ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     }
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, type SnapshotRow, type SnapshotTable } from "../storage/index.js";
 import type { FileBlobStore } from "../artifacts/index.js";
@@ -31,6 +31,8 @@ export interface BackupOptions {
   readonly piState?: PiStateSource;
   /** Signs the finished manifest (card K01b3): the signature file is written beside it before the folder gets its final name. A signer that fails fails the backup: none is written unsigned on an installation that signs. */
   readonly signer?: BackupSigner;
+  /** Tests only: the rename that puts the finished folder in place (default `fs.promises.rename`), so a test can stand in for another system's answer to a name that is taken. */
+  readonly renameFolder?: (from: string, to: string) => Promise<void>;
 }
 
 const stamp = (d: Date): string => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -45,6 +47,21 @@ export const backupName = (at: Date, kind: BackupKind): string => `backup-${stam
 export function createBackup(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
   // The artifact store's shared lock is held from before the database is read until the blobs are copied, so orphan cleanup (which takes it exclusively) cannot delete a blob the copied rows still name.
   return options.blobs === undefined ? write(storage, options) : options.blobs.lock.shared(() => write(storage, options));
+}
+
+/**
+ * Renames the finished folder to its final name. A final name that is already taken fails as EEXIST on every system: POSIX says ENOTEMPTY (or EEXIST), but Windows says EPERM, and a caller that steps
+ * the name on when it is taken (`BackupService.safetyCopy`, two restores within one second) did not know that answer, so on Windows a second restore in the same second failed (CI repair round 9).
+ * Any other failure, an EPERM where the name is free included, is passed on as it came.
+ */
+async function putInPlace(staging: string, final: string, move: (from: string, to: string) => Promise<void>): Promise<void> {
+  try { await move(staging, final); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "ENOTEMPTY" && await lstat(final).then(() => true, () => false)) {
+      throw Object.assign(new Error(`the backup name ${final} is already taken`, { cause: error }), { code: "EEXIST" });
+    }
+    throw error;
+  }
 }
 
 async function write(storage: Pick<ControllerStorage, "snapshot">, options: BackupOptions): Promise<{ path: string; manifest: BackupManifest }> {
@@ -103,7 +120,7 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
       const signatureHandle = await open(join(staging, SIGNATURE_FILE), "wx", 0o600);
       try { await signatureHandle.write(`${JSON.stringify(signature)}\n`); await signatureHandle.sync(); } finally { await signatureHandle.close(); }
     }
-    await rename(staging, final);
+    await putInPlace(staging, final, options.renameFolder ?? rename);
     const dir = await open(options.root, "r").catch(() => undefined);
     if (dir !== undefined) { await dir.sync().catch(() => undefined); await dir.close(); }
     return { path: final, manifest };
