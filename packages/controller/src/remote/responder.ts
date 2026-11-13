@@ -64,7 +64,7 @@ export class WorkspaceResponder {
       return;
     }
     // The conversation stores (card K01i): copied and sent for a backup, or fetched and put back after a restore. The host's own `PiStateHost` judges it (a store whose agent is running is not replaced), so the quiet-attempts check below does not apply.
-    if (ask.operation === "pi-state-send" || ask.operation === "pi-state-restore") {
+    if (ask.operation === "pi-state-send" || ask.operation === "pi-state-restore" || ask.operation === "pi-thinking-purge") {
       let answered: RemoteWorkspaceAnswer;
       try { answered = this.#piState === undefined ? { ok: false, reason: "this host keeps no conversation stores in backups (it was started without a Pi state handler), so nothing was done" } : await this.#piState.answer(ask); } catch (error) { answered = { ok: false, reason: `this host could not finish the request: ${String((error as Error)?.message ?? error).slice(0, 300)}`, failed: true }; }
       await this.#send(ask.requestId, answered);

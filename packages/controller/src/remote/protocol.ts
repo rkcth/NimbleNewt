@@ -136,7 +136,7 @@ export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 /** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
-  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore";
+  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore" | "pi-thinking-purge";
   readonly taskId: string;
   readonly projectId: string;
   readonly reason: string;
@@ -148,6 +148,8 @@ export interface WorkspaceAsk {
   readonly verify?: { readonly attemptId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number };
   /** `pi-state-send` and `pi-state-restore` only (card K01i): the transfer the host's conversation stores travel in. `send`: the host copies its stores and uploads them under this ID; `restore`: the host fetches the stores the controller holds under this ID and puts each one back in its place. */
   readonly piState?: { readonly transferId: string };
+  /** `pi-thinking-purge` only (card K06c): the attempts whose conversation stores on the host are to lose their stored model thinking (the retention rule's act, 14 days after the task is done). The host removes it from the stores it keeps for these attempts (never one with a call in flight) and answers which it cleaned and which it keeps none of. */
+  readonly thinkingPurge?: { readonly attemptIds: readonly string[] };
   /** When the controller stops waiting (an ISO time). It frees the agent then, so a host must not start the work after it. */
   readonly expiresAt?: string;
 }

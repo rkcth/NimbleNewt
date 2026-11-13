@@ -145,7 +145,7 @@ export function localHostBuilder(setup) {
           close,
           // The agents' conversation stores (card K01i): each attempt's home is `<base>/attempts/<attemptId>/home` and the process keeps its conversation in `<home>/pi`. Given here, backups copy every one found there and a restore puts each back
           // where it was, so the conversation memory comes back with the records.
-          piState: (() => { const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" }); return { source: stores.source, final: stores.final }; })(),
+          piState: (() => { const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" }); return { source: stores.source, final: stores.final, purge: piAdapter.removeStoredThinking }; })(),
           build: (services) => {
             composed = services;
             const parts = worker.localWorkerParts({

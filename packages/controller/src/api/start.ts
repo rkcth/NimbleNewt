@@ -3,12 +3,12 @@ import { assignedTaskIn, projectIds, type RouteProbes } from "../dispatch/loops.
 import { createTargetVersions, type TargetVersionOptions } from "../dispatch/target-versions.js";
 import { allows } from "../security/access.js";
 import { WORKER_PROTOCOL } from "../remote/protocol.js";
-import { PiStateTransfers, RemotePiRestore, RemotePiState, combinedPiState, localOnly } from "../remote/pi-state.js";
+import { PiStateTransfers, RemotePiRestore, RemotePiState, RemoteThinkingStores, combinedPiState, localOnly } from "../remote/pi-state.js";
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import { InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
-import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, guardStorage, type RetentionValues } from "../retention/index.js";
+import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, combineThinkingStores, guardStorage, localThinkingStores, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
 import { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, SIGNING_SECRET_NAME, secretsSourceOf, sealsBackups, type SecretsSink, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile, rm, statfs } from "node:fs/promises";
@@ -1166,8 +1166,18 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     };
     const releaseService = ReleaseService.withEpoch(storage, epoch);
     releaseLive = releaseService;
+    // The model's own copy of its thinking sits in the conversation store of each attempt (card K06c): cleaned where the host composition gave the Pi adapter's removal (this machine), and on every remote host that can be asked.
+    const localPi = options.dispatch?.local?.piState;
+    // A host that keeps conversation stores but gave no way to clean them cannot be said to have none, so the stores are not reached at all then (the controller's own copy is still removed).
+    const thinkingStores = localPi !== undefined && localPi.purge === undefined ? undefined : combineThinkingStores(
+      localPi?.purge === undefined ? undefined : localThinkingStores({ source: localPi.source, purge: localPi.purge }),
+      options.dispatch?.remote === undefined ? undefined : new RemoteThinkingStores({
+        hosts: async () => (dispatch?.remote === undefined ? { ask: [], unreachable: [] } : dispatch.remote.piStateHosts(dispatch.principal)),
+        ask: async (hostId, requestId, attemptIds, waitMs) => dispatch!.remote!.askThinkingPurge(dispatch!.principal, hostId, requestId, attemptIds, { waitMs }),
+      }),
+    );
     const retention = RetentionService.withEpoch(storage, epoch, {
-      settings: retentionSettings, catalog: catalogService, ...(backups === undefined ? {} : { backups }), incidents, projects: () => projectIds(projects),
+      settings: retentionSettings, catalog: catalogService, ...(thinkingStores === undefined ? {} : { thinkingStores }), ...(backups === undefined ? {} : { backups }), incidents, projects: () => projectIds(projects),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: n.ref, detail: n.text }); },
       meter: quotaMeter, ...(options.backup === undefined ? {} : { ledger: new DeletionLedger(join(options.backup.directory, LEDGER_FILE)) }), ...(reserve === undefined ? {} : { reserve }), ...(dataDirectory === undefined ? {} : { dataDirectory }), ...(options.retention?.autoEveryMs === undefined ? {} : { autoEveryMs: options.retention.autoEveryMs }),
     });
