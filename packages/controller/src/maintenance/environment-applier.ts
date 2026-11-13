@@ -53,6 +53,8 @@ export interface EnvironmentRuntime {
   trial(input: TrialInput): Promise<TrialResult>;
   reload(input: ReloadInput): Promise<ReloadResult>;
   validate(input: ValidateInput): Promise<ValidateResult>;
+  /** Reads an artifact for the reviewer before approval (card A09 seventh slice): see `MaintenanceOptions.inspector`. Optional: a runtime without it leaves the reviewer with the requester's claims. */
+  inspect?(artifact: { readonly name: string; readonly version: string; readonly digest: string; readonly source: string }): Promise<import("./maintenance.js").ArtifactInspection>;
 }
 
 type Phase = "staged" | "suspended" | "activated" | "validated" | "restored" | "done" | "failed" | "superseded";
