@@ -43,6 +43,11 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--fg);background:var
 .grid thead th{color:var(--muted);font-weight:600}
 h3.card-title,h4.card-title{margin:.1em 0 .25rem;font-size:1rem;overflow-wrap:anywhere}
 .row{display:flex;gap:.5rem;flex-wrap:wrap}
+/* the replay page (card U09b): lines of work side by side, scrolling sideways on a phone */
+.lanes{display:flex;gap:.75rem;overflow-x:auto;align-items:flex-start}
+.lane{flex:1 0 15rem;min-width:0}
+.lane .btn{display:block;width:100%;text-align:left;margin:.3rem 0 .1rem}
+.faded{opacity:.65}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 @media (prefers-reduced-motion:no-preference){.log{scroll-behavior:smooth}}
 @media (min-width:700px){.msg{max-width:70%}}

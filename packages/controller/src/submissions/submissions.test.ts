@@ -369,4 +369,25 @@ for (const backend of backends) {
     c.roles.set(bob.id, ["reviewer"]);
     assert.equal(await svc.get({ ...bob, grants: [] }, first.id), undefined);
   });
+
+  // Card U09b: the task's activity is told of every recorded submission, so its replay can link to the diff or the comment.
+  suite("the host is told of a recorded submission (and of a repeat, which it records once), and a hook that fails changes nothing", async (c) => {
+    const told: string[] = [];
+    let failing = false;
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { onRecorded: async (e) => { if (failing) throw new Error("activity is down"); told.push(`${e.submissionId}|${e.taskId}|${e.kind}|${e.role}|${e.submittedBy}|${e.verdict ?? e.decision ?? ""}`); } });
+    const ann = await c.agent("ann", ["author", "reviewer"]);
+    const code = await svc.record(ann, { commandId: "u09b-1", taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const again = await svc.record(ann, { commandId: "u09b-1", taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    assert.equal(again.replayed, true);
+    const bob = await c.agent("bob", ["reviewer"]);
+    const review = await svc.record(bob, { commandId: "u09b-2", taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "changes" });
+    assert.deepEqual(told, [`${code.id}|${c.task}|code|author|${ann.id}|`, `${code.id}|${c.task}|code|author|${ann.id}|`, `${review.id}|${c.task}|review|reviewer|${bob.id}|changes`], "a repeat is told again; the host's own step command makes it one step");
+    failing = true;
+    const kept = await svc.record(ann, { commandId: "u09b-3", taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    assert.equal((await svc.get(ann, kept.id))?.tree, T2, "the submission stands though the hook failed");
+    // Nothing is told of a refused submission.
+    failing = false; told.length = 0;
+    await refuses("forbidden", () => svc.record(ann, { commandId: "u09b-4", taskId: c.task, kind: "qa", role: "author", subject: code.id, report: "x" }));
+    assert.deepEqual(told, []);
+  });
 }

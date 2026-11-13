@@ -57,6 +57,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Letting the controller take the next recovery step by itself when nobody answers (autoStep, autoStepMinutes) is set through the same operation, so it is shown first too (card V02c).
   "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level, and whether the controller takes the next one by itself after a time with no answer (autoStep true or false; autoStepMinutes, the wait in minutes, null for the default)", mode: "propose" },
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
+  // A rerun of a replay (card U09b) changes nothing: it is a walk through the recorded steps in an isolated scope, so it applies at once. Saying a step was wrong (replaces true) changes how every later replay shows it, so it is first shown.
+  "activity.replay.simulate": { verb: "Rerun a task's replay as a simulation (nothing is run, sent or changed; failAt injects a provider failure at a step)", mode: "apply" },
+  "activity.correct": { verb: "Correct a step of a task's activity; replaces true says the step was wrong, so the replay shows it as replaced", mode: "propose" },
   "thinking.collection.set": { verb: "Turn collecting the model's thinking off or on (enabled true or false); what was kept stays until retention removes it", mode: "apply" },
   "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
   "replay.limits.enable": { verb: "Bound how much of a task's record one replay reads", mode: "apply" },
@@ -78,6 +81,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "retention.archive": { verb: "Archive a finished task's records", mode: "propose" },
   "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
+  // Whether a due responsibility check may start agent work, and how many such tasks may be open at once in a project: reversible, and a check that is not taken stays owed (shown as not observed), so it applies at once (provisional).
+  "check.settings.set": { verb: "Turn on or off giving due responsibility checks to the agent that answers for them as small tasks, or change how many such check tasks may be open at once in one project", mode: "apply" },
   // Letting a task go on after a resume check found changes that matter to it: shown first in every profile, because the owner is accepting that the work continues on changed inputs.
   "resume.approve": { verb: "Let a task go on after a resume check found changes that matter to it", mode: "propose" },
   // Not letting it go on: the task is released (nothing works on it until it is assigned again). Shown first as well: it ends the task's waiting attempt.

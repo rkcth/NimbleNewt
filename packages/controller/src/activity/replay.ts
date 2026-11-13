@@ -14,7 +14,7 @@ import { REPLAY_LIMIT_DEFAULTS, type EffectiveReplayLimits } from "./replay-limi
  * model: the service holds no port that could (only the activity reads, the task record and, for the owner's explicit look at stored thinking, the thinking read), and opening or stepping writes nothing.
  * A rerun or a simulation is a different command in an isolated scope (card P07) and is not offered here.
  *
- * The view shows each step as it was recorded: the context versions supplied then (never the current records), where it stood (proposed, dispatched, confirmed, uncertain, or "not recorded"), its branch lane,
+ * The view shows each step as it was recorded: the context versions supplied then (never the current records), where it stood (proposed, dispatched, confirmed, failed, uncertain, or "not recorded"), its branch lane,
  * whether it was later superseded (non-authoritative from then on), how many corrections it has, and links to what it cites. Explanations written at the time and explanations asked for afterwards are kept in
  * separate lists with their own labels.
  */
@@ -108,7 +108,16 @@ export interface ReplayDetail {
 export type ReplayThinkingState = { readonly state: "removed-by-retention"; readonly removedAt: string; readonly label: string } | { readonly state: "not-removed"; readonly note: string } | { readonly state: "unavailable"; readonly label: string };
 
 export interface ThinkingRemovalSource { /** When retention removed the task's stored thinking, if it did. */ removedAt(task: { readonly projectId: string; readonly taskId: string }): Promise<string | undefined> }
+/** What a link stands for, read for this reader (card U09b): the record's own words, redacted and bounded, marked as text some agent may have written. */
+export interface ResolvedRecord { readonly title: string; readonly lines: readonly string[]; /** True when the lines are something an agent or a reviewer wrote (a message, a comment), not a controller fact. */ readonly untrusted: boolean }
+export type LinkResolution = ({ readonly state: "readable" } & ResolvedRecord) | { readonly state: "not-readable"; readonly note: string } | { readonly state: "no-reader"; readonly note: string };
+export interface ResolvedLink extends ReplayLink { readonly resolution: LinkResolution }
+/** Reads one cited record for a reader by its own rules (a message only for its sender, recipient or the owner, and so on); `undefined` reads exactly like a record that does not exist. A resolver must refuse a record of another task. */
+export type LinkResolver = (by: Principal, ref: { readonly id: string; readonly version?: string }, task: { readonly projectId: string; readonly taskId: string }) => Promise<ResolvedRecord | undefined>;
+export const LINK_LIMITS = { links: 30, lines: 8, line: 400, title: 160 } as const;
 export interface ReplayDeps {
+  /** Resolvers by the kind of record a step cites (messages, submissions for diffs and comments, reviews, artifacts, branches). A kind with no resolver is shown as a reference, never guessed. */
+  readonly resolvers?: Readonly<Record<string, LinkResolver>>;
   /** The owner's explicit look at stored thinking (a recorded look); without it, thinking is not offered. */
   readonly thinking?: { read(by: Principal, command: { commandId: string; projectId: string; taskId: string; reason: string; after?: ThinkingCursor; limit?: number }): Promise<{ blocks?: ReadBlock[]; next?: ThinkingCursor; lookId: string; replayed: boolean }> };
   readonly thinkingRemoval?: ThinkingRemovalSource;
@@ -240,6 +249,46 @@ export class ReplayService {
     if (found.supersedes !== undefined) links.push({ relation: "supersedes", seq: found.supersedes });
     return { seq, links, grounded: links.length > 0, note: links.length > 0 ? "Links to what the records show the step was given; they are not a statement of why." : REPLAY_LABELS.unexplained, ...(scanned.first > 1 ? { scanLimited: true } : {}) };
   }
+
+  /**
+   * The links of one step (what it cites, the evidence written for it, what led to it) resolved to the records themselves where the reader may read them: a message, the diff of a code submission, a review or
+   * QA comment, an approval, an artifact, a side line. Each record is read by ITS OWN rules for this reader and must belong to this task; one the reader may not read says "not readable" in the same words as one that is
+   * gone. A kind nobody reads yet is shown as a reference with `no-reader`. Read only: nothing is run or sent, and the lines are the record's own words, redacted and bounded.
+   */
+  async links(by: Principal, taskId: string, seq: number): Promise<{ seq: number; items: readonly ResolvedLink[]; truncated: boolean }> {
+    const tid = checkTaskIdValue(taskId);
+    const task = await this.#task(tid);
+    const detail = await this.step(by, tid, seq);
+    const led = await this.led(by, tid, seq);
+    const seen = new Set<string>(); const items: ResolvedLink[] = []; let truncated = false;
+    for (const l of [...detail.step.links, ...led.links]) {
+      if (l.kind === undefined || l.id === undefined) continue;
+      const key = `${l.relation}\u0000${l.kind}\u0000${l.id}\u0000${l.version ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (items.length >= LINK_LIMITS.links) { truncated = true; break; }
+      items.push({ ...l, resolution: await this.#resolve(by, { projectId: task.projectId, taskId: tid }, l.kind, l.id, l.version) });
+    }
+    return { seq, items, truncated };
+  }
+
+  async #resolve(by: Principal, task: { projectId: string; taskId: string }, kind: string, id: string, version: string | undefined): Promise<LinkResolution> {
+    const resolver = Object.hasOwn(this.#deps.resolvers ?? {}, kind) ? this.#deps.resolvers![kind] : undefined;
+    if (resolver === undefined) return { state: "no-reader", note: "nothing here reads this kind of record; it is shown as the reference it is" };
+    try {
+      const got = await resolver(by, { id, ...(version === undefined ? {} : { version }) }, task);
+      if (got === undefined) return { state: "not-readable", note: "not found, or you may not read it" };
+      // Control characters, line and paragraph separators, and the invisible and direction-changing ones (which could make a record's text read as something else) become spaces; a cut never leaves half a character.
+      const tidy = (t: unknown, max: number): string => { const x = redactText(typeof t === "string" ? t : "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, " ").slice(0, max); return /[\ud800-\udbff]$/.test(x) ? x.slice(0, -1) : x; };
+      return { state: "readable", title: tidy(got.title, LINK_LIMITS.title), lines: (Array.isArray(got.lines) ? got.lines : []).slice(0, LINK_LIMITS.lines).map((x) => tidy(x, LINK_LIMITS.line)), untrusted: got.untrusted !== false };
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return { state: "not-readable", note: "not found, or you may not read it" };
+      throw error;
+    }
+  }
+
+  /** A replay never reruns anything. A rerun is the owner's separate `activity.replay.simulate` command, in an isolated scope (card U09b, standing in for P07). */
+  async rerun(): Promise<never> { throw new DomainError("forbidden", "a replay does not rerun anything: use activity.replay.simulate, a separate owner-only command that runs in an isolated scope and changes nothing"); }
 
   /** Finds steps of a task whose summary contains the words (case ignored). Summaries were redacted when recorded; stored content is not searched. The same task checks apply. */
   async search(by: Principal, taskId: string, query: string, options: { limit?: number } = {}): Promise<{ matches: readonly ReplayStep[]; scanLimited: boolean; range: { first: number; last: number; of: number } }> {

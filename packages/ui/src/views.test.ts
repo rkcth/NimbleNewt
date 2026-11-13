@@ -205,10 +205,10 @@ test("the tabs name the new pages and the page offers no control the chat lacks:
   const page = boot({});
   await settle();
   const names = page.doc.body.find((e) => e.getAttribute("role") === "tab").map((e) => e.textContent);
-  assert.deepEqual(names, ["Chat", "Status", "Needs you", "Approvals", "Models", "Blockers", "Cost", "Recovery", "Setup", "Settings"]);
+  assert.deepEqual(names, ["Chat", "Status", "Needs you", "Approvals", "Models", "Blockers", "Cost", "Recovery", "Replay", "Setup", "Settings"]);
   // Each POST route the script uses; the new one is the approvals route, and its two actions are chat commands of the same names.
   const posts = [...APP_JS.matchAll(/call\('POST', '([^']+)'/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(posts)].sort(), ["/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/sessions/revoke", "/web/thinking/collection"]);
+  assert.deepEqual([...new Set(posts)].sort(), ["/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/replay/", "/web/sessions/revoke", "/web/thinking/collection"]);
 });
 
 test("only the lengths the controller accepts become buttons, whatever a record says", async () => {

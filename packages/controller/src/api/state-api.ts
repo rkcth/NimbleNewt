@@ -13,7 +13,7 @@ import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
-import type { CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -69,6 +69,7 @@ import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { ReplayService } from "../activity/replay.js";
 import type { ReplayLimitsService } from "../activity/replay-limits.js";
+import type { ReplaySimulationService } from "../activity/replay-simulation.js";
 import type { ThinkingStore } from "../context/thinking-store.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
@@ -177,6 +178,8 @@ export interface StateApiDeps {
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
+  readonly coverageGaps?: Pick<CoverageGapService, "list">;
+  readonly checkSettings?: Pick<CheckRunSettingsService, "get" | "set">;
   readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
@@ -214,7 +217,8 @@ export interface StateApiDeps {
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
   readonly continuations?: ContinuationOps;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
-  readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
+  readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking" | "links" | "rerun">;
+  readonly replaySimulation?: Pick<ReplaySimulationService, "simulate" | "get">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
@@ -356,6 +360,8 @@ export class StateApi {
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
+        ...(this.#deps.coverageGaps === undefined ? {} : { coverageGaps: this.#deps.coverageGaps }),
+        ...(this.#deps.checkSettings === undefined ? {} : { checkSettings: this.#deps.checkSettings }),
         ...(this.#deps.leases === undefined ? {} : { leases: this.#deps.leases }),
         ...(this.#deps.retention === undefined ? {} : { retention: this.#deps.retention }),
         ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
@@ -406,6 +412,7 @@ export class StateApi {
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
         ...(this.#deps.replay === undefined ? {} : { replay: this.#deps.replay }),
         ...(this.#deps.replayLimits === undefined ? {} : { replayLimits: this.#deps.replayLimits }),
+        ...(this.#deps.replaySimulation === undefined ? {} : { replaySimulation: this.#deps.replaySimulation }),
         ...(this.#deps.thinkingStore === undefined ? {} : { thinkingStore: this.#deps.thinkingStore }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.continuations === undefined ? {} : { continuations: this.#deps.continuations }),
