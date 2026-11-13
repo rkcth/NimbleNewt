@@ -142,7 +142,9 @@ export class CoverageGapService {
       downtime = { start: last, end: now };
       await this.record(by, { key: "controller", reason: "controller-down", start: last, end: now, detail: "NimbleNewt was not running, so no check was generated and no alert was seen in this time." });
     }
-    if (found === undefined || options.startup === true || last === undefined || Date.parse(now) - Date.parse(last) >= HEARTBEAT_EVERY_MS) {
+    // Also when the clock went back: a last-seen time left in the future would hide a later real absence (now minus a future time is never over the threshold).
+    const since = last === undefined ? Number.NaN : Date.parse(now) - Date.parse(last);
+    if (found === undefined || options.startup === true || !Number.isFinite(since) || since < 0 || since >= HEARTBEAT_EVERY_MS) {
       try {
         await this.#runner.command("coverage.liveness", { commandId: `cgl-${hash(now, String(found?.revision ?? 0))}`, actor: by.id }, async () => ({
           payload: { at: now },

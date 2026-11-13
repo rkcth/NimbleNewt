@@ -381,6 +381,27 @@ export function responsibilityRunLoops(work: { readonly events?: { sweep(by: Pri
   } }];
 }
 
+/**
+ * P04f: what the event-source poll tells the coverage gaps, for `sourceLoops`' `ran` option. A source whose poll failed opens an `event-source-outage` gap (closed by its next good poll), and a source that lost events (its saved position
+ * was older than what it keeps) is a closed `events-missed` gap over that time, recorded once. One source's failure does not skip the others; the first is raised after all were tried.
+ */
+export function sourceGapHook(gaps: { open(by: Principal, c: { key: string; reason: "event-source-outage"; start: string; detail: string }): Promise<unknown>; close(by: Principal, c: { key: string; end: string }): Promise<unknown>; record(by: Principal, c: { key: string; reason: "events-missed"; start: string; end: string; detail: string }): Promise<unknown> }, by: () => Principal, now: () => string = () => new Date().toISOString()): (runs: readonly SourceRun[]) => Promise<void> {
+  return async (runs) => {
+    const at = now(); const who = by();
+    let failure: unknown;
+    for (const r of runs) {
+      const key = `source:${r.source}`.slice(0, 160);
+      try {
+        const from = r.gap === undefined ? Number.NaN : Date.parse(r.gap.from); const to = r.gap === undefined ? Number.NaN : Date.parse(r.gap.to);
+        if (r.gap !== undefined && Number.isFinite(from) && Number.isFinite(to) && from <= to) await gaps.record(who, { key, reason: "events-missed", start: r.gap.from, end: r.gap.to, detail: `Events from ${r.source} were not watched: its saved position was older than what it keeps.`.slice(0, 300) });
+        if (r.error !== undefined) await gaps.open(who, { key, reason: "event-source-outage", start: at, detail: `Event source ${r.source} could not be polled: ${r.error}`.slice(0, 300) });
+        else await gaps.close(who, { key, end: at });
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  };
+}
+
 /** One health record of a model route, account or endpoint, as far as the coverage gaps need it. */
 export interface ProviderHealthLike { readonly scope: string; readonly name: string; readonly state: "down" | "healthy"; readonly since: string; readonly lastClass: string; readonly restoredAt?: string }
 

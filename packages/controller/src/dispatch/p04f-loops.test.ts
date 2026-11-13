@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { coverageGapLoops, responsibilityRunLoops, sourceLoops } from "./loops.js";
+import { coverageGapLoops, responsibilityRunLoops, sourceGapHook, sourceLoops } from "./loops.js";
 
 const by = { id: "service:dispatcher", kind: "service" } as never;
 
@@ -51,4 +51,17 @@ test("the event-source loop tells the gap hook what each source did, even when a
   assert.deepEqual(told, ["files:unreadable,git:ok"]);
   assert.equal(logged.length, 1);
   assert.match(logged[0]!, /hook broke/);
+});
+
+test("review: the source gap hook opens an outage for a failed poll, closes it on a good one, records lost events once as a closed gap, and one failing source does not skip the others (card P04f)", async () => {
+  const log: string[] = [];
+  let failOpen = true;
+  const hook = sourceGapHook({
+    open: async (_b, c) => { log.push(`open:${c.key}:${c.reason}`); if (failOpen) { failOpen = false; throw new Error("storage busy"); } },
+    close: async (_b, c) => { log.push(`close:${c.key}:${c.end}`); },
+    record: async (_b, c) => { log.push(`record:${c.key}:${c.reason}:${c.start}:${c.end}`); },
+  }, () => by, () => "2026-11-12T12:00:00.000Z");
+  const run = (source: string, extra: Record<string, unknown> = {}) => ({ source, polled: 0, published: 0, duplicates: 0, suppressed: 0, rejected: [], more: false, ...extra });
+  await assert.rejects(hook([run("files", { error: "unreadable" }), run("git", { gap: { from: "2026-11-01T00:00:00.000Z", to: "2026-11-12T12:00:00.000Z" } }), run("bad", { gap: { from: "later", to: "x" } })] as never), /storage busy/);
+  assert.deepEqual(log, ["open:source:files:event-source-outage", "record:source:git:events-missed:2026-11-01T00:00:00.000Z:2026-11-12T12:00:00.000Z", "close:source:git:2026-11-12T12:00:00.000Z", "close:source:bad:2026-11-12T12:00:00.000Z"], "an unreadable gap time is not recorded");
 });

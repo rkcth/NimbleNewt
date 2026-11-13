@@ -6,7 +6,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { EventService } from "../events/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { CheckRunService, CheckRunSettingsService, CoverageGapService, IncidentService, ResponsibilityChecks, ResponsibilityEventChecks, ResponsibilityService, type CheckProbe } from "./index.js";
+import { CheckRunService, CheckRunSettingsService, CoverageGapService, IncidentService, ResponsibilityChecks, ResponsibilityEventChecks, ResponsibilityService, type CheckProbe, type EventCheckDeps } from "./index.js";
 
 after(stopServer);
 
@@ -23,6 +23,7 @@ for (const backend of backends) {
     store: { readonly storage: { listAggregates(kind: string, o: { limit: number }): Promise<{ id: string; body: any }[]> } };
     runner(extra?: { probe?: CheckProbe; checks?: Partial<Pick<ResponsibilityChecks, "noteRun">> }): CheckRunService;
     eventChecks(batch?: number): ResponsibilityEventChecks;
+    eventChecksWith(over: Partial<EventCheckDeps>): ResponsibilityEventChecks;
     again(): { gaps: CoverageGapService; eventChecks: ResponsibilityEventChecks; runner: CheckRunService };
     make(extra?: Record<string, unknown>): Promise<string>;
     publish(kind: string, source?: { id: string; seq: number }): Promise<void>;
@@ -56,6 +57,7 @@ for (const backend of backends) {
           setNow: (t) => { now = t; },
           runner: (extra = {}) => mkRunner(extra.probe, extra.checks?.noteRun as never),
           eventChecks: (batch) => mkEvents(batch),
+          eventChecksWith: (over) => ResponsibilityEventChecks.withEpoch(world.storage, epoch, { responsibilities: duties, checks, events, gaps, ...over }, options),
           again: () => { const d = ResponsibilityService.withEpoch(world.storage, epoch, options); const c = ResponsibilityChecks.withEpoch(world.storage, epoch, d, options); const g = CoverageGapService.withEpoch(world.storage, epoch, options); return { gaps: g, eventChecks: ResponsibilityEventChecks.withEpoch(world.storage, epoch, { responsibilities: d, checks: c, events: EventService.withEpoch(world.storage, epoch, options), gaps: g }, options), runner: CheckRunService.withEpoch(world.storage, epoch, { responsibilities: d, checks: c, incidents: IncidentService.withEpoch(world.storage, epoch, d, options), settings: CheckRunSettingsService.withEpoch(world.storage, epoch, options), projects, assignments }, options) }; },
           make: async (extra = {}) => (await duties.create(owner, { commandId: cid("r"), projectId: project, title: "Keep the server healthy", objective: "Up", desiredCondition: "answers on /health", everyMinutes: 60, ownerId: ann.id, permittedActions: ["service.restart"], ...extra } as never)).id,
           publish: async (kind, source) => { await events.publish(owner, { commandId: cid("ev"), stream: `project:${project}`, kind, ref: { kind: "service", id: "web" }, key: cid("k"), ...(source === undefined ? {} : { source }) } as never); },
@@ -331,5 +333,78 @@ for (const backend of backends) {
     assert.equal((await c.runner().run(c.owner, c.project)).tasks, 1);
     const task = (await c.store.storage.listAggregates("task", { limit: 5 }))[0]!.body as unknown as { description: string };
     assert.match(task.description, /1 event from svc-health \(service\.failed\)/);
+  });
+
+  // ---- review (P04f): crash safety, bounded reads, clock changes -------------------------------------------------------------
+
+  suite("review: a look repeated after a crash between the check and the saved position is the same check, even when more events came in meanwhile; two instances at once make one", async (c) => {
+    await c.make({ eventSources: ["svc-health"], everyMinutes: undefined });
+    await c.eventChecks().sweep(c.owner, c.project);
+    await c.publish("service.failed", { id: "svc-health", seq: 1 });
+    await c.publish("service.failed", { id: "svc-health", seq: 2 });
+    c.setNow(iso(T0, 1));
+    // The check is written, then the process dies before the position is saved.
+    const crashing = c.eventChecksWith({ checks: { recordEvent: async (...a: Parameters<ResponsibilityChecks["recordEvent"]>) => { await c.checks.recordEvent(...a); throw new Error("process died"); } } });
+    await assert.rejects(() => crashing.sweep(c.owner, c.project), /process died/);
+    assert.equal((await c.checks.pending(c.owner, c.project))!.length, 1);
+    await c.publish("service.failed", { id: "svc-health", seq: 3 });
+    c.setNow(iso(T0, 2));
+    assert.equal((await c.again().eventChecks.sweep(c.owner, c.project)).recorded, 0, "the repeated look is the check already written");
+    assert.equal((await c.checks.pending(c.owner, c.project))!.length, 1, "one owed check, not two for overlapping events");
+    assert.deepEqual(await c.eventChecks().sweep(c.owner, c.project), { recorded: 0, more: false }, "and the position went past every event");
+    // Two instances looking at once from the same position record one check.
+    await c.publish("service.failed", { id: "svc-health", seq: 4 });
+    const both = await Promise.all([c.again().eventChecks.sweep(c.owner, c.project), c.again().eventChecks.sweep(c.owner, c.project)]);
+    assert.equal(both[0].recorded + both[1].recorded, 1);
+    assert.equal((await c.checks.pending(c.owner, c.project))!.length, 2);
+  });
+
+  suite("review: responsibilities at the same position share one read, a sweep reads a bounded number of events in all and the rest get their turn next, and a new responsibility starts at its creation, not at the start of a long history", async (c) => {
+    let reads = 0;
+    const counting: EventCheckDeps["events"] = { since: (...a) => { reads++; return c.events.since(...a); } };
+    for (let i = 0; i < 12; i++) await c.make({ title: `Duty ${i}`, eventSources: ["svc-health"], everyMinutes: undefined });
+    await c.eventChecksWith({ events: counting }).sweep(c.owner, c.project);
+    await c.publish("service.failed", { id: "svc-health", seq: 1 });
+    c.setNow(iso(T0, 1)); reads = 0;
+    assert.deepEqual(await c.eventChecksWith({ events: counting }).sweep(c.owner, c.project), { recorded: 12, more: false });
+    assert.equal(reads, 1, "twelve responsibilities at one position: one read");
+    // A long history, then a new responsibility: it finds its start in a few reads and sees the event that came after it was created.
+    for (let i = 0; i < 40; i++) await c.publish("other.kind");
+    c.setNow(iso(T0, 10));
+    const fresh = await c.make({ title: "Fresh", eventSources: ["svc-health"], everyMinutes: undefined });
+    c.setNow(iso(T0, 11));
+    await c.publish("service.failed", { id: "svc-health", seq: 2 });
+    reads = 0;
+    await c.eventChecksWith({ events: counting, batch: 5 }).sweep(c.owner, c.project);
+    assert.ok(reads <= 12, `found its start by halving, not by reading forty events five at a time (${reads} reads)`);
+    const mine = (await c.checks.pending(c.owner, c.project))!.filter((p) => p.responsibilityId === fresh);
+    assert.deepEqual(mine.map((p) => p.trigger?.firstSeq), [42], "the event after its creation is owed to it on the first look");
+    // A budget of one read per sweep: two positions take two sweeps, each responsibility gets its turn, nothing is skipped.
+    await c.eventChecks().sweep(c.owner, c.project);
+    const all = (await c.duties.list(c.owner, c.project, { state: "active" }))!;
+    const paused = all.find((r) => r.title === "Duty 0")!;
+    await c.duties.update(c.owner, { commandId: cid("u"), responsibilityId: paused.id, expectedRevision: paused.revision, state: "paused" } as never);
+    await c.publish("service.failed", { id: "svc-health", seq: 3 });
+    await c.eventChecks().sweep(c.owner, c.project);
+    await c.duties.update(c.owner, { commandId: cid("u"), responsibilityId: paused.id, expectedRevision: (await c.duties.get(c.owner, paused.id))!.revision, state: "active" } as never);
+    await c.publish("service.failed", { id: "svc-health", seq: 4 });
+    const tight = c.eventChecksWith({ reads: 1, batch: 1 });
+    for (let i = 0; i < 6; i++) await tight.sweep(c.owner, c.project);
+    const head = (await c.events.since(`project:${c.project}`, 1, 1)).head;
+    for (const r of all) assert.equal(await c.eventChecks().position(c.owner, r.id), head, `${r.title} reached the end`);
+  });
+
+  suite("review: the clock set back keeps the last-seen time honest, so a later real absence is still a gap; exactly five minutes away is not a gap, a moment more is", async (c) => {
+    c.setNow(iso(T0, 100));
+    await c.gaps.heartbeat(c.owner, { startup: true });
+    c.setNow(T0); // the clock was put back by 100 minutes while running
+    await c.gaps.heartbeat(c.owner);
+    c.setNow(iso(T0, 30));
+    assert.deepEqual(await c.again().gaps.heartbeat(c.owner, { startup: true }), { downtime: { start: T0, end: iso(T0, 30) } }, "30 minutes away after the clock went back is a gap");
+    c.setNow(iso(T0, 35));
+    assert.deepEqual(await c.again().gaps.heartbeat(c.owner, { startup: true }), {}, "exactly five minutes: not a gap");
+    c.setNow(new Date(Date.parse(iso(T0, 40)) + 1).toISOString());
+    assert.equal((await c.again().gaps.heartbeat(c.owner, { startup: true })).downtime?.start, iso(T0, 35), "five minutes and a moment: a gap");
+    assert.equal((await c.gaps.list(c.owner, c.project))!.items.filter((g) => g.reason === "controller-down").length, 2);
   });
 }

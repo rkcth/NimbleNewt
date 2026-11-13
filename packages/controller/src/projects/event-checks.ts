@@ -12,7 +12,11 @@ import type { ResponsibilityBody, ResponsibilityService } from "./responsibiliti
 
 /** At most this many events are read for one responsibility in one look; the rest wait for the next (the position is kept, so nothing is skipped). */
 export const EVENT_CHECK_BATCH = 200;
+/** At most this many events are read in one sweep of a project, whatever the number of responsibilities (responsibilities at the same position share one read). */
+export const EVENT_CHECK_READS = 2000;
 const CURSOR = "responsibility-event-cursor";
+type Read = { events: EventBody[]; next: number; floor: number; head: number };
+interface Reads { readonly cache: Map<number, Promise<Read>>; budget: number }
 interface CursorBody { readonly next: number; readonly at: string }
 const hash = (...p: string[]): string => createHash("sha256").update(p.join("\0")).digest("hex").slice(0, 24);
 
@@ -23,6 +27,8 @@ export interface EventCheckDeps {
   readonly gaps?: Pick<CoverageGapService, "record">;
   /** Events read for one responsibility in one look (default `EVENT_CHECK_BATCH`). */
   readonly batch?: number;
+  /** Events read in all in one sweep of a project (default `EVENT_CHECK_READS`). */
+  readonly reads?: number;
 }
 
 /**
@@ -38,6 +44,7 @@ export interface EventCheckDeps {
 export class ResponsibilityEventChecks {
   readonly #runner: CommandRunner;
   readonly #deps: EventCheckDeps;
+  #turn = 0;
   private constructor(runner: CommandRunner, deps: EventCheckDeps) { this.#runner = runner; this.#deps = deps; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: EventCheckDeps, options: RunnerOptions = {}): ResponsibilityEventChecks {
@@ -49,9 +56,13 @@ export class ResponsibilityEventChecks {
     const projectId = eventProjectId(projectIdValue);
     if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "look at events for that project");
     let recorded = 0; let more = false; let failure: unknown;
-    for (const r of (await this.#deps.responsibilities.list(by, projectId, { state: "active" })) ?? []) {
-      if (r.eventSources.length === 0) continue;
-      try { const one = await this.#one(by, projectId, r); recorded += one.recorded; more ||= one.more; } catch (error) { failure ??= error; }
+    const watching = ((await this.#deps.responsibilities.list(by, projectId, { state: "active" })) ?? []).filter((r) => r.eventSources.length > 0);
+    // Bounded per sweep: responsibilities at the same position share one read, and at most `EVENT_CHECK_READS` events are read in all; those left wait for the next tick, and the start rotates so each gets its turn.
+    const reads: Reads = { cache: new Map(), budget: this.#deps.reads ?? EVENT_CHECK_READS };
+    const start = watching.length === 0 ? 0 : this.#turn++ % watching.length;
+    for (let i = 0; i < watching.length; i++) {
+      const r = watching[(start + i) % watching.length]!;
+      try { const one = await this.#one(by, projectId, r, reads); recorded += one.recorded; more ||= one.more; } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;
     return { recorded, more };
@@ -64,11 +75,21 @@ export class ResponsibilityEventChecks {
     return undefined;
   }
 
-  async #one(by: Principal, projectId: string, r: View<ResponsibilityBody>): Promise<{ recorded: number; more: boolean }> {
+  async #one(by: Principal, projectId: string, r: View<ResponsibilityBody>, reads: Reads): Promise<{ recorded: number; more: boolean }> {
     const stream = `project:${projectId}`;
     const found = await this.#runner.get(CURSOR, r.id);
     const cursor = found?.body as unknown as CursorBody | undefined;
-    const read = await this.#deps.events.since(stream, cursor?.next ?? 1, this.#deps.batch ?? EVENT_CHECK_BATCH);
+    const limit = Math.max(1, this.#deps.batch ?? EVENT_CHECK_BATCH);
+    // A new responsibility starts at the first event recorded after it was created (found by halving, a few reads), not at the start of a long history.
+    const from = cursor?.next ?? (await this.#firstAfter(stream, Date.parse(r.createdAt)));
+    let pending = reads.cache.get(from);
+    if (pending === undefined) {
+      if (reads.budget <= 0) return { recorded: 0, more: true };
+      // Charged by the sequence numbers actually scanned, so a look at the end of the stream (nothing new) costs nothing and does not hold back one that is behind. At most one batch over the budget.
+      pending = this.#deps.events.since(stream, from, limit).then((r) => { reads.budget -= Math.max(0, r.next - Math.max(from, r.floor)); return r; });
+      reads.cache.set(from, pending);
+    }
+    const read = await pending;
     const now = this.#runner.now();
     if (cursor !== undefined && cursor.next < read.floor && this.#deps.gaps !== undefined) {
       await this.#deps.gaps.record(by, { key: `events:${r.id}:${cursor.next}`, reason: "events-missed", start: cursor.at, end: now, scope: projectId, detail: `Events ${cursor.next} to ${read.floor - 1} of the project were cut by retention before "${r.title.slice(0, 80)}" looked at them.` });
@@ -84,10 +105,24 @@ export class ResponsibilityEventChecks {
     if (hits.length > 0) {
       const first = hits[0]!.event; const last = hits[hits.length - 1]!.event;
       const trigger: CheckTrigger = { kind: "event", source: (first.source?.id ?? hits[0]!.name).slice(0, 120), events: hits.length, firstSeq: first.seq, lastSeq: last.seq, kinds: [...new Set(hits.map((h) => h.event.kind))].slice(0, 5) };
-      if (await this.#deps.checks.recordEvent(by, projectId, r.id, trigger, last.at)) recorded++;
+      // Identified by where the look started: a look repeated after a crash (or by a second instance) from the same position is the same check, even when more events arrived in between.
+      if (await this.#deps.checks.recordEvent(by, projectId, r.id, trigger, last.at, from)) recorded++;
     }
     if (found === undefined || cursor === undefined || read.next !== cursor.next) await this.#move(by, r.id, found, read.next, now);
     return { recorded, more: read.next < read.head };
+  }
+
+  /** The lowest sequence number whose event was recorded at or after `at` (or the next to be written). Holes and unreadable events count as "after", so the search can only start earlier, never skip an event. */
+  async #firstAfter(stream: string, at: number): Promise<number> {
+    const probe = await this.#deps.events.since(stream, 1, 1);
+    let lo = Math.max(1, probe.floor); let hi = probe.head;
+    if (!Number.isFinite(at)) return lo;
+    for (let i = 0; i < 64 && lo < hi; i++) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      const e = (await this.#deps.events.since(stream, mid, 1)).events[0];
+      if (e !== undefined && e.seq === mid && Date.parse(e.at) < at) lo = mid + 1; else hi = mid;
+    }
+    return lo;
   }
 
   async #move(by: Principal, id: string, current: { revision: number } | undefined, next: number, at: string): Promise<void> {

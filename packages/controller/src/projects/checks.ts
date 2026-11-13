@@ -84,13 +84,14 @@ export class ResponsibilityChecks {
   }
 
   /** Records that events woke a responsibility (card P04f): one check for the events of one look, identified by the responsibility and the first and last event, so a repeat records nothing new. Owner, service or `responsibility.write`. */
-  async recordEvent(by: Principal, projectIdValue: string, responsibilityId: string, trigger: CheckTrigger, slotStart: string): Promise<boolean> {
+  async recordEvent(by: Principal, projectIdValue: string, responsibilityId: string, trigger: CheckTrigger, slotStart: string, lookFrom?: number): Promise<boolean> {
     const projectId = checkProjectId(projectIdValue);
     if (!(by.kind === "owner" || by.kind === "service" || may(by, "responsibility.write", projectId))) throw hidden(by, "generate checks for that project");
     const status = await this.#responsibilities.status(by, responsibilityId);
     if (status === undefined) return false;
     const body: CheckBody = { responsibilityId, projectId, slotStart, scheduledAt: status.asOf, inMaintenanceWindow: status.inMaintenanceWindow, trigger };
-    const id = idOf(responsibilityId, `event:${trigger.firstSeq}-${trigger.lastSeq}`);
+    // Keyed by the look's starting position when given (the event sweep does), so a look repeated from the same position after a crash is the same check even if more events came in meanwhile.
+    const id = idOf(responsibilityId, lookFrom === undefined ? `event:${trigger.firstSeq}-${trigger.lastSeq}` : `event-from:${lookFrom}`);
     const result = await this.#runner.command("responsibility.check.generate", { commandId: id, actor: by.id }, async () => ({
       payload: { id },
       build: async (): Promise<Built> => {
@@ -137,6 +138,8 @@ export class ResponsibilityChecks {
     const projectId = checkProjectId(projectIdValue);
     const list = await this.#responsibilities.list(by, projectId);
     if (list === undefined) return undefined;
+    // Run each tick for every project: a project with no responsibilities owes nothing, and the scan of all checks is skipped.
+    if (list.length === 0) return [];
     const last = new Map<string, number | undefined>();
     for (const r of list) { const lastAt = (await this.#responsibilities.status(by, r.id))?.lastCheckAt; last.set(r.id, lastAt === undefined ? undefined : Date.parse(lastAt)); }
     const found = await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).projectId === projectId);

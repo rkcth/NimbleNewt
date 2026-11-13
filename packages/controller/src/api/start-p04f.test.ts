@@ -49,6 +49,15 @@ test("through the running controller: an event wakes a responsibility, its check
     assert.equal((await call("check.settings.set", { enabled: false }, "s1")).ok, true);
     assert.deepEqual((await call("check.settings.get", {})).result.item.effective, { enabled: false, maxOpen: 5 });
     assert.equal((await call("check.settings.set", { enabled: true, maxOpen: 0 }, "s2")).error?.code, "invalid_command");
+    // Review: bad values are refused whatever their type, and the queries refuse readers without the right.
+    for (const [i, bad] of ([{ maxOpen: Number.NaN }, { maxOpen: "5" }, { maxOpen: 51 }, { maxOpen: 2.5 }, { enabled: "true" }, { enabled: true, expectedRevision: "1" }, { enabled: true, extra: 1 }] as Record<string, unknown>[]).entries()) assert.equal((await call("check.settings.set", bad, `bad-${i}`)).error?.code, "invalid_command", JSON.stringify(bad));
+    for (const bad of [{ limit: "abc" }, { limit: 0 }, { limit: 201 }, { limit: Number.NaN }, { open: "yes" }]) assert.equal((await call("responsibility.gaps", { projectId: project, ...bad })).error?.code, "invalid_command", JSON.stringify(bad));
+    assert.equal((await call("responsibility.gaps", { projectId: project, limit: 1, open: false })).ok, true);
+    const annToken = (await c.services.principals.issueCredential(owner, "agent:ann")).token;
+    const asAnn = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(annToken, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    assert.equal((await asAnn("check.settings.get", {})).error?.code, "forbidden");
+    assert.equal((await asAnn("check.settings.set", { enabled: true }, "ann-s")).error?.code, "forbidden");
+    assert.equal((await asAnn("responsibility.gaps", { projectId: project })).error?.code, "not_found", "no responsibility.read in the project: hidden");
 
     // An event arrives, then the controller stops before it looks; the saved "last seen" is moved back to a quarter of an hour ago.
     await publish(2);
