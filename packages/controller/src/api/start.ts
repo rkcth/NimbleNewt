@@ -248,6 +248,11 @@ export interface StartOptions {
     readonly narrate?: NonNullable<MeetingRecordOptions["narrate"]>;
     /** The steward agent (card M02h): an answer of allow or ask for a widening change the approval policy leaves to the owner; used only while the owner switched `meeting.decision.steward` on. See `meetings/agents.ts` (`stewardFrom`). */
     readonly steward?: NonNullable<MeetingRecordOptions["steward"]>;
+    /**
+     * Why the steward cannot answer right now, in plain words, or undefined when it can (card M02h, wiring): asked when the owner proposes switching `meeting.decision.steward` or `meeting.decision.stewardRights` on, so the proposal says the switch has
+     * no effect yet instead of being accepted silently. Without a `steward` at all the same warning is given with the reason that none is configured. A decision the steward cannot answer goes to the owner as it does with the switch off.
+     */
+    readonly stewardUnavailable?: () => Promise<string | undefined>;
   };
   /** Reviewed environment changes (card A09). The applier makes an approved change in the agent's environment; without one every approved change waits (pending) and the owner is not misled. */
   readonly maintenance?: { readonly applier?: MaintenanceApplier; /** The host side of the real environment applier (card A09): the disposable trial, the worker reload and the validation. With it, and without an `applier` of its own, approved package and extension requests are carried out by `EnvironmentChangeApplier`; without both, approved changes wait. */ readonly environmentRuntime?: EnvironmentRuntime; /** How long the suspension for an environment change may take (default one minute). */ readonly suspendMs?: number; /** The maintenance loop period in milliseconds (default 30000). */ readonly tickMs?: number; /** The claim heartbeat in milliseconds (default a third of the lease; 0 = off). */ readonly heartbeatMs?: number };
@@ -1260,7 +1265,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       const o = options.chat;
       // The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed from the services built above.
       const policy = PolicyService.withEpoch(storage, epoch, grants, { roles: (id) => agents.rolesOfPrincipal(id) });
-      const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter });
+      const policyEdits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews, grants, configuration, conversations, interpreter: o.interpreter, settingNotes: async (key, value) => {
+        if ((key !== "meeting.decision.steward" && key !== "meeting.decision.stewardRights") || value !== true) return [];
+        const why = options.meetingRecords?.steward === undefined ? "no steward agent is configured on this installation" : await options.meetingRecords.stewardUnavailable?.().catch(() => "its model could not be checked");
+        return why === undefined ? [] : [`Heads up: this has no effect for now, because ${why}. Meeting decisions the approval policy leaves to you still come to you; the setting works once a model is available for the steward.`];
+      } });
       policyEditsLive = policyEdits;
       chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: (owner) => status.needsYouCount(owner), ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {

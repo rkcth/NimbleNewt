@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BudgetService } from "../budgets/budgets.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ScriptedInterpreter } from "../chat/index.js";
 import { PolicyService, type SetPolicy } from "../policy/policy.js";
 import { startController } from "./index.js";
 
@@ -164,4 +165,32 @@ test("what the decision log suggests is read through the API and in chat's statu
     const lines = (await s.call(s.token, "status.ask", { request: { kind: "decision_patterns" } })).result.item.lines as { text: string }[];
     assert.match(lines[0]!.text, /you agreed to 0, refused 0, 3 went ahead/);
   });
+});
+
+test("switching the steward on when no steward can answer is still accepted but the proposal says plainly that it has no effect yet; with a working steward it says nothing of the kind (card M02h)", async () => {
+  const cases: { name: string; meetingRecords?: Record<string, unknown>; key: string; value: boolean; warns: RegExp | undefined }[] = [
+    { name: "no steward configured", key: "meeting.decision.steward", value: true, warns: /no effect for now, because no steward agent is configured/ },
+    { name: "rights switch, no steward", key: "meeting.decision.stewardRights", value: true, warns: /no effect for now/ },
+    { name: "switching it off needs no warning", key: "meeting.decision.steward", value: false, warns: undefined },
+    { name: "steward that cannot run now", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => "no model route is usable for chat yet" }, key: "meeting.decision.steward", value: true, warns: /no effect for now, because no model route is usable for chat yet/ },
+    { name: "unavailable check that throws", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => { throw new Error("boom"); } }, key: "meeting.decision.steward", value: true, warns: /no effect for now, because its model could not be checked/ },
+    { name: "a working steward", meetingRecords: { steward: async () => ({ verdict: "ask" }), stewardUnavailable: async () => undefined }, key: "meeting.decision.steward", value: true, warns: undefined },
+    { name: "a steward with no availability check", meetingRecords: { steward: async () => ({ verdict: "ask" }) }, key: "meeting.decision.steward", value: true, warns: undefined },
+    { name: "another setting", key: "meeting.decision.holdExpiryDays", value: true, warns: undefined },
+  ];
+  for (const k of cases) {
+    const d = mkdtempSync(join(tmpdir(), "nn-wsteward-"));
+    const say: Record<string, unknown[]> = {};
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) }, ...(k.meetingRecords === undefined ? {} : { meetingRecords: k.meetingRecords }) } as never);
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const text = `change ${k.key} please (${k.name})`;
+      say[text] = [{ kind: "policy_edit", change: { type: "setting", layer: "installation", key: k.key, value: k.key === "meeting.decision.holdExpiryDays" ? 7 : k.value }, evidence: text, basis: "owner" }];
+      const turn = await c.chat!.submit(boot.token, { messageId: "m1", text });
+      const out = (turn.outcomes as unknown as { status: string; explanation?: string[] }[])[0]!;
+      assert.equal(out.status, "proposed", `${k.name}: ${JSON.stringify(turn.outcomes)}`);
+      const shown = JSON.stringify(turn.outcomes);
+      if (k.warns === undefined) assert.doesNotMatch(shown, /no effect for now/, k.name); else assert.match(shown, k.warns, k.name);
+    } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  }
 });
