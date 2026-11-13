@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { canon } from "../backup/canon.js";
 import { SqliteStorage } from "../storage/sqlite/index.js";
 import { databaseSizeFrom, discardPostgresTransferCopy, dropPostgresSchema } from "../storage/postgres/index.js";
-import { hideAddress, sqliteTargetsFromConfig, type SqliteTargetDeps } from "./index.js";
+import { assertNotFenced, hideAddress, postgresFingerprint, sqliteFingerprint, sqliteTargetsFromConfig, storageFollowingAuthority, writeAuthority, type SqliteTargetDeps } from "./index.js";
+import { writeFile } from "node:fs/promises";
 
 const deps: SqliteTargetDeps = { openStorage: (path) => SqliteStorage.open({ path }), statfs };
 const enoent = (p: string): never => { const e: NodeJS.ErrnoException = new Error(`enoent: ${p}`); e.code = "ENOENT"; throw e; };
@@ -360,4 +361,74 @@ test("the schema drop refuses a name it could not place in its statement safely,
     await assert.rejects(dropPostgresSchema("postgres://u:p@127.0.0.1:1/none", schema), /invalid PostgreSQL schema name/);
     await assert.rejects(discardPostgresTransferCopy("postgres://u:p@127.0.0.1:1/none", schema, "transfer-pending:x"), /invalid PostgreSQL schema name/);
   }
+});
+
+test("the restart hand-over: the configured destination the authority file names is where the start goes; anything else is left to the start guard (card F04m)", async () => {
+  const dir = temp();
+  try {
+    const state = join(dir, "state");
+    const home = join(dir, "home.sqlite");
+    const moved = join(dir, "moved.sqlite");
+    const PASSWORD = "nn-secret-pw-91";
+    const address = `postgres://svc:${PASSWORD}@db.internal:5432/nn`;
+    const asked: string[] = [];
+    const secret = async (name: string): Promise<string | undefined> => { asked.push(name); return name === "pg-url" ? address : undefined; };
+    const entries = [
+      "junk", null, { name: "bad", kind: "sqlite", path: "relative.sqlite" }, { name: "pg", kind: "postgres", url: { secret: "pg-url" }, schema: "other" }, { name: "pg-missing", kind: "postgres", url: { secret: "none" } },
+      { name: "moved", kind: "sqlite", path: moved },
+    ];
+    const home0 = { kind: "sqlite", path: home } as const;
+    // No authority file: the configured database.
+    assert.deepEqual(await storageFollowingAuthority(home0, entries, state, secret), { storage: home0 });
+    const at = "2026-11-13T00:00:00.000Z";
+    const place = async (path: string, name: string) => ({ kind: "sqlite" as const, fingerprint: await sqliteFingerprint(path), name });
+    // It names the configured database (after a rollback): nothing to follow.
+    await writeAuthority(state, { format: 1, generation: 1, active: await place(home, "the SQLite database"), since: at });
+    assert.deepEqual(await storageFollowingAuthority(home0, entries, state, secret), { storage: home0 });
+    // It names a configured SQLite destination.
+    await writeAuthority(state, { format: 1, generation: 2, active: await place(moved, "moved"), transferId: "x1", since: at });
+    // F04m review: its file is not there (a disk not attached): refused, and nothing is created there (opening it would make a new, empty database).
+    await assert.rejects(storageFollowingAuthority(home0, entries, state, secret), /moved to moved \(sqlite\), but that database file is not there/);
+    assert.equal(existsSync(moved), false);
+    await writeFile(moved, "");
+    assert.deepEqual(await storageFollowingAuthority(home0, entries, state, secret), { storage: { kind: "sqlite", path: moved }, movedTo: { name: "moved", kind: "sqlite" } });
+    // It names a place no entry has: left alone for the guard to refuse. No entries at all: the same.
+    await writeAuthority(state, { format: 1, generation: 3, active: await place(join(dir, "stranger.sqlite"), "stranger"), transferId: "x2", since: at });
+    assert.deepEqual(await storageFollowingAuthority(home0, entries, state, secret), { storage: home0 });
+    assert.deepEqual(await storageFollowingAuthority(home0, undefined, state, secret), { storage: home0 });
+    // It names a configured PostgreSQL destination: the address is resolved to compare and used for the start, and shown nowhere else; the schema is part of the place.
+    await writeAuthority(state, { format: 1, generation: 4, active: { kind: "postgres", fingerprint: postgresFingerprint(address, "other"), name: "pg" }, transferId: "x3", since: at });
+    const pg = await storageFollowingAuthority({ kind: "postgres", url: "postgres://u:p@elsewhere:5432/d", maxConnections: 7 }, entries, state, secret);
+    assert.deepEqual(pg, { storage: { kind: "postgres", url: address, schema: "other", maxConnections: 7 }, movedTo: { name: "pg", kind: "postgres" } });
+    assert.ok(!JSON.stringify(pg.movedTo).includes(PASSWORD));
+    await writeAuthority(state, { format: 1, generation: 5, active: { kind: "postgres", fingerprint: postgresFingerprint(address, "nimblenewt"), name: "pg" }, transferId: "x4", since: at });
+    assert.deepEqual(await storageFollowingAuthority(home0, entries, state, secret), { storage: home0 }, "another schema is another place");
+    // A file that was changed by anything else is refused, not followed.
+    await writeAuthority(state, { format: 1, generation: 6, active: await place(moved, "moved"), transferId: "x5", since: at });
+    const file = join(state, "storage-authority.json");
+    const text = (await import("node:fs")).readFileSync(file, "utf8").replace(/"generation": 6/, '"generation": 60');
+    await writeFile(file, text);
+    await assert.rejects(storageFollowingAuthority(home0, entries, state, secret), /integrity mark/);
+  } finally { done(dir); }
+});
+
+test("a database the authority file names for a transfer is not started on when it is empty (never started on, not a copy): a disk not attached or a file replaced, on either backend (F04m review)", async () => {
+  const dir = temp();
+  try {
+    const state = join(dir, "state");
+    const here = { fingerprint: postgresFingerprint("postgres://u@db.internal:5432/nn", "nimblenewt") };
+    const db = (row: Record<string, unknown> | undefined) => ({ snapshot: async () => ({ read: async () => (row === undefined ? [] : [row]), close: async () => undefined }) }) as never;
+    const empty = db({ epoch: 0, holder: null }), none = db(undefined), used = db({ epoch: 7, holder: "controller" }), copy = db({ epoch: 7, holder: "transfer-pending:t1" });
+    // No authority file, or one with no transfer (the first start of an installation): an empty database is a new one.
+    assert.equal(await assertNotFenced(state, here, empty), 0);
+    await writeAuthority(state, { format: 1, generation: 1, active: { kind: "postgres", ...here, name: "pg" }, since: "2026-11-13T00:00:00.000Z" });
+    assert.equal(await assertNotFenced(state, here, empty), 0);
+    // The authority file names it for transfer t1: empty is refused (with no address in the text); a used database or the copy starts.
+    await writeAuthority(state, { format: 1, generation: 2, active: { kind: "postgres", ...here, name: "pg" }, transferId: "t1", since: "2026-11-13T00:00:00.000Z" });
+    for (const s of [empty, none]) await assert.rejects(assertNotFenced(state, here, s), (e: Error) => /name this database \(pg\) as the one that holds the data since database transfer t1, but it is empty/.test(e.message) && !e.message.includes("db.internal"));
+    assert.equal(await assertNotFenced(state, here, used), 7);
+    assert.equal(await assertNotFenced(state, here, copy), 7);
+    // It names another database: this check is not the one that decides (the guard refuses that start before the database is opened).
+    assert.equal(await assertNotFenced(state, { fingerprint: "sqlite:/elsewhere" }, empty), 0);
+  } finally { done(dir); }
 });

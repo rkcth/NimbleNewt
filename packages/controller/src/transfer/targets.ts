@@ -1,10 +1,10 @@
 import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import type { ControllerStorage } from "../storage/types.js";
 import { PostgresStorage, discardPostgresTransferCopy, postgresDatabaseBytes } from "../storage/postgres/index.js";
-import { pendingHolder, postgresFingerprint, sqliteFingerprint, type TransferTarget } from "./transfer.js";
+import { pendingHolder, postgresFingerprint, readAuthority, sqliteFingerprint, type TransferTarget } from "./transfer.js";
 
 /**
  * Transfer targets built from the host's configuration (card F04l). The entries may come from untrusted JSON, so every field is checked before a target exists.
@@ -201,3 +201,45 @@ export async function transferTargetsFromConfig(entries: readonly unknown[], dep
 
 /** The first slice's name for the same function (a list with only SQLite entries behaves as before). */
 export const sqliteTargetsFromConfig = transferTargetsFromConfig;
+
+/** What the launcher is configured to start on, in the shape `StartOptions.storage` takes (declared here so this file does not import the start). */
+export type ConfiguredStorage =
+  | { readonly kind: "sqlite"; readonly path: string }
+  | { readonly kind: "postgres"; readonly url: string; readonly schema?: string; readonly maxConnections?: number };
+
+/**
+ * The restart hand-over (card F04m): after a database move or rollback the authority file names the database a controller may start on. The configuration still names the one it was written for, so a host that
+ * restarts "from its configuration" would be refused by the start guard. This returns the configured destination whose place the authority file names, so the restarted controller comes up on it by itself.
+ * Nothing changes when there is no authority file or it names the configured database; an authority file that names a place no configured entry has is left alone (the start guard then refuses it and says so).
+ * An authority file that fails its integrity check throws (nobody starts on a database a changed file chose). The entries are untrusted JSON and are checked defensively; a PostgreSQL address is resolved only
+ * to compare places and is never put in a message.
+ */
+export async function storageFollowingAuthority(configured: ConfiguredStorage, entries: readonly unknown[] | undefined, stateDirectory: string, resolveSecret: (name: string) => Promise<string | undefined>): Promise<{ readonly storage: ConfiguredStorage; readonly movedTo?: { readonly name: string; readonly kind: "sqlite" | "postgres" } }> {
+  const authority = await readAuthority(stateDirectory);
+  if (authority === undefined || !Array.isArray(entries) || entries.length === 0) return { storage: configured };
+  const here = configured.kind === "sqlite" ? await sqliteFingerprint(configured.path) : postgresFingerprint(configured.url, configured.schema);
+  if (authority.active.fingerprint === here) return { storage: configured };
+  for (const entry of entries.slice(0, TARGET_ENTRIES_MAX)) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const o = entry as Record<string, unknown>;
+    const name = typeof o["name"] === "string" ? o["name"] : "";
+    if (o["kind"] === "sqlite" && typeof o["path"] === "string" && absolute(o["path"])) {
+      let fingerprint: string;
+      try { fingerprint = await sqliteFingerprint(o["path"]); } catch { continue; }
+      if (fingerprint === authority.active.fingerprint) {
+        // F04m review: opening a missing file makes a new, empty database; the start would then run on it. Refused before anything is created (a destination on a disk that is not attached, or a file removed).
+        if (!(await stat(o["path"]).then((s) => s.isFile(), () => false))) throw new Error(`NimbleNewt will not start: the database transfer files say the controller database was moved to ${name.slice(0, 80)} (sqlite), but that database file is not there. It may be on a disk that is not attached, or it was removed. Nothing was started or created: attach or restore it, then start again.`);
+        return { storage: { kind: "sqlite", path: o["path"] }, movedTo: { name, kind: "sqlite" } };
+      }
+    } else if (o["kind"] === "postgres") {
+      const ref = o["url"];
+      const secretName = ref !== null && typeof ref === "object" && !Array.isArray(ref) && typeof (ref as Record<string, unknown>)["secret"] === "string" && SECRET_NAME.test((ref as { secret: string }).secret) ? (ref as { secret: string }).secret : undefined;
+      const schema = o["schema"] === undefined ? "nimblenewt" : typeof o["schema"] === "string" && SCHEMA_NAME.test(o["schema"]) ? o["schema"] : undefined;
+      if (secretName === undefined || schema === undefined) continue;
+      let url: string | undefined, fingerprint: string;
+      try { url = await resolveSecret(secretName); if (url === undefined || !/^postgres(?:ql)?:\/\//i.test(url)) continue; fingerprint = postgresFingerprint(url, schema); } catch { continue; }
+      if (fingerprint === authority.active.fingerprint) return { storage: { kind: "postgres", url, schema, ...(configured.kind === "postgres" && configured.maxConnections !== undefined ? { maxConnections: configured.maxConnections } : {}) }, movedTo: { name, kind: "postgres" } };
+    }
+  }
+  return { storage: configured };
+}
