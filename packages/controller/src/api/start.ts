@@ -26,7 +26,7 @@ import { NotificationService, UrgentWatch, workSource, type ChannelAdapter } fro
 import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
-import { AssignmentService } from "../domain/assignments.js";
+import { ASSIGNMENT_EVENTS, AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService, WorkingNoteService, ContextRouteSettingsService, StartSizeService, ThinkingStore, ThinkingService, InspectionService } from "../context/index.js";
 import { existsSync } from "node:fs";
@@ -209,6 +209,11 @@ export interface StartOptions {
   readonly onInternalError?: (error: unknown) => void;
   /** The harnesses this installation ships (card F08). None by default: an attempt that names a harness is then refused. The first release ships Pi only. */
   readonly harnesses?: readonly HarnessDeclaration[];
+  /**
+   * Card U14e: a task given to an agent starts by itself. The assignment's event is delivered to the inbox by the reconciler's pass and the inbox admits the attempt (once, whatever the repeats), which the dispatcher then
+   * places on a host. Off by default, so a controller that is driven by hand (tests, a service that admits attempts itself) is unchanged. It needs exactly one shipped harness, which every such admission names.
+   */
+  readonly admitAssigned?: boolean;
   /**
    * Opens the conversation listener (card U02b). Off unless given. Local only by default; a remote listener needs `allowRemote`, TLS and `publicHosts` (see `TransportOptions`).
    * The listener is closed with the controller.
@@ -1284,8 +1289,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The first start on a database a transfer moved to notes its counters now: the epoch is taken and the start-up records are written, and no loop has run yet (card F04e).
     // An unrecorded first start only disables a rollback; it must never keep the controller from starting.
     const noteFirstStart = async (): Promise<void> => { if (stateDirectory !== undefined) { try { await withStateLock(stateDirectory, () => recordFirstStart(stateDirectory, sourcePlace, storage), { wait: true }); } catch (error) { print(`database transfer: the first start on this database could not be recorded (${error instanceof Error ? error.message.slice(0, 160) : "failed"}); a rollback of the transfer is not available`); } } };
-    // The reconciler (card L01b) holds an inbox message for a paused task. No delivery destination or effect bridge is built yet, so it repairs, admits, recovers and settles waits only.
-    const reconciler = new Reconciler(storage, epoch, { projects, inbox: InboxService.withEpoch(storage, epoch, assignments), effects: EffectService.withEpoch(storage, epoch, assignments), blockers: BlockerService.withEpoch(storage, epoch), waits, pauses, destinations: [], bridges: {} }, { claimant: "controller" });
+    // The reconciler (card L01b) holds an inbox message for a paused task. No effect bridge is built yet, and the assignment events are delivered only when the start asks for it (`admitAssigned`, card U14e), so otherwise it repairs, admits, recovers and settles waits only.
+    const autoAdmit = options.admitAssigned === true && (options.harnesses ?? []).length === 1;
+    const assignInbox = InboxService.withEpoch(storage, epoch, assignments, autoAdmit ? { harness: options.harnesses![0]!.harness } : {});
+    const reconciler = new Reconciler(storage, epoch, { projects, inbox: assignInbox, effects: EffectService.withEpoch(storage, epoch, assignments), blockers: BlockerService.withEpoch(storage, epoch), waits, pauses, destinations: autoAdmit ? [{ name: ASSIGNMENT_EVENTS, handler: assignInbox.handler("controller") }] : [], bridges: {} }, { claimant: "controller" });
     let dispatchProblem: string | undefined;
     if (options.dispatch !== undefined) {
       // The tool execution service is built over the dispatcher (below), so the dispatcher and the local host reach it late (card T06b): the local worker processes' bridge requests are answered by it, and the dispatcher asks it whether a

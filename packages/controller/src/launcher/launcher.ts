@@ -221,7 +221,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
         else {
           await controller.close();
           try {
-            controller = await startController({ ...baseStart, ...made.start, dispatch: { ...(made.start.dispatch ?? {}), ...(options.start?.dispatch ?? {}) } as NonNullable<StartOptions["dispatch"]>, ...(options.start?.tools === undefined ? {} : { tools: { ...(made.start.tools ?? {}), ...options.start.tools } as NonNullable<StartOptions["tools"]> }) });
+            controller = await startController({ ...baseStart, ...made.start, admitAssigned: true, dispatch: { ...(made.start.dispatch ?? {}), ...(options.start?.dispatch ?? {}) } as NonNullable<StartOptions["dispatch"]>, ...(options.start?.tools === undefined ? {} : { tools: { ...(made.start.tools ?? {}), ...options.start.tools } as NonNullable<StartOptions["tools"]> }) });
             if (controller.dispatch === undefined) {
               // A dispatcher that could not be composed (for instance the host builder threw) is not an error of the start: the controller runs, and says why it has no dispatcher.
               await made.close().catch(() => undefined);

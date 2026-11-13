@@ -947,7 +947,24 @@ export class ChatService {
     // A right is only what the owner said: the principal, the action, the grant and the scope must each appear in the message as a whole word, never as a part of a longer one.
     if (intent.op.startsWith("grant.")) {
       if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");
+      // A right for an agent the owner names by its name (card U14e review): the agents status shows `agt-` IDs, never the `agent:` principal a grant names, so a first-run owner could not give a
+      // right in words. The name is looked up as an assignment's is (exactly one active agent, case ignored; none is refused, two are asked about) and the right is drawn up for that agent's principal.
+      const grantName = args["agentName"];
+      delete args["agentName"];
+      let namedGrantee: { principal: string; name: string } | undefined;
+      if (grantName !== undefined) {
+        if (intent.op !== "grant.create") return refuse("invalid_command", "agentName is not an argument of this operation");
+        if (args["grantee"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as a grantee and by name; which one is meant has to be settled.");
+        if (typeof grantName !== "string" || grantName.trim() === "") return refuse("invalid_command", "agentName must be the agent's name as the owner said it");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === grantName.trim().toLowerCase());
+        if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(grantName.trim(), 80)}`);
+        if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(grantName.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
+        namedGrantee = { principal: `agent:${String(exact[0]!["id"])}`, name: String(exact[0]!["friendlyName"]).slice(0, 80) };
+      }
       for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant did you mean, by its grt- ID?" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
+      // The principal found from the owner's name is not in their words (only the name is), so it is put in after the check above.
+      if (namedGrantee !== undefined) { args["grantee"] = namedGrantee.principal; labels[namedGrantee.principal] = namedGrantee.name; }
       // A project the owner named by its name (already checked above to be in their own words) is the right's scope: the project with exactly that name, or a question when several have it.
       // A name and a different `project` together are two scopes, and which one the owner meant is asked rather than picked.
       const named = args["projectName"];
@@ -1031,6 +1048,15 @@ export class ChatService {
       projectId = focus.projectId;
       if (focus.projectName !== undefined) labels[projectId] = focus.projectName;
       if (spec.needsProject === true) args["projectId"] = projectId;
+    }
+    // An owner with exactly one project (the first-run case, card U14e) is not asked which project a task title or a project-scoped control is about: there is only one it can be.
+    if (projectId === undefined && needsScope) {
+      const only = await this.#listAll(token, "project.list", {});
+      if (only.length === 1) {
+        projectId = only[0]!["id"] as string;
+        labels[projectId] = only[0]!["name"] as string;
+        if (spec.needsProject === true) args["projectId"] = projectId;
+      }
     }
     if (projectId === undefined && needsScope) return await this.#askProject();
     // These operations name the project as `project`, not `projectId`: it was read as `projectId` above and is named back here.
@@ -1489,6 +1515,23 @@ export class ChatService {
         if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent called ${quotedText(named, 80)}` : `more than one agent is called ${quotedText(named, 80)}`);
         args["to"] = { kind: "agent", id: String(found[0]!["id"]) };
         labels[String(found[0]!["id"])] = named.trim();
+      }
+    }
+    // Work given to an agent the owner names by name (card U14e): the owner never has to know an agent's ID. The name is looked up in the active agents (exactly one, else asked or refused), and what is shown
+    // and confirmed is the agent's name; the owner may also be given as an ID the owner wrote, as before.
+    if (intent.op === "task.assign" || intent.op === "task.transfer") {
+      const named = args["agentName"];
+      delete args["agentName"];
+      const key = intent.op === "task.assign" ? "owner" : "to";
+      if (named !== undefined && args[key] !== undefined) return refuse("invalid_command", "the agent is named twice over, as an ID and by name; which one is meant has to be settled.");
+      if (named !== undefined) {
+        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "agentName must be the agent's name as the owner said it");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === named.trim().toLowerCase());
+        if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(named.trim(), 80)}`);
+        if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(named.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
+        args[key] = { kind: "agent", id: String(exact[0]!["id"]) };
+        labels[String(exact[0]!["id"])] = named.trim();
       }
     }
     if (intent.op === "resume.retry" || intent.op === "resume.cancel") {
