@@ -37,6 +37,9 @@ test("nothing is pushed while a proposal or a question waits for the owner, and 
   assert.ok(said.indexOf("QUESTION-host") > said.indexOf("ok."), "said after the answer, once");
   const asked = await run(world(["project", "host"], [["asked"]]), "something");
   assert.doesNotMatch(asked, /Next step/);
+  // Review: a step held for the owner (an answer the chat could not apply alone) is waiting too; among other outcomes it still silences the push.
+  const held = await run(world(["project", "host"], [["applied", "held"]]), "something");
+  assert.doesNotMatch(held, /Next step/);
 });
 
 test("the last required step done is told once; an unreadable view says nothing and does not stop the chat", async () => {

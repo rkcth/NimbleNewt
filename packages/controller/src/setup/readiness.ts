@@ -53,9 +53,11 @@ const MAX_PAGES = 5;
  */
 export class SetupReadinessService {
   readonly #storage: ControllerStorage;
-  private constructor(storage: ControllerStorage) { this.#storage = storage; }
+  readonly #startedAt: string | undefined;
+  private constructor(storage: ControllerStorage, startedAt: string | undefined) { this.#storage = storage; this.#startedAt = startedAt; }
 
-  static withEpoch(storage: ControllerStorage, _epoch: number): SetupReadinessService { return new SetupReadinessService(storage); }
+  /** `startedAt`: when this controller started (an ISO time on the clock the local host setting is recorded by). It tells a "run agents on this computer" chosen before this start (which should have joined) from one chosen since (which joins at the next start). */
+  static withEpoch(storage: ControllerStorage, _epoch: number, options: { readonly startedAt?: string } = {}): SetupReadinessService { return new SetupReadinessService(storage, options.startedAt); }
 
   async #each(kind: string, visit: (id: string, body: Record<string, unknown>) => void): Promise<boolean> {
     let afterId: string | undefined;
@@ -93,9 +95,11 @@ export class SetupReadinessService {
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });
     await this.#each("host-record", () => { announced++; });
     // The owner may have said "run agents on this computer" already: that counts from the controller's next start, so say so instead of looking as if the answer was lost (card U14d).
-    const localOn = (await s.getAggregate({ kind: "local-host-settings", id: "main" }))?.body as { enabled?: unknown } | undefined;
-    const waitingForStart = localOn?.enabled === true && !(hosts > 0 && announced > 0);
-    items.push({ id: "host", label: "A host to run agents on", required: true, state: hosts > 0 && announced > 0 ? "done" : "missing", detail: waitingForStart ? "you chose to run agents on this computer; it joins when the controller is started again (stop it and start it again, then ask for the setup list)" : hosts === 0 ? "no host enrolled" : announced === 0 ? `${plural(hosts, "host", "hosts", !completeH)} enrolled, none has announced itself` : `${plural(hosts, "host", "hosts", !completeH)} enrolled, ${announced} announced`, how: "host.local.set enabled true to run agents on this computer (it counts from the next start), or credential.issue kind host for a host on another machine, which then announces itself" });
+    // Once the controller has started with that choice in effect, "start it again" would send the owner round in circles: a host that has not joined since says so and points at the start-up messages.
+    const localOn = (await s.getAggregate({ kind: "local-host-settings", id: "main" }))?.body as { enabled?: unknown; updatedAt?: unknown } | undefined;
+    const chosenLocal = localOn?.enabled === true && !(hosts > 0 && announced > 0);
+    const chosenBeforeThisStart = chosenLocal && this.#startedAt !== undefined && typeof localOn?.updatedAt === "string" && localOn.updatedAt < this.#startedAt;
+    items.push({ id: "host", label: "A host to run agents on", required: true, state: hosts > 0 && announced > 0 ? "done" : "missing", detail: chosenBeforeThisStart && hosts === 0 ? "you chose to run agents on this computer, but no host has joined since this start; the messages printed when the controller started say why (for example, this computer cannot run the worker host), and tasks wait for a host until one joins" : chosenLocal && !chosenBeforeThisStart ? "you chose to run agents on this computer; it joins when the controller is started again (stop it and start it again, then ask for the setup list)" : hosts === 0 ? "no host enrolled" : announced === 0 ? `${plural(hosts, "host", "hosts", !completeH)} enrolled, none has announced itself` : `${plural(hosts, "host", "hosts", !completeH)} enrolled, ${announced} announced`, how: "host.local.set enabled true to run agents on this computer (it counts from the next start), or credential.issue kind host for a host on another machine, which then announces itself" });
 
     const notices = (await s.getAggregate({ kind: "notification-settings", id: "installation" }))?.body as { channel?: unknown; channelName?: unknown } | undefined;
     items.push({ id: "notifications", label: "How you are notified", required: false, state: notices === undefined ? "default" : "done", detail: notices === undefined ? "the inbox (nothing leaves the installation)" : notices.channel === "external" ? `external channel ${String(notices.channelName ?? "")}` : "the inbox", how: "notifications.configure" });
@@ -116,7 +120,9 @@ export class SetupReadinessService {
     let limited = 0;
     await this.#each("model-budget", (_id, body) => { if (["maxCostMicros", "maxTokens", "maxFailedAttempts"].some((k) => typeof body[k] === "number")) limited++; });
     limited += (await s.listAggregates("budget-tree", { limit: 1 })).length;
-    items.push({ id: "budgets", label: "Budgets and time limits", required: false, state: limited > 0 ? "done" : "default", detail: limited > 0 ? "a ceiling has been set on at least one task (the cost view lists them)" : "none are imposed; a task with no budget has nothing held against it", how: "model-budget.set and the budget operations, only if you want a ceiling" });
+    // The owner's aggregate money cap (budget.aggregate.set) is a ceiling too, and the likeliest answer to "do you want a ceiling": on means answered, off (or never set) is the default.
+    if (((await s.getAggregate({ kind: "budget-aggregate", id: "main" }))?.body as { enabled?: unknown } | undefined)?.enabled === true) limited++;
+    items.push({ id: "budgets", label: "Budgets and time limits", required: false, state: limited > 0 ? "done" : "default", detail: limited > 0 ? "a ceiling has been set (on at least one task, or an overall money cap; the cost view lists them)" : "none are imposed; a task with no budget has nothing held against it", how: "model-budget.set, budget.aggregate.set (an overall money cap) and the budget operations, only if you want a ceiling" });
 
     const next = items.find((i) => i.required && i.state !== "done")?.id;
     return { ready: next === undefined, items: items.map((i) => ({ ...i, guide: SETUP_GUIDE[i.id] })), ...(next === undefined ? {} : { next }) };

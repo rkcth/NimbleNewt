@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { BudgetService } from "../budgets/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -61,6 +62,22 @@ for (const backend of backends) {
       assert.match(set.detail, /ceiling has been set/);
       await fb.setBudget(owner, { commandId: cid("b"), taskId: task, maxTokens: null });
       assert.equal((await item("budgets")).state, "default", "a budget with every limit removed is no ceiling");
+      // Review: the overall money cap is a ceiling too (the likeliest answer to the budgets question), and turning it off again is the default once more.
+      const budgets = BudgetService.withEpoch(world.storage, projects.epoch);
+      await budgets.setAggregate(owner, { commandId: cid("a"), enabled: true, scope: "installation", period: "month", amountMicros: 50_000_000 });
+      assert.equal((await item("budgets")).state, "done", "an overall money cap answers the budgets step");
+      await budgets.setAggregate(owner, { commandId: cid("a"), enabled: false });
+      assert.equal((await item("budgets")).state, "default", "a cap that is off is no ceiling");
+
+      // Review: once the controller has started with "run agents on this computer" in effect and no host joined, "start it again" would be a loop; the view points at the start-up messages.
+      await hostSetting.set(owner, { commandId: cid("h"), enabled: true });
+      const later = SetupReadinessService.withEpoch(world.storage, projects.epoch, { startedAt: new Date(Date.now() + 60_000).toISOString() });
+      const afterStart = (await later.check(owner)).items.find((i) => i.id === "host")!;
+      assert.equal(afterStart.state, "missing");
+      assert.doesNotMatch(afterStart.detail, /started again/, "a start has already happened with the choice in effect");
+      assert.match(afterStart.detail, /no host has joined since this start; the messages printed when the controller started say why/);
+      const earlier = SetupReadinessService.withEpoch(world.storage, projects.epoch, { startedAt: new Date(Date.now() - 60_000).toISOString() });
+      assert.match((await earlier.check(owner)).items.find((i) => i.id === "host")!.detail, /joins when the controller is started again/, "chosen during this run: it joins at the next start");
       assert.doesNotMatch(JSON.stringify(await readiness.check(owner)), /sk-[A-Za-z0-9]{8}|Bearer |password/);
     } finally { await world.close(); }
   });

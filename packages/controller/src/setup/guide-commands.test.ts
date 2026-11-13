@@ -4,19 +4,29 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { OPERATION_BY_NAME } from "../api/operations.js";
 import { CHAT_OPS } from "../chat/commands.js";
+import { ACTIONS } from "../security/access.js";
 import { SETUP_GUIDE, SetupReadinessService } from "./index.js";
 
 // Card U14d: "docs/nimblenewt/getting-started.md is updated so every step uses a built command". The guide may name an operation only if the controller has it, and the first-run steps must be
 // reachable in chat.
 const guide = readFileSync(fileURLToPath(new URL("../../../../docs/nimblenewt/getting-started.md", import.meta.url)), "utf8");
-const prefixes = new Set([...OPERATION_BY_NAME.keys()].map((name) => name.split(".")[0]!));
-// Dotted names in backticks that are not operations: configuration keys and files. Each is named here so that a new one has to be looked at.
-const NOT_OPERATIONS: ReadonlySet<string> = new Set(["models.providers", "dispatch.local.build", "controller.storage", "approvals.preset", "public.example.json", "private.example.json", "dispatch.cache.endpoints", "dispatch.local.window", "dispatch.remote.hosts", "first-run.mjs", "config.stage", "config.apply", "resource.scope.write", "role.list", "attempt.work", "task.read", "assignment.get", "activity.get"]);
+// A grant names an action (`task.read`, `attempt.work`): those are checked against the controller's own list of actions, not taken on trust.
+const actions: ReadonlySet<string> = new Set(ACTIONS);
+// Dotted names in backticks that are neither operations nor grant actions: configuration keys, files and the configuration service's internal command names (the guide says they have no API
+// operation). Each is named here so that a new one has to be looked at. Review: a real operation must never be listed here (it would hide its removal), and the check no longer skips a name whose
+// first part is no operation's (a made-up `firstrun.begin` was not looked at before).
+const NOT_OPERATIONS: ReadonlySet<string> = new Set(["models.providers", "dispatch.local.build", "controller.storage", "approvals.preset", "public.example.json", "private.example.json", "dispatch.cache.endpoints", "dispatch.local.window", "dispatch.remote.hosts", "first-run.mjs", "config.stage", "config.apply"]);
+const known = (name: string): boolean => OPERATION_BY_NAME.has(name) || actions.has(name) || NOT_OPERATIONS.has(name);
+
+test("the list of names that are not operations holds no operation and no grant action", () => {
+  for (const name of NOT_OPERATIONS) assert.ok(!OPERATION_BY_NAME.has(name) && !actions.has(name), `${name} is real; check it as such instead of listing it`);
+});
 
 test("every command the getting-started guide names in backticks is a built operation (or a listed configuration key)", () => {
   const named = new Set<string>();
   for (const m of guide.matchAll(/`([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+)`/g)) named.add(m[1]!);
-  const missing = [...named].filter((name) => prefixes.has(name.split(".")[0]!) && !OPERATION_BY_NAME.has(name) && !NOT_OPERATIONS.has(name));
+  assert.ok(named.size > 20, "the guide's command names were read");
+  const missing = [...named].filter((name) => !known(name));
   assert.deepEqual(missing, [], "the guide names a command the controller does not have");
   for (const must of ["setup.readiness", "project.create", "routing.provider.add", "host.local.set", "credential.issue", "notifications.configure", "model-budget.set", "agent.create", "task.create", "grant.create"]) assert.ok(named.has(must), `${must} is part of the first run and the guide should name it`);
 });
@@ -40,7 +50,7 @@ test("the first-run steps are all reachable by chat, with a plain guide, and eac
     assert.deepEqual(view.items.map((i) => i.id).sort(), Object.keys(SETUP_GUIDE).sort());
     for (const i of view.items) for (const m of i.how.matchAll(/\b([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+)\b/g)) {
       const name = m[1]!;
-      if (prefixes.has(name.split(".")[0]!) && !name.endsWith(".mjs")) assert.ok(OPERATION_BY_NAME.has(name) || NOT_OPERATIONS.has(name), `${i.id}: "${name}" is not an operation`);
+      assert.ok(known(name), `${i.id}: "${name}" is not an operation`);
     }
   } finally { await storage.close(); }
 });
