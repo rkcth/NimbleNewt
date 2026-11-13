@@ -315,6 +315,31 @@ test("H12j: advice waits for a safe boundary while a model call is open", async 
   await running;
 });
 
+test("card M04h: the local worker says its conversation is idle only while the turn runs with no model call open and no tool call in flight, and never when the runtime cannot count its model calls", async () => {
+  let modelCalls = 1;
+  let finish!: () => void;
+  const turn = new Promise<void>((ok) => { finish = ok; });
+  let counts = true;
+  const local = new LocalWorker({
+    hostId: "host:local", resources: { cpus: 1, memoryMb: 1 }, version: "v", capabilities: () => ({}) as never,
+    sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
+    runtimes: { open: async () => ({ run: async () => { await turn; return { status: "completed" }; }, checkpoint: async () => ({}), tell: async () => undefined, ...(counts ? { activeModelCalls: () => modelCalls } : {}), close: async () => undefined }) },
+  });
+  const handle = await local.start(order());
+  assert.equal(await handle.idle!(), false, "the turn has not started");
+  const running = handle.run(gateway());
+  assert.equal(await handle.idle!(), false, "a model call is open");
+  modelCalls = 0;
+  assert.equal(await handle.idle!(), true, "no call is open");
+  finish();
+  await running;
+  await handle.stop();
+  assert.equal(await handle.idle!(), false, "stopped");
+  counts = false;
+  const blind = await (await local.start(order())).idle!();
+  assert.equal(blind, false, "a runtime that cannot count its model calls is never idle");
+});
+
 const ADMIT_ALL: RuntimeGuards["context"] = { admit: async () => ({ admit: true, reasons: [] }), resume: async () => ({ resume: true, reason: "fits" }) };
 
 test("card H12f: the first refusal is announced as one to be retried when the runtime can compact (no blocker yet), the second is final; a compaction that fails still gets the second round, which refuses", async () => {

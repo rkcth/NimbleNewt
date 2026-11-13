@@ -1126,7 +1126,7 @@ export const OPERATIONS: readonly Operation[] = [
   attendOp("call-now", "command", "Starts an immediate meeting with the available participants of the project or a named team.", "callNow", ["projectId", "title", "reason", "scope", "requireAll", "durationMinutes"], "the room."),
   attendOp("status", "query", "Who is preparing, present, unavailable or blocked in a room.", "status", ["occurrenceId"], "`{ item }`.", ["occurrenceId"]),
   attendOp("begin", "command", "Starts the discussion with whoever is present; with 'everyone required' waits for the rest until the timeout.", "beginDiscussion", ["occurrenceId"], "`{ startedWith, missing, fullAttendance }`."),
-  attendOp("prepare", "command", "Asks an agent to reach a safe boundary before the meeting.", "prepare", ["occurrenceId", "agent", "interrupted"], "`{ state, waitingOn }`."),
+  attendOp("prepare", "command", "Asks an agent to reach a safe boundary before the meeting. A named task whose attempt only waits on its background jobs is paused too; its jobs carry on under the pause (listed in `carriedOn`).", "prepare", ["occurrenceId", "agent", "interrupted"], "`{ state, waitingOn, carriedOn }`."),
   attendOp("blocked", "command", "Says an agent cannot attend, or can again.", "reportBlocked", ["occurrenceId", "agent", "blocked", "reason"], "`{ ok }`."),
   attendOp("join", "command", "An agent joins the room; its ownership and background work stay as they are.", "join", ["occurrenceId", "agent"], "`{ joined, state, meetingTaskId?, waitingOn }`."),
   attendOp("join-owner", "command", "The owner joins the room.", "joinAsOwner", ["occurrenceId"], "`{ replayed }`."),
