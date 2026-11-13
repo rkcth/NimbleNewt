@@ -1092,6 +1092,8 @@ test("the same command sent again after the move is answered with what was recor
 });
 
 test("the host's restart: asked once after the answer when it opted in and the owner has not turned it off; a refusal by the host is written down; without an opt-in nothing is scheduled (card F04m)", async () => {
+  // The restart is asked a moment after the answer and its outcome is written then: a fixed sleep was too short on a slow CI runner (round 8), so the test waits for what it checks (bounded).
+  const waitFor = async (what: string, ok: () => Promise<boolean> | boolean): Promise<void> => { const end = Date.now() + 10_000; while (!(await ok())) { if (Date.now() > end) assert.fail(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 10)); } };
   const f = await fixture();
   try {
     const events: Array<{ reason: string; transferId: string; to: string }> = [];
@@ -1102,7 +1104,7 @@ test("the host's restart: asked once after the answer when it opted in and the o
     assert.equal(done.restart, "scheduled");
     assert.equal(events.length, 0, "not before the answer is out");
     assert.equal((await readJournal(st(f)))?.restart?.state, "requested");
-    await new Promise((r) => setTimeout(r, 120));
+    await waitFor("the restart to be asked", () => events.length > 0);
     assert.deepEqual(events, [{ reason: "switched", transferId: done.id, to: "sqlite2" }]);
     await new Promise((r) => setTimeout(r, 60));
     assert.equal(events.length, 1, "once");
@@ -1122,7 +1124,7 @@ test("the host's restart: asked once after the answer when it opted in and the o
     const target = await sqlTarget(g, "dest.sqlite");
     const refusing = await service(g, [target], { restart: { run: () => { throw new Error("no supervisor to restart me"); }, delayMs: 10 } });
     await refusing.apply("sqlite2", (await refusing.preview("sqlite2")).token);
-    await new Promise((r) => setTimeout(r, 150));
+    await waitFor("the refusal to be written down", async () => (await readJournal(st(g)))?.restart?.state !== "requested");
     const j = await readJournal(st(g));
     assert.equal(j?.restart?.state, "failed"); assert.match(j?.restart?.reason ?? "", /no supervisor/);
     assert.equal(j?.phase, "switched", "a refused restart does not undo the move");

@@ -237,8 +237,10 @@ for (const backend of backends) {
     assert.deepEqual(calls, [], "no file-system call was started while one still hangs (each would hold a thread of the shared pool)");
     assert.ok(faults.some((f) => /has not come back/.test(f)), JSON.stringify(faults));
     release();
-    await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(await statuses(c, await probe(c.task)), { "a.ts": "unchanged", "b.ts": "unchanged" }, "once it came back, probes read again");
+    // The read that hung now ends (a real read of b.ts); until it has, a probe still reads nothing, which is the rule. A fixed 20 ms was too short on a loaded CI runner (round 8): wait for it, bounded.
+    let after: Record<string, string> = {};
+    for (let i = 0; i < 200; i++) { after = await statuses(c, await probe(c.task)); if (after["a.ts"] !== "unknown") break; await new Promise((r) => setTimeout(r, 25)); }
+    assert.deepEqual(after, { "a.ts": "unchanged", "b.ts": "unchanged" }, "once it came back, probes read again");
   });
 
   suite("review: one probe reads a bounded number of bytes in all", async (c) => {
