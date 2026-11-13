@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **261 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **262 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -118,7 +118,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
+| Meetings | `▓▓▓▓▓▓▓▓▓░░░` 81% | 26 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -477,7 +477,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓░░░ 25 of 32</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓░░░ 26 of 32</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -512,7 +512,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
 - [x] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
 - [ ] **M03h** · P37 · Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up _(needs M03g)_
-- [ ] **M04h** · P37 · A real host that wakes stopped agents _(needs M04g)_
+- [x] **M04h** · P37 · A real host that wakes stopped agents _(needs M04g)_
 
 </details>
 
