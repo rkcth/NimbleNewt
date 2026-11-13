@@ -21,7 +21,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface World {
   readonly m: MaintenanceService; readonly applier: FakeApplier; readonly owner: Principal; readonly agents: AgentService; readonly grants: GrantService; readonly principals: PrincipalService;
   readonly time: { ms: number };
-  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number }): MaintenanceService;
+  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number }): MaintenanceService;
   make(name: string, by?: Principal, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
@@ -41,7 +41,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     const grants = GrantService.withEpoch(open.storage, projects.epoch, options);
     const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
     const applier = new FakeApplier();
-    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
+    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     const m = service();
     const make: World["make"] = async (friendlyName, by = owner, supervisorId) => {
       const created = await agents.create(by, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
@@ -492,6 +492,44 @@ for (const [index, backend] of backends.entries()) {
       await m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "reject", specDigest: await specOf(w, r.maintenanceId) });
       release(); await m.idle();
       assert.equal((await w.storage.getAggregate({ kind: "maintenance-inspection", id: r.maintenanceId })), undefined, "a request that is no longer waiting is not read on");
+    });
+  });
+
+  test(`readings run one at a time, a reading given up at the limit is told to stop, and past the queue bound a request is recorded as not read (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      // One at a time: three waiting requests never have two readings running together.
+      let running = 0, most = 0, entered = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const m = w.service({ inspector: async () => { running++; entered++; most = Math.max(most, running); try { await gate; return read(); } finally { running--; } } });
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push((await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg(`q${i}`, { digest: D(String(i + 1)) }), reason: "needed", rollbackPlan: "undo" })).maintenanceId);
+      // Give readings that could overlap the chance to (bounded); one that waits its turn never starts while the gate holds.
+      for (let k = 0; k < 50 && entered < 2; k++) await sleep(10);
+      assert.equal(entered, 1, "the second reading waits for the first");
+      release(); await m.idle();
+      assert.equal(most, 1, "never two readings at once");
+      for (const id of ids) assert.equal(((await reviewOf(w, w.owner, id)).inspection as Record<string, unknown>).read, true, "each was read in turn");
+      // A reading given up at the limit is told to stop (its fetch is aborted).
+      let aborted = false;
+      const slow = w.service({ inspectTimeoutMs: 50, inspector: async (_a, signal) => { await new Promise<void>((r) => { if (signal === undefined) return; signal.addEventListener("abort", () => { aborted = true; r(); }); }); return read(); } });
+      const s = await slow.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("slow", { digest: D("5") }), reason: "needed", rollbackPlan: "undo" });
+      await slow.idle();
+      assert.equal(aborted, true, "the host was told to stop");
+      assert.match(String(((await reviewOf(w, w.owner, s.maintenanceId)).inspection as Record<string, unknown>).why), /too long/);
+      // Past the bound a request is not queued: it is recorded as not read, and the host is not asked.
+      let asked = 0;
+      let open!: () => void;
+      const held = new Promise<void>((r) => { open = r; });
+      const small = w.service({ inspectQueue: 2, inspector: async () => { asked++; await held; return read(); } });
+      const q: string[] = [];
+      for (let i = 0; i < 3; i++) q.push((await small.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg(`b${i}`, { digest: D(String(i + 6)) }), reason: "needed", rollbackPlan: "undo" })).maintenanceId);
+      open(); await small.idle();
+      assert.equal(asked, 2, "the third was not handed to the host");
+      const third = (await reviewOf(w, w.owner, q[2]!)).inspection as Record<string, unknown>;
+      assert.equal(third.read, false);
+      assert.match(String(third.why), /too many artifacts were waiting/);
     });
   });
 }

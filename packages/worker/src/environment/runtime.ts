@@ -105,12 +105,14 @@ export class LocalEnvironmentRuntime {
    * with the same limits and checks as an install (so an artifact an install would refuse is shown as refused), and the declared install scripts are returned with their text. Nothing is written to the disk or the store and nothing
    * runs. An artifact that does not match its digest or its own name and version shows none of its content.
    */
-  async inspect(artifact: RuntimeApproved): Promise<RuntimeInspectResult> {
+  async inspect(artifact: RuntimeApproved, signal?: AbortSignal): Promise<RuntimeInspectResult> {
     try {
       if (!DIGEST_FORM.test(artifact.digest) || !validPackageName(artifact.name) || !validPackageVersion(artifact.version)) return { ok: false, reason: "the name, version or digest is not in an accepted form" };
       if (this.#opts.source === undefined) return { ok: false, reason: "this host has no way to fetch the artifact, so its install scripts cannot be read before approval" };
       let bytes: Uint8Array;
-      try { bytes = await this.#opts.source.fetch(artifact.source, this.#limits.maxArchiveBytes); } catch (error) { return { ok: false, reason: `the artifact could not be fetched: ${say(error)}` }; }
+      try { bytes = await this.#opts.source.fetch(artifact.source, this.#limits.maxArchiveBytes, signal); } catch (error) { return { ok: false, reason: `the artifact could not be fetched: ${say(error)}` }; }
+      // A reading the controller gave up on (its time limit) is not unpacked: the caller no longer waits for it.
+      if (signal?.aborted === true) return { ok: false, reason: "the reading was stopped before the artifact was unpacked" };
       if (digestOf(bytes) !== artifact.digest) return { ok: false, reason: "the fetched artifact does not match the digest the requester named; nothing of it is shown" };
       const unpacked = unpack(bytes, this.#limits);
       const { metadata } = unpacked;

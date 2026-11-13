@@ -19,7 +19,8 @@ const url = (name: string): string => `https://registry.example.org/${name}.tgz`
 
 class Source implements ArtifactSource {
   readonly files = new Map<string, Uint8Array>(); fetched: string[] = [];
-  async fetch(source: string): Promise<Uint8Array> { this.fetched.push(source); const f = this.files.get(source); if (f === undefined) throw new Error("not in the fake registry"); return f; }
+  signals: (AbortSignal | undefined)[] = [];
+  async fetch(source: string, _max?: number, signal?: AbortSignal): Promise<Uint8Array> { this.fetched.push(source); this.signals.push(signal); const f = this.files.get(source); if (f === undefined) throw new Error("not in the fake registry"); return f; }
 }
 class Scripts implements InstallScriptPort { runs = 0; async run(): Promise<void> { this.runs++; } }
 function world(withSource = true) {
@@ -91,5 +92,17 @@ describe("a reviewer can read an artifact before it is approved", { skip: POSIX_
     const bad = await w.runtime.inspect({ name: "../x", version: "latest", digest: "nope", source: url("x") });
     assert.equal(bad.ok, false);
     assert.equal(w.source.fetched.includes(url("x")), false, "a malformed request fetches nothing");
+  });
+
+  test("the caller's stop signal reaches the source, and a reading stopped meanwhile is not unpacked", async () => {
+    const w = world();
+    const a = w.add("tool", "1.0.0", { files: { "index.js": "1", "setup.js": "STOPPED-TEXT" }, scripts: { install: "setup.js" } });
+    const stop = new AbortController();
+    stop.abort();
+    const r = await w.runtime.inspect(a, stop.signal);
+    assert.equal(w.source.signals[0], stop.signal, "the source was handed the signal");
+    assert.equal(r.ok, false);
+    assert.match(r.ok ? "" : r.reason, /stopped/);
+    assert.doesNotMatch(JSON.stringify(r), /STOPPED-TEXT/);
   });
 });

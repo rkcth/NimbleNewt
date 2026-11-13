@@ -144,7 +144,7 @@ export type ArtifactInspection =
   | { readonly ok: false; readonly reason: string };
 /** What is stored: the host's answer, cleaned and bounded by the controller, bound to the exact request it was read for. */
 export interface StoredInspection { readonly specDigest: string; readonly at: string; readonly result: ArtifactInspection }
-const INSPECT_SCRIPTS = 6, INSPECT_TEXT = 2000;
+const INSPECT_SCRIPTS = 6, INSPECT_TEXT = 2000, INSPECT_QUEUE = 50;
 /** Cleans an answer from a host: text only, bounded, no invisible or direction-changing characters, secret-shaped values redacted. A script's own text is untrusted content and is shown as such, never as an instruction. */
 function cleanInspection(raw: unknown): ArtifactInspection {
   const clip = (v: unknown, max: number): string => { const c = cleanUntrusted(typeof v === "string" ? v : String(v), { lines: "keep" }); return c.text.length > max ? `${c.text.slice(0, max)}...` : c.text; };
@@ -289,9 +289,11 @@ export interface MaintenanceOptions {
    * Reads an artifact for the reviewer (card A09 seventh slice): given the requested name, version, source and digest, what the artifact declares, read after its digest was checked and without installing or running anything. Called in the
    * background once for each package or extension request that waits for a person; the answer (or the reason there is none) is stored beside the request and shown in its review. Absent: the reviewer has only the requester's claims.
    */
-  readonly inspector?: (artifact: { readonly name: string; readonly version: string; readonly digest: string; readonly source: string }) => Promise<ArtifactInspection>;
+  readonly inspector?: (artifact: { readonly name: string; readonly version: string; readonly digest: string; readonly source: string }, signal?: AbortSignal) => Promise<ArtifactInspection>;
   /** How long the inspector may take before the review says it could not be read (default 30 seconds; tests). */
   readonly inspectTimeoutMs?: number;
+  /** How many readings may wait or run at once before a new one is recorded as not read (default 50; tests). */
+  readonly inspectQueue?: number;
 }
 
 const inputAgent = (v: unknown, field: string): string => { const s = typeof v === "string" ? v.trim() : ""; const id = s.startsWith("agent:") ? s : `agent:${s}`; return AGENT.test(id) ? id : bad(field, "must be an agent's principal ID such as agent:agt-..."); };
@@ -332,6 +334,9 @@ export class MaintenanceService {
   #applying = 0;
   #closing = false;
   readonly #cursor: { resume: { after?: string }; enforce: { after?: string } } = { resume: {}, enforce: {} };
+  /** Artifact readings run one at a time (each may hold an archive and its unpacked files in memory on the controller); `#inspectWaiting` counts the ones queued or running, bounded by INSPECT_QUEUE. */
+  #inspectTail: Promise<void> = Promise.resolve();
+  #inspectWaiting = 0;
 
   private constructor(runner: CommandRunner, options: MaintenanceOptions) { this.#runner = runner; this.#applier = options.applier ?? noApplier; this.#notify = options.notify; this.#options = options; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: MaintenanceOptions = {}, runnerOptions: RunnerOptions = {}): MaintenanceService { return new MaintenanceService(new CommandRunner(storage, epoch, runnerOptions), options); }
@@ -425,9 +430,21 @@ export class MaintenanceService {
    * Has the host read the artifact of a waiting request, once, and keeps what it found beside the request (bound to its exact digest of the spec). A failure, a timeout or an inspector that throws is itself recorded as "could not be read".
    * Reading changes nothing about the request: nobody is asked to wait for it and no decision depends on it.
    */
-  async #inspect(id: string): Promise<void> {
+  /**
+   * Queues a reading: one runs at a time, because each may hold an archive of up to the install limit and its unpacked files in the controller's memory, and many agents' requests must not make many of those at once. Past
+   * INSPECT_QUEUE readings waiting, a new one is recorded as not read rather than queued without end.
+   */
+  #queueInspect(id: string): Promise<void> {
+    if (this.#inspectWaiting >= (this.#options.inspectQueue ?? INSPECT_QUEUE)) return this.#inspect(id, { ok: false, reason: "too many artifacts were waiting to be read at the time; this one was not read" });
+    this.#inspectWaiting++;
+    const run = this.#inspectTail.then(() => this.#inspect(id)).finally(() => { this.#inspectWaiting--; });
+    this.#inspectTail = run.catch(() => undefined);
+    return run;
+  }
+
+  async #inspect(id: string, given?: ArtifactInspection): Promise<void> {
     const inspector = this.#options.inspector;
-    if (inspector === undefined) return;
+    if (inspector === undefined || this.#closing) return;
     const found = await this.#runner.get(REQ, id);
     const b = found?.body as unknown as MaintenanceBody | undefined;
     if (found === undefined || b === undefined || b.status !== "pending" || (b.kind !== "package" && b.kind !== "extension")) return;
@@ -436,10 +453,13 @@ export class MaintenanceService {
     let result: ArtifactInspection;
     const limit = this.#options.inspectTimeoutMs ?? 30_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const asked = Promise.resolve().then(() => inspector({ name: String(s["name"]), version: String(s["version"]), digest: String(s["digest"]), source: String(s["source"]) }));
+    // At the limit the host is told to stop (its fetch is aborted), so a slow source does not keep a download going after the reading was given up and the next one started.
+    const stop = new AbortController();
+    if (given !== undefined) result = given;
+    else try {
+      const asked = Promise.resolve().then(() => inspector({ name: String(s["name"]), version: String(s["version"]), digest: String(s["digest"]), source: String(s["source"]) }, stop.signal));
       asked.catch(() => undefined);
-      result = cleanInspection(await Promise.race([asked, new Promise<never>((_, no) => { timer = setTimeout(() => no(new Error("the host took too long to read the artifact")), limit); })]));
+      result = cleanInspection(await Promise.race([asked, new Promise<never>((_, no) => { timer = setTimeout(() => { stop.abort(); no(new Error("the host took too long to read the artifact")); }, limit); })]));
     } catch (error) { result = { ok: false, reason: redactText(String((error as Error)?.message ?? error)).slice(0, 300) }; } finally { if (timer !== undefined) clearTimeout(timer); }
     // A request decided while the host was reading is not written to: nobody is waiting for the reading any more.
     const now = (await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody | undefined;
@@ -549,7 +569,7 @@ export class MaintenanceService {
     const a = await this.#runner.get(REQ, id);
     const status = (a?.body as unknown as MaintenanceBody | undefined)?.status ?? "pending";
     if (!result.replayed && status === "approved") this.background(this.drive(id));
-    if (!result.replayed && status === "pending" && this.#options.inspector !== undefined && (kind === "package" || kind === "extension")) this.background(this.#inspect(id));
+    if (!result.replayed && status === "pending" && this.#options.inspector !== undefined && (kind === "package" || kind === "extension")) this.background(this.#queueInspect(id));
     return { maintenanceId: id, status, revision: result.revision, replayed: result.replayed };
   }
 

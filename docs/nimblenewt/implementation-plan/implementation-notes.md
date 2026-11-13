@@ -10264,12 +10264,35 @@ Closes the leftover "a reviewer view of install behaviour beyond the `installScr
 - Showing is not gating: an approval does not require that the reading exists or matches (a host outage must not stop a decision; an install still refuses a mismatching or script-declaring artifact on its own).
 - A remote host has no environment runtime, so nothing is read there; macOS/Windows have no environment runtime at all.
 - The text of a script is shown, not analysed: no judgement of what it does.
-- Mount and network application (sandbox enforcement) is still not built: the sandbox recipe supports only `network: "none"` and no resource store exists to mount from, so those approved requests wait. That cannot be met without a controlled-route card and a resource store.
+- Mount and network application (sandbox enforcement) is still not built, so those approved requests wait. Mounts still lack a resource store to mount from. Network: since H12i (on main) the controlled route exists (recipe `route`, worker proxy, controller relay with per-connection checks, revoke and log), but an approved A09 `network` request is per agent and per site, while H12i grants are per task and per exact host and port; nothing connects the two yet (see the review below).
 - An administrator role for host policy and the base.
 
 ASSUMPTION: the owner is the only administrator. The product has one owner principal (`maintenance` tests already prove a supervisor cannot decide the protected kinds); a second human role would be a new kind of principal and a permission model decision that is larger than this card, so "owner or administrator" is met by the owner alone.
 ASSUMPTION: the reading is made at request time, once, not when a person opens the request, so opening a request never makes the controller fetch anything, and what the reviewer sees is what was read when the request was made.
 ASSUMPTION: a request that the owner's rules approve is not read (nobody reviews it; the install verifies the digest itself).
+
+### A09 seventh slice review (Claude agent, Opus, 2026-11-13)
+
+Merged origin/main 6d2271d1 (H12i, H12p, flip audits; only this notes file conflicted, both sides kept). Checked: the digest is compared before any parsing; the in-memory unpack uses the install limits (32 MiB fetched, gzip output capped while it is read, 10000 entries, 128 MiB of files, path depth and length, no links, no special files, no set-ID bits, no long-name or pax headers, duplicate and file-versus-directory names refused ignoring letter case, a checksum on every header, nothing after the end marker); a nested archive is only a file's bytes and is never opened; nothing is written or run. The fetch goes only through the host's own source (the https source has a required host list, follows no redirect and caps the size; the local host uses its offline mirror), so a request reaches no host it could not already name for its install; what changes is that the fetch now happens before a decision. The stored text is cleaned (redacted, invisible and direction characters removed, redacted again) and is cleaned again when shown. Agents never see it: the tool bridge's maintenance-status shows only status fields, and the chat's decide preview shows only the spec. Read access is the request's own (owner, requester, its supervisor).
+
+**Fixed.**
+- Readings had no limit on how many ran at once. Each runs inside the controller process and may hold the archive, its unpacked tar and a copy of every file (several hundred MiB at the install limits), and every package or extension request started one at once (up to 20 waiting per agent). Readings now run one at a time in a queue. Past 50 waiting, a new one is recorded as "could not be read" with that reason, so nothing queues without end.
+- The 30 s limit stopped waiting but left the host's fetch going (the https source has its own 60 s limit). The inspector is now given an abort signal: at the limit the fetch is aborted, and a reading stopped after its fetch is not unpacked (`LocalEnvironmentRuntime.inspect(artifact, signal)`, `EnvironmentRuntime.inspect` and `startController` pass it through).
+- Tests: `maintenance-review.test.ts` adds "readings run one at a time, a reading given up at the limit is told to stop, and past the queue bound a request is recorded as not read" on the four backends; `inspect.test.ts` adds the signal reaching the source and an aborted reading not being unpacked.
+
+**Breakages tried (each alone on the built files, restored).** Caught: the queue bypassed; the abort removed; the digest check before unpacking removed; the abort check after the fetch removed; the name and version check removed; the decided-meanwhile recheck removed. Survived: (1) the spec-digest binding in `reviewSummary` (the implementer's survivor). A request's `specDigest` is set when it is created and no command changes it, so a reading can never belong to another spec under the same ID. The check is defence for a hand-edited record, and leaving it untested is acceptable. (2) The "a replay does not ask again" guard. The "already read" record check in `#inspect` covers it, and with the queue the replay's reading always runs after the first has written. This is redundant, not wrong.
+
+**Left as it was (noted).**
+- A controller that stops while a reading waits or runs loses it. Nothing reads that request again, and its review shows no `inspection` at all, the same as "not read yet". A follow-up could have `resume()` queue pending package and extension requests with no inspection record. The command ID `inspect:<id>` already makes a second controller's write harmless.
+- The unpack is synchronous, so one reading may block the controller's event loop for up to about a second at the install limits. Installs already do the same, after approval.
+
+**H12i and network application.** A follow-up slice that applies an approved A09 `network` request needs to:
+- (a) decide how an agent-level, per-site approval becomes reach. The fitting form is for `admit` to also accept a destination that the agent's active environment revision lists, with A09's site deny rules winning, rather than minting per-task H12i grants;
+- (b) add the route to the attempt's recipe when the pinned environment revision has network entries (Linux bubblewrap only; other backends refuse a route, as H12i tests);
+- (c) when the A09 change is revoked, close open connections through H12i's revoke push and timer recheck;
+- (d) log those connections in H12i's `net-conn` records with the A09 request ID as the grant.
+
+Mount application still needs a resource store first.
 
 ## H12i (finish): tasks get controlled network routes through the worker relay (Claude agent, Sonnet 5.5, 2026-11-13)
 
