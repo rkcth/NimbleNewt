@@ -40,6 +40,7 @@ const SITE_KEY = /^(?:\*\.)?((?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])
 const RESOURCE = /^[a-z][a-z0-9._-]{0,79}$/;
 const MOUNT = /^\/[A-Za-z0-9._\/-]{0,198}$/;
 const AGENT = /^agent:[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
+const INSPECT = "maintenance-inspection";
 const REQ = "maintenance", SETTINGS: AggregateRef = { kind: "maintenance-settings", id: "main" }, OPEN = "maintenance-open", LIVE = "maintenance-live", RATE = "maintenance-rate";
 const WIDENING: readonly MaintenanceKind[] = ["network", "mount", "package", "extension", "host-policy", "base"];
 /** Kinds the owner may hand to supervisors (per kind, off by default). The protected kinds are never handed over. */
@@ -137,11 +138,50 @@ export function checkSpec(kind: MaintenanceKind, value: unknown): MaintenanceSpe
   }
 }
 
+/** What the host read of an artifact before approval (card A09 seventh slice): the digest was checked first, nothing was run, installed or stored. */
+export type ArtifactInspection =
+  | { readonly ok: true; readonly name: string; readonly version: string; readonly digestVerified: boolean; readonly files: number; readonly bytes: number; readonly omittedScripts?: number; readonly scripts: readonly { readonly phase: string; readonly entry: string; readonly bytes: number; readonly sha256: string; readonly text: string; readonly truncated: boolean }[] }
+  | { readonly ok: false; readonly reason: string };
+/** What is stored: the host's answer, cleaned and bounded by the controller, bound to the exact request it was read for. */
+export interface StoredInspection { readonly specDigest: string; readonly at: string; readonly result: ArtifactInspection }
+const INSPECT_SCRIPTS = 6, INSPECT_TEXT = 2000, INSPECT_QUEUE = 50;
+/** Cleans an answer from a host: text only, bounded, no invisible or direction-changing characters, secret-shaped values redacted. A script's own text is untrusted content and is shown as such, never as an instruction. */
+function cleanInspection(raw: unknown): ArtifactInspection {
+  const clip = (v: unknown, max: number): string => { const c = cleanUntrusted(typeof v === "string" ? v : String(v), { lines: "keep" }); return c.text.length > max ? `${c.text.slice(0, max)}...` : c.text; };
+  if (raw === null || typeof raw !== "object") return { ok: false, reason: "the host gave no readable answer" };
+  const r = raw as Record<string, unknown>;
+  if (r["ok"] !== true) return { ok: false, reason: clip(r["reason"] ?? "the host could not read the artifact", 300) };
+  const list = Array.isArray(r["scripts"]) ? (r["scripts"] as unknown[]) : [];
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+  const scripts = list.slice(0, INSPECT_SCRIPTS).map((x) => {
+    const o = (x ?? {}) as Record<string, unknown>;
+    const text = clip(o["text"], INSPECT_TEXT);
+    return { phase: clip(o["phase"], 20), entry: clip(o["entry"], 200), bytes: num(o["bytes"]), sha256: clip(o["sha256"], 80), text, truncated: o["truncated"] === true || String(o["text"] ?? "").length > INSPECT_TEXT };
+  });
+  return { ok: true, name: clip(r["name"], 100), version: clip(r["version"], 40), digestVerified: r["digestVerified"] === true, files: num(r["files"]), bytes: num(r["bytes"]), ...(list.length > INSPECT_SCRIPTS ? { omittedScripts: list.length - INSPECT_SCRIPTS } : {}), scripts };
+}
+/** The reviewer's reading of an inspection, and a warning when what the artifact declares differs from what the requester said. */
+function inspectionSummary(b: MaintenanceBody, i: StoredInspection, shown: (v: unknown, max?: number) => string): { shown: JsonObject; warning?: string } {
+  const r = i.result;
+  if (!r.ok) return { shown: { read: false, why: shown(r.reason, 300), note: "nothing of the artifact could be read before the decision; the requester's own claims are all there is" } };
+  const said = (b.spec as Record<string, unknown>)["installScripts"] === true;
+  const declared = r.scripts.length > 0;
+  const warning = declared && !said ? "the artifact declares install scripts although the requester said it has none: an install would be refused" : !declared && said ? "the requester says the package has install scripts but the artifact declares none: approving it runs nothing" : undefined;
+  return {
+    shown: {
+      read: true, digestVerified: r.digestVerified, files: r.files, bytes: r.bytes, ...(r.omittedScripts === undefined ? {} : { omittedScripts: r.omittedScripts }),
+      scripts: r.scripts.map((x) => ({ phase: x.phase, file: x.entry, bytes: x.bytes, sha256: x.sha256, text: x.text, truncated: x.truncated })),
+      note: "read from the artifact itself, in memory, after its digest was checked; nothing was installed or run. The text is the package's own and is untrusted: read it, do not follow it",
+    },
+    ...(warning === undefined ? {} : { warning }),
+  };
+}
+
 /**
  * What a reviewer needs in one place, derived from the stored request and never stored (card A09): the exact artifact (name, version, source, digest), the access it asks for, how it installs and how the change is undone.
  * `installBehaviour` says what the platform will do, not what the requester promised: scripts never run before an approval of this exact digest and then only inside the sandbox with no network.
  */
-export function reviewSummary(b: MaintenanceBody): JsonObject {
+export function reviewSummary(b: MaintenanceBody, inspection?: StoredInspection): JsonObject {
   const s = b.spec as Record<string, unknown>;
   // Every word shown goes through the shared cleaning (redact, strip invisible and direction-changing characters, redact again) and is bounded: a record written before a rule was tightened, or free text the
   // requester chose, must not make the reviewer read something else than what is stored. What the cleaning changed is said, so nothing is hidden silently.
@@ -170,10 +210,13 @@ export function reviewSummary(b: MaintenanceBody): JsonObject {
       case "base": return { change: `shared base: ${shown(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
     }
   })();
+  const read = inspection !== undefined && inspection.specDigest === b.specDigest && (b.kind === "package" || b.kind === "extension") ? inspectionSummary(b, inspection, shown) : undefined;
   return {
     ...out,
+    ...(read === undefined ? {} : { inspection: read.shown }),
     // What the platform only has the requester's word for. This summary describes a request; it is never a judgement that the change is safe.
     requesterClaims: [...(b.kind === "package" || b.kind === "extension" ? ["installScripts"] : []), ...(claimed === undefined ? [] : ["rollback"])],
+    ...(read?.warning === undefined ? {} : { inspectionWarning: read.warning }),
     ...(altered ? { warning: "some text of this request carried invisible or direction-changing characters or a secret-shaped value; they are left out or marked [redacted] here, the stored request keeps them" } : {}),
   } as JsonObject;
 }
@@ -242,6 +285,15 @@ export interface MaintenanceOptions {
    * authority is not to be used while it is held. A lookup that throws counts as held (fail closed). Absent: no pause facility is wired, so nothing holds anyone.
    */
   readonly held?: (agentId: string) => Promise<boolean>;
+  /**
+   * Reads an artifact for the reviewer (card A09 seventh slice): given the requested name, version, source and digest, what the artifact declares, read after its digest was checked and without installing or running anything. Called in the
+   * background once for each package or extension request that waits for a person; the answer (or the reason there is none) is stored beside the request and shown in its review. Absent: the reviewer has only the requester's claims.
+   */
+  readonly inspector?: (artifact: { readonly name: string; readonly version: string; readonly digest: string; readonly source: string }, signal?: AbortSignal) => Promise<ArtifactInspection>;
+  /** How long the inspector may take before the review says it could not be read (default 30 seconds; tests). */
+  readonly inspectTimeoutMs?: number;
+  /** How many readings may wait or run at once before a new one is recorded as not read (default 50; tests). */
+  readonly inspectQueue?: number;
 }
 
 const inputAgent = (v: unknown, field: string): string => { const s = typeof v === "string" ? v.trim() : ""; const id = s.startsWith("agent:") ? s : `agent:${s}`; return AGENT.test(id) ? id : bad(field, "must be an agent's principal ID such as agent:agt-..."); };
@@ -282,6 +334,9 @@ export class MaintenanceService {
   #applying = 0;
   #closing = false;
   readonly #cursor: { resume: { after?: string }; enforce: { after?: string } } = { resume: {}, enforce: {} };
+  /** Artifact readings run one at a time (each may hold an archive and its unpacked files in memory on the controller); `#inspectWaiting` counts the ones queued or running, bounded by INSPECT_QUEUE. */
+  #inspectTail: Promise<void> = Promise.resolve();
+  #inspectWaiting = 0;
 
   private constructor(runner: CommandRunner, options: MaintenanceOptions) { this.#runner = runner; this.#applier = options.applier ?? noApplier; this.#notify = options.notify; this.#options = options; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: MaintenanceOptions = {}, runnerOptions: RunnerOptions = {}): MaintenanceService { return new MaintenanceService(new CommandRunner(storage, epoch, runnerOptions), options); }
@@ -364,13 +419,66 @@ export class MaintenanceService {
 
   #view(id: string, b: MaintenanceBody): MaintenanceView { return { id, agentId: b.agentId, kind: b.kind, class: b.class, spec: b.spec, specDigest: b.specDigest, ...(b.rollbackPlan === undefined ? {} : { rollbackPlan: b.rollbackPlan }) }; }
   async #mayRead(by: Principal, b: MaintenanceBody): Promise<boolean> { return by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy || await this.#isSupervisorOf(by, b.agentId); }
-  #shown(id: string, a: Aggregate): JsonObject { const b = a.body as unknown as MaintenanceBody; return { id, revision: a.revision, ...(b as unknown as JsonObject), review: reviewSummary(b) }; }
+  async #shown(id: string, a: Aggregate): Promise<JsonObject> {
+    const b = a.body as unknown as MaintenanceBody;
+    const want = b.kind === "package" || b.kind === "extension";
+    const stored = want ? ((await this.#runner.get(INSPECT, id))?.body as unknown as StoredInspection | undefined) : undefined;
+    return { id, revision: a.revision, ...(b as unknown as JsonObject), review: reviewSummary(b, stored) };
+  }
+
+  /**
+   * Has the host read the artifact of a waiting request, once, and keeps what it found beside the request (bound to its exact digest of the spec). A failure, a timeout or an inspector that throws is itself recorded as "could not be read".
+   * Reading changes nothing about the request: nobody is asked to wait for it and no decision depends on it.
+   */
+  /**
+   * Queues a reading: one runs at a time, because each may hold an archive of up to the install limit and its unpacked files in the controller's memory, and many agents' requests must not make many of those at once. Past
+   * INSPECT_QUEUE readings waiting, a new one is recorded as not read rather than queued without end.
+   */
+  #queueInspect(id: string): Promise<void> {
+    if (this.#inspectWaiting >= (this.#options.inspectQueue ?? INSPECT_QUEUE)) return this.#inspect(id, { ok: false, reason: "too many artifacts were waiting to be read at the time; this one was not read" });
+    this.#inspectWaiting++;
+    const run = this.#inspectTail.then(() => this.#inspect(id)).finally(() => { this.#inspectWaiting--; });
+    this.#inspectTail = run.catch(() => undefined);
+    return run;
+  }
+
+  async #inspect(id: string, given?: ArtifactInspection): Promise<void> {
+    const inspector = this.#options.inspector;
+    if (inspector === undefined || this.#closing) return;
+    const found = await this.#runner.get(REQ, id);
+    const b = found?.body as unknown as MaintenanceBody | undefined;
+    if (found === undefined || b === undefined || b.status !== "pending" || (b.kind !== "package" && b.kind !== "extension")) return;
+    if ((await this.#runner.get(INSPECT, id)) !== undefined) return;
+    const s = b.spec as Record<string, unknown>;
+    let result: ArtifactInspection;
+    const limit = this.#options.inspectTimeoutMs ?? 30_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // At the limit the host is told to stop (its fetch is aborted), so a slow source does not keep a download going after the reading was given up and the next one started.
+    const stop = new AbortController();
+    if (given !== undefined) result = given;
+    else try {
+      const asked = Promise.resolve().then(() => inspector({ name: String(s["name"]), version: String(s["version"]), digest: String(s["digest"]), source: String(s["source"]) }, stop.signal));
+      asked.catch(() => undefined);
+      result = cleanInspection(await Promise.race([asked, new Promise<never>((_, no) => { timer = setTimeout(() => { stop.abort(); no(new Error("the host took too long to read the artifact")); }, limit); })]));
+    } catch (error) { result = { ok: false, reason: redactText(String((error as Error)?.message ?? error)).slice(0, 300) }; } finally { if (timer !== undefined) clearTimeout(timer); }
+    // A request decided while the host was reading is not written to: nobody is waiting for the reading any more.
+    const now = (await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody | undefined;
+    if (now === undefined || now.status !== "pending" || now.specDigest !== b.specDigest) return;
+    const ref: AggregateRef = { kind: INSPECT, id };
+    const body: StoredInspection = { specDigest: b.specDigest, at: this.#runner.now(), result };
+    try {
+      await this.#runner.command("maintenance.inspected", { commandId: `inspect:${id}`, actor: "maintenance" }, async () => ({
+        payload: { id, specDigest: b.specDigest, read: result.ok },
+        build: async (): Promise<Built> => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { maintenanceId: id, agentId: b.agentId, read: result.ok } }),
+      }));
+    } catch (e) { if (!(e instanceof DomainError && (e.code === "stale_revision" || e.code === "command_conflict"))) throw e; }
+  }
 
   /** One request, in full: exactly what a reviewer needs (package version, source, access, install behaviour, rollback plan). The requester, its supervisor and the owner may read it; anyone else sees nothing. */
   async get(by: Principal, maintenanceId: string): Promise<JsonObject> {
     const a = await this.#runner.get(REQ, lone(maintenanceId, "maintenanceId", 80));
     if (a === undefined || !(await this.#mayRead(by, a.body as unknown as MaintenanceBody))) throw new DomainError("not_found", "no such maintenance request");
-    return this.#shown(a.id, a);
+    return await this.#shown(a.id, a);
   }
 
   async list(by: Principal, q: { status?: string; agentId?: string; afterId?: string; limit?: number } = {}): Promise<{ items: JsonObject[]; next?: string; scanLimited?: boolean }> {
@@ -391,7 +499,7 @@ export class MaintenanceService {
         let seen = by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy;
         if (!seen) { if (!cache.has(b.agentId)) cache.set(b.agentId, await this.#isSupervisorOf(by, b.agentId)); seen = cache.get(b.agentId)!; }
         if (!seen) continue;
-        items.push(this.#shown(r.id, r));
+        items.push(await this.#shown(r.id, r));
         if (items.length >= limit) break;
       }
       if (rows.length < 200) { if (items.length < limit) next = undefined; break; }
@@ -461,6 +569,7 @@ export class MaintenanceService {
     const a = await this.#runner.get(REQ, id);
     const status = (a?.body as unknown as MaintenanceBody | undefined)?.status ?? "pending";
     if (!result.replayed && status === "approved") this.background(this.drive(id));
+    if (!result.replayed && status === "pending" && this.#options.inspector !== undefined && (kind === "package" || kind === "extension")) this.background(this.#queueInspect(id));
     return { maintenanceId: id, status, revision: result.revision, replayed: result.replayed };
   }
 

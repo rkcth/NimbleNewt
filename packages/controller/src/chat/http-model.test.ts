@@ -59,3 +59,18 @@ test("a refused connection, a body that never ends and an error inside a 200 rep
   const nullCause = mk(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: null }); });
   await assert.rejects(nullCause.complete("a/b", { system: "s", user: "u" }), /fetch failed/);
 });
+
+test("the chat model call keeps only the words of the reply: reasoning fields a server adds (reasoning_content, reasoning, thinking blocks) are dropped at once and appear in no result (card K06c, chat keeps the words said)", async () => {
+  const canary = "CANARY-private-reasoning-words";
+  for (const message of [
+    { content: good, reasoning_content: canary },
+    { content: good, reasoning: canary },
+    { content: good, thinking: [{ type: "thinking", thinking: canary, signature: "sig" }] },
+    { content: good, reasoning_details: [{ type: "reasoning.text", text: canary }] },
+  ]) {
+    const m = new HttpModelCall({ endpoint: () => ({ url: "http://x/v1" }), fetch: async () => new Response(JSON.stringify({ choices: [{ message }], usage: { prompt_tokens: 3, completion_tokens: 4 } }), { status: 200 }) });
+    const out = await m.complete("a/b", { system: "s", user: "u" });
+    assert.equal(out, good);
+    assert.ok(!JSON.stringify(out).includes(canary), "no reasoning text in what the call returns");
+  }
+});

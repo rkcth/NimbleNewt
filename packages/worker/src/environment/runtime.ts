@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, realpathSync, chmodSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep, basename } from "node:path";
-import { ArchiveError, DEFAULT_ARCHIVE_LIMITS, digestOf, validPackageName, validPackageVersion, type ArchiveLimits } from "./archive.js";
+import { ArchiveError, DEFAULT_ARCHIVE_LIMITS, digestOf, unpack, validPackageName, validPackageVersion, type ArchiveLimits } from "./archive.js";
 import { AgentEnvironments, EnvironmentStoreError, manifestDigestOf, type InstallScriptPort, type PackageRef } from "./agent-environments.js";
 import type { ArtifactSource } from "./sources.js";
 import { ContentStore, DIGEST_FORM, StoreError } from "./store.js";
@@ -20,6 +20,11 @@ export type RuntimeTrialResult =
   | { readonly ok: true; readonly digestVerified: boolean; readonly scriptsDeclared: boolean; readonly scriptsRan: boolean; readonly notes?: string }
   | { readonly ok: false; readonly reason: string };
 export interface RuntimeReloadInput { readonly requestId: string; readonly agentId: string; readonly revision: number; readonly manifest: RuntimeManifest; readonly checkpointId: string; readonly change?: RuntimeApproved & { readonly installScripts: boolean } }
+/** What a reviewer may read of an artifact before approving it (card A09 seventh slice): read in memory, nothing unpacked to disk, stored or run. */
+export interface RuntimeInspection { readonly name: string; readonly version: string; readonly digestVerified: true; readonly files: number; readonly bytes: number; readonly scripts: readonly { readonly phase: string; readonly entry: string; readonly bytes: number; readonly sha256: string; readonly text: string; readonly truncated: boolean }[] }
+export type RuntimeInspectResult = ({ readonly ok: true } & RuntimeInspection) | { readonly ok: false; readonly reason: string };
+/** The most of one script's text a review reads. */
+export const INSPECT_TEXT_BYTES = 4000;
 export type RuntimeReloadResult = { readonly ok: true; readonly observed: Readonly<Record<string, string>> } | { readonly ok: false; readonly reason: string };
 export type RuntimeValidateResult = { readonly ok: true; readonly sessionIntact: boolean; readonly compactionIntact: boolean } | { readonly ok: false; readonly reason: string };
 
@@ -93,6 +98,33 @@ export class LocalEnvironmentRuntime {
     let bytes: Uint8Array;
     try { bytes = await this.#opts.source.fetch(artifact.source, this.#limits.maxArchiveBytes); } catch (error) { throw new StoreError("missing", `the artifact could not be fetched: ${say(error)}`); }
     await this.store.put(bytes, artifact);
+  }
+
+  /**
+   * Reads an artifact for the reviewer before anyone approves it (card A09 seventh slice): the bytes come from the host's source, are hashed and compared with the digest the requester named BEFORE they are read, unpacked in memory
+   * with the same limits and checks as an install (so an artifact an install would refuse is shown as refused), and the declared install scripts are returned with their text. Nothing is written to the disk or the store and nothing
+   * runs. An artifact that does not match its digest or its own name and version shows none of its content.
+   */
+  async inspect(artifact: RuntimeApproved, signal?: AbortSignal): Promise<RuntimeInspectResult> {
+    try {
+      if (!DIGEST_FORM.test(artifact.digest) || !validPackageName(artifact.name) || !validPackageVersion(artifact.version)) return { ok: false, reason: "the name, version or digest is not in an accepted form" };
+      if (this.#opts.source === undefined) return { ok: false, reason: "this host has no way to fetch the artifact, so its install scripts cannot be read before approval" };
+      let bytes: Uint8Array;
+      try { bytes = await this.#opts.source.fetch(artifact.source, this.#limits.maxArchiveBytes, signal); } catch (error) { return { ok: false, reason: `the artifact could not be fetched: ${say(error)}` }; }
+      // A reading the controller gave up on (its time limit) is not unpacked: the caller no longer waits for it.
+      if (signal?.aborted === true) return { ok: false, reason: "the reading was stopped before the artifact was unpacked" };
+      if (digestOf(bytes) !== artifact.digest) return { ok: false, reason: "the fetched artifact does not match the digest the requester named; nothing of it is shown" };
+      const unpacked = unpack(bytes, this.#limits);
+      const { metadata } = unpacked;
+      if (metadata.name !== artifact.name || metadata.version !== artifact.version) return { ok: false, reason: `the artifact names itself ${metadata.name}@${metadata.version}, not the requested ${artifact.name}@${artifact.version}` };
+      const scripts = metadata.scripts.map((s) => {
+        const file = unpacked.files.find((f) => f.path === s.entry)!;
+        return { phase: s.phase, entry: s.entry, bytes: file.data.length, sha256: digestOf(file.data), text: file.data.subarray(0, INSPECT_TEXT_BYTES).toString("utf8"), truncated: file.data.length > INSPECT_TEXT_BYTES };
+      });
+      return { ok: true, name: metadata.name, version: metadata.version, digestVerified: true, files: unpacked.files.length, bytes: unpacked.bytes, scripts };
+    } catch (error) {
+      return { ok: false, reason: error instanceof ArchiveError ? `the archive is refused: ${error.message}` : this.#why(error) };
+    }
   }
 
   async trial(input: RuntimeTrialInput): Promise<RuntimeTrialResult> {
