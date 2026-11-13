@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentService, AgentBody } from "../agents/agents.js";
 import { DomainError } from "../domain/errors.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { onlyKnown, text, type ProjectBody, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -14,9 +14,12 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { GrantRecordBody, GrantService } from "../security/grants.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import { planAgent, planProject, type Blocker, type Plan, type ReleaseLists } from "./gather.js";
+import { bareAgentId, liveAssignments, planAgent, planProject, type Blocker, type Plan, type ReleaseLists } from "./gather.js";
 
 export const RETIREMENT = "retirement";
+/** One record per agent or project (kind `retirement-claim`, prefix `rtc`): which retirement of it is under way, so two at once cannot both run (the second carries on the first, or is refused if it is a different action). */
+export const RETIREMENT_CLAIM = "retirement-claim";
+interface ClaimBody { readonly subjectKind: "agent" | "project"; readonly subjectId: string; readonly recordId: string; readonly state: "open" | "closed" }
 export type RetirementAction = "retire-agent" | "archive-project" | "restore-project";
 
 /**
@@ -60,13 +63,24 @@ export interface RetirementResult {
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
 const empty: ReleaseLists = { maintenanceLeases: [], integratorLeases: [], grants: [], resources: [], responsibilities: [], credential: false };
+const claimIdOf = (kind: "agent" | "project", id: string): string => derivedId("rtc", `retirement-claim:${kind}:${id}`);
+/** A blocker that stops a retirement at any point (a list that is merely long only stops one that has not started). */
+const hardBlocker = (b: Blocker): boolean => b.kind !== "too-many";
+const merge = (a: readonly string[], b: readonly string[]): string[] => [...new Set([...a, ...b])].sort();
+const union = (a: ReleaseLists, b: ReleaseLists): ReleaseLists => ({ maintenanceLeases: merge(a.maintenanceLeases, b.maintenanceLeases), integratorLeases: merge(a.integratorLeases, b.integratorLeases), grants: merge(a.grants, b.grants), resources: merge(a.resources, b.resources), responsibilities: merge(a.responsibilities, b.responsibilities), credential: a.credential || b.credential });
+/** What a look made after the releases still finds held: taken or given while the retirement ran. The same command again releases it. */
+const stillHeld = (p: Plan): Blocker[] => {
+  const r = p.release;
+  const n = r.maintenanceLeases.length + r.integratorLeases.length + r.grants.length + r.resources.length + r.responsibilities.length + (r.credential ? 1 : 0);
+  return n === 0 ? [] : [{ kind: "held", id: p.id, why: `${n} lease(s), grant(s), binding(s), duties or a credential were taken or given while the retirement ran; send the same command again to release them too` }];
+};
 
 /** The one-line account of a plan, for the owner (chat and API). */
 export function describePlan(p: Plan): string {
   const r = p.release;
   const what = p.kind === "agent"
     ? `${r.maintenanceLeases.length} maintenance lease(s) and ${r.integratorLeases.length} integrator lease(s) it holds are released, ${r.grants.length} grant(s) revoked${r.credential ? ", its credential taken away" : ""}, its identity disabled`
-    : `${r.responsibilities.length} responsibility(ies) retired, ${r.maintenanceLeases.length} maintenance lease(s) and ${r.integratorLeases.length} integrator lease(s) released, ${r.resources.length} resource binding(s) unbound, ${r.grants.length} grant(s) of this project revoked`;
+    : `${r.responsibilities.length} responsibility(ies) retired, ${r.maintenanceLeases.length} maintenance lease(s) and ${r.integratorLeases.length} integrator lease(s) released, ${r.resources.length} resource binding(s) unbound, ${r.grants.length} execution grant(s) made for this project revoked (read-only grants stay, so who could read it still can)`;
   if (p.blockers.length > 0) return `${p.kind === "agent" ? "Agent" : "Project"} ${p.name}: cannot be ${p.kind === "agent" ? "retired" : "archived"} yet. ${p.blockers.slice(0, 5).map((b) => `${b.kind} ${b.id}: ${b.why}`).join("; ")}${p.blockers.length > 5 ? `; and ${p.blockers.length - 5} more` : ""}.`;
   return `${p.kind === "agent" ? "Retiring agent" : "Archiving project"} ${p.name} would: ${what}. Its records stay and stay searchable${p.kind === "agent" ? "; its ID is never reused" : "; the project can be restored (grants, bindings and retired responsibilities are not brought back by themselves)"}. Confirm with digest ${p.digest}.`;
 }
@@ -117,17 +131,17 @@ export class RetirementService {
     const found = await this.#runner.get("project", projectId);
     if (found === undefined) throw new DomainError("not_found", `project ${projectId} does not exist`);
     const project = found.body as unknown as ProjectBody;
-    const existing = await this.#runner.get(RETIREMENT, recordId);
+    const existing = (await this.#runner.get(RETIREMENT, recordId)) ?? (await this.#runner.storage.getOperation(operationIdOf(cid)));
     if (existing === undefined && project.state !== "archived") invalid("projectId", "the project is not archived");
     // The archiving this undoes, named in the record: the latest finished one for the project.
     const earlier = (await this.list(by, { subjectId: projectId, limit: 200 })).items.filter((r) => r.action === "archive-project" && r.status === "done").sort((a, b) => (a.finishedAt ?? "") < (b.finishedAt ?? "") ? 1 : -1)[0];
-    const note = earlier === undefined ? "The project was archived without a ledger record (it was archived by a plain project change); nothing was released then, so nothing needs restoring." : `Archived ${earlier.finishedAt ?? ""}: its ${earlier.released.responsibilities.length} responsibility(ies) stay retired, its ${earlier.released.resources.length} resource binding(s) stay unbound and its ${earlier.released.grants.length} grant(s) stay revoked. Bind, grant and create again what the project needs.`;
-    await this.#start(by, cid, recordId, { action: "restore-project", subjectKind: "project", subjectId: projectId, subjectName: project.name, requestedBy: by.id, reason, startedAt: this.#runner.now(), released: empty, note }, { action: "restore-project", subjectId: projectId, reason });
+    const note = earlier === undefined ? "The project was archived without a ledger record (it was archived by a plain project change); nothing was released then, so nothing needs restoring." : `Archived ${earlier.finishedAt ?? ""}: its ${earlier.released.responsibilities.length} responsibility(ies) stay retired, its ${earlier.released.resources.length} resource binding(s) stay unbound and its ${earlier.released.grants.length} execution grant(s) stay revoked (read-only grants were never revoked). Bind, grant and create again what the project needs.`;
+    const started = await this.#start(by, cid, recordId, { action: "restore-project", subjectKind: "project", subjectId: projectId, subjectName: project.name, requestedBy: by.id, reason, startedAt: this.#runner.now(), released: empty, note }, { action: "restore-project", subjectId: projectId, reason });
     const now = await this.#runner.get("project", projectId);
     if (now !== undefined && (now.body as unknown as ProjectBody).state === "archived") {
-      await this.#retry(async () => { const cur = (await this.#runner.get("project", projectId))!; await this.#ports.projects.updateProject({ commandId: `rtm-${hash(recordId, "project")}`, actor: by.id, projectId, expectedRevision: cur.revision, state: "active" } as never); });
+      await this.#retry(async () => { const cur = (await this.#runner.get("project", projectId))!; await this.#ports.projects.updateProject({ commandId: `rtm-${hash(started.id, "project")}`, actor: by.id, projectId, expectedRevision: cur.revision, state: "active" } as never); });
     }
-    return this.#finish(by, recordId, cid);
+    return this.#finish(by, started.id);
   }
 
   /** The retirement ledger: newest first, optionally for one subject. */
@@ -157,7 +171,8 @@ export class RetirementService {
     const confirm = text(command.confirm, "confirm", { min: 1, max: 100 });
     const cid = scopedCommandId(by.id, command.commandId);
     const recordId = derivedId("rtm", cid);
-    const existing = await this.#runner.get(RETIREMENT, recordId);
+    // This command already ran (its own record, or the record of a retirement it met under way and carried on): it is answered from what it did, not judged again.
+    const existing = (await this.#runner.get(RETIREMENT, recordId)) ?? (await this.#runner.storage.getOperation(operationIdOf(cid)));
     let plan: Plan | undefined;
     if (existing === undefined) {
       plan = kind === "agent" ? await planAgent(this.#runner, id) : await planProject(this.#runner, id);
@@ -168,22 +183,29 @@ export class RetirementService {
       if (plan.blockers.length > 0) throw new DomainError("invalid_transition", describePlan(plan), { field: `${kind}Id` });
     }
     const started = await this.#start(by, cid, recordId, { action, subjectKind: kind, subjectId: id, subjectName: plan?.name ?? "", requestedBy: by.id, reason, digest: confirm, startedAt: this.#runner.now(), released: plan?.release ?? empty }, { action, subjectId: id, reason, digest: confirm });
-    if (started.status === "done") return { id: recordId, status: "done", replayed: true, record: started };
-    const released = started.released;
-    const target = { kind, id, recordId, actor: by };
+    if (started.status === "done") return { id: started.id, status: "done", replayed: true, record: started };
+    // A retirement carried on (this command again, or another one meeting it under way) also releases what was taken or given since it started: a look made now.
+    const now = plan ?? (kind === "agent" ? await planAgent(this.#runner, id) : await planProject(this.#runner, id));
+    if (now === undefined) throw new DomainError("not_found", `${kind} ${id} does not exist`);
+    const stop = now.blockers.filter(hardBlocker);
+    if (stop.length > 0) throw new DomainError("invalid_transition", describePlan({ ...now, blockers: stop }), { field: `${kind}Id` });
+    const released = union(started.released, now.release);
+    const target = { kind, id, recordId: started.id, actor: by };
     if (kind === "agent") await this.#releaseAgent(by, target, released, started.reason);
     else await this.#releaseProject(by, target, released, started.reason);
-    // Last look before the record itself changes: a task assigned since the preview stops the retirement here (the same command carries on once it is cleared).
+    // Last look before the record itself changes: a task assigned, a duty given or a lease or grant taken since the preview stops the retirement here (the same command carries on once it is cleared, and releases what was taken).
     const fresh = kind === "agent" ? await planAgent(this.#runner, id) : await planProject(this.#runner, id);
-    const hard = (fresh?.blockers ?? []).filter((b: Blocker) => b.kind === "assignment" || b.kind === "responsibility" || b.kind === "report" || b.kind === "unreadable");
+    const left = fresh === undefined ? [] : stillHeld(fresh);
+    const hard = [...(fresh?.blockers ?? []).filter(hardBlocker), ...left];
     if (hard.length > 0 && fresh !== undefined) throw new DomainError("invalid_transition", describePlan({ ...fresh, blockers: hard }), { field: `${kind}Id` });
-    await this.#subject(by, kind, id, recordId);
-    return this.#finish(by, recordId, cid);
+    await this.#subject(by, kind, id, started.id);
+    return this.#finish(by, started.id, released);
   }
 
   async #releaseAgent(by: Principal, t: { id: string; recordId: string }, r: ReleaseLists, reason: string): Promise<void> {
     const why = `released because agent ${t.id} was retired (${t.recordId})`;
-    await this.#leases(by, t.recordId, r, why);
+    // Only a lease the agent itself still holds is released: one that changed hands since the plan was read belongs to someone else now.
+    await this.#leases(by, t.recordId, r, why, (holder) => bareAgentId(holder) === t.id);
     await this.#grants(by, t.recordId, r, `revoked because agent ${t.id} was retired: ${reason}`.slice(0, 900));
     const agent = (await this.#runner.get("agent", t.id))?.body as unknown as AgentBody | undefined;
     if (r.credential && agent !== undefined) await this.#ports.principals.revokeCredential(by, { commandId: `rtm-${hash(t.recordId, "credential")}`, principalId: agent.principalId, reason: `agent retired (${t.recordId})` });
@@ -191,7 +213,14 @@ export class RetirementService {
 
   async #releaseProject(by: Principal, t: { id: string; recordId: string }, r: ReleaseLists, reason: string): Promise<void> {
     const why = `released because project ${t.id} was archived (${t.recordId})`;
-    await this.#leases(by, t.recordId, r, why);
+    // A lease whose holder is (now) working on an assigned task is in use: it is not freed under that work; the archiving stops and says so.
+    const live = await liveAssignments(this.#runner, () => false);
+    if (!live.complete) throw new DomainError("invalid_transition", `project ${t.id}: the assignments could not all be read, so no lease is freed on a guess`, { field: "projectId" });
+    await this.#leases(by, t.recordId, r, why, (holder) => {
+      const busy = live.holders.get(bareAgentId(holder));
+      if (busy !== undefined) throw new DomainError("invalid_transition", `project ${t.id}: a lease is held by ${holder} while it works on task ${busy}; wait for it to release the lease or release that task first`, { field: "projectId" });
+      return true;
+    });
     for (const id of r.responsibilities) {
       await this.#retry(async () => {
         const cur = await this.#runner.get("responsibility", id);
@@ -209,18 +238,18 @@ export class RetirementService {
     await this.#grants(by, t.recordId, r, `revoked because project ${t.id} was archived: ${reason}`.slice(0, 900));
   }
 
-  async #leases(by: Principal, recordId: string, r: ReleaseLists, why: string): Promise<void> {
+  async #leases(by: Principal, recordId: string, r: ReleaseLists, why: string, holderOk: (holder: string) => boolean): Promise<void> {
     for (const id of r.maintenanceLeases) {
       const cur = await this.#runner.get("maintenance-lease", id);
       const b = cur?.body as unknown as LeaseBody | undefined;
-      if (b === undefined || b.state !== "held") continue;
+      if (b === undefined || b.state !== "held" || b.holderId === undefined || !holderOk(b.holderId)) continue;
       await this.#retry(() => this.#ports.leases.release(by, { commandId: `rtm-${hash(recordId, "mlease", id, String(b.generation))}`, resourceId: b.resourceId, evidence: why }).then(() => undefined));
     }
     for (const id of r.integratorLeases) {
       await this.#retry(async () => {
         const cur = await this.#runner.get("integrator-lease", id);
         const b = cur?.body as unknown as IntegratorLeaseBody | undefined;
-        if (b === undefined || b.state !== "held") return;
+        if (b === undefined || b.state !== "held" || !holderOk(b.holder)) return;
         await this.#ports.integrator.release({ commandId: `rtm-${hash(recordId, "ilease", id, String(b.fence))}`, leaseId: id, fence: b.fence, note: why.slice(0, 300) });
       });
     }
@@ -249,31 +278,65 @@ export class RetirementService {
   }
 
   /** Creates the ledger record as `started` (or finds the same command's record) and returns it. */
+  /**
+   * Creates the ledger record as `started` (or finds the same command's record) and returns it. The subject's claim is taken in the same write, so two retirements of one agent or project cannot both start:
+   * a second command that meets a retirement of the same kind under way carries that one on (one ledger record), and a different action (a restore while an archiving is under way) is refused.
+   */
   async #start(by: Principal, cid: string, recordId: string, body: Omit<RetirementBody, "status">, payload: JsonObject): Promise<View<RetirementBody>> {
-    await this.#runner.command("retirement.start", { commandId: cid, actor: by.id }, async () => ({
-      payload,
-      build: async () => {
-        const ref = { kind: RETIREMENT, id: recordId };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: { ...body, status: "started" } as unknown as JsonObject }], detail: { action: body.action, subject: body.subjectId } };
-      },
-    }));
-    const found = await this.#runner.get(RETIREMENT, recordId);
+    const claimRef = { kind: RETIREMENT_CLAIM, id: claimIdOf(body.subjectKind, body.subjectId) };
+    let target = recordId;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const done = await this.#runner.command("retirement.start", { commandId: cid, actor: by.id }, async () => ({
+          payload,
+          build: async () => {
+            const claim = await this.#runner.get(claimRef.kind, claimRef.id);
+            const held = claim?.body as unknown as ClaimBody | undefined;
+            const contention = async () => new DomainError("stale_revision", `another retirement of ${body.subjectKind} ${body.subjectId} started at the same moment`);
+            if (held !== undefined && held.state === "open" && held.recordId !== recordId) {
+              const other = (await this.#runner.get(RETIREMENT, held.recordId))?.body as unknown as RetirementBody | undefined;
+              if (other !== undefined && other.status === "started") {
+                if (other.action !== body.action) throw new DomainError("invalid_transition", `a ${other.action} of ${body.subjectKind} ${body.subjectId} is under way (${held.recordId}); it has to finish first`, { field: `${body.subjectKind}Id` });
+                const ref = { kind: RETIREMENT, id: held.recordId };
+                return { ref, creates: false, changes: [{ type: "check" as const, ref: claimRef, expectedRevision: claim!.revision }, { type: "check" as const, ref, expectedRevision: (await this.#runner.get(RETIREMENT, held.recordId))!.revision }], detail: { action: body.action, subject: body.subjectId, carriedOn: held.recordId }, contention };
+              }
+            }
+            const ref = { kind: RETIREMENT, id: recordId };
+            const open: ClaimBody = { subjectKind: body.subjectKind, subjectId: body.subjectId, recordId, state: "open" };
+            const claimChange = claim === undefined ? { type: "create" as const, ref: claimRef, body: open as unknown as JsonObject } : { type: "update" as const, ref: claimRef, expectedRevision: claim.revision, body: open as unknown as JsonObject };
+            return { ref, creates: true, changes: [claimChange, { type: "create" as const, ref, body: { ...body, status: "started" } as unknown as JsonObject }], detail: { action: body.action, subject: body.subjectId }, contention };
+          },
+        }));
+        target = done.id;
+        break;
+      } catch (error) {
+        if (attempt < 6 && error instanceof DomainError && error.code === "stale_revision") continue;
+        throw error;
+      }
+    }
+    const found = await this.#runner.get(RETIREMENT, target);
     if (found === undefined) throw new DomainError("unavailable", "the retirement record could not be read back");
     return view<RetirementBody>(found);
   }
 
-  async #finish(by: Principal, recordId: string, cid: string): Promise<RetirementResult> {
+  /** Marks the record `done` (with everything that was released, including what was taken since it started) and frees the subject's claim, in one write. The command ID comes from the record, so two commands finishing the same retirement write it once. */
+  async #finish(by: Principal, recordId: string, released?: ReleaseLists): Promise<RetirementResult> {
     const before = (await this.#runner.get(RETIREMENT, recordId))!;
     if ((before.body as unknown as RetirementBody).status === "done") return { id: recordId, status: "done", replayed: true, record: view<RetirementBody>(before) };
-    await this.#runner.command("retirement.finish", { commandId: `rtm-fin-${hash(cid)}`, actor: by.id }, async () => ({
+    const result = await this.#runner.command("retirement.finish", { commandId: `rtm-fin-${hash(recordId)}`, actor: by.id }, async () => ({
       payload: { recordId },
       build: async () => {
-        const cur = await this.#runner.existing(RETIREMENT, recordId, (await this.#runner.get(RETIREMENT, recordId))!.revision);
+        const cur = (await this.#runner.get(RETIREMENT, recordId))!;
+        const body = cur.body as unknown as RetirementBody;
         const ref = { kind: RETIREMENT, id: recordId };
-        return { ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: cur.revision, body: { ...(cur.body as unknown as RetirementBody), status: "done", finishedAt: this.#runner.now() } as unknown as JsonObject }], detail: { recordId } };
+        const claimRef = { kind: RETIREMENT_CLAIM, id: claimIdOf(body.subjectKind, body.subjectId) };
+        const claim = await this.#runner.get(claimRef.kind, claimRef.id);
+        const closed: ClaimBody = { subjectKind: body.subjectKind, subjectId: body.subjectId, recordId, state: "closed" };
+        const claimChange = claim === undefined ? [] : (claim.body as unknown as ClaimBody).recordId === recordId ? [{ type: "update" as const, ref: claimRef, expectedRevision: claim.revision, body: closed as unknown as JsonObject }] : [];
+        return { ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: cur.revision, body: { ...body, status: "done", finishedAt: this.#runner.now(), ...(released === undefined ? {} : { released }) } as unknown as JsonObject }, ...claimChange], detail: { recordId } };
       },
     }));
-    return { id: recordId, status: "done", replayed: false, record: view<RetirementBody>((await this.#runner.get(RETIREMENT, recordId))!) };
+    return { id: recordId, status: "done", replayed: result.replayed, record: view<RetirementBody>((await this.#runner.get(RETIREMENT, recordId))!) };
   }
 
   /** A change to a record that others also write (a grant's last-used time, say) may lose a race: read again and redo, a few times. */

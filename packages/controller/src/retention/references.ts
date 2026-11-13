@@ -34,6 +34,7 @@ export class RetainedMaterial {
   /** Why the record must stay, or `undefined` when no resumable task or replay needs it. An incomplete scan answers for every record. */
   why(kind: string, id: string): string[] | undefined {
     // Card P06: the retirement ledger and the agent records are kept for good (a retired agent's ID is never reused, and what was released is the record of who did it and why), whatever a scan found.
+    if (kind === "retirement-claim") return ["a retirement claim is kept for good: it says which retirement of an agent or project is under way, so two cannot run at once"];
     if (kind === RETIREMENT_KIND) return ["a retirement ledger record is kept for good: it is the record of who retired what, why, and what was released"];
     if (kind === "agent") return ["an agent record is kept for good: a retired agent stays as a record so its ID is never reused"];
     if (!this.#complete) return ["the check of what resumable tasks need did not finish, so nothing is treated as free to delete"];

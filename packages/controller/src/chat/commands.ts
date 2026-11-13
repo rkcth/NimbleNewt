@@ -79,7 +79,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   // Retirement (card P06): always shown first with what it would release; the chat fills in the confirmation from a preview it makes just now. A plan with live assignments is refused with what to release first.
   "retirement.agent": { verb: "Retire an agent (its leases are released, its grants and credential revoked and its identity disabled; refused while it still has unfinished tasks or answers for active responsibilities; its records stay and its ID is never reused)", mode: "propose" },
-  "retirement.project": { verb: "Archive a project (its responsibilities are retired, its leases released, resource bindings unbound and the grants made for it revoked; refused while it has assigned unfinished tasks; everything stays readable and it can be restored)", mode: "propose", needsProject: true },
+  "retirement.project": { verb: "Archive a project (its responsibilities are retired, its leases released, resource bindings unbound and the execution grants made for it revoked (read-only grants stay); refused while it has assigned unfinished tasks; everything stays readable and it can be restored)", mode: "propose", needsProject: true },
   "retirement.project.restore": { verb: "Restore an archived project to active (what archiving released is not brought back by itself)", mode: "propose", needsProject: true },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
   // Letting a task go on after a resume check found changes that matter to it: shown first in every profile, because the owner is accepting that the work continues on changed inputs.

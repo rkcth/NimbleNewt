@@ -187,7 +187,9 @@ for (const backend of backends) {
       await w.projects.transitionTask({ commandId: cid("tc"), actor: "owner:rob", taskId: finished, expectedRevision: (await w.projects.getTask(finished))!.revision, to: "cancelled" } as never);
       await assign(w, open, ann);
       const plan = await r.retirement.preview(w.owner, { kind: "project", id: p });
-      assert.deepEqual(plan.blockers.map((b) => [b.kind, b.id]), [["assignment", open]]);
+      // Ann works on the open task and holds both leases, so they are in use and block as well (review: a lease is not freed under live work).
+      assert.deepEqual(plan.blockers.map((b) => b.kind), ["assignment", "lease", "lease"]);
+      assert.equal(plan.blockers[0]!.id, open);
       assert.equal(await code(r.retirement.archiveProject(w.owner, { commandId: cid("x"), projectId: p, reason: "finished", confirm: plan.digest })), "invalid_transition");
       assert.equal((await w.projects.getProject(p))!.state, "active");
       await w.assignments.releaseTask({ commandId: cid("rl"), actor: "owner:rob", taskId: open, expectedRevision: (await w.assignments.getAssignment(open))!.revision });
@@ -201,7 +203,7 @@ for (const backend of backends) {
 
       const ready = await r.retirement.preview(w.owner, { kind: "project", id: p });
       assert.equal(ready.blockers.length, 0);
-      assert.deepEqual([ready.release.responsibilities.length, ready.release.resources.length, ready.release.maintenanceLeases.length, ready.release.integratorLeases.length, ready.release.grants.length], [1, 1, 1, 1, 1]);
+      assert.deepEqual([ready.release.responsibilities.length, ready.release.resources.length, ready.release.maintenanceLeases.length, ready.release.integratorLeases.length, ready.release.grants.length], [1, 1, 1, 1, 0], "Ann's grant here is read-only, so it stays");
       const done = await r.retirement.archiveProject(w.owner, { commandId: cid("arch"), projectId: p, reason: "the season is over", confirm: ready.digest });
       assert.equal(done.status, "done");
       assert.equal((await w.projects.getProject(p))!.state, "archived");
@@ -209,17 +211,18 @@ for (const backend of backends) {
       assert.equal((await w.resources.get(w.owner, res.id))!.state, "unbound");
       assert.equal((await r.leases.list(w.owner, p))![0]!.status, "free");
       assert.equal((await r.integrator.get(ann.lease.integrator!))!.state, "released");
-      assert.equal((await r.grants.getGrant(ann.g1))!.state, "revoked", "the grant made for this project is revoked");
+      assert.equal((await r.grants.getGrant(ann.g1))!.state, "active", "a read-only grant made for this project stays (execution grants are revoked: see retirement-review.test.ts)");
       assert.equal((await r.grants.getGrant(ann.g2))!.state, "active", "a grant for every project is not this project's to revoke");
       assert.equal((await w.agents.get(w.owner, ann.agentId))!.state, "active", "the agent is not retired by archiving a project");
       assert.equal((await w.projects.getProject(other))!.state, "active");
       assert.equal((await w.projects.getTask(otherTask))!.state, "proposed");
 
-      // Archived records are still found and the access rules are the same. (The reader's grant was revoked, so the reader reads nothing now: access follows the grants, not the archive.)
+      // Archived records are still found and the access rules are the same: the reader still reads, an outsider is still refused.
       assert.equal((await w.projects.getTask(open))!.title, "Water the beds");
       assert.equal(await readTask(w.ownerToken), "read");
       assert.equal((await r.call(w.ownerToken, "project.get", { projectId: p })).result.item.state, "archived");
       assert.ok((await r.call(w.ownerToken, "task.list", { projectId: p })).result.items.length >= 2);
+      assert.equal(await readTask(reader.token), "read", "a reader still reads");
       assert.equal(await readTask(outsider.token), before[2], "an outsider is refused exactly as before");
       await assert.rejects(w.projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: p, title: "More" } as never), /archived/);
       assert.equal(await code(r.retirement.archiveProject(w.owner, { commandId: cid("again"), projectId: p, reason: "twice", confirm: ready.digest })), "invalid_command");
@@ -228,7 +231,7 @@ for (const backend of backends) {
       const back = await r.retirement.restoreProject(w.owner, { commandId: cid("rest"), projectId: p, reason: "spring again" });
       assert.equal(back.status, "done");
       assert.equal((await w.projects.getProject(p))!.state, "active");
-      assert.match(back.record.note ?? "", /1 responsibility\(ies\) stay retired, its 1 resource binding\(s\) stay unbound and its 1 grant\(s\) stay revoked/);
+      assert.match(back.record.note ?? "", /1 responsibility\(ies\) stay retired, its 1 resource binding\(s\) stay unbound and its 0 execution grant\(s\) stay revoked/);
       assert.deepEqual((await r.retirement.list(w.owner, { subjectId: p })).items.map((x) => [x.action, x.status]), [["restore-project", "done"], ["archive-project", "done"]]);
       assert.equal(await code(r.retirement.restoreProject(w.owner, { commandId: cid("rest"), projectId: p })), "invalid_command", "an active project is not restored");
       await w.projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: p, title: "Plant again" } as never);

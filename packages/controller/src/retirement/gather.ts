@@ -17,8 +17,8 @@ export const RETIREMENT_SCAN_LIMIT = 50_000;
 export const RETIREMENT_LIST_LIMIT = 200;
 
 export interface Blocker {
-  /** `assignment` (a live task), `responsibility` (an active duty answered by the agent), `report` (an active agent still reports to it), `too-many` (a list is longer than one retirement handles), `unreadable` (a look did not finish). */
-  readonly kind: "assignment" | "responsibility" | "report" | "too-many" | "unreadable";
+  /** `assignment` (a live task), `responsibility` (an active duty answered by the agent), `report` (an active agent still reports to it), `lease` (a project's lease is held by an agent still working on a task), `held` (something was taken or given while the retirement ran; the same command again releases it), `too-many` (a list is longer than one retirement handles), `unreadable` (a look did not finish). */
+  readonly kind: "assignment" | "responsibility" | "report" | "lease" | "held" | "too-many" | "unreadable";
   readonly id: string;
   readonly why: string;
 }
@@ -62,19 +62,29 @@ export async function scan(runner: CommandRunner, kind: string, keep: (a: Aggreg
 }
 
 /** The tasks that are assigned and not finished, by whoever holds them (`owns` decides from the assignment's owner and the task). Used by the plan and by the agent-retire guard. */
-export async function liveAssignments(runner: CommandRunner, owns: (owner: { kind: string; id: string }, task: TaskBody) => boolean): Promise<{ items: Blocker[]; complete: boolean }> {
+export async function liveAssignments(runner: CommandRunner, owns: (owner: { kind: string; id: string }, task: TaskBody) => boolean): Promise<{ items: Blocker[]; complete: boolean; holders: ReadonlyMap<string, string> }> {
   const found = await scan(runner, "assignment", (a) => { const b = a.body as unknown as AssignmentBody; return b.state === "assigned" && b.owner !== undefined; });
-  if (found === undefined) return { items: [], complete: false };
+  if (found === undefined) return { items: [], complete: false, holders: new Map() };
   const items: Blocker[] = [];
+  // Every holder of a live assignment (agent ID without the `agent:` prefix) and one task it works on: a lease such a holder has is in use and is not freed under it.
+  const holders = new Map<string, string>();
   for (const a of found) {
     const b = a.body as unknown as AssignmentBody;
     const task = await runner.get("task", b.taskId);
     const body = task?.body as unknown as TaskBody | undefined;
-    if (body === undefined || FINAL.has(body.state) || !owns(b.owner!, body)) continue;
+    if (body === undefined || FINAL.has(body.state)) continue;
+    if (b.owner!.kind === "agent" && !holders.has(bareAgentId(b.owner!.id))) holders.set(bareAgentId(b.owner!.id), b.taskId);
+    if (!owns(b.owner!, body)) continue;
     items.push({ kind: "assignment", id: b.taskId, why: `task "${body.title.slice(0, 80)}" is assigned and ${body.state}; release or transfer it first` });
   }
-  return { items, complete: true };
+  return { items, complete: true, holders };
 }
+
+/** An agent named by its agent ID or by its principal ID (`agent:<id>`), as the agent ID alone. */
+export const bareAgentId = (id: string): string => (id.startsWith("agent:") ? id.slice("agent:".length) : id);
+
+/** A grant that only lets its holder read (`task.read`, `desk.read`, ...). Archiving a project leaves these: archived records stay readable under the same access rules; only execution grants are revoked. */
+export const readOnlyGrant = (action: string): boolean => /^[a-z][a-z.-]*\.read$/.test(action);
 
 const digestOf = (value: unknown): string => createHash("sha256").update(canonicalJson(value as never)).digest("hex").slice(0, 32);
 
@@ -130,8 +140,11 @@ export async function planProject(runner: CommandRunner, projectId: string): Pro
   const leases = await scan(runner, "maintenance-lease", (a) => { const b = a.body as unknown as LeaseBody; return b.projectId === projectId && b.state === "held"; });
   const integrator = await scan(runner, "integrator-lease", (a) => { const b = a.body as unknown as IntegratorLeaseBody; return b.projectId === projectId && b.state === "held"; });
   const resources = await scan(runner, "project-resource", (a) => { const b = a.body as unknown as ResourceBody; return b.projectId === projectId && b.state === "bound"; });
-  const grants = await scan(runner, "grant-record", (a) => { const b = a.body as unknown as GrantRecordBody; return b.project === projectId && b.state === "active"; });
+  const grants = await scan(runner, "grant-record", (a) => { const b = a.body as unknown as GrantRecordBody; return b.project === projectId && b.state === "active" && !readOnlyGrant(b.action); });
   if ([duties, leases, integrator, resources, grants].some((x) => x === undefined)) blockers.push({ kind: "unreadable", id: "release", why: "the responsibilities, leases, resources or grants could not all be read" });
+  // A lease whose holder is still working on an assigned task (in any project) is in use: archiving does not free it under that work.
+  for (const l of leases ?? []) { const h = (l.body as unknown as LeaseBody).holderId; const busy = h === undefined ? undefined : live.holders.get(bareAgentId(h)); if (busy !== undefined) blockers.push({ kind: "lease", id: l.id, why: `the maintenance lease is held by ${h} while it works on task ${busy}; wait for it to release the lease or release that task first` }); }
+  for (const l of integrator ?? []) { const h = (l.body as unknown as IntegratorLeaseBody).holder; const busy = live.holders.get(bareAgentId(h)); if (busy !== undefined) blockers.push({ kind: "lease", id: l.id, why: `the integrator lease is held by ${h} while it works on task ${busy}; wait for it to release the lease or release that task first` }); }
   const release: ReleaseLists = {
     maintenanceLeases: cap("maintenance leases", (leases ?? []).map((a) => a.id), blockers),
     integratorLeases: cap("integrator leases", (integrator ?? []).map((a) => a.id), blockers),
