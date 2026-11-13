@@ -81,3 +81,15 @@ test("the interpreter prompt tells the model how to have a meeting hand its outc
   assert.match(OPERATIONS.find((o) => o.name === op)!.summary, /never an agent, an outside app or a task credential/);
   assert.ok(OPERATIONS.some((o) => o.name === "meeting.owner-outcomes" && o.kind === "query"));
 });
+
+// Card M05b and the owner's rule that everything is reachable by free-form chat: what the chair read from absent members' desks is asked for through the status view, which the interpreter prompt lists from the one table.
+test("the interpreter prompt lists the status view of the chair's desk reads, and the API has the query (card M05b)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
+  await m.interpret({ text: "what did the chair read from Ben's desk?", quoted: [], focus: {}, proposals: [] });
+  assert.ok(STATUS_KINDS["meeting_desk_reads"] !== undefined, "a status view");
+  assert.match(system, /meeting_desk_reads/);
+  assert.match(system, /what a meeting's chair read from absent members' desks and shared working notes/);
+  assert.ok(OPERATIONS.some((o) => o.name === "meeting.desk-reads" && o.kind === "query"));
+  assert.match(OPERATIONS.find((o) => o.name === "status.ask")!.summary, /meeting_desk_reads/);
+});
