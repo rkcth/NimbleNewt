@@ -7,6 +7,7 @@ import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { scanSecrets } from "../security/secret-scan.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { canonicalHost, canonicalPort, neverReachable } from "./destination.js";
 
@@ -74,6 +75,11 @@ const HEADER = /^[a-z][a-z0-9-]{0,59}$/i;
 /** A name that looks like a key itself (someone pasted the secret where its name goes). */
 const KEY_SHAPED = /^(sk|pk|rk|ghp|gho|ghs|xox[a-z]|akia|aiza)[-_]?[a-z0-9]{16,}$/i;
 const SECRET_REF = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+/** Whether a would-be secret NAME reads like a secret itself: a known key shape, anything the secret scanner finds, or a long unbroken run of mixed letters and digits (a random token) with no word separator. */
+export function keyLikeName(ref: string): boolean {
+  if (KEY_SHAPED.test(ref) || scanSecrets(ref).length > 0) return true;
+  return ref.split(/[._-]/).some((part) => part.length >= 20 && /[0-9]/.test(part) && /[a-z]/i.test(part));
+}
 /** Headers a credential may never be put in: the ones that change how a request is routed or framed. */
 const FORBIDDEN_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer", "proxy-authorization", "proxy-connection", "expect"]);
 
@@ -138,7 +144,7 @@ export class NetworkGrantService {
       const c = command.credential as { header?: unknown; ref?: unknown };
       if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner states a credential for a destination");
       if (c === null || typeof c !== "object" || typeof c.header !== "string" || !HEADER.test(c.header) || FORBIDDEN_HEADERS.has(c.header.toLowerCase())) return invalid("credential.header", "must be a header name that does not frame or route the request");
-      if (typeof c.ref !== "string" || !SECRET_REF.test(c.ref) || KEY_SHAPED.test(c.ref)) return invalid("credential.ref", "must be the NAME of a secret, never the secret");
+      if (typeof c.ref !== "string" || !SECRET_REF.test(c.ref) || keyLikeName(c.ref)) return invalid("credential.ref", "must be the NAME of a secret, never the secret");
       credential = { header: c.header.toLowerCase(), ref: c.ref };
     }
     const task = await this.#task(taskId);
@@ -274,12 +280,12 @@ export class NetworkGrantService {
     }
   }
 
-  /** The grants of a task, for the owner and for those who work the task. */
+  /** The grants of a task: for the owner only (an agent learns where it may connect from the answer to each connection). */
   async forTask(by: Principal, taskId: string): Promise<GrantView[]> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the owner; only the owner lists network grants`);
     const id = checkTaskId(taskId);
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     if (task === undefined) return [];
-    if (!(by.kind === "owner" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id } }) || allows(by, "history.read", task.projectId))) return [];
     return this.#ofTask(id);
   }
 
@@ -331,6 +337,33 @@ export class NetworkGrantService {
     }));
   }
 
+  /**
+   * Ends the records of connections a stopped controller left `open` (its relay, and so every tunnel, went with it): each is closed as `failed`, ended by `error`, with the reason that the controller stopped. Only records that began before `before`
+   * are touched, so a connection opened since this controller started is never ended on paper while it is still open. Every task that ever held a grant is looked at (a connection is opened only under a grant). Returns how many were closed.
+   */
+  async sweepOpen(before: string = this.#runner.now()): Promise<number> {
+    const tasks = new Set<string>();
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list(GRANT_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+      for (const p of page) { after = p.id; tasks.add((p.body as unknown as GrantBody).taskId); }
+      if (page.length < 1000) break;
+    }
+    let closed = 0;
+    for (const taskId of tasks) {
+      const stale: { id: string; body: ConnectionBody }[] = [];
+      for (let after: string | undefined; ;) {
+        const page = await this.#runner.list(connKind(taskId), { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+        for (const p of page) { after = p.id; const body = p.body as unknown as ConnectionBody; if (body.outcome === "open" && body.startedAt < before) stale.push({ id: p.id, body }); }
+        if (page.length < 1000) break;
+      }
+      for (const r of stale) {
+        await this.logClose(taskId, r.id, { outcome: "failed", endedBy: "error", bytesToTarget: r.body.bytesToTarget, bytesFromTarget: r.body.bytesFromTarget, reason: "the controller stopped while the connection was open; the bytes after its start were not counted" });
+        closed++;
+      }
+    }
+    return closed;
+  }
+
   /** How many connection records a task's attempt has written (the cap that stops a hostile worker from filling the store with refused attempts). */
   async loggedFor(taskId: string, attemptId: string): Promise<number> {
     let count = 0;
@@ -341,12 +374,12 @@ export class NetworkGrantService {
     }
   }
 
-  /** The connections of a task, oldest first: for the owner and for those who work or read the task. */
+  /** The connections of a task, oldest first: for the owner only. */
   async connections(by: Principal, taskId: string, options: { readonly limit?: number } = {}): Promise<ConnectionView[]> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the owner; only the owner reads the network log`);
     const id = checkTaskId(taskId);
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     if (task === undefined) return [];
-    if (!(by.kind === "owner" || allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id } }) || allows(by, "history.read", task.projectId))) return [];
     const cap = Math.min(options.limit ?? NETWORK_LIMITS.page, NETWORK_LIMITS.page);
     const out: ConnectionView[] = [];
     for (let after: string | undefined; out.length < cap;) {

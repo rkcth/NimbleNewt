@@ -593,6 +593,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     const o = i.options.network;
     if (o === undefined || i.networkGrants === undefined) return undefined;
     const grants = i.networkGrants;
+    // Records a stopped controller left `open` are ended now (their tunnels went with it); one opened from here on is never touched (the cut-off is this moment).
+    void grants.sweepOpen().catch((error: unknown) => { try { o.onError?.(`open connection records could not be ended: ${error instanceof Error ? error.message.slice(0, 120) : "error"}`); } catch { /* ignored */ } });
     const relay = new NetworkRelay({ grants, resolve: o.resolve, ...(o.dial === undefined ? {} : { dial: o.dial }), ...(o.recheckMs === undefined ? {} : { recheckMs: o.recheckMs }), ...(o.maxOpen === undefined ? {} : { maxOpen: o.maxOpen }), ...(o.idleMs === undefined ? {} : { idleMs: o.idleMs }), ...(o.connectTimeoutMs === undefined ? {} : { connectTimeoutMs: o.connectTimeoutMs }), ...(o.maxLogged === undefined ? {} : { maxLogged: o.maxLogged }), ...(o.onError === undefined ? {} : { onError: o.onError }) });
     const web = new WebFetch({ grants, resolve: o.resolve, ...(o.dial === undefined ? {} : { dial: o.dial }), ...(o.tls === undefined ? {} : { tls: o.tls }), ...(o.secret === undefined ? {} : { secret: o.secret }), ...(o.maxLogged === undefined ? {} : { maxLogged: o.maxLogged }) });
     const webTool: BuiltinTool = {

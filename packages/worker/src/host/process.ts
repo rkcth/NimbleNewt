@@ -66,6 +66,8 @@ export class WorkerProcess {
   /** The connections the process has open through the network relay (card H12i), and the waiters for its acknowledgement of the last piece sent to it. */
   readonly #nets = new Map<number, NetworkPipe>();
   readonly #netAcks = new Map<number, () => void>();
+  /** Connections with a piece from the process being written now: the process must wait for `net.ack` before it sends the next, and one that does not has that connection closed (its memory is not the host's to fill). */
+  readonly #netWriting = new Set<number>();
   #bridges = 0;
   /** Lease renewals the host is asking the controller about now (card H08b): each is a write at the controller, so a process may not have more than a few waiting. */
   #renewals = 0;
@@ -128,6 +130,7 @@ export class WorkerProcess {
   #closeNets(why: string): void {
     for (const pipe of [...this.#nets.values()]) { try { pipe.close(); } catch { /* already gone */ } }
     this.#nets.clear();
+    this.#netWriting.clear();
     for (const release of [...this.#netAcks.values()]) release();
     this.#netAcks.clear();
     try { this.#handlers.network?.closeAll(why); } catch { /* the relay is gone */ }
@@ -262,7 +265,16 @@ export class WorkerProcess {
   async #netWrite(id: number, data: string): Promise<void> {
     const pipe = this.#nets.get(id);
     if (pipe === undefined) return;
-    try { await pipe.write(new Uint8Array(Buffer.from(data, "base64"))); } catch { this.#nets.get(id)?.close(); return; }
+    if (this.#netWriting.has(id)) {
+      // A piece before the last one was acknowledged: the connection is closed and the process told why.
+      this.#nets.delete(id); this.#netWriting.delete(id);
+      this.#netAcks.get(id)?.(); this.#netAcks.delete(id);
+      try { pipe.close(); } catch { /* already gone */ }
+      await this.#send({ t: "net.close", id, message: "a piece was sent before the last one was acknowledged; the connection is closed" });
+      return;
+    }
+    this.#netWriting.add(id);
+    try { await pipe.write(new Uint8Array(Buffer.from(data, "base64"))); } catch { this.#nets.get(id)?.close(); return; } finally { this.#netWriting.delete(id); }
     if (this.#nets.has(id)) await this.#send({ t: "net.ack", id });
   }
 

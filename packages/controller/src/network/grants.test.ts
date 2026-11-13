@@ -179,7 +179,7 @@ for (const backend of backends) {
     await refuses("command_conflict", () => c.grants.grant(c.owner, { commandId: "same-1", taskId: c.ta, host: "y.example.com", port: 443 }));
   });
 
-  suite("the connection log keeps task, attempt, destination, outcome and bytes, and is read only by the owner and the task's own people", async (c) => {
+  suite("the connection log keeps task, attempt, destination, outcome and bytes, and is read only by the owner (not the task's worker, nor anyone else)", async (c) => {
     const id = await c.grants.logOpen({ taskId: c.ta, projectId: c.a, attemptId: "att-1", host: "research.example.com", port: 443, address: "93.184.216.34", grantId: "ngr-x", via: "relay", outcome: "open" });
     await c.grants.logOpen({ taskId: c.ta, projectId: c.a, attemptId: "att-1", host: "evil.example.net", port: 25, via: "relay", outcome: "refused", reason: "the task holds no grant for that destination" });
     await c.grants.logOpen({ taskId: c.ta, projectId: c.a, attemptId: "att-2", host: "x.example.com", port: 80, via: "web-tool", outcome: "refused", reason: `key ${keyShaped} leaked` });
@@ -197,9 +197,10 @@ for (const backend of backends) {
     assert.equal(refused.length, 2);
     assert.ok(refused.every((x) => x.endedAt !== undefined));
     assert.equal(JSON.stringify(list).includes(keyShaped), false, "a key-shaped text is redacted before it is kept");
-    assert.equal((await c.grants.connections(c.ann, c.ta)).length, 3, "the task's own worker reads it");
-    assert.deepEqual(await c.grants.connections(c.ben, c.ta), [], "a worker of another project does not");
-    assert.deepEqual(await c.grants.connections(c.cat, c.ta), []);
+    for (const who of [c.ann, c.ben, c.cat]) {
+      await assert.rejects(() => c.grants.connections(who, c.ta), (e: unknown) => e instanceof DomainError && e.code === "forbidden", `${who.id} does not read the log`);
+      await assert.rejects(() => c.grants.forTask(who, c.ta), (e: unknown) => e instanceof DomainError && e.code === "forbidden", `${who.id} does not list the grants`);
+    }
     assert.equal((await c.grants.connections(c.owner, c.ta, { limit: 2 })).length, 2);
   });
 }

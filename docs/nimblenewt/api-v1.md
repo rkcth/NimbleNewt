@@ -350,7 +350,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `network.grants`
 
-A task's network grants and requests: destination, state (`requested`, `granted`, `denied`, `revoked`), who approved it and how (the owner, or the approval policy through a standing approval grant), when it ended. For the owner and for those who work or read the task. An empty list is the default: no access.
+A task's network grants and requests: destination, state (`requested`, `granted`, `denied`, `revoked`), who approved it and how (the owner, or the approval policy through a standing approval grant), when it ended. Owner only. An empty list is the default: no access.
 
 Arguments:
 
@@ -362,7 +362,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `network.connections`
 
-The connections a task's sandbox or web tool asked for, oldest first, allowed and refused: destination, the address it went to, outcome, why it was refused, bytes each way, who ended it. For the owner and for those who work or read the task.
+The connections a task's sandbox or web tool asked for, oldest first, allowed and refused: destination, the address it went to, outcome, why it was refused, bytes each way, who ended it. Owner only.
 
 Arguments:
 

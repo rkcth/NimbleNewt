@@ -70,11 +70,24 @@ export class NetworkRelay {
   forAttempt(ctx: NetworkContext): NetworkOpener {
     const mine = new Set<Live>();
     const o = this.#o;
+    // Connections being admitted or connected count against the cap too (taken before the first wait, so opens at the same moment cannot all pass). `closeAll` (the process ended or was stopped) also ends a connection that was
+    // still being made when it was called: each call starts a new generation, and an open begun in an older one is refused. A later process of the same sandbox (a runtime restart) opens connections as before.
+    let pending = 0;
+    let generation = 0;
     return {
-      closeAll: () => { for (const l of [...mine]) l.close("attempt"); },
+      closeAll: () => { generation++; for (const l of [...mine]) l.close("attempt"); },
       open: async (target, events) => {
-        if (mine.size >= (o.maxOpen ?? NETWORK_RELAY_DEFAULTS.maxOpen)) throw new NetworkRefused("too many connections are open for this attempt");
+        const begun = generation;
+        if (mine.size + pending >= (o.maxOpen ?? NETWORK_RELAY_DEFAULTS.maxOpen)) throw new NetworkRefused("too many connections are open for this attempt");
+        pending++;
+        let counted = true;
+        const settle = (): void => { if (counted) { counted = false; pending--; } };
+        try {
         const admitted = await admit(o.grants, ctx, target.host, target.port, { resolve: o.resolve, via: "relay", ...(o.maxLogged === undefined ? {} : { maxLogged: o.maxLogged }) });
+        if (generation !== begun) {
+          await o.grants.logClose(ctx.taskId, admitted.recordId, { outcome: "failed", endedBy: "attempt", bytesToTarget: 0, bytesFromTarget: 0, reason: "the attempt ended before the connection was made" }).catch(() => undefined);
+          throw new NetworkRefused("the attempt has ended; no connection is made");
+        }
         const socket = (o.dial ?? ((address, port) => netConnect({ host: address, port })))(admitted.address, admitted.port);
         socket.setNoDelay(true);
         let bytesTo = 0; let bytesFrom = 0; let ended = false; let ready = false;
@@ -91,7 +104,7 @@ export class NetworkRelay {
           try { events.closed(reason ?? `closed by ${endedBy}`); } catch { /* the pipe is over */ }
         };
         const live: Live = { socket, grantId: admitted.grant.id, close: (by) => { endedBy = by; finish("closed", by === "revoked" ? "the grant was revoked" : by === "ended" ? "the grant ended with its task" : by === "attempt" ? "the attempt ended" : by === "idle" ? "idle too long" : undefined); } };
-        mine.add(live); this.#live.add(live);
+        settle(); mine.add(live); this.#live.add(live);
         const touch = (): void => { clearTimeout(idle); idle = setTimeout(() => live.close("idle"), o.idleMs ?? NETWORK_RELAY_DEFAULTS.idleMs); idle.unref?.(); };
         touch();
         // The grant is judged again while the connection is open: a revoke made in another process, or the end of the task, is noticed here.
@@ -115,6 +128,8 @@ export class NetworkRelay {
           socket.once("connect", () => { clearTimeout(wait); ready = true; resolve(); });
           socket.once("close", () => { clearTimeout(wait); if (!ready) reject(new NetworkRefused(`could not connect to ${admitted.host}:${admitted.port}`)); });
         });
+        // The attempt ended while the connection was being made (its close found nothing of this one yet to end).
+        if (generation !== begun && !ended) { live.close("attempt"); throw new NetworkRefused("the attempt has ended; no connection is made"); }
         return {
           write: (chunk) => new Promise<void>((resolve, reject) => {
             if (ended || socket.destroyed) return reject(new Error("the connection is closed"));
@@ -124,6 +139,7 @@ export class NetworkRelay {
           end: () => { if (!ended && !socket.destroyed) socket.end(); },
           close: () => { endedBy = "client"; finish("closed"); },
         };
+        } finally { settle(); }
       },
     };
   }

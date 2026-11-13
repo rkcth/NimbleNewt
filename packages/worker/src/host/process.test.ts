@@ -407,3 +407,23 @@ test("the number of connections open at once is bounded, and the end of the proc
   f.exit(); await p.exited;
   await waitFor("every one closed", () => r.log.filter((l) => l === "close").length === PROCESS_LIMITS.netInFlight && r.closedAll() >= 1);
 });
+
+test("a process that sends a second piece before the first was acknowledged has that connection closed, and no second write is started", async () => {
+  const f = fake();
+  let writes = 0; let release!: () => void; const stuck = new Promise<void>((r) => { release = r; }); const log: string[] = [];
+  const port = {
+    open: async () => ({ write: async () => { writes++; await stuck; }, end: () => { log.push("end"); }, close: () => { log.push("close"); } }),
+    closeAll: () => undefined,
+  };
+  const p = await launchWith(f, port as never);
+  f.send({ t: "net.open", id: 1, host: "docs.example.com", port: 443 });
+  await waitFor("opened", () => f.written.some((m) => m.t === "net.opened"));
+  f.send({ t: "net.data", id: 1, data: Buffer.from("one").toString("base64") });
+  await waitFor("first write started", () => writes === 1);
+  for (let i = 0; i < 5; i++) f.send({ t: "net.data", id: 1, data: Buffer.from("more").toString("base64") });
+  await waitFor("closed for the breach", () => f.written.some((m) => m.t === "net.close" && m.id === 1 && /acknowledged/.test(m.message ?? "")));
+  assert.equal(writes, 1, "the unacknowledged pieces were not written");
+  assert.ok(log.includes("close"));
+  release();
+  f.exit(); await p.exited;
+});

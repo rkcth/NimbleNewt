@@ -1,6 +1,6 @@
 import { BlockList, isIP } from "node:net";
 import { DomainError } from "../domain/errors.js";
-import { internalHost } from "../mcp/mcp.js";
+import { internalHost, ipv6Bytes } from "../mcp/mcp.js";
 
 /**
  * Where a task may connect to (card H12i). A destination is a host (a name or an address literal) and a port, written exactly: no wildcard, no address range, no scheme, path or credentials. The checks here are about the *form* of a destination
@@ -64,10 +64,17 @@ export function neverReachable(address: string): boolean {
   if (kind === 4) return NEVER.check(a, "ipv4");
   let text = a;
   try { text = new URL(`http://[${a}]/`).hostname.replace(/^\[|\]$/g, ""); } catch { return true; }
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(text);
-  if (mapped !== null) {
-    const hi = parseInt(mapped[1]!, 16); const lo = parseInt(mapped[2]!, 16);
-    return NEVER.check(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`, "ipv4");
+  // An IPv6 address that carries an IPv4 address is judged as that address too: mapped (::ffff:a.b.c.d), SIIT (::ffff:0:a.b.c.d), compatible (::a.b.c.d), NAT64 (64:ff9b::/96 and the local 64:ff9b:1::/48)
+  // and 6to4 (2002:aabb:ccdd::). A gateway that translates them would otherwise carry a connection to the credentials service of a cloud instance.
+  const b = ipv6Bytes(text);
+  if (b !== undefined) {
+    const v4 = (i: number): boolean => NEVER.check(`${b[i]}.${b[i + 1]}.${b[i + 2]}.${b[i + 3]}`, "ipv4");
+    const zeros = (from: number, to: number): boolean => b.slice(from, to).every((x) => x === 0);
+    if (zeros(0, 10) && b[10] === 0xff && b[11] === 0xff && v4(12)) return true;
+    if (zeros(0, 8) && b[8] === 0xff && b[9] === 0xff && zeros(10, 12) && v4(12)) return true;
+    if (zeros(0, 12) && b[12] !== 0 && v4(12)) return true; // not ::1 or ::, which carry no address
+    if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && (zeros(4, 12) || (b[4] === 0 && b[5] === 1)) && v4(12)) return true;
+    if (b[0] === 0x20 && b[1] === 0x02 && v4(2)) return true;
   }
   return NEVER.check(text, "ipv6");
 }
