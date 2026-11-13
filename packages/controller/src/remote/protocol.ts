@@ -136,7 +136,7 @@ export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 /** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
-  readonly operation: "integration" | "landing" | "refresh" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore" | "pi-thinking-purge";
+  readonly operation: "integration" | "landing" | "refresh" | "reapply" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore" | "pi-thinking-purge";
   readonly taskId: string;
   readonly projectId: string;
   readonly reason: string;

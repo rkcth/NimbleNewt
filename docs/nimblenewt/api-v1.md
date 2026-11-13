@@ -360,6 +360,31 @@ Result: `{ item: { revision, scratch, default, effective: { scratch }, damaged? 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `network.grants`
+
+A task's network grants and requests: destination, state (`requested`, `granted`, `denied`, `revoked`), who approved it and how (the owner, or the approval policy through a standing approval grant), when it ended. Owner only. An empty list is the default: no access.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.connections`
+
+The connections a task's sandbox or web tool asked for, oldest first, allowed and refused: destination, the address it went to, outcome, why it was refused, bytes each way, who ended it. Owner only.
+
+Arguments:
+
+- `taskId`: the task
+- `limit` (optional): at most this many (default and most 200)
+
+Result: `{ items }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `dispatch.limits.get`
 
 The dispatcher's two limits (owner only): the owner's entries (on or off, with the kept figure), the start-up options, and what applies now. Both are off (no limit) unless set.
@@ -2949,6 +2974,56 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `network.grant`
+
+Gives a task network access to one destination, or asks for it. A task's sandbox has no network; its only way out is the controller's relay, which connects only for a destination the task holds a live grant for. The default is none. A grant names the task and ONE destination written exactly (`host` a name or an address, `port` 1 to 65535; no wildcard, range, scheme or path). When the owner calls this the grant is made at once. When the task's own credential calls it, it is a request: the approval policy judges it as opening new outside access (tool `open-network`, class access change), and only a standing approval grant that names it lets the policy allow it; otherwise it waits as `requested` for the owner (`network.decide`). A grant ends with its task or when it is revoked. A destination that is a private, loopback or local address (a service on this machine or the owner's network) needs `allowPrivate: true`, and only the owner makes that. `credential` (owner only) names a header and the NAME of a secret that the controller's web tool, never the relay, adds when it fetches from this destination. Addresses nobody can reach (unspecified, broadcast, multicast, link-local such as 169.254.169.254) are refused whoever asks.
+
+Arguments:
+
+- `taskId`: the task
+- `host`: the destination's host name or address
+- `port`: the destination's port
+- `allowPrivate` (optional): true to allow a private, loopback or local address (owner only)
+- `reason` (optional): why it is wanted (at most 300 characters)
+- `credential` (optional): `{ header, ref }`: the header the web tool adds and the NAME of the secret (owner only)
+
+Result: `{ id, state, revision }`: `state` is `granted` or `requested`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.decide`
+
+The owner approves or refuses a task's request for network access (`network.grant` by the task). Approving makes the grant; it applies at the task's next connection, with nothing restarted.
+
+Arguments:
+
+- `grantId` (optional): the request's ID (`ngr-...`)
+- `taskId` (optional): or the task (with host and port)
+- `host` (optional): the destination's host
+- `port` (optional): the destination's port
+- `verdict`: `approve` or `deny`
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ state, revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `network.revoke`
+
+The owner takes network access away: one grant or request by `grantId` or by `taskId` with `host` and `port`, or every grant of a task by `taskId` alone. Connections open under it end at once and new ones are refused; nothing is restarted. Revoking what is already over changes nothing.
+
+Arguments:
+
+- `grantId` (optional): one grant or request
+- `taskId` (optional): every grant of this task (or, with host and port, one destination)
+- `host` (optional): the destination's host
+- `port` (optional): the destination's port
+- `expectedRevision` (optional): the revision you read (with one grant)
+
+Result: `{ revoked }`: how many ended.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `dispatch.limits.change`
 
 The owner changes the dispatcher's limits (owner only), leaving the others as they are: `attemptMinutes` (1 to 525600: how long an attempt may run) and `maxAttempts` (1 to 1000: attempts admitted after a lost one). Both are off by default. `set` turns the named limits on with a figure (a null figure turns the limit off), `disable` turns them off keeping the figure, `enable` turns them on again with the kept figure, `unset` forgets the entry so the start-up option or no limit applies. A task's contract `maxMinutes`/`maxAttempts` still applies. It counts from the next attempt claimed or re-admitted; an attempt already running keeps the expiry it was given. This is the form the chat uses.
@@ -3215,6 +3290,19 @@ Arguments:
 - `commandId`: required
 
 Result: `{ notes, replayed }`: how many notes the attempt holds.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `work.refresh`
+
+An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
+
+Arguments:
+
+- `attemptId`: your attempt
+- `commandId`: required
+
+Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, and `round`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -6432,7 +6520,7 @@ Arguments:
 - `base` (optional): code: the base commit (git object ID)
 - `tree` (optional): code: the tree (git object ID)
 - `patchId` (optional): code: the patch ID
-- `refreshRound` (optional): code: the refresh round, default 0
+- `refreshRound` (optional): code: leave it out: the controller counts the refresh rounds (card H12p) and records its own count; a different number is refused
 - `subject` (optional): review, qa, signoff: the submission it is about
 - `verdict` (optional): review: `approve`, `changes` or `reject`
 - `decision` (optional): signoff: `approve` or `decline`

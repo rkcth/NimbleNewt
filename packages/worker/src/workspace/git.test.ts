@@ -575,3 +575,63 @@ test("integrate does not hang on a file swapped for a FIFO after the walk, and r
     assert.equal(await readFile(join(hostDir, "b.ts"), "utf8"), "HOST-ONLY-CONTENT\n", "the host file was not cut or written");
   } finally { await v.done(); }
 });
+
+// H12p review: the author's refresh runs on a LIVE checkout (no quiesce). A file the agent writes while it runs is never overwritten silently: the refresh stops (`stale`) and asking again finishes it.
+test("reapply on a live checkout: a file the landing branch changed that the agent writes during the refresh is kept, the refresh stops before overwriting it, and asking again lists it as a conflict (H12p review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const next = await advance(w, { "README.md": "moved\n", "zz.txt": "landing\n" });
+    let once = false;
+    await refuses("stale", () => w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout, hooks: { beforeOpen: async (abs) => { if (once) return; once = true; await writeFile(abs, "agent wrote this meanwhile\n"); } } }));
+    assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "agent wrote this meanwhile\n", "the agent's write was not lost");
+    assert.equal(existsSync(join(w.checkout, "zz.txt")), false, "nothing after it was written");
+    assert.equal(await w.git.baseOf(w.gitDir), w.commit, "the base did not move");
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(r.conflicts, [{ path: "README.md", kind: "overlap" }]);
+    const marked = await readFile(join(w.checkout, "README.md"), "utf8");
+    assert.ok(marked.includes("agent wrote this meanwhile") && marked.includes("moved") && marked.includes("<<<<<<< mine"), marked);
+    assert.equal(await readFile(join(w.checkout, "zz.txt"), "utf8"), "landing\n");
+    assert.equal(await w.git.baseOf(w.gitDir), next);
+  } finally { await w.done(); }
+});
+
+test("reapply on a live checkout: a file the agent creates during the refresh where the landing branch adds one is not overwritten; a retry after the partial refresh finishes it (H12p review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const next = await advance(w, { "README.md": "moved\n", "zz.txt": "landing\n" });
+    let once = false;
+    await assert.rejects(() => w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout, hooks: { beforeOpen: async () => { if (once) return; once = true; await writeFile(join(w.checkout, "zz.txt"), "the agent's own\n"); } } }),
+      (e: unknown) => { assert.ok(e instanceof WorkspaceError); assert.equal(e.code, "stale"); assert.match(e.message, /zz\.txt.*asking again finishes the refresh/); return true; });
+    assert.equal(await readFile(join(w.checkout, "zz.txt"), "utf8"), "the agent's own\n", "the agent's new file was not overwritten");
+    assert.equal(await readFile(join(w.checkout, "README.md"), "utf8"), "moved\n", "the file before it was taken");
+    assert.equal(await w.git.baseOf(w.gitDir), w.commit);
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual([r.merged, r.conflicts], [["README.md"], [{ path: "zz.txt", kind: "both-added" }]]);
+    assert.equal(await readFile(join(w.checkout, "zz.txt"), "utf8"), "the agent's own\n");
+    assert.equal(await w.git.baseOf(w.gitDir), next);
+    assert.deepEqual((await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout })).map((c) => c.path), ["zz.txt"], "only the agent's own file is its work");
+  } finally { await w.done(); }
+});
+
+test("reapply: when the merged content of a file cannot be written whole, the agent's version is put back, never left cut short (H12p review)", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "doc.txt"), lines(20)); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "doc");
+    const start = await w.git.head(w.shared);
+    const dir = join(w.dir, "c2"); const gd = join(w.dir, "t2.git");
+    await w.git.createCheckout({ shared: w.shared, commit: start, gitDir: gd, checkout: dir });
+    const mine = lines(20, [2, "mine two"]);
+    await writeFile(join(dir, "doc.txt"), mine);
+    const next = await advance(w, { "doc.txt": lines(20, [15, "landing fifteen"]) });
+    // The prepared content disappears between the check and the write (as a full disk or a read error would cut the write short).
+    const lose = async (): Promise<void> => { for (const e of await readdir(gd)) if (e.startsWith("nn-reapply-")) for (const f of await readdir(join(gd, e))) await rm(join(gd, e, f)); };
+    await assert.rejects(() => w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir, hooks: { beforeOpen: lose } }),
+      (e: unknown) => { assert.ok(e instanceof WorkspaceError); assert.match(e.message, /your version of it was put back/); return true; });
+    assert.equal(await readFile(join(dir, "doc.txt"), "utf8"), mine, "the agent's work is whole");
+    assert.equal(await w.git.baseOf(gd), start);
+    const r = await w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir });
+    assert.deepEqual(r.merged, ["doc.txt"]);
+    const text = await readFile(join(dir, "doc.txt"), "utf8");
+    assert.ok(text.includes("mine two") && text.includes("landing fifteen"));
+  } finally { await w.done(); }
+});

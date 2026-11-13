@@ -27,8 +27,14 @@ export interface SandboxRecipe {
   /** The agent's private scratch (host side). Writable; /scratch. */
   readonly scratch: string;
   readonly readOnly: readonly ReadOnlyMount[];
-  /** Only `none` exists: no network, so no uncontrolled route. Controlled routes arrive with the cards that own them. */
+  /** Only `none` exists: the sandbox has no network interface, so no uncontrolled route. The controlled route is `route`. */
   readonly network: "none";
+  /**
+   * The controlled route out (card H12i): a proxy endpoint the sandbox's own program serves on the sandbox's loopback at this port, which sends every connection over the worker channel to the host's network relay (the sandbox itself still
+   * has no network interface). It is part of the recipe, so the recipe revision records it; the environment gets the standard proxy variables pointing at it (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lower-case forms), and a recipe
+   * that names any of them itself is refused. Absent: no route, and nothing in the recipe or its revision changes.
+   */
+  readonly route?: { readonly proxyPort: number };
   /** The whole environment of the agent's process, besides HOME, PATH and TMPDIR. Nothing is inherited from the service. */
   readonly env: Readonly<Record<string, string>>;
   /** Names directly under the workdir that are bound read-only on top of it when they exist (default `.git`). */
@@ -46,6 +52,9 @@ export const GUEST = { work: "/work", home: "/home/agent", scratch: "/scratch" }
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const RESERVED_ENV = new Set(["HOME", "PATH", "TMPDIR"]);
+/** The variables most clients read to find a proxy; a recipe with a route sets them itself, and one without may not set them (they would point at nothing the host controls). */
+export const PROXY_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"] as const;
+const PROXY_ENV_SET = new Set<string>(PROXY_ENV);
 const MAX_ENV_VALUE = 4096;
 const MAX_ENV_ENTRIES = 64;
 const SUBPATH = /^[A-Za-z0-9._-]{1,100}$/;
@@ -115,6 +124,14 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   if (recipe === null || typeof recipe !== "object") return bad("a recipe is an object");
   if (recipe.mode !== "sandboxed" && recipe.mode !== "trusted-host") return bad(`mode: must be "sandboxed" or "trusted-host"`);
   if (recipe.network !== "none") return bad(`network: only "none" is supported`);
+  let route: { proxyPort: number } | undefined;
+  if (recipe.route !== undefined) {
+    const r = recipe.route as { proxyPort?: unknown } | null;
+    if (r === null || typeof r !== "object" || Array.isArray(r) || Object.keys(r).some((k) => k !== "proxyPort")) return bad("route: must be { proxyPort }");
+    if (typeof r.proxyPort !== "number" || !Number.isInteger(r.proxyPort) || r.proxyPort < 1024 || r.proxyPort > 65535) return bad("route.proxyPort: must be a port from 1024 to 65535");
+    if (recipe.mode !== "sandboxed") return bad("route: a trusted-host run has the host's own network; a route is for a sandboxed run");
+    route = { proxyPort: r.proxyPort };
+  }
   const workdir = checkHostPath("workdir", recipe.workdir, protectedPaths, "directory");
   const home = checkHostPath("home", recipe.home, protectedPaths, "directory");
   const scratch = checkHostPath("scratch", recipe.scratch, protectedPaths, "directory");
@@ -137,6 +154,7 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   for (const [name, value] of entries) {
     if (!ENV_NAME.test(name)) return bad(`env: ${JSON.stringify(name)} is not a valid variable name`);
     if (RESERVED_ENV.has(name)) return bad(`env: ${name} is set by the launcher`);
+    if (PROXY_ENV_SET.has(name)) return bad(`env: ${name} is a proxy setting; it is set by the recipe's route and by nothing else`);
     // Library-loading variables change what a program loads before it does anything, including the sandbox launcher itself.
     if (/^(?:DYLD_|LD_|LDR_)/.test(name)) return bad(`env: ${name} would change how programs load libraries and is never passed on`);
     if (typeof value !== "string" || value.length > MAX_ENV_VALUE || value.includes("\0")) return bad(`env: ${name} must be a string of at most ${MAX_ENV_VALUE} characters`);
@@ -151,7 +169,10 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
     try { stats = lstatSync(join(workdir, name)); } catch { unprotectedSubpaths.push(name); continue; }
     if (stats.isSymbolicLink()) return bad(`protectedSubpaths: ${join(workdir, name)} is a symbolic link`);
   }
-  const body = { mode: recipe.mode, workdir, home, scratch, readOnly, network: "none" as const, env: Object.fromEntries(entries.sort(([a], [b]) => (a < b ? -1 : 1))), protectedSubpaths };
+  // With a route the standard proxy variables name it, so every client that honours them goes through the forwarder and nothing else is told of a way out. The loopback is never proxied around: the variables carry no exceptions.
+  const proxyUrl = route === undefined ? undefined : `http://127.0.0.1:${route.proxyPort}`;
+  const withProxy = proxyUrl === undefined ? entries : [...entries, ...(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] as const).map((n) => [n, proxyUrl] as [string, string])];
+  const body = { mode: recipe.mode, workdir, home, scratch, readOnly, network: "none" as const, ...(route === undefined ? {} : { route }), env: Object.fromEntries(withProxy.sort(([a], [b]) => (a < b ? -1 : 1))), protectedSubpaths };
   return { ...body, revision: sha256(canonical(body)), unprotectedSubpaths };
 }
 

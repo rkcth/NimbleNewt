@@ -32,6 +32,16 @@ const wipLastRef = (remote: string, ref: string): string => `refs/nn/wip-last/${
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** What `snapshot` says of a name with nothing at it. */
+const ABSENT_FILE = "absent";
+/** A file's identity, size and times (nanoseconds): any write to it, or its replacement, changes this. */
+const stamp = (s: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; isFile(): boolean; isDirectory(): boolean }): string => `${s.isFile() ? "f" : s.isDirectory() ? "d" : "o"}:${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+/** How a name in the checkout looks now, without following a link at it (`ABSENT_FILE` when nothing is there). */
+const snapshot = async (absolute: string): Promise<string> => {
+  try { return stamp(await lstat(absolute, { bigint: true })); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") return ABSENT_FILE; return `error:${String((error as NodeJS.ErrnoException).code)}`; }
+};
+/** The refusal of a refresh that met a file the agent changed while it ran. */
+const changedWhile = (path: string, partial: boolean): string => `${JSON.stringify(path.slice(0, 80))} changed while the refresh ran (something in your attempt is writing it), so it was not overwritten and the refresh stopped${partial ? ": files before it may already hold the landing branch's version, your base is still the old one, and asking again finishes the refresh" : " before writing anything"}; ask again when nothing is writing your checkout`;
 /** Bounds of `GitBridge.doneState` (card W05): the uncommitted files it names, and the evidence paths it looks at. */
 export const DONE_STATE_LIMITS = { named: 20, paths: 30 } as const;
 /** Where the commits made through a permit are listed: a file in the checkout's git directory (host side, outside the checkout the agent edits). Text in a commit message proves nothing; a commit counts as permitted only if `commit()` made it and listed it here. */
@@ -169,7 +179,6 @@ export class GitBridge {
   async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void> } }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
     if (!COMMIT.test(options.commit)) throw new WorkspaceError("invalid_path", "a refresh goes to a full commit ID");
     const previous = await this.#base(options.gitDir);
-    const mine = new Map((await this.changes(options)).map((c) => [c.path, { op: c.op, modeOnly: c.modeOnly }] as const));
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
     const listing = (await this.#run(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", previous, options.commit], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
@@ -182,12 +191,18 @@ export class GitBridge {
       theirs.set(path, { op: status === "D" ? "delete" : "write", mode: newMode, oldMode, sha });
     }
     if (theirs.size > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
+    // The checkout is LIVE (H12p review): the agent, a job it started or a parallel tool call may write while this runs. Each file this refresh may write or delete is looked at BEFORE the agent's work is
+    // read, and looked at again before the first write and on the opened file just before it is written: a file that changed in between is not overwritten (the refresh stops, `stale`), so a write the agent
+    // made meanwhile is never lost silently. Files the landing branch did not change are never touched, so writes to them cannot race.
+    const seen = new Map<string, string>();
+    for (const path of theirs.keys()) seen.set(path, await snapshot(join(options.checkout, path)));
+    const mine = new Map((await this.changes(options)).map((c) => [c.path, { op: c.op, modeOnly: c.modeOnly }] as const));
     const result = { base: options.commit, previous, unchanged: previous === options.commit, kept: [...mine.keys()].filter((p) => !theirs.has(p)).sort(), taken: [] as string[], merged: [] as string[], conflicts: [] as { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] };
     // Nothing to do on the same head: the refs, the index and the agent's own commits stay as they are.
     if (result.unchanged) return result;
     const stage = await mkdtemp(join(options.gitDir, "nn-reapply-"));
     try {
-      const steps: { path: string; source?: string; mode?: number }[] = [];
+      const steps: { path: string; source?: string; mode?: number; prior?: Buffer }[] = [];
       const marker = `>>>>>>> landing ${options.commit.slice(0, 12)}`;
       let n = 0;
       const modeOf = (mode: string): number => (mode === "100755" ? 0o755 : 0o644);
@@ -213,7 +228,7 @@ export class GitBridge {
         const outcome = await this.#mergeText(options.gitDir, base, here, there, `landing ${options.commit.slice(0, 12)}`);
         const source = join(stage, String(n++));
         await writeFile(source, outcome.bytes);
-        steps.push({ path, source, ...(info.mode !== info.oldMode ? { mode: modeOf(info.mode) } : {}) });
+        steps.push({ path, source, prior: here, ...(info.mode !== info.oldMode ? { mode: modeOf(info.mode) } : {}) });
         if (outcome.conflicts === 0) result.merged.push(path); else result.conflicts.push({ path, kind: "overlap" });
       }
       // Every path is checked before the first write; a missing directory on the way is made below.
@@ -221,15 +236,26 @@ export class GitBridge {
         const safe = await resolveSafe(options.checkout, s.path, { forWrite: s.source !== undefined }).catch((error: unknown) => { if (error instanceof WorkspaceError && error.code === "not_found") return undefined; throw error; });
         if (safe?.exists === "directory" && s.source !== undefined) throw new WorkspaceError("invalid_path", `${JSON.stringify(s.path.slice(0, 80))} is a directory in the checkout; nothing was changed`);
       }
+      // Nothing is written when a file changed after it was looked at (the agent is writing): the refresh stops before its first write and can be asked again.
+      for (const s of steps) if ((await snapshot(join(options.checkout, s.path))) !== seen.get(s.path)) throw new WorkspaceError("stale", changedWhile(s.path, false));
       for (const s of steps) if (s.source !== undefined) await resolveSafe(options.checkout, s.path, { forWrite: true, createParents: true });
       for (const s of steps) {
         const safe = await resolveSafe(options.checkout, s.path, { forWrite: true, createParents: true });
-        if (s.source === undefined) { if (safe.exists === "file") await rm(safe.absolute); continue; }
+        if (s.source === undefined) {
+          if (safe.exists === "file") {
+            if ((await snapshot(safe.absolute)) !== seen.get(s.path)) throw new WorkspaceError("stale", changedWhile(s.path, true));
+            await rm(safe.absolute);
+          }
+          continue;
+        }
         if (safe.exists === "directory") throw new WorkspaceError("invalid_path", `${JSON.stringify(s.path.slice(0, 80))} is a directory in the checkout; the refresh stopped there`);
         await options.hooks?.beforeOpen?.(safe.absolute);
+        // A file that was not there when looked at is created exclusively: one the agent made meanwhile is not overwritten.
+        const absent = seen.get(s.path) === ABSENT_FILE;
         let handle;
-        try { handle = await open(safe.absolute, constants.O_WRONLY | constants.O_CREAT | NOFOLLOW, 0o644); } catch (error) {
+        try { handle = await open(safe.absolute, constants.O_WRONLY | constants.O_CREAT | (absent ? constants.O_EXCL : 0) | NOFOLLOW, 0o644); } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} became a link while the refresh ran; it was not written`, { tamper: true });
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new WorkspaceError("stale", changedWhile(s.path, true));
           throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be opened for writing`);
         }
         let streamed = false;
@@ -238,10 +264,18 @@ export class GitBridge {
           const now = await lstat(safe.absolute).catch(() => undefined);
           const parent = await realpath(dirname(safe.absolute)).catch(() => undefined);
           if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent || !(await openedAt(handle, safe.absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
+          // The opened file must still be the one looked at before the agent's work was read (same file, size and times): otherwise the agent wrote it meanwhile and it is not overwritten.
+          if (!absent && stamp(await handle.stat({ bigint: true })) !== seen.get(s.path)) throw new WorkspaceError("stale", changedWhile(s.path, true));
           await handle.truncate(0);
           if (s.mode !== undefined) await handle.chmod(s.mode);
           streamed = true; // the stream closes the handle
-          await pipeline(createReadStream(s.source), handle.createWriteStream({ start: 0 }));
+          try { await pipeline(createReadStream(s.source), handle.createWriteStream({ start: 0 })); } catch (error) {
+            // A merged file holds the agent's work: when its new content could not be written whole (a full disk, a read error), the agent's version is put back, never left cut short.
+            if (s.prior === undefined) throw error;
+            let back = false;
+            try { const again = await open(safe.absolute, constants.O_WRONLY | constants.O_TRUNC | NOFOLLOW); try { await again.writeFile(s.prior); back = true; } finally { await again.close().catch(() => undefined); } } catch { back = false; }
+            throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be written; ${back ? "your version of it was put back" : "your version of it could NOT be put back, so the file may be cut short"} and the refresh stopped there (ask again)`, { cause: error });
+          }
         } finally { if (!streamed) await handle.close().catch(() => undefined); }
       }
     } finally { await rm(stage, { recursive: true, force: true }); }
@@ -273,7 +307,7 @@ export class GitBridge {
     try {
       await Promise.all([writeFile(join(dir, "mine"), mine), writeFile(join(dir, "base"), base), writeFile(join(dir, "landing"), theirs)]);
       return await new Promise((resolveMerge, reject) => {
-        execFile(this.#git, ["merge-file", "-p", "--diff3", "-L", "mine", "-L", "base", "-L", label, join(dir, "mine"), join(dir, "base"), join(dir, "landing")], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes * 2, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => {
+        execFile(this.#git, [...this.#flags(), "--git-dir", gitDir, "merge-file", "-p", "--diff3", "-L", "mine", "-L", "base", "-L", label, join(dir, "mine"), join(dir, "base"), join(dir, "landing")], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.fileBytes * 2, windowsHide: true, cwd: this.#empty, timeout: GIT_LIMITS.timeoutMs }, (error, stdout) => {
           if (error === null) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: 0 });
           const code = (error as { code?: unknown }).code;
           if (typeof code === "number" && code > 0 && code < 128) return resolveMerge({ bytes: stdout as unknown as Buffer, conflicts: code });

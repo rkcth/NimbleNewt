@@ -39,7 +39,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -152,13 +152,30 @@ export interface ToolExecutionDeps {
    */
   readonly jobs?: Pick<JobService, "admit" | "get" | "requestCancel">;
   readonly jobRuns?: Pick<LocalJobRuns, "room" | "start" | "ended"> & Partial<Pick<LocalJobRuns, "runningFor">>;
+  /** Tools the controller itself runs (card H12i: the web tool). They appear in `tool.discover` and `tool.describe` and run through `tool.invoke`; they cannot be started as jobs. */
+  readonly builtins?: readonly BuiltinTool[];
+}
+
+/**
+ * A tool of the system layer that the controller itself runs (card H12i: the web tool), listed, described and invoked like a catalogue tool but with no script: its manifest is fixed in the program, `run` is the controller's own code. It still goes
+ * through the dispatcher's tool path (the agent's `tool.<name>` grant, budget, pause, policy classification, the durable operation record), and its call is recorded like any other.
+ */
+export interface BuiltinTool {
+  /** The canonical name in the protected namespace (`nimblenewt.<name>`); also its name in the dispatcher's tool path and in the approval policy. */
+  readonly name: string;
+  readonly version: string;
+  readonly purpose: string;
+  readonly input: JsonObject;
+  readonly output: JsonObject;
+  /** Runs the tool for the attempt. A refusal is thrown (a `DomainError` becomes the call's failure with its message). The result must fit `output`. */
+  run(call: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agent: Principal }, input: JsonObject, signal: AbortSignal): Promise<JsonObject>;
 }
 
 /** The bound gateway of the attempt the request came through. */
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
@@ -468,6 +485,7 @@ export class ToolExecutionService {
               case "job.status": case "job.output": return await this.#jobRead(context, request.op as BridgeOperation, args);
               case "job.cancel": return await this.#jobCancel(context, args);
               case "work.end": return await this.#workEnd(token, context, args);
+              case "work.refresh": return await this.#workRefresh(token, context, args);
               case "work.note": case "work.answer": return await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args);
               case "maintenance.request": return await this.#maintenanceRequest(token, context, args);
               case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
@@ -736,6 +754,17 @@ export class ToolExecutionService {
     return refusal(response.error.code, response.error.message);
   }
 
+  /**
+   * The agent refreshes its own checkout onto the landing branch's head (`work.refresh`, card H12p), through the same door every client uses, for the attempt the request came through (never one the request names). It takes no
+   * arguments. A pause refuses it like every other write; the controller refuses it while the attempt is held. The answer carries the conflicts it left for the agent to fix.
+   */
+  async #workRefresh(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, []);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "work.refresh", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { attemptId: c.attemptId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
   /** Card W10: a running note (`work.note`) or the answers to the second agent's questions (`work.answer`), through the same door every client uses, for the attempt the request came through. */
   async #workWrite(token: unknown, c: Context, op: "work.note" | "work.answer", args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
@@ -841,7 +870,8 @@ export class ToolExecutionService {
     const query = args["query"] === undefined ? undefined : typeof args["query"] === "string" && args["query"].length <= BRIDGE_LIMITS.query ? args["query"].toLowerCase() : invalid("query", `must be text of at most ${BRIDGE_LIMITS.query} characters`);
     const limit = args["limit"] === undefined ? BRIDGE_LIMITS.defaultPage : Number.isSafeInteger(args["limit"]) && (args["limit"] as number) >= 1 && (args["limit"] as number) <= BRIDGE_LIMITS.page ? (args["limit"] as number) : invalid("limit", `must be 1 to ${BRIDGE_LIMITS.page}`);
     const after = args["after"] === undefined ? undefined : typeof args["after"] === "string" ? args["after"] : invalid("after", "must be the `next` of a previous answer");
-    const all = (await this.#deps.catalog.list(c.agent)).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const builtins = (this.#deps.builtins ?? []).map((b) => ({ name: b.name, kind: "tool" as const, layer: "protected" as const, latest: b.version }));
+    const all = [...(await this.#deps.catalog.list(c.agent)).filter((x) => !builtins.some((b) => b.name === x.name)), ...builtins].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     // The revision says whether the visible set changed: a new declaration appears at the next model-request boundary because the extension compares this.
     const revision = digest(canonicalJson({ items: all.map((x) => [x.name, x.kind, x.latest]) } as never)).slice(0, 24);
     const matching = all.filter((x) => (query === undefined || x.name.includes(query)) && (after === undefined || x.name > after));
@@ -852,6 +882,8 @@ export class ToolExecutionService {
   async #describe(c: Context, args: JsonObject): Promise<BridgeResponse> {
     onlyKnown(args, ["tool", "version"]);
     const { canonical, version } = this.#target(args);
+    const own = this.#builtin(canonical, version);
+    if (own !== undefined) return ok({ name: own.name, kind: "tool", version: own.version, digest: digest(canonicalJson({ name: own.name, version: own.version, input: own.input, output: own.output } as never)), purpose: own.purpose, input: own.input, output: own.output, requestedAccess: [], limits: { cpus: 1, memoryMb: 64, seconds: 30 }, os: ["linux", "macos", "windows"], arch: ["arm64", "x64"], recovery: "none", replaySafe: false, instructions: own.purpose });
     const v = await this.#deps.catalog.get(c.agent, canonical, version);
     if (v === undefined) throw new DomainError("not_found", `no tool ${canonical.slice(0, 80)} is available to you`);
     const text = await this.#deps.catalog.content(c.agent, canonical, v.version, "instructions");
@@ -879,6 +911,8 @@ export class ToolExecutionService {
   async #invoke(c: Context, gateway: BoundGateway, args: JsonObject): Promise<BridgeResponse> {
     onlyKnown(args, ["tool", "version", "input"]);
     const target = this.#target(args);
+    const own = this.#builtin(target.canonical, target.version);
+    if (own !== undefined) return this.#invokeBuiltin(c, gateway, own, args["input"]);
     const prepared = await this.#prepare(c, gateway, target, args["input"]);
     if ("settled" in prepared) return prepared.settled;
     const { v, pathName, input, facts, launch } = prepared;
@@ -903,6 +937,36 @@ export class ToolExecutionService {
       },
     );
     return ok({ ...(result as unknown as JsonObject), tool: v.name, version: v.version });
+    } finally { this.#bridgeCalls.delete(key); }
+  }
+
+  /** The controller's own tool of that name and version (the version, when given, must be the one it has). */
+  #builtin(canonical: string, version: string | undefined): BuiltinTool | undefined {
+    const b = (this.#deps.builtins ?? []).find((x) => x.name === canonical);
+    return b !== undefined && (version === undefined || version === b.version) ? b : undefined;
+  }
+
+  /** `tool.invoke` of a tool the controller runs itself: the arguments are checked against its input schema, then the dispatcher's tool path judges the call (grant, budget, pause, policy) and runs it. */
+  async #invokeBuiltin(c: Context, gateway: BoundGateway, tool: BuiltinTool, rawInput: unknown): Promise<BridgeResponse> {
+    const input = rawInput ?? {};
+    if (!isObject(input)) return invalid("input", "must be a JSON object");
+    const problems = checkValue(tool.input, input);
+    if (problems.length > 0) throw new DomainError("invalid_command", `the arguments do not match ${tool.name} ${tool.version}: ${problems.slice(0, 5).join("; ")}`, { field: "input" });
+    const key = `${c.attemptId}\0${c.callId}`;
+    this.#bridgeCalls.add(key);
+    try {
+      const result = await gateway.call(
+        { callId: c.callId, tool: { name: tool.name, version: tool.version, kind: "catalog" }, args: input },
+        { kind: "local", run: async (signal) => {
+          const out = await tool.run({ attemptId: c.attemptId, taskId: c.taskId, projectId: c.projectId, agent: c.agent }, input, guardedSignal(signal));
+          const text = JSON.stringify(out);
+          if (Buffer.byteLength(text, "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
+          const bad = checkValue(tool.output, out);
+          if (bad.length > 0) throw new Error(`the tool's output does not match its manifest: ${bad.slice(0, 3).join("; ")}`);
+          return { text };
+        } },
+      );
+      return ok({ ...(result as unknown as JsonObject), tool: tool.name, version: tool.version });
     } finally { this.#bridgeCalls.delete(key); }
   }
 

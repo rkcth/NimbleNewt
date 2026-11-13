@@ -8,7 +8,7 @@ import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
 import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
 import { MAX_RUN_PROCESSES, splitRunTree, type RunProcess } from "../sandbox/proc.js";
 import { removeTree } from "../sandbox/script.js";
-import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type RelayRequest, type RelayResponse } from "./process.js";
+import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type NetworkPort, type RelayRequest, type RelayResponse } from "./process.js";
 
 /**
  * The local worker host's two ports, bound to the real sandbox launcher and the real worker process (card H12b). The controller's `LocalWorker` takes a `SandboxPort` and a `RuntimeFactory`; the worker package depends on no other package of the
@@ -315,6 +315,12 @@ export interface LocalHostOptions<Call> {
   readonly leaseGraceMs?: number;
   /** The address the process uses for model calls (default `http://relay.invalid`). */
   readonly relayBase?: string;
+  /**
+   * The controlled route out of the sandbox (card H12i). Given, every attempt's sandbox recipe carries a route (a proxy endpoint on the sandbox's loopback at `proxyPort`, default 3128, which the recipe's environment names) and the process serves
+   * it; each connection it makes goes over the channel to `forAttempt(order)`, the controller's network relay bound to the attempt, which connects only for a destination the task holds a grant for. `forAttempt` answering `undefined` gives that attempt
+   * no route. Absent: no recipe has a route and the process serves none. A route needs a sandbox backend with a private network (bubblewrap); another backend refuses the launch.
+   */
+  readonly network?: { readonly forAttempt: (order: HostOrder) => NetworkPort | undefined; readonly proxyPort?: number };
   readonly clock?: () => number;
   /** Where a contract check (card W05) gets its own empty home and scratch for the run, removed afterwards (an absolute directory this host owns; default the system's temporary directory). */
   readonly checkBase?: string;
@@ -330,12 +336,14 @@ export const CHECK_OUTPUT_CHARS = 8000;
 /** Pi's own system prompt is not visible to the process; until it is measured the first call is counted with this many characters for it, so the check errs on the side of refusing. */
 const UNKNOWN_SYSTEM_PROMPT_CHARS = 8000;
 const RELAY_BASE = "http://relay.invalid";
+/** The loopback port the proxy of a sandbox with a route is served on (card H12i). Each sandbox has a network of its own, so every attempt may use the same one. */
+const DEFAULT_PROXY_PORT = 3128;
 const DEFAULT_REFRESH = "The owner's decisions changed. Read the decisions that apply to this task again before you act on anything you had planned.";
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
 const LEASE_GRACE_MS = 10_000;
 
 interface Reserved {
-  readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; process?: WorkerProcess; closed: boolean;
+  readonly order: HostOrder; readonly workspace: AttemptWorkspace; readonly recipe: ReturnType<typeof attemptSandbox>["recipe"]; readonly limits: ResourceLimits | undefined; /** The route out of this attempt's sandbox (card H12i), when it has one. */ readonly network?: NetworkPort; process?: WorkerProcess; closed: boolean;
   /** Every worker process launched in this sandbox (a restart of the runtime launches another), for Stop (card L02d). Bounded: past 16, the oldest ended one goes, its winding-down time kept in `foldedMs`. */
   readonly launched: WorkerProcess[];
   foldedMs: number;
@@ -412,17 +420,19 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       const workspace = await options.workspace(order);
       const reach = await reachOf(summary, order);
       const planned = attemptSandbox({ ...workspace, ...(reach.env === undefined ? {} : { env: { ...reach.env, ...workspace.env } }) }, { protectedPaths: options.protectedPaths });
-      const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts, ...reach.readOnly] };
+      const network = options.network?.forAttempt(order);
+      const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts, ...reach.readOnly], ...(network === undefined ? {} : { route: { proxyPort: options.network?.proxyPort ?? DEFAULT_PROXY_PORT } }) };
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
       const normalized = normalizeRecipe(recipe, planned.protectedPaths);
       // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
-      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set() };
+      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set(), ...(network === undefined ? {} : { network }) };
       reserved.set(order.attemptId, entry);
       return {
         revision: normalized.revision,
         close: async () => {
           entry.closed = true;
           if (reserved.get(order.attemptId) === entry) reserved.delete(order.attemptId);
+          try { entry.network?.closeAll("the attempt's sandbox was closed"); } catch { /* the relay is gone */ }
           for (const r of entry.checkRuns) r.kill();
           // A process the OS could not end is not taken as gone (card L02d): the close says so, and the sandbox keeps listing it.
           await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; });
@@ -474,6 +484,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         }, {
           bridge: (token, request) => options.bridge(order, call, token, request),
           relay: (request) => options.relay(order, request),
+          ...(entry.network === undefined ? {} : { network: entry.network }),
           ...(options.onCompaction === undefined ? {} : { compacted: (note) => options.onCompaction!(order, note) }),
           ...(options.onThinking === undefined ? {} : { thinking: (blocks) => options.onThinking!(order, blocks) }),
           ...(lease === undefined ? {} : {
@@ -510,6 +521,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           // The lease goes as the duration the controller meant (card H08b): the process counts it on its own monotonic clock, so a wrong clock in or beside the sandbox changes nothing.
           ...(lease === undefined ? {} : { lease: { leaseMs: Math.max(1000, Math.min(3_600_000, Math.floor(lease.leaseMs))), graceMs: options.leaseGraceMs ?? LEASE_GRACE_MS } }),
           ...(channelContext === undefined ? {} : { context: channelContext }),
+          ...(entry.network === undefined ? {} : { network: { proxyPort: options.network?.proxyPort ?? DEFAULT_PROXY_PORT } }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
       } catch (error) {
