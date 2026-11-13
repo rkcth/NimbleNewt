@@ -134,6 +134,11 @@ export interface WorkerHandle {
   restart(recipe: RecipeSummary, from: JsonObject): Promise<void>;
   /** Tells the agent something (a recipe was widened, an approval arrived). Optional. */
   tell?(text: string): Promise<void>;
+  /**
+   * Card M04h: whether the conversation is idle right now: the turn is running but no model call and no tool call is in progress (the agent waits for something outside, such as a background job). Optional: a worker that cannot tell
+   * (a remote one, an older one) leaves it out and its attempt is never taken to be idle. A failure reads as "not idle".
+   */
+  idle?(): Promise<boolean>;
   /** Ends the worker: kills the sandbox and everything in it. Safe to repeat. */
   stop(): Promise<void>;
 }

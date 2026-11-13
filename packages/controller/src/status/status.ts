@@ -288,6 +288,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
+  meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
   attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, or the newest one of a task still open is over a week old), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
@@ -380,6 +381,7 @@ export type StatusRequest =
   | { readonly kind: "agents"; readonly state?: string; readonly limit?: number }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
+  | { readonly kind: "meeting_desk_reads"; readonly occurrenceId: string; readonly deskRecordId?: string; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
@@ -533,6 +535,8 @@ export interface StatusDeps {
   /** Each attempt's starting size across a task's hand-offs and the alerts open on it (card C07i): the `start_size` view and the warning in the task's status. Absent: neither is shown. */
   readonly startSizes?: Pick<StartSizeService, "read" | "openAlerts">;
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
+  /** What a meeting's chair read from absent members' desks (card M05b): the `meeting_desk_reads` view. Absent: the view is not offered. */
+  readonly deskReads?: { reads(by: Principal, query: { occurrenceId: string; deskRecordId?: string; limit?: number }): Promise<{ reads: readonly { id: string; revision: number; deskRecordId: string; deskOwner: string; deskRevision: number; bytes: number; visibility: string; source?: string; reader: string; at: string; meetingRecordId: string }[]; next?: string }>; attempts(by: Principal, query: { occurrenceId: string; limit?: number }): Promise<{ attempts: readonly { id: string; revision: number; targetId: string; operation: string; count: number; last: string; lastBy: string }[]; next?: string }> };
   readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer, and the stand-ups themselves (card M03h): the `standups` view. Absent: they are not listed. */
   readonly standups?: {
@@ -779,6 +783,7 @@ export class StatusService {
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
       case "agents": { onlyKnown(request, ["kind", "state", "limit"]); return this.agentLines(by, request); }
+      case "meeting_desk_reads": { onlyKnown(request, ["kind", "occurrenceId", "deskRecordId", "limit"]); return this.deskReadLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
@@ -1777,6 +1782,22 @@ export class StatusService {
       for (const st of b.statements) lines.push(line(`${st.by === "owner" ? "A note from the owner" : `${who}'s own words`} (${st.section}): ${quoted(st.text)}`, cite("standup-brief", b.id, b.revision)));
     }
     if (all.length === 0) lines.push(line("No brief has been prepared for that stand-up yet, or none is yours to read.", cite("meeting", request.occurrenceId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  async deskReadLines(by: Principal, request: { occurrenceId: string; deskRecordId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const source = this.#deps.deskReads;
+    if (source === undefined) return undefined;
+    if (typeof request.occurrenceId !== "string" || request.occurrenceId === "") invalid("occurrenceId", "must be a meeting occurrence ID");
+    if (request.deskRecordId !== undefined && (typeof request.deskRecordId !== "string" || request.deskRecordId === "")) invalid("deskRecordId", "must be a desk record or note ID");
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 100 ? request.limit : invalid("limit", "must be 1 to 100");
+    const page = await source.reads(by, { occurrenceId: request.occurrenceId, ...(request.deskRecordId === undefined ? {} : { deskRecordId: request.deskRecordId }), limit });
+    const tried = await source.attempts(by, { occurrenceId: request.occurrenceId, limit });
+    const lines: Line[] = page.reads.map((r) => line(`${shown(r.reader)} read ${r.source === "note" ? "a shared note" : `a ${r.visibility} desk record`} of ${shown(r.deskOwner)} (revision ${r.deskRevision}, ${r.bytes} bytes) at ${r.at}.`, cite("meeting-desk-read", r.id, r.revision), cite(r.source === "note" ? "working-note" : "desk-record", r.deskRecordId, r.deskRevision)));
+    if (page.next !== undefined) lines.push(line("There are more reads than shown.", cite("meeting", request.occurrenceId)));
+    for (const t of tried.attempts.filter((a) => request.deskRecordId === undefined || a.targetId === request.deskRecordId)) lines.push(line(`${shown(t.lastBy)} tried to ${t.operation} ${shown(t.targetId)} through the read ${t.count === 1 ? "once" : `${t.count} times`}, last at ${t.last}; it was refused and nothing changed.`, cite("meeting-desk-attempt", t.id, t.revision)));
+    if (tried.next !== undefined) lines.push(line("There are more refused attempts than shown.", cite("meeting", request.occurrenceId)));
+    if (lines.length === 0) lines.push(line("The chair has read nothing from absent members' desks in that meeting, or none of it is yours to see.", cite("meeting", request.occurrenceId)));
     return { observedAt: this.#runner.now(), lines };
   }
 

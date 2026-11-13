@@ -19,13 +19,16 @@ export interface InspectionPolicyBody {
 /** One look at a record that is not published: who looked, at what, under which policy and why. Kept for good; the agent whose record it was can see it. */
 export interface InspectionBody {
   readonly inspector: string;
-  readonly via: "owner" | "recovery";
+  readonly via: "owner" | "recovery" | "meeting-chair";
   readonly recordId: string;
   readonly recordOwner: string;
   readonly projectId: string;
   readonly reason: string;
   readonly policy: "allowed" | "denied" | "not-applicable";
   readonly at: string;
+  /** Set for a look by a meeting's chair (card M05b): the meeting record it was made in, and the revision of the record that was read. */
+  readonly meetingRecordId?: string;
+  readonly revision?: number;
 }
 
 const POLICY: AggregateRef = { kind: "inspection-policy", id: "installation" };

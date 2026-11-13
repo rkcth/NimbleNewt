@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
 import { describe, proposalReason, acceptedArgs, CHAT_OPS } from "./commands.js";
-import { MeetingRecordService, taskUpdateApplier, type ChangeApplier } from "../meetings/index.js";
+import { MeetingDeskReadService, MeetingRecordService, taskUpdateApplier, type ChangeApplier } from "../meetings/index.js";
 import { DomainError } from "../domain/errors.js";
 import { GrantService } from "../security/index.js";
 import type { ChatService, Outcome } from "./index.js";
@@ -40,7 +40,10 @@ export function defineMeetingControlTests(backendName: string): void {
         const script: Record<string, unknown> = {};
         const holder: { r?: MeetingRecordService } = {};
         const lazy = new Proxy({}, { get: (_t, k) => async (...a: unknown[]) => (holder.r as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>)[k as string]!(...a) }) as MeetingRecordService;
-        const w = await openWorld(backend, script, undefined, { records: lazy });
+        const deskHolder: { d?: MeetingDeskReadService } = {};
+        const lazyDesk = new Proxy({}, { get: (_t, k) => async (...a: unknown[]) => (deskHolder.d as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>)[k as string]!(...a) }) as MeetingDeskReadService;
+        const w = await openWorld(backend, script, undefined, { records: lazy, deskReads: lazyDesk });
+        deskHolder.d = MeetingDeskReadService.withEpoch(w.world.storage, w.projects.epoch, options);
         const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
         const authority = async (id: string) => { const p = await w.principals.get(id); return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, options.clock()); };
         const crash = { n: 0 };
@@ -318,7 +321,15 @@ export function defineMeetingControlTests(backendName: string): void {
     });
 
     suite("only the owner reads what can be acted on, and the controls are chat commands with a line of their own", async (w, _script, room) => {
-      await room.meeting("Sync");
+      const { recordId: syncRecord } = await room.meeting("Sync");
+      // Card M05b: what the chair read from absent members' desks is an owner query of the API (the chat asks it through the status view `meeting_desk_reads`); it lists nothing for a meeting where nobody read anything, refuses a bad page size and malformed arguments.
+      const occurrenceId = String((await call(w, w.ownerToken, "meeting.record.get", { recordId: syncRecord })).result.item.occurrenceId);
+      const noReads = await call(w, w.ownerToken, "meeting.desk-reads", { occurrenceId });
+      assert.deepEqual([noReads.ok, noReads.result.item.reads, noReads.result.item.attempts], [true, [], []]);
+      assert.equal((await call(w, room.agentToken, "meeting.desk-reads", { occurrenceId })).result.item.reads.length, 0, "a roster member reads the same, empty list");
+      assert.equal((await call(w, w.ownerToken, "meeting.desk-reads", { occurrenceId, limit: 0 })).ok, false);
+      assert.equal((await call(w, w.ownerToken, "meeting.desk-reads", { occurrenceId, color: "red" })).ok, false);
+      assert.equal((await call(w, w.ownerToken, "meeting.desk-reads", {})).ok, false);
       const refused = await call(w, room.agentToken, "meeting.owner-controls", {});
       assert.equal(refused.ok, false);
       assert.equal((await call(w, w.ownerToken, "meeting.owner-controls", { limit: 0 })).ok, false);

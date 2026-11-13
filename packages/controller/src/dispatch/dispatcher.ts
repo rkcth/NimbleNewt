@@ -766,16 +766,54 @@ export class DispatcherService {
   /**
    * Card M04g: whether a RUNNING attempt may carry on while its agent attends a meeting, because what it has left is only background jobs (`options.safeLongRunning`). The caller must ESTABLISH that the agent's own conversation is idle (it is waiting on its jobs) and say so with `conversationIdle: true`: this controller cannot tell an idle attempt from one still working next to a background job, so without that input the answer is always false.
    * Also false for an attempt that is not running (a new attempt never starts during a meeting: admission does not ask), when no meeting concerns the agent (the predicate is not read then), without the option, and on any failure.
-   * Nothing in the controller yields a running attempt for a meeting by itself yet (the agent interrupts its own tasks with `prepare`); the decision to interrupt, and the idle determination, are the caller's (remainder on M04h).
+   * The caller is `carriesOnTask`, which the attendance service's `prepare` asks before it pauses a task for a meeting (card M04h).
    */
   async carriesOnDuringMeeting(attemptId: string, input: { readonly conversationIdle: boolean }): Promise<boolean> {
     try {
       if (input?.conversationIdle !== true || typeof attemptId !== "string" || !ATTEMPT.test(attemptId) || this.#options.safeLongRunning === undefined || this.#deps.meetings === undefined) return false;
       const d = await this.#load(attemptId);
       if (d === undefined || d.body.state !== "running") return false;
-      const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: d.body.agentId, expectedMinutes: 1 });
-      if (advice.meeting === undefined) return false;
-      return (await this.#options.safeLongRunning(d.body.taskId, attemptId)) === true;
+      return await this.#onlyBackgroundDuringMeeting(attemptId, d.body);
+    } catch { return false; }
+  }
+
+  /** A meeting concerns the attempt's agent and what the attempt has left is only background jobs (`options.safeLongRunning`). The caller has checked the attempt's state and catches failures. */
+  async #onlyBackgroundDuringMeeting(attemptId: string, b: DispatchBody): Promise<boolean> {
+    if (this.#options.safeLongRunning === undefined || this.#deps.meetings === undefined) return false;
+    const advice = await this.#deps.meetings.admission(this.#deps.principal, { agent: b.agentId, expectedMinutes: 1 });
+    if (advice.meeting === undefined) return false;
+    return (await this.#options.safeLongRunning(b.taskId, attemptId)) === true;
+  }
+
+  /**
+   * Card M04h, the caller of `carriesOnDuringMeeting`: whether the work on `taskId` is only background jobs that carry on while its agent attends a meeting. The controller itself establishes that the attempt's conversation is idle,
+   * from what it can see and what the worker host says: every live attempt of the task is running, none has a call in flight or parked for an approval, and its worker reports `idle()` (no model call and no tool call in progress; a worker
+   * that cannot say, such as a remote one, is never idle). Only then is `carriesOnDuringMeeting(attempt, { conversationIdle: true })` asked, which reads the job records. A task with no running attempt, several attempts of which one
+   * does not qualify, any failure and any caller that is not staff read as false. Staff only (the attendance service asks it as the dispatcher's own principal).
+   * Review fix (M04h): an attempt that ended its turn and parked to wait for its jobs (card W11, `waitsOnJobs`, no approval parked) is the usual way an agent waits on background work, so it qualifies too (its conversation is not
+   * running at all); a task already held by a pause (the owner's, or any other) never does. The answer is INFORMATION only: the meeting still pauses the task (`AttendanceService.prepare`), because the pause is what refuses the
+   * agent's writes while it attends; under that pause the background jobs keep running, their results are recorded, and their wakes wait for the pause to be lifted (L01, W11).
+   */
+  async carriesOnTask(by: Principal, taskId: string): Promise<boolean> {
+    try {
+      const staff = (by.kind === "owner" || by.kind === "host" || by.kind === "service") && by.taskScope === undefined;
+      if (!staff || typeof taskId !== "string") return false;
+      if ((await this.#deps.pauses.guard(taskId)).blockedBy.length > 0) return false;
+      const ids = await this.liveAttemptsOf(by, { taskId });
+      if (ids.length === 0) return false;
+      for (const id of ids) {
+        const d = await this.#load(id);
+        if (d === undefined || d.body.inFlight.length > 0 || d.body.parked.length > 0) return false;
+        if (d.body.state === "parked" && (d.body.waitsOnJobs?.length ?? 0) > 0) {
+          if (!(await this.#onlyBackgroundDuringMeeting(id, d.body))) return false;
+          continue;
+        }
+        const live = this.#live.get(id);
+        if (d.body.state !== "running" || live?.handle.idle === undefined) return false;
+        if ((await live.handle.idle()) !== true) return false;
+        if (!(await this.carriesOnDuringMeeting(id, { conversationIdle: true }))) return false;
+      }
+      return true;
     } catch { return false; }
   }
 
