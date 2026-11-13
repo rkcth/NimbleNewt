@@ -104,7 +104,7 @@ export interface ApiError {
 }
 
 export type ApiResponse =
-  | { readonly v: typeof API_VERSION; readonly op: string; readonly ok: true; readonly result: JsonObject; readonly accepted?: true; readonly completed?: boolean; readonly awaits?: string }
+  | { readonly v: typeof API_VERSION; readonly op: string; readonly ok: true; readonly result: JsonObject; readonly accepted?: true; readonly completed?: boolean; /** The command's state in the shared vocabulary for long-running commands: `accepted` (a worker must still act; see `awaits`) or `completed`. */ readonly state?: "accepted" | "completed"; readonly awaits?: string }
   | { readonly v: typeof API_VERSION; readonly op: string; readonly ok: false; readonly error: ApiError };
 
 export interface StateApiDeps {
@@ -140,12 +140,12 @@ export interface StateApiDeps {
   /** The authorised door to the integrator leases of landing (card P10). */
   readonly integratorLeases?: Pick<IntegratorLeaseOps, "acquire" | "renew" | "release" | "list">;
   /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
-  readonly status?: Pick<StatusService, "ask" | "attention">;
+  readonly status?: Pick<StatusService, "ask" | "attention" | "toolActivity">;
   readonly invitations?: InvitationInbox;
   /** When present, context branches can be opened, switched, resumed and delegated through the API (card C05). */
   readonly branches?: ContextBranchService;
   /** When present, an agent can ask the owner a question and the owner can see and answer the questions (card U12). */
-  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner">;
+  readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner" | "referencesFor">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
   readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
@@ -247,7 +247,7 @@ export interface StateApiDeps {
   /** When present, a hand-off note named in an attempt's first call can be read through the API (card C07m). */
   readonly handoffNotes?: { readonly read: (by: Principal, noteId: string) => Promise<{ id: string; taskId: string; attemptId: string; source: "attempt" | "controller"; endedBecause: string; text: string } | undefined> };
   /** When present, the owner can set the idle time of event subscriptions and cancel one through the API (card H06c). */
-  readonly events?: Pick<EventService, "configureIdle" | "cancel">;
+  readonly events?: Pick<EventService, "configureIdle" | "cancel" | "subscribe" | "pull" | "acknowledge" | "heartbeat" | "status" | "resume" | "trace">;
   /** When present, the owner can read and set notification settings through the API (card U11b). */
   readonly notifications?: Pick<NotificationService, "configure" | "settings">;
   /** When present, the owner can mark the critical path through the API (card U11d, "U11f"). */
@@ -277,7 +277,8 @@ export interface StateApiDeps {
  * - **Idempotent writes.** A command carries a `commandId`; sending it again returns the first result with `replayed: true`; reusing it for a different command is `command_conflict`.
  * - **Optimistic revisions.** A write names the revision it read; a stale one is `stale_revision` with `currentRevision`.
  * - **Accepted is not completed.** A successful command says `accepted: true` and `completed`. For a recorded change that is the whole effect, `completed` is true. For a command whose work
- *   is done by someone else (assigning a task) it is false and `awaits` says what to look at.
+ *   is done by someone else (assigning a task) it is false and `awaits` says what to look at. `state` says the same in the shared words (`accepted` or `completed`); the records of work that goes on (jobs, suspensions and
+ *   stops) carry `commandState` (queued, running, completed, blocked, failed, outcome_unknown) so a client can follow a command to its end.
  * - **Pagination.** Lists take `limit` (at most 100) and `after`, and return `items` and, when more may follow, `next`.
  * - **Errors** have a code, a message and, where it helps, the field or current revision. Failures that are not part of the contract are reported as `unavailable` without detail.
  */
@@ -426,7 +427,7 @@ export class StateApi {
       const result = await operation.run(context, args, request.commandId);
       if (operation.kind === "query") return { v: API_VERSION, op: request.op, ok: true, result };
       const deferred = operation.completion?.kind === "deferred";
-      return { v: API_VERSION, op: request.op, ok: true, result, accepted: true, completed: !deferred, ...(operation.completion?.kind === "deferred" ? { awaits: operation.completion.awaits } : {}) };
+      return { v: API_VERSION, op: request.op, ok: true, result, accepted: true, completed: !deferred, state: deferred ? "accepted" : "completed", ...(operation.completion?.kind === "deferred" ? { awaits: operation.completion.awaits } : {}) };
     }
   }
 

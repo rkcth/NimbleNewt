@@ -148,6 +148,8 @@ export interface SendResult {
   readonly woke: boolean;
 }
 
+/** A message as a reference: who, what class, how far it got, and where to read it, without its words. */
+export interface MessageReference { readonly id: string; readonly revision: number; readonly taskId: string; readonly projectId: string; readonly sender: string; readonly to: string; readonly kind: AgentMessageKind; readonly class: DeliveryClass; readonly state: AgentMessageState; readonly reach: Reach; readonly sentAt: string; readonly lastAt: string; readonly deliveredAt?: string; readonly handledAt?: string; readonly answeredAt?: string; readonly replyTo?: string; readonly correlationId: string }
 export type AgentMessageView = View<AgentMessageBody> & { readonly trust: "untrusted-content"; readonly reachNow: Reach };
 
 export interface AgentMessageOptions extends RunnerOptions {
@@ -503,6 +505,33 @@ export class AgentMessageService {
     if (viewer.kind !== "owner" && viewer.id !== m.sender && viewer.id !== m.to) return undefined;
     if (!inTaskScope(viewer, m.projectId) || (viewer.taskScope !== undefined && viewer.taskScope.taskId !== m.taskId)) return undefined;
     return this.#asView(found);
+  }
+
+  /**
+   * The messages about one task as references, a page at a time in ID order (card U13): each with its ID, revision, sender and recipient, class, state, reach and times, and the message it answers, but never the text or purpose
+   * (read one message with `get` for those, marked untrusted). The owner sees every message of the task; anyone else sees those they sent or received; a task credential only its own task. Messages have no per-task index, so the list
+   * scans message records in pages of 500 (at most 20 reads) and `scanLimited` says the scan stopped early; `next` continues.
+   */
+  async referencesFor(viewer: Principal, taskId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ items: MessageReference[]; next?: string; scanLimited?: true }> {
+    const task = typeof taskId === "string" && /^task-[a-z2-7]{20}$/.test(taskId) ? taskId : invalid("taskId", "is not a task ID");
+    const limit = page.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid("limit", "must be a whole number from 1 to 100");
+    if (page.afterId !== undefined && (typeof page.afterId !== "string" || !MESSAGE_ID.test(page.afterId))) invalid("afterId", "is not a cursor from an earlier page");
+    if (viewer.taskScope !== undefined && viewer.taskScope.taskId !== task) return { items: [] };
+    const items: MessageReference[] = [];
+    let after = page.afterId;
+    for (let reads = 0; reads < 20; reads++) {
+      const chunk = await this.#runner.list("agent-message", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const found of chunk) {
+        after = found.id;
+        const m = found.body as unknown as AgentMessageBody;
+        if (m.taskId !== task || !(viewer.kind === "owner" || viewer.id === m.sender || viewer.id === m.to) || !inTaskScope(viewer, m.projectId)) continue;
+        items.push({ id: found.id, revision: found.revision, taskId: m.taskId, projectId: m.projectId, sender: m.sender, to: m.to, kind: m.kind, class: m.effectiveClass, state: m.state, reach: m.reach, sentAt: m.sentAt, lastAt: m.lastAt, ...(m.deliveredAt === undefined ? {} : { deliveredAt: m.deliveredAt }), ...(m.handledAt === undefined ? {} : { handledAt: m.handledAt }), ...(m.answeredAt === undefined ? {} : { answeredAt: m.answeredAt }), ...(m.replyTo === undefined ? {} : { replyTo: m.replyTo }), correlationId: m.correlationId });
+        if (items.length >= limit) return { items, next: found.id };
+      }
+      if (chunk.length < 500) return { items };
+    }
+    return { items, ...(after === undefined ? {} : { next: after }), scanLimited: true };
   }
 
   /** What is waiting for a recipient, with its focus period and how much of its interruption allowance is used. Only the recipient and the owner see it. */
