@@ -7,7 +7,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { ACTIONS, allows, covers, mayHold } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
-import type { NoActor, Principal, Restriction } from "./principals.js";
+import type { Grant, NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
 
 /** Where a grant came from. `direct`: the owner's decision for something specific. `standing`: a lasting delegation. `derived`: a step reasonably necessary under another grant, never wider than it. */
@@ -635,6 +635,21 @@ export async function heldRecords(runner: CommandRunner, principalId: string, no
   return mine.filter(({ body }) => holds(body, 0));
 }
 
+/** A grant that only lets its holder read (`task.read`, `desk.read`, ...). Archiving a project leaves these working. */
+export const readOnlyGrant = (action: string): boolean => /^[a-z][a-z.-]*\.read$/.test(action);
+
+/**
+ * Card P06 (project archive): a grant for ONE project that lets its holder do more than read does not work while that project is archived. This covers the grants written on a principal's own record (enrolment, `setGrants`),
+ * which no grant record stands behind and so cannot be revoked one by one. Nothing is deleted: restoring the project makes them work again. Grants for every project (`*`) and read-only grants are untouched.
+ */
+async function fenceArchived(runner: CommandRunner, grants: Grant[]): Promise<Grant[]> {
+  const ids = [...new Set(grants.filter((g) => g.project !== "*" && !readOnlyGrant(g.action)).map((g) => g.project))];
+  if (ids.length === 0) return grants;
+  const archived = new Set<string>();
+  for (const id of ids) { const p = await runner.get("project", id); if (p !== undefined && (p.body as { state?: unknown }).state === "archived") archived.add(id); }
+  return archived.size === 0 ? grants : grants.filter((g) => !(archived.has(g.project) && !readOnlyGrant(g.action)));
+}
+
 /** Takes the snapshot described at `GrantService.effective`. Shared with authentication so that no authenticated principal is ever without its restrictions. */
 export async function effectiveOf(runner: CommandRunner, principal: Principal, now: string): Promise<Principal> {
   if (principal.kind === "owner") return { ...principal, asOf: now };
@@ -665,8 +680,9 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     if (page.length < 500) break;
   }
   const scope = principal.taskScope;
+  const open = await fenceArchived(runner, grants);
   // A task credential keeps only the grants of its task's project, for that task or the whole project, and narrows a grant for every project to this one.
-  const kept = scope === undefined ? grants : grants
+  const kept = scope === undefined ? open : open
     // A grant for one service resource (`<service>/<resource>`) is the agent's own right and stays on its task credential: the use site asks for the exact resource, so only that one resource is reached (card P03 review).
     .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId) || g.resource.kind === "service" || (g.resource.kind === "project" && g.resource.id === scope.projectId)))
     .map((g) => ({ ...g, project: scope.projectId }));

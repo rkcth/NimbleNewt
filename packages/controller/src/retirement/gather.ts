@@ -3,7 +3,8 @@ import type { AssignmentBody } from "../domain/assignment-model.js";
 import type { ProjectBody, TaskBody } from "../domain/model.js";
 import type { CommandRunner } from "../domain/runner.js";
 import type { AgentBody } from "../agents/agents.js";
-import type { GrantRecordBody } from "../security/grants.js";
+import { readOnlyGrant, type GrantRecordBody } from "../security/grants.js";
+import type { PrincipalBody } from "../security/principals.js";
 import type { LeaseBody } from "../projects/leases.js";
 import type { ResourceBody } from "../projects/resources.js";
 import type { ResponsibilityBody } from "../projects/responsibilities.js";
@@ -30,6 +31,11 @@ export interface ReleaseLists {
   readonly grants: readonly string[];
   readonly resources: readonly string[];
   readonly responsibilities: readonly string[];
+  /**
+   * Project archive only: grants written on a principal's own record (enrolment, `setGrants`) for this project that let it do more than read, as `<principal>|<action>`. They are not deleted; they stop working while the project is archived
+   * and work again when it is restored (see `fenceArchived`). Listed so the owner sees them, covered by the digest, and kept in the ledger. Absent in records made before this was added.
+   */
+  readonly fencedGrants?: readonly string[];
   /** An agent's own credential is taken away (and its identity disabled); a project has none. */
   readonly credential: boolean;
 }
@@ -83,8 +89,7 @@ export async function liveAssignments(runner: CommandRunner, owns: (owner: { kin
 /** An agent named by its agent ID or by its principal ID (`agent:<id>`), as the agent ID alone. */
 export const bareAgentId = (id: string): string => (id.startsWith("agent:") ? id.slice("agent:".length) : id);
 
-/** A grant that only lets its holder read (`task.read`, `desk.read`, ...). Archiving a project leaves these: archived records stay readable under the same access rules; only execution grants are revoked. */
-export const readOnlyGrant = (action: string): boolean => /^[a-z][a-z.-]*\.read$/.test(action);
+export { readOnlyGrant };
 
 const digestOf = (value: unknown): string => createHash("sha256").update(canonicalJson(value as never)).digest("hex").slice(0, 32);
 
@@ -141,7 +146,9 @@ export async function planProject(runner: CommandRunner, projectId: string): Pro
   const integrator = await scan(runner, "integrator-lease", (a) => { const b = a.body as unknown as IntegratorLeaseBody; return b.projectId === projectId && b.state === "held"; });
   const resources = await scan(runner, "project-resource", (a) => { const b = a.body as unknown as ResourceBody; return b.projectId === projectId && b.state === "bound"; });
   const grants = await scan(runner, "grant-record", (a) => { const b = a.body as unknown as GrantRecordBody; return b.project === projectId && b.state === "active" && !readOnlyGrant(b.action); });
-  if ([duties, leases, integrator, resources, grants].some((x) => x === undefined)) blockers.push({ kind: "unreadable", id: "release", why: "the responsibilities, leases, resources or grants could not all be read" });
+  const principals = await scan(runner, "principal", (a) => { const b = a.body as unknown as PrincipalBody; return b.kind !== "owner" && (b.grants ?? []).some((g) => g.project === projectId && !readOnlyGrant(g.action)); });
+  const fenced = (principals ?? []).flatMap((a) => ((a.body as unknown as PrincipalBody).grants ?? []).filter((g) => g.project === projectId && !readOnlyGrant(g.action)).map((g) => `${a.id}|${g.action}`));
+  if ([duties, leases, integrator, resources, grants, principals].some((x) => x === undefined)) blockers.push({ kind: "unreadable", id: "release", why: "the responsibilities, leases, resources or grants could not all be read" });
   // A lease whose holder is still working on an assigned task (in any project) is in use: archiving does not free it under that work.
   for (const l of leases ?? []) { const h = (l.body as unknown as LeaseBody).holderId; const busy = h === undefined ? undefined : live.holders.get(bareAgentId(h)); if (busy !== undefined) blockers.push({ kind: "lease", id: l.id, why: `the maintenance lease is held by ${h} while it works on task ${busy}; wait for it to release the lease or release that task first` }); }
   for (const l of integrator ?? []) { const h = (l.body as unknown as IntegratorLeaseBody).holder; const busy = live.holders.get(bareAgentId(h)); if (busy !== undefined) blockers.push({ kind: "lease", id: l.id, why: `the integrator lease is held by ${h} while it works on task ${busy}; wait for it to release the lease or release that task first` }); }
@@ -152,6 +159,7 @@ export async function planProject(runner: CommandRunner, projectId: string): Pro
     resources: cap("resource bindings", (resources ?? []).map((a) => a.id), blockers),
     responsibilities: cap("responsibilities", (duties ?? []).map((a) => a.id), blockers),
     credential: false,
+    ...(fenced.length === 0 ? {} : { fencedGrants: cap("identity grants", [...new Set(fenced)], blockers) }),
   };
   const sorted = [...blockers].sort((a, b) => (`${a.kind}:${a.id}` < `${b.kind}:${b.id}` ? -1 : 1));
   return { kind: "project", id: projectId, name: project.name, revision: found.revision, blockers: sorted, release, digest: digestOf({ kind: "project", id: projectId, state: project.state, blockers: sorted.map((b) => `${b.kind}:${b.id}`), release }) };
