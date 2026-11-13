@@ -170,7 +170,7 @@ export async function startRemoteWorker(setup, config) {
   runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble: (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`) });
   // The conversation stores of this host's agents (card K01i): the controller asks for them when it makes a backup (`pi-state-send`) and gives them back after a restore (`pi-state-restore`). Each attempt's home is `<base>/attempts/<attemptId>/home`.
   const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" });
-  const piState = new controller.PiStateHost({ client, source: stores.source, final: stores.final, busy: () => local.busyAttempts(), scratch: join(base, "pi-state-copies") });
+  const piState = new controller.PiStateHost({ client, source: stores.source, final: stores.final, busy: () => local.busyAttempts(), scratch: join(base, "pi-state-copies"), purgeThinking: piAdapter.removeStoredThinking });
   const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), verify: verifyDone, piState, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
 
   const abort = new AbortController();

@@ -276,6 +276,13 @@ function checkPiAsk(operation: unknown, requestId: unknown, transferId: unknown)
   return { requestId: requestId as string, operation: operation as "pi-state-send" | "pi-state-restore", taskId: "pi-state", projectId: "pi-state", reason: operation === "pi-state-send" ? "copy the agents' conversation stores for a backup" : "put restored conversation stores back", quietAttempts: [], piState: { transferId: transferId as string } };
 }
 
+/** The request that asks a host to remove the stored model thinking from the conversation stores of some attempts (card K06c): only the operation, the request ID and the attempt IDs ride it. */
+function checkThinkingAsk(requestId: unknown, attemptIds: unknown): WorkspaceAsk {
+  if (typeof requestId !== "string" || !/^wsr-[a-z2-7]{20}$/.test(requestId)) invalid("requestId", "is not a workspace request ID");
+  if (!Array.isArray(attemptIds) || attemptIds.length < 1 || attemptIds.length > 50 || attemptIds.some((a) => typeof a !== "string" || !ATTEMPT.test(a)) || new Set(attemptIds).size !== attemptIds.length) invalid("attemptIds", "must be 1 to 50 different attempt IDs");
+  return { requestId: requestId as string, operation: "pi-thinking-purge", taskId: "pi-state", projectId: "pi-state", reason: "remove the stored model thinking of finished attempts", quietAttempts: [], thinkingPurge: { attemptIds: [...(attemptIds as string[])] } };
+}
+
 /** A host's answer, checked: the typed outcome and nothing more, with the text and the detail bounded. */
 function checkAnswer(value: unknown): RemoteWorkspaceAnswer {
   if (value === null || typeof value !== "object" || Array.isArray(value)) invalid("outcome", "must be an object");
@@ -617,6 +624,15 @@ export class RemoteWorkerService {
   async askPiState(by: Principal, hostId: string, operation: "pi-state-send" | "pi-state-restore", requestId: string, transferId: string, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     this.#staff(by);
     return this.#ask(hostIdOf(hostId), checkPiAsk(operation, requestId, transferId), options);
+  }
+
+  /**
+   * Asks a host to remove the stored model thinking from the conversation stores of these attempts (`pi-thinking-purge`, card K06c). The same channel, limits and answer rules as a workspace request; the answer names the attempts it cleaned and the ones it keeps no store of
+   * (`detail.purged`, `detail.none`, `detail.blocks`). Only the owner and the dispatcher may ask.
+   */
+  async askThinkingPurge(by: Principal, hostId: string, requestId: string, attemptIds: readonly string[], options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
+    this.#staff(by);
+    return this.#ask(hostIdOf(hostId), checkThinkingAsk(requestId, attemptIds), options);
   }
 
   /** Where the files of a transfer are received and served from (card K01i): the composed controller gives it once. Without one, a host's transfer messages are refused. */

@@ -166,6 +166,49 @@ export class PiStateTransfers implements PiTransferPort {
   }
 }
 
+// ---- retention: the stored thinking in every remote host's stores (card K06c) -----------------------------------------------
+
+export interface RemoteThinkingStoresOptions {
+  /** Which hosts to ask and which cannot be asked now (with the reason): the same list a backup uses. */
+  readonly hosts: () => Promise<{ readonly ask: readonly string[]; readonly unreachable: readonly { readonly hostId: string; readonly why: string }[] }>;
+  /** Carries the request to the host and waits for its answer (`RemoteWorkerService.askThinkingPurge`). */
+  readonly ask: (hostId: string, requestId: string, attemptIds: readonly string[], waitMs: number) => Promise<RemoteWorkspaceAnswer>;
+  readonly waitMs?: number;
+}
+
+/**
+ * The retention rule's reach into the remote hosts' conversation stores. Every host that can be asked is asked about the attempts (at most 50 a request); an attempt is `purged` where a host cleaned it, `none` when every host answered that it keeps no store of it, and `pending`
+ * when a host could not be asked, did not answer, refused, or left the store alone because the attempt is running. Nothing is read as clean without a host saying so.
+ */
+export class RemoteThinkingStores {
+  readonly #o: RemoteThinkingStoresOptions;
+  constructor(options: RemoteThinkingStoresOptions) { this.#o = options; }
+
+  async purge(attemptIds: readonly string[]): Promise<{ readonly status: Readonly<Record<string, "purged" | "none" | "pending">>; readonly blocks: number; readonly problems: readonly string[] }> {
+    const status: Record<string, "purged" | "none" | "pending"> = {}; const problems: string[] = []; let blocks = 0;
+    const note = (text: string): void => { if (problems.length < 20) problems.push(text.slice(0, 300)); };
+    const { ask, unreachable } = await this.#o.hosts();
+    for (const u of unreachable) note(`${u.hostId}: its conversation stores could not be cleaned now (${u.why})`);
+    const per = new Map<string, ("purged" | "none" | "pending")[]>(attemptIds.map((id) => [id, unreachable.length > 0 ? ["pending"] : []] as const));
+    for (const hostId of ask) {
+      for (let i = 0; i < attemptIds.length; i += 50) {
+        const chunk = attemptIds.slice(i, i + 50);
+        let answer: RemoteWorkspaceAnswer | undefined;
+        try { answer = await this.#o.ask(hostId, newPiId("wsr"), chunk, this.#o.waitMs ?? 600_000); } catch (error) { note(`${hostId}: did not answer (${(error instanceof Error ? error.message : String(error)).slice(0, 200)})`); }
+        if (answer !== undefined && !answer.ok) { note(`${hostId}: ${answer.reason}`); answer = undefined; }
+        const d = answer?.ok === true ? (answer.detail as { purged?: unknown; none?: unknown; blocks?: unknown } | undefined) : undefined;
+        const list = (v: unknown): Set<string> => new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+        const purged = list(d?.purged); const none = list(d?.none);
+        if (typeof d?.blocks === "number" && Number.isSafeInteger(d.blocks) && d.blocks > 0) blocks += d.blocks;
+        for (const id of chunk) per.get(id)!.push(purged.has(id) ? "purged" : none.has(id) ? "none" : "pending");
+      }
+    }
+    for (const [id, each] of per) status[id] = each.includes("pending") ? "pending" : each.includes("purged") ? "purged" : "none";
+    // No host at all (and none unreachable) means there is nothing remote to clean.
+    return { status, blocks, problems };
+  }
+}
+
 // ---- backups: the stores of every remote host --------------------------------------------------------------------------------
 
 export interface RemotePiStateOptions {
@@ -391,6 +434,8 @@ export interface PiStateHostOptions {
   readonly busy: () => readonly string[] | Promise<readonly string[]>;
   /** A folder of this host for the copies it makes while it sends and fetches (outside the agents' homes). */
   readonly scratch: string;
+  /** Removes the stored model thinking from one conversation store folder (the Pi adapter's `removeStoredThinking`); answers `pi-thinking-purge` (card K06c). Absent: such a request is refused and nothing is done. */
+  readonly purgeThinking?: (dir: string) => Promise<{ readonly blocks: number }>;
   readonly now?: () => Date;
 }
 
@@ -403,11 +448,34 @@ export class PiStateHost {
   }
 
   async answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> {
+    if (ask.operation === "pi-thinking-purge") {
+      try { return await this.#purgeThinking(ask); } catch (error) { return { ok: false, reason: `this host could not finish: ${(error instanceof Error ? error.message : String(error)).replace(/[\\/][^\s"']{3,}/g, "(path)").slice(0, 300)}`, failed: true }; }
+    }
     const transferId = ask.piState?.transferId;
     if (transferId === undefined || !PI_TRANSFER_ID.test(transferId)) return { ok: false, reason: "the request named no transfer" };
     try { return ask.operation === "pi-state-send" ? await this.#send(transferId) : await this.#restore(transferId); } catch (error) {
       return { ok: false, reason: `this host could not finish: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`, failed: true };
     }
+  }
+
+  /** Card K06c. Removes the model's stored thinking from the stores of the named attempts that this host keeps: a store whose attempt has a call in flight is left alone and named `pending`; an attempt with no store here is `none`. */
+  async #purgeThinking(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> {
+    const purge = this.#o.purgeThinking;
+    if (purge === undefined) return { ok: false, reason: "this host cannot remove stored thinking (it was started without the Pi adapter's removal), so nothing was done" };
+    const ids = ask.thinkingPurge?.attemptIds;
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 50 || ids.some((id) => typeof id !== "string" || !validStoreId(id))) return { ok: false, reason: "the request named no valid attempts" };
+    const busy = new Set(await this.#o.busy());
+    const stores = new Map((await this.#o.source.list()).map((s) => [s.id, s.dir] as const));
+    const purged: string[] = []; const none: string[] = []; const pending: string[] = []; let blocks = 0;
+    try {
+      for (const id of ids) {
+        const dir = stores.get(id);
+        if (dir === undefined) { none.push(id); continue; }
+        if (busy.has(id)) { pending.push(id); continue; }
+        try { blocks += (await purge(dir)).blocks; purged.push(id); } catch { pending.push(id); }
+      }
+    } finally { await this.#o.source.release?.(); }
+    return { ok: true, summary: `cleaned ${purged.length} store(s), ${none.length} not kept here, ${pending.length} left for later`, detail: { purged, none, pending, blocks } };
   }
 
   async #send(transferId: string): Promise<RemoteWorkspaceAnswer> {

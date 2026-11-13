@@ -12,6 +12,7 @@ export { CONTINUATION_MARK, DEFAULT_MAX_CONTINUATIONS, MAX_CONTINUATIONS_LIMIT, 
 export { COMPLETION_CHECK_RULE, COMPLETION_END_RULE, COMPLETION_INTRO, COMPLETION_JOB_RULE, COMPLETION_PLAN_RULE, COMPLETION_REPORT_RULE, COMPLETION_RULES, COMPLETION_RULE_GROUPS, COMPLETION_SECTION_KEY, JOB_WAKE_RULE_TEXT, LayoutHolder, PI_AGENT_LAYOUT, UnstablePromptError, assertStableText, checkLayout, layoutFingerprint, layoutSections, sharedSystemText, sortedTools, volatileContext, type PromptLayout } from "./prompt-layout.js";
 export { PrefixTracker, shapeModels, splitSharedSystem, thinkingFor, type CacheShaping, type ModelCachePolicy, type ModelInfo, type PrefixReport, type Retention, type ThinkingDropReport } from "./cache-shaping.js";
 export { storedThinking } from "./thinking.js";
+export { removeStoredThinking, type ThinkingPurgeResult } from "./thinking-purge.js";
 export { BRIDGE_REFUSED_PREFIX, BRIDGE_TOOL_NAMES, WORK_ANSWER_TOOL, WORK_END_TOOL, WORK_NOTE_TOOL, DeclarationBoard, boundTransport, bridgeToolName, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeRequest, type BridgeTransport, type Declarations } from "./bridge.js";
 export { missingCheckpoints, type CheckpointVerifier, type StoredCheckpointRef } from "./store-check.js";
 export { BACKGROUND_SHARE, DEFAULT_BACKGROUND_TOKENS, DEFAULT_RESERVE_TOKENS, MIN_WORKABLE_WINDOW, PI_CONTEXT_SAFETY_TOKENS, RESERVE_SHARE, WindowTooSmallError, assertWorkableWindow, compactionThresholds, type CompactionThresholds } from "./compaction-thresholds.js";
