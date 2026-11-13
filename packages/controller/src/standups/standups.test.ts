@@ -1268,6 +1268,57 @@ for (const backend of backends) {
     assert.match((await run()).text, /may be low/);
   });
 
+  suite("the attempt-record path gives the same slot figures as the scan of every dispatch record on the same data, and a full list is judged at the period start exactly (card M03h review)", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    at("2026-10-20T12:00:00.000Z");
+    const pc = async (id: string): Promise<void> => { await c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId: id, expectedVersion: (await c.contracts.get(c.owner, id))!.version, workClass: "PC" } as never); };
+    const pTask = await c.task("Ship the export", c.agentA, "in_progress");
+    const pcTask = await c.task("Faster lint", c.agentB, "in_progress"); await pc(pcTask);
+    const doneTask = await c.task("Ship the report", c.agentA, "done");
+    const blockedPc = await c.task("Retire the old tool", c.agentB, "blocked"); await pc(blockedPc);
+    const named = new Map<string, string[]>();
+    const put = async (taskId: string, id: string, body: Record<string, unknown>, project = c.a): Promise<void> => {
+      await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId, projectId: project, claimedAt: body.startedAt, ...body });
+      named.set(taskId, [...(named.get(taskId) ?? []), id]);
+    };
+    // Spans across the period start and end, a still-open span on a running attempt, a span closed at a heartbeat, retries of one task, a cut record, legacy records with and without a park.
+    await put(pTask, "x-1", { state: "finished", startedAt: "2026-10-20T06:00:00.000Z", slotSpans: [{ from: "2026-10-20T06:00:00.000Z", to: "2026-10-20T08:00:00.000Z" }], outcome: { status: "failed", summary: "x", at: "2026-10-20T08:00:00.000Z" } });
+    await put(pTask, "x-2", { state: "finished", startedAt: "2026-10-20T09:00:00.000Z", slotSpans: [{ from: "2026-10-20T09:00:00.000Z", to: "2026-10-20T09:30:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-20T09:30:00.000Z" } });
+    await put(pTask, "x-3", { state: "running", startedAt: "2026-10-21T04:00:00.000Z", slotSpans: [{ from: "2026-10-21T04:00:00.000Z" }] });
+    await put(pcTask, "x-4", { state: "parked", startedAt: "2026-10-20T10:00:00.000Z", lastHeartbeatAt: "2026-10-20T11:15:00.000Z", slotSpans: [{ from: "2026-10-20T10:00:00.000Z" }] });
+    await put(pcTask, "x-5", { state: "running", startedAt: "2026-10-19T09:00:00.000Z", slotSpansCut: "2026-10-20T08:00:00.000Z", slotSpans: [{ from: "2026-10-20T12:00:00.000Z", to: "2026-10-20T13:00:00.000Z" }] });
+    await put(pcTask, "x-10", { state: "finished", startedAt: "2026-10-21T04:30:00.000Z", slotSpans: [{ from: "2026-10-21T04:30:00.000Z", to: "2026-10-21T06:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-21T06:00:00.000Z" } });
+    await put(doneTask, "x-6", { state: "finished", startedAt: "2026-10-20T14:00:00.000Z", outcome: { status: "succeeded", summary: "x", at: "2026-10-20T16:00:00.000Z" } });
+    await put(blockedPc, "x-7", { state: "finished", startedAt: "2026-10-20T08:00:00.000Z", requests: 2, outcome: { status: "succeeded", summary: "x", at: "2026-10-20T19:00:00.000Z" } });
+    await put(blockedPc, "x-8", { state: "finished", startedAt: "2026-10-19T08:00:00.000Z", slotSpans: [{ from: "2026-10-19T08:00:00.000Z", to: "2026-10-19T09:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-19T09:00:00.000Z" } });
+    await put(blockedPc, "x-9", { state: "finished", startedAt: "2026-10-20T07:00:00.000Z", slotSpans: [{ from: "2026-10-20T07:00:00.000Z", to: "2026-10-21T08:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-21T08:00:00.000Z" } }, "prj-elsewhere");
+    at("2026-10-21T05:00:00.000Z");
+    const review = async (): Promise<{ text: string; listed: string[] }> => { const { service, listed } = spied(c); return { text: (await service.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n"), listed }; };
+    const scanned = await review();
+    assert.ok(scanned.listed.includes("dispatch"), "with no attempt records every attempt is found by the scan (the earlier method)");
+    // P: x-1 1 h (07:00-08:00) + x-2 0.5 h + x-3 1 h + x-6 2 h = 4.5 h; PC: x-4 1.25 h + x-5 1 h + x-10 0.5 h (cut at the period end, 05:00) = 2.75 h; x-7 is left out (parked legacy), x-8 is before the period,
+    // x-9 is another project's: 2.75 / 7.25 = 38%.
+    assert.match(scanned.text, /actual PC share 38% \(worker-slot time of 7 attempts; 1 older record that parked or was placed again is not counted, as its run time is not recorded; the earliest runs of 1 attempt are not on record\)/);
+    for (const [taskId, ids] of named) await c.put("dispatch-task-attempts", taskId, { taskId, attempts: ids });
+    const recorded = await review();
+    assert.ok(!recorded.listed.includes("dispatch"), "with every task's attempt record no dispatch record is listed");
+    const share = (t: string): string => /Allocation against use:[^\n]*/.exec(t)![0];
+    assert.equal(share(recorded.text), share(scanned.text), "the same figures by either method");
+    assert.ok(!recorded.text.includes("may be low"));
+    // A full list (20) whose oldest attempt started exactly at the period start lost nothing inside it; one whose oldest started a millisecond later may have.
+    const full = async (title: string, oldestAt: string): Promise<string> => {
+      at("2026-10-20T12:00:00.000Z");
+      const t = await c.task(title, c.agentA, "in_progress");
+      const ids = Array.from({ length: 20 }, (_, i) => `${title}-${i}`);
+      for (const [i, id] of ids.entries()) await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId: t, projectId: c.a, state: "finished", startedAt: i === 0 ? oldestAt : "2026-10-20T16:00:00.000Z", slotSpans: [], outcome: { status: "failed", summary: "x", at: "2026-10-20T16:00:00.000Z" } });
+      await c.put("dispatch-task-attempts", t, { taskId: t, attempts: ids });
+      at("2026-10-21T05:00:00.000Z");
+      return (await review()).text;
+    };
+    assert.ok(!(await full("edge", "2026-10-20T07:00:00.000Z")).includes("may be low"), "oldest at the period start: nothing lost");
+    assert.match(await full("inside", "2026-10-20T07:00:00.001Z"), /may be low/);
+  });
+
   suite("a project's stand-ups are found from its own index, so the lookups read no stand-up record of other projects (card M03h)", async (c) => {
     const daily = await c.schedule();
     const weekly = await c.schedule({ title: "Weekly review", time: "10:00", windowTo: "11:00" });
