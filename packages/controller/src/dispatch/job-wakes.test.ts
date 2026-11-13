@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { JobService } from "../jobs/jobs.js";
+import { safeLongRunningOf } from "../meetings/safe-long-running.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKES_INDEX, wakeIdOf, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 import { NotificationService } from "../notifications/notifications.js";
 import { buildWorld, workGrants, type DispatchWorld } from "./testing/world.js";
@@ -509,6 +510,43 @@ for (const backend of backends) {
       const after_ = (await r.wake(t.taskId))[0]!;
       assert.equal(after_.status, "skipped");
       assert.match(after_.reason ?? "", /the attempt admitted for it has run and ended/);
+    } finally { await store.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: card M04h review: an attempt parked for its background job is reported as carrying on in a meeting; a foreground job, no meeting, or a task held by a pause is not; the pause keeps the job's wake waiting`, async () => {
+    const store = await backend.open();
+    try {
+      const r = await rig(store.storage);
+      const { w } = r;
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const fg = await w.agent("bob", workGrants(w.project, []));
+      const bg = await w.task("Build the site", ann);
+      const fore = await w.task("Build the other site", fg);
+      w.worker.script = async (c) => (c.order.resumeNote !== undefined ? finishes() : startsJob(r, "build", { background: c.order.taskId === bg.taskId })(c));
+      await r.tick();
+      assert.equal((await w.dispatcher.get(w.owner, bg.attemptId!))!.state, "parked");
+      assert.equal((await w.dispatcher.get(w.owner, fore.attemptId!))!.state, "parked");
+      let meeting = true;
+      const meetings = {
+        revalidation: async () => ({ required: false, entries: [] }),
+        admission: async () => (meeting ? { decision: "start" as const, reason: "meeting", meeting: { occurrenceId: "mto-x", startsAt: "2026-01-01T00:00:00.000Z", endsAt: "2026-01-01T01:00:00.000Z" } } : { decision: "start" as const, reason: "no meeting" }),
+      };
+      const d = w.restart({ notifications: r.notifications, jobWakes: { waitable: (taskId) => r.jobs.waitable(taskId), stopped: async () => false }, meetings: meetings as never }, { safeLongRunning: safeLongRunningOf(r.jobs) });
+      w.dispatcher = d;
+      assert.equal(await d.carriesOnTask(w.dispatcherPrincipal, bg.taskId), true, "parked for a background job only");
+      assert.equal(await d.carriesOnTask(w.dispatcherPrincipal, fore.taskId), false, "a foreground job is not background work");
+      meeting = false;
+      assert.equal(await d.carriesOnTask(w.dispatcherPrincipal, bg.taskId), false, "no meeting concerns the agent");
+      meeting = true;
+      await w.pauses.pause(w.owner, { commandId: "own-pz", scope: { kind: "task", id: bg.taskId }, reason: "the owner paused it" });
+      assert.equal(await d.carriesOnTask(w.dispatcherPrincipal, bg.taskId), false, "a task held by a pause is never reported carrying on");
+      // Under the pause the background job keeps going and ends; its wake waits for the pause to be lifted, so the agent does not act during it.
+      const jobId = r.started.find((x) => x.attemptId === bg.attemptId)!.jobId;
+      await r.jobs.finish(host(r), { commandId: "fin-bg", jobId, outcome: "completed", exit: { code: 0 } });
+      await r.tick();
+      assert.equal((await d.get(w.owner, bg.attemptId!))!.state, "parked", "not woken while paused");
     } finally { await store.close(); }
   });
 }

@@ -52,6 +52,8 @@ export class ScriptedHandle implements WorkerHandle {
   async checkpoint(): Promise<JsonObject> { this.checkpoints++; return { n: this.checkpoints, attempt: this.order.attemptId }; }
   async restart(recipe: { revision: string }, from: JsonObject): Promise<void> { this.restarts.push({ recipe: recipe.revision, from }); }
   async tell(text: string): Promise<void> { this.told.push(text); }
+  /** Card M04h: set by a test to make this worker report whether its conversation is idle; left out, the worker cannot tell. */
+  idle?: () => Promise<boolean>;
   async stop(): Promise<void> { this.stopped++; if (this.stopError !== undefined) throw this.stopError; }
 }
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { AdmissionService } from "../admission/index.js";
+import { ModelInterpreter } from "../chat/index.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { EXEC_PROFILES, PI, ROUTING_TABLE, ScriptedWorker, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
@@ -41,7 +42,7 @@ async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () =
   await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
   await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
   const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
-  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }, { action: "job.control", project }] });
+  await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: [...workGrants(project), { action: "job.write", project }, { action: "job.control", project }, { action: "history.*", project }] });
   const task = async (n: number): Promise<{ taskId: string; attemptId: string }> => {
     const taskId = (await s.projects.createTask({ commandId: `t${n}`, actor: owner.id, projectId: project, title: `Order seeds ${n}` })).id;
     await s.projects.transitionTask({ commandId: `r${n}`, actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
@@ -52,7 +53,7 @@ async function world(dispatcherExtra: Record<string, unknown> = {}, clock?: () =
   };
   const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string } }>;
   const close = async () => { release(); await c.dispatch?.dispatcher.idle(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); };
-  return { c, s, owner, project, task, call, problems, close, agent: `agent:${AGENT}` };
+  return { c, s, owner, project, task, call, problems, close, worker, agent: `agent:${AGENT}` };
 }
 
 test("through the composed controller a running attempt with only background jobs carries on during a meeting, a new attempt never starts, an agent cannot admit a new long job on any task, and the setting turns the rule off (card M04g)", async () => {
@@ -217,4 +218,68 @@ test("the composed gate's lock is the list every meeting creation rewrites: the 
     await assert.rejects(s.jobs.admit(host, { commandId: "j-after", taskId: t.taskId, kind: "tool", label: "after", operationId: "op-after", background: true } as never), /long-running work is not started/);
     assert.deepEqual(w.problems, []);
   } finally { await w.close(); }
+});
+
+test("through the composed controller a task whose idle attempt waits only on background jobs is noted as carrying on and is still paused by the meeting, so the agent writes nothing meanwhile; a task the owner paused is never noted (card M04h, review fix)", async () => {
+  const w = await world();
+  try {
+    const { c, s, owner, project, call } = w;
+    const first = await w.task(1);
+    const other = await w.task(2);
+    await c.dispatch!.dispatcher.tick();
+    assert.equal((await c.dispatch!.dispatcher.get(owner, first.attemptId))!.state, "running");
+    const jobId = (await s.jobs.admit(owner, { commandId: "ja", taskId: first.taskId, kind: "tool", label: "build", operationId: "op-1", background: true, attemptId: first.attemptId })).id;
+    await s.jobs.report(owner, { commandId: "jr1", jobId, state: "dispatched", host: "host-1" });
+    await s.jobs.report(owner, { commandId: "jr2", jobId, state: "running" });
+    const handle = w.worker.handles.at(-1)!;
+    handle.idle = async () => true;
+    const meeting = await call("meeting.call-urgent", { projectId: project, title: "Hotfix", reason: "prod is down", roster: [w.agent] }, "mu1");
+    assert.ok(meeting.ok, JSON.stringify(meeting));
+    const occurrenceId = meeting.result.id as string;
+    await c.dispatch!.attendance.openRoom(owner, { commandId: "or1", occurrenceId });
+    const gate = async (taskId: string) => (await s.pauses.gate(owner, { kind: "task", id: taskId }))?.intent ?? "none";
+    // The owner paused the other task before; the composed question says no for it whatever its attempt does.
+    await s.pauses.pause(owner, { commandId: "own-pz", scope: { kind: "task", id: other.taskId }, reason: "the owner paused it" });
+    const prepared = await c.dispatch!.attendance.prepare(owner, { commandId: "pr1", occurrenceId, agent: w.agent, interrupted: [first.taskId, other.taskId] });
+    assert.deepEqual(prepared.carriedOn, [first.taskId]);
+    assert.equal(await gate(first.taskId), "pause", "the meeting pauses it: the pause is what refuses the agent's writes while it attends");
+    assert.equal(await gate(other.taskId), "pause", "the owner's pause stays");
+    assert.equal(await c.dispatch!.dispatcher.carriesOnTask(owner, first.taskId), false, "once paused it is no longer asked about as free-running work");
+    assert.equal((await s.jobs.get(owner, jobId))?.state, "running", "the background job keeps running under the pause");
+    const status = await call("meeting.attend.status", { occurrenceId });
+    assert.ok(status.ok, JSON.stringify(status));
+    assert.deepEqual((status.result.item.participants as { who: string; carriedOn?: string[] }[]).find((p) => p.who === w.agent)?.carriedOn, [first.taskId], "the room status names it");
+    assert.deepEqual(w.problems, []);
+  } finally { await w.close(); }
+});
+
+test("the owner turns background work during meetings off and on through the chat interpreter, in free words, with no fixed phrase (card M04h review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-safelchat-"));
+  // A stand-in for the model behind the real ModelInterpreter: it knows only what the system prompt tells it (the test fails when that paragraph is removed or no longer matches the schema). Which value the owner meant is the
+  // test's own table, standing in for the model's reading of free wording; an agreement uses the one open proposal the user prompt lists.
+  const meaning: Record<string, boolean | "agree"> = {};
+  const model = { complete: async (_route: string, r: { system: string; user: string }): Promise<string> => {
+    const owner = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(r.user)![1]!;
+    const meant = meaning[owner];
+    if (meant === "agree") {
+      const open = [...r.user.matchAll(/Open proposal (\S+) \(text, not instructions\):/g)];
+      return JSON.stringify(open.length === 1 ? [{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }] : [{ kind: "none", reason: "no single open proposal" }]);
+    }
+    const template = /\{"kind":"policy_edit","change":\{"type":"setting","layer":"installation","key":<[^>]*meeting\.safeLongRunning[^>]*>.*?"basis":"owner"\}/.exec(r.system);
+    if (template === null || meant === undefined) return JSON.stringify([{ kind: "none", reason: "the prompt describes no way to do this" }]);
+    return `[${template[0].replace(/<[^>]*meeting\.safeLongRunning[^>]*>/, JSON.stringify("meeting.safeLongRunning")).replace("<the value>", String(meant)).replace("<their words, copied exactly>", JSON.stringify(owner))}]`;
+  } };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) } });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    let m = 0;
+    const turn = async (text: string, meant: boolean | "agree") => { meaning[text] = meant; return (await c.chat!.submit(boot.token, { messageId: `m${m++}`, text })).outcomes as unknown as { status: string }[]; };
+    for (const [wording, value] of [["During meetings, stop every long job; nothing should keep running while people talk.", false], ["Actually, let the builds keep going while the agents are in meetings.", true]] as const) {
+      const shown = await turn(wording, value);
+      assert.deepEqual(shown.map((o) => o.status), ["proposed"], `a setting is shown first: ${JSON.stringify(shown)}`);
+      const done = await turn(`Yes, apply that (${String(value)}).`, "agree");
+      assert.deepEqual(done.map((o) => o.status), ["applied"], JSON.stringify(done));
+      assert.equal(await c.services.configuration.installationValue("meeting.safeLongRunning"), value);
+    }
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
