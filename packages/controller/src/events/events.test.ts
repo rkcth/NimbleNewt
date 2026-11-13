@@ -19,7 +19,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
 };
 
 for (const backend of backends) {
-  interface Ctx { ev: EventService; owner: Principal; host: Principal; ann: Principal; ben: Principal; reader: Principal; stream: string; other: string; hold: { on: boolean }; storage: ControllerStorage; open(extra?: { notify?: NotifyExpiry }): EventService; epoch: number; projectA: string; pub(kind?: string, ref?: string, extra?: Record<string, unknown>, by?: Principal): ReturnType<EventService["publish"]> }
+  interface Ctx { ev: EventService; projects: ProjectService; owner: Principal; host: Principal; ann: Principal; ben: Principal; reader: Principal; stream: string; other: string; hold: { on: boolean }; storage: ControllerStorage; open(extra?: { notify?: NotifyExpiry }): EventService; epoch: number; projectA: string; pub(kind?: string, ref?: string, extra?: Record<string, unknown>, by?: Principal): ReturnType<EventService["publish"]> }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       now = Date.parse("2026-10-22T19:00:00.000Z");
@@ -39,7 +39,7 @@ for (const backend of backends) {
         const ev = EventService.withEpoch(world.storage, projects.epoch, { ...options, held: async () => hold.on });
         const stream = `project:${a}`;
         const open = (extra: { notify?: NotifyExpiry } = {}) => EventService.withEpoch(world.storage, projects.epoch, { ...options, held: async () => hold.on, ...extra });
-        await body({ ev, storage: world.storage, open, epoch: projects.epoch, projectA: a, owner, host, ann, ben, reader, stream, other: `project:${b}`, hold, pub: (kind = "task.updated", ref = "task-aaaaaaaaaaaaaaaaaaaa", extra = {}, by = host) => ev.publish(by, { commandId: cid("pb"), stream, kind, ref: { kind: "task", id: ref }, ...extra } as never) });
+        await body({ ev, projects, storage: world.storage, open, epoch: projects.epoch, projectA: a, owner, host, ann, ben, reader, stream, other: `project:${b}`, hold, pub: (kind = "task.updated", ref = "task-aaaaaaaaaaaaaaaaaaaa", extra = {}, by = host) => ev.publish(by, { commandId: cid("pb"), stream, kind, ref: { kind: "task", id: ref }, ...extra } as never) });
       } finally { await world.close(); }
     });
 
@@ -399,7 +399,8 @@ for (const backend of backends) {
     assert.deepEqual(await ev.expireIdle(c.owner), { expired: [host.id], noticed: 1, noticeFailed: 0, more: false });
     assert.equal((await notifications.inbox(c.owner)).items.length, 1);
     const ids: string[] = [];
-    for (let i = 0; i <= EVENT_LIMITS.sweep; i++) ids.push((await ev.subscribe(c.reader, { commandId: cid("sb"), stream: c.stream })).id);
+    // Spread over several readers: one agent may hold at most EVENT_LIMITS.perSubscriber subscriptions to a stream.
+    for (let i = 0; i <= EVENT_LIMITS.sweep; i++) ids.push((await ev.subscribe({ ...c.reader, id: `agent:reader${i % 8}` } as Principal, { commandId: cid("sb"), stream: c.stream })).id);
     now += IDLE;
     const one = await ev.expireIdle(c.owner);
     assert.deepEqual([one.expired.length, one.more], [EVENT_LIMITS.sweep, true]);
@@ -430,5 +431,51 @@ for (const backend of backends) {
     assert.deepEqual((await racing.expireIdle(c.owner)).expired, []);
     assert.equal((await c.ev.status(c.reader, sub.id)).state, "active");
     assert.equal((await audit(c, "events.expire")).length, 0);
+  });
+
+  suite("task streams (card U13 review): the task's project decides who may read them, a task credential reaches only its own task's stream and subscriptions, a revoked reader stops receiving, and an agent cannot pile up subscriptions", async (c) => {
+    const t1 = (await c.projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: c.projectA, title: "weed" })).id;
+    const t2 = (await c.projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: c.projectA, title: "water" })).id;
+    const s1 = `task:${t1}`; const s2 = `task:${t2}`;
+    await c.ev.publish(c.host, { commandId: cid("pb"), stream: s1, kind: "task.updated", ref: { kind: "task", id: t1 } });
+    // A reader of the task's project may follow the task's stream; a reader of another project may not (before, only a grant over every project could reach a task stream).
+    const rs = await c.ev.subscribe(c.reader, { commandId: cid("sb"), stream: s1, fromStart: true });
+    assert.deepEqual((await c.ev.pull(c.reader, rs.id)).events.map((e) => e.seq), [1]);
+    assert.equal((await c.ev.trace(c.reader, s1)).length, 1);
+    await refuses("forbidden", () => c.ev.subscribe(c.ben, { commandId: cid("sb"), stream: s1 }));
+    assert.deepEqual(await c.ev.trace(c.ben, s1), []);
+    // A task credential carries its agent's ID: it uses its own task's stream, never its agent's other subscriptions.
+    const annT1 = { ...c.ann, taskScope: { taskId: t1, projectId: c.projectA } } as Principal;
+    const annT2 = { ...c.ann, taskScope: { taskId: t2, projectId: c.projectA } } as Principal;
+    const own = await c.ev.subscribe(annT1, { commandId: cid("sb"), stream: s1, fromStart: true });
+    assert.deepEqual((await c.ev.pull(annT1, own.id)).events.map((e) => e.seq), [1]);
+    await refuses("forbidden", () => c.ev.subscribe(annT1, { commandId: cid("sb"), stream: s2 }));
+    await refuses("forbidden", () => c.ev.subscribe(annT1, { commandId: cid("sb"), stream: c.stream }));
+    assert.deepEqual(await c.ev.trace(annT1, s2), []);
+    const wide = await c.ev.subscribe(c.ann, { commandId: cid("sb"), stream: c.stream, fromStart: true });
+    for (const who of [annT1, annT2]) {
+      await refuses("forbidden", () => c.ev.pull(who, wide.id));
+      await refuses("forbidden", () => c.ev.acknowledge(who, { commandId: cid("ak"), subscriptionId: wide.id, through: 0 }));
+      await refuses("forbidden", () => c.ev.heartbeat(who, { commandId: cid("hb"), subscriptionId: wide.id }));
+      await refuses("forbidden", () => c.ev.status(who, wide.id));
+      await refuses("forbidden", () => c.ev.cancel(who, { commandId: cid("cn"), subscriptionId: wide.id }));
+    }
+    await refuses("forbidden", () => c.ev.pull(annT2, own.id));
+    assert.equal((await c.ev.status(c.ann, wide.id)).state, "active", "the agent itself still holds it");
+    // A reader whose right was taken away no longer receives the stream's events through a subscription it made earlier.
+    const revoked = { ...c.reader, grants: [] } as Principal;
+    await refuses("forbidden", () => c.ev.pull(revoked, rs.id));
+    await refuses("forbidden", () => c.ev.acknowledge(revoked, { commandId: cid("ak"), subscriptionId: rs.id, through: 1 }));
+    // At most EVENT_LIMITS.perSubscriber active subscriptions per agent and stream; a cancelled one frees its place; a repeat answers as recorded.
+    const made: string[] = [own.id];
+    for (let i = 1; i < EVENT_LIMITS.perSubscriber; i++) made.push((await c.ev.subscribe(annT1, { commandId: `cap-${i}`, stream: s1 })).id);
+    await refuses("invalid_command", () => c.ev.subscribe(annT1, { commandId: cid("sb"), stream: s1 }));
+    assert.equal((await c.ev.subscribe(annT1, { commandId: "cap-1", stream: s1 })).id, made[1], "a repeat is not a new subscription");
+    await c.ev.subscribe(c.ann, { commandId: cid("sb"), stream: s2 });
+    await c.ev.cancel(annT1, { commandId: cid("cn"), subscriptionId: made[3]! });
+    assert.ok((await c.ev.subscribe(annT1, { commandId: cid("sb"), stream: s1 })).id);
+    await refuses("invalid_command", () => c.ev.subscribe(annT1, { commandId: cid("sb"), stream: s1 }));
+    // Hosts and services are relied on by the controller and are not capped.
+    for (let i = 0; i <= EVENT_LIMITS.perSubscriber; i++) await c.ev.subscribe(c.host, { commandId: cid("sb"), stream: s1 });
   });
 }

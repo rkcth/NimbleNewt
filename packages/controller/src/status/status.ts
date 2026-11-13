@@ -130,8 +130,13 @@ export interface Overview {
   readonly lines: readonly Line[];
 }
 
-export type AttentionKind = "paused_assignee" | "unreachable_worker" | "uncertain_tool_result";
-export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "unreachable_worker", "uncertain_tool_result"];
+export type AttentionKind = "paused_assignee" | "unreachable_worker" | "uncertain_tool_result" | "stale_artifact";
+export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "unreachable_worker", "uncertain_tool_result", "stale_artifact"];
+/**
+ * When an artifact counts as stale (card U13, ASSUMPTION): (1) `superseded`, a newer artifact with the same name was recorded on the same task, so anyone still pointing at this one has an old version; or (2) `aged`, the newest
+ * artifact of a task that is still open (not done or cancelled) was recorded more than this many days ago and nothing newer followed, so the deliverable may no longer match the work. No file is read: the records are enough.
+ */
+export const STALE_ARTIFACT_DAYS = 7;
 export interface AttentionItem {
   readonly kind: AttentionKind;
   readonly taskId: string;
@@ -147,12 +152,32 @@ export interface AttentionItem {
   readonly detail: Readonly<Record<string, unknown>>;
   readonly cite: Cite;
 }
+/** One tool call on a task as the state API shows it (card U13): the record's own revision and the identities it carries, never its inputs or outputs. */
+export interface ToolActivityItem {
+  readonly id: string;
+  readonly revision: number;
+  readonly taskId: string;
+  readonly projectId: string;
+  /** Who made the call (provenance). */
+  readonly by: string;
+  readonly server: string;
+  readonly capability: string;
+  /** `in_progress` (started, no outcome yet), `confirmed` (the server said ok), `failed` (the server said error) or `uncertain` (it is not known whether the call took effect). A cancelled call is not recorded as such here. */
+  readonly state: "in_progress" | "confirmed" | "failed" | "uncertain";
+  readonly at: string;
+  readonly observedAt?: string;
+  readonly protocolRevision: string;
+  readonly catalogRevision: number;
+}
+export const TOOL_ACTIVITY_STATES: readonly ToolActivityItem["state"][] = ["in_progress", "confirmed", "failed", "uncertain"];
 export interface Attention {
   readonly observedAt: string;
   readonly items: readonly AttentionItem[];
   readonly next?: string;
   /** The search stopped before the end (its budget ran out): some items may be missing; ask again from `next`. */
   readonly scanLimited?: true;
+  /** The artifact records were not all read (more than the scan budget), so `stale_artifact` items may be missing; asking again does not help, narrow the question by project or task. */
+  readonly artifactsPartial?: true;
 }
 
 export interface StatusChange { readonly at: string; readonly what: string; readonly summary: string; readonly cite: Cite }
@@ -265,6 +290,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
+  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, or the newest one of a task still open is over a week old), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
   critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
@@ -317,6 +343,7 @@ export type StatusRequest =
   | { readonly kind: "owner_questions"; readonly limit?: number }
   | { readonly kind: "setup" }
   | { readonly kind: "needs_you"; readonly limit?: number }
+  | { readonly kind: "attention"; readonly projectId?: string; readonly agentId?: string; readonly state?: string; readonly attentionKind?: string; readonly since?: string; readonly until?: string; readonly limit?: number }
   | { readonly kind: "critical_path" }
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
@@ -769,6 +796,7 @@ export class StatusService {
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
       case "revocations": { onlyKnown(request, ["kind", "name", "limit"]); return this.revocationLines(by, request); }
+      case "attention": { onlyKnown(request, ["kind", "projectId", "agentId", "state", "attentionKind", "since", "until", "limit"]); return this.attentionLines(by, request); }
       case "needs_you": { onlyKnown(request, ["kind", "limit"]); return this.needsYou(by, request.limit); }
       case "critical_path": { onlyKnown(request, ["kind"]); return this.criticalPathLines(by); }
       case "setup": { onlyKnown(request, ["kind"]); return this.setupLines(by); }
@@ -2352,6 +2380,28 @@ export class StatusService {
     let scanLimited = false;
     let resume: string | undefined;
     const found: { item: AttentionItem; key: string }[] = [];
+    let artifactsPartial = false;
+    let artifactIndex: Map<string, { id: string; revision: number; createdAt: string; name: string; createdBy: string }[]> | undefined;
+    const artifactsOf = async (taskId: string): Promise<{ id: string; revision: number; createdAt: string; name: string; createdBy: string }[]> => {
+      if (artifactIndex === undefined) {
+        artifactIndex = new Map();
+        let after: string | undefined;
+        for (let reads = 0; ; reads++) {
+          if (reads >= this.#pages) { artifactsPartial = true; break; }
+          const page = await this.#runner.list("artifact", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
+          for (const a of page) {
+            after = a.id;
+            const art = a.body as unknown as ArtifactBody;
+            if (art.taskId === undefined) continue;
+            const list = artifactIndex.get(art.taskId) ?? [];
+            list.push({ id: a.id, revision: a.revision, createdAt: a.createdAt, name: art.name, createdBy: art.createdBy });
+            artifactIndex.set(art.taskId, list);
+          }
+          if (page.length < this.#pageSize) break;
+        }
+      }
+      return artifactIndex.get(taskId) ?? [];
+    };
 
     const visit = async (taskId: string, revision: number, updatedAt: string, body: TaskBody, floor: { rank: number; id: string } | undefined): Promise<void> => {
       examined++;
@@ -2403,6 +2453,22 @@ export class StatusService {
           if (page.length < take) break;
         }
       }
+      if (want("stale_artifact") && this.#mayReadArtifacts(by, body.projectId) && (floor === undefined || floor.rank <= 3)) {
+        const all = (await artifactsOf(taskId)).slice().sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : x.id < y.id ? -1 : 1));
+        const open = body.state !== "done" && body.state !== "cancelled";
+        for (const art of [...all].sort((x, y) => (x.id < y.id ? -1 : 1))) {
+          if (floor !== undefined && floor.rank === 3 && art.id <= floor.id) continue;
+          const newer = all.find((o) => o.name === art.name && (o.createdAt > art.createdAt || (o.createdAt === art.createdAt && o.id > art.id)));
+          const aged = newer === undefined && open && nowMs - Date.parse(art.createdAt) > STALE_ARTIFACT_DAYS * 86_400_000;
+          if (newer === undefined && !aged) continue;
+          const at = newer === undefined ? art.createdAt : newer.createdAt;
+          if (!inRange(at)) continue;
+          const maker = art.createdBy.replace(/^agent:/, "");
+          if (agent !== undefined && maker !== agent) continue;
+          push(3, art.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), at, summary: newer === undefined ? `Artifact ${shown(art.name)} on ${base.title} was recorded ${plainDuration(nowMs - Date.parse(art.createdAt))} ago and nothing newer followed while the task is still open.` : `Artifact ${shown(art.name)} on ${base.title} has been replaced by a newer version.`, detail: { artifactId: art.id, name: shown(art.name, 120), reason: newer === undefined ? "aged" : "superseded", recordedAt: art.createdAt, ...(newer === undefined ? {} : { supersededBy: newer.id }) }, cite: cite("artifact", art.id, art.revision) });
+          if (found.length > limit) return;
+        }
+      }
     };
 
     let lastDone: string | undefined;
@@ -2432,7 +2498,67 @@ export class StatusService {
     if (found.length > limit) next = found[limit - 1]!.key;
     else if (resume !== undefined) next = resume;
     else if (scanLimited && lastDone !== undefined) next = this.#seal(`${lastDone}|9|`);
-    return { observedAt: now, items: found.slice(0, limit).map((f) => f.item), ...(next === undefined ? {} : { next }), ...(scanLimited ? { scanLimited: true as const } : {}) };
+    return { observedAt: now, items: found.slice(0, limit).map((f) => f.item), ...(next === undefined ? {} : { next }), ...(scanLimited ? { scanLimited: true as const } : {}), ...(artifactsPartial ? { artifactsPartial: true as const } : {}) };
+  }
+
+  /**
+   * The tool calls recorded on one task, a page at a time, oldest first by call ID, with the revision of each record and who made the call. Filters: `agentId` (the caller), `state`, and `since` (exclusive) / `until` (inclusive) on the call time.
+   * Needs the tool-history right of the `tools` view; a task the caller may not read for tools reads as missing (`undefined`). No input or output of any call is shown. The scan reads at most `scanPages x scanPageSize` records.
+   */
+  async toolActivity(by: Principal, query: { taskId: string; agentId?: string; state?: string; since?: string; until?: string; afterId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly items: readonly ToolActivityItem[]; readonly next?: string; readonly scanLimited?: true } | undefined> {
+    onlyKnown(query, ["taskId", "agentId", "state", "since", "until", "afterId", "limit"]);
+    const taskId = checkTaskId(query.taskId);
+    const agent = query.agentId === undefined ? undefined : this.#agentFilter(query.agentId);
+    const state = query.state === undefined ? undefined : (TOOL_ACTIVITY_STATES as readonly string[]).includes(query.state) ? query.state as ToolActivityItem["state"] : invalid("state", `must be one of ${TOOL_ACTIVITY_STATES.join(", ")}`);
+    const stamp = (name: string, v: string | undefined): string | undefined => v === undefined ? undefined : typeof v === "string" && v.length <= STATUS_LIMITS.since && TIMESTAMP.test(v) ? v : invalid(name, "must be a UTC timestamp such as 2026-10-20T12:00:00.000Z");
+    const since = stamp("since", query.since);
+    const until = stamp("until", query.until);
+    if (since !== undefined && until !== undefined && since > until) invalid("since", "must not be after until");
+    const limit = query.limit === undefined ? 50 : typeof query.limit === "number" && Number.isSafeInteger(query.limit) && query.limit >= 1 && query.limit <= 100 ? query.limit : invalid("limit", "must be a whole number from 1 to 100");
+    if (query.afterId !== undefined && (typeof query.afterId !== "string" || !/^mcc-[a-z2-7]{20}$/.test(query.afterId))) invalid("afterId", "is not a cursor from an earlier page");
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined || !this.#mayReadTools(by, task.projectId, taskId)) return undefined;
+    const now = this.#runner.now();
+    const items: ToolActivityItem[] = [];
+    let after = query.afterId;
+    let reads = 0;
+    let scanned = 0;
+    const budget = this.#pages * this.#pageSize;
+    let scanLimited = false;
+    let more = false;
+    scan: for (; ; reads++) {
+      if (reads >= this.#pages || scanned >= budget) { scanLimited = true; break; }
+      const take = Math.min(this.#pageSize, budget - scanned);
+      const page = await this.#runner.list(`mcp-call-${taskId}`, { ...(after === undefined ? {} : { afterId: after }), limit: take });
+      for (const a of page) {
+        after = a.id;
+        scanned++;
+        const c = a.body as unknown as CallBody;
+        const shownState: ToolActivityItem["state"] = c.uncertain === true || c.outcome === "uncertain" ? "uncertain" : c.state === "started" && c.outcome === undefined ? "in_progress" : c.outcome === "error" ? "failed" : "confirmed";
+        if ((since !== undefined && c.at <= since) || (until !== undefined && c.at > until) || (state !== undefined && shownState !== state) || (agent !== undefined && c.by.replace(/^agent:/, "") !== agent)) continue;
+        if (items.length >= limit) { more = true; break scan; }
+        items.push({ id: a.id, revision: a.revision, taskId, projectId: task.projectId, by: shown(c.by, 80), server: shown(c.serverName, 80), capability: `${c.capability.kind}:${shown(c.capability.name, 120)}`, state: shownState, at: c.at, ...(c.observedAt === undefined ? {} : { observedAt: c.observedAt }), protocolRevision: c.protocolRevision, catalogRevision: c.catalogRevision });
+      }
+      if (page.length < take) break;
+    }
+    // A full page ends at the last item handed out: the next page starts after it.
+    const last = items[items.length - 1];
+    const next = more && last !== undefined ? last.id : scanLimited && after !== undefined ? after : undefined;
+    return { observedAt: now, items, ...(next === undefined ? {} : { next }), ...(scanLimited ? { scanLimited: true as const } : {}) };
+  }
+
+  /** The attention list as owner-facing lines, one per item citing its record (the chat's `attention` kind). Without a project the owner reads the whole installation; anyone else must name a project. */
+  async attentionLines(by: Principal, request: { projectId?: string; agentId?: string; state?: string; attentionKind?: string; since?: string; until?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] }> {
+    const { kind: _kind, attentionKind, limit, ...rest } = request as typeof request & { kind?: string };
+    void _kind;
+    const result = await this.attention(by, { ...rest, ...(attentionKind === undefined ? {} : { kind: attentionKind }), limit: limit === undefined ? 20 : limit });
+    const lines: Line[] = result.items.map((i) => line(`${i.at === undefined ? "" : `${i.at}: `}${i.summary}`, i.cite));
+    const scope = request.projectId === undefined ? cite("installation", "all") : cite("project", checkProjectId(request.projectId));
+    if (lines.length === 0) lines.push(line("Nothing needs attention for that question: no paused assignee, unreachable worker, uncertain tool result or stale artifact was found.", scope));
+    // The chat view has no cursor (asking again shows the same first items), so it says how to see the rest: narrow the question, or page with status.attention.
+    if (result.next !== undefined) lines.push(line(result.scanLimited === true ? "The search stopped before the end, so more may exist; ask about one project, one kind of item or a shorter time span to see the rest." : "There are more items than are listed; ask about one project, one kind of item or a shorter time span to see the rest.", scope));
+    if (result.artifactsPartial === true) lines.push(line("There are too many artifact records to read them all, so stale artifacts may be missing; ask about one project or task to be sure.", scope));
+    return { observedAt: result.observedAt, lines };
   }
 
   // ---- what changed ------------------------------------------------------------------------------------------------------------

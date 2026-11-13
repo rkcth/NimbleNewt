@@ -46,6 +46,8 @@ export interface ContinuationInput {
   /** Credentials the run uses, by name only. */
   readonly credentialRefs: readonly string[];
 }
+/** A checkpoint as the state API lists it: identity, revision and provenance, not what the run was doing. */
+export interface CheckpointView { readonly id: string; readonly revision: number; readonly taskId: string; readonly projectId: string; readonly seq: number; readonly status: "complete" | "incomplete"; readonly problem?: string; readonly capturedBy: string; readonly capturedAt: string; readonly agent: string; readonly boundary: { readonly kind: string; readonly turnInProgress?: boolean }; readonly checkpoint: { readonly conversationId: number; readonly at: number; readonly digest: string; readonly runtime: { readonly name: string; readonly version: string }; readonly format: number } }
 export interface ContinuationBody extends Omit<ContinuationInput, "durable"> {
   readonly taskId: string;
   readonly projectId: string;
@@ -143,6 +145,34 @@ export class ContinuationService {
     if (head.latestCompleteId === undefined) return undefined;
     const a = await this.#runner.get("continuation", head.latestCompleteId);
     return a === undefined ? undefined : { ...(a.body as unknown as ContinuationBody), id: a.id };
+  }
+
+  /**
+   * The checkpoints captured for a task as a page (card U13), complete and incomplete alike, in ID order: each with its record's ID and revision, its capture order (`seq`), whether the capture is complete and why not, who captured it
+   * and when, and the checkpoint's own identity (conversation, time, digest, runtime). What the run was doing (next step, artifacts, decisions, summaries) is not listed: `latest` returns that. Needs the same right as `latest`; a task the
+   * caller may not read reads as no checkpoints. There is no per-task index, so the list scans continuation records in pages of 500 (at most 20 reads); `scanLimited` says it stopped early and `next` continues.
+   */
+  async history(by: Principal, taskId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ items: CheckpointView[]; next?: string; scanLimited?: true }> {
+    const tid = checkTaskId(taskId);
+    const limit = page.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) invalid("limit", "must be a whole number from 1 to 100");
+    if (page.afterId !== undefined && (typeof page.afterId !== "string" || !/^cnt-[a-z2-7]{20}$/.test(page.afterId))) invalid("afterId", "is not a cursor from an earlier page");
+    const head = (await this.#runner.get("continuation-head", tid))?.body as unknown as HeadBody | undefined;
+    if (head === undefined || !this.#mayRead(by, head.projectId, tid)) return { items: [] };
+    const items: CheckpointView[] = [];
+    let after = page.afterId;
+    for (let reads = 0; reads < 20; reads++) {
+      const chunk = await this.#runner.list("continuation", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of chunk) {
+        after = a.id;
+        const b = a.body as unknown as ContinuationBody;
+        if (b.taskId !== tid) continue;
+        items.push({ id: a.id, revision: a.revision, taskId: tid, projectId: b.projectId, seq: b.seq, status: b.status, ...(b.problem === undefined ? {} : { problem: redactText(b.problem) }), capturedBy: b.capturedBy, capturedAt: b.capturedAt, agent: b.agent, boundary: b.boundary, checkpoint: { conversationId: b.checkpoint.conversationId, at: b.checkpoint.at, digest: b.checkpoint.digest, runtime: b.checkpoint.runtime, format: b.checkpoint.format } });
+        if (items.length >= limit) return { items, next: a.id };
+      }
+      if (chunk.length < 500) return { items };
+    }
+    return { items, ...(after === undefined ? {} : { next: after }), scanLimited: true };
   }
 
   /** Continues a task from a complete continuation (the latest by default) in the same conversation identity, after a restart or with a different model. */

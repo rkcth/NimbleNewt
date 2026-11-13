@@ -209,9 +209,11 @@ test("an agent starts a job through the bridge and keeps a durable handle; statu
     // The owner reads jobs through the API: one job, a task's jobs, the live ones.
     const got = await api(boot.token, "job.get", { jobId: handle });
     assert.deepEqual([got.ok, got.result?.item?.state, got.result?.item?.cancel?.operation], [true, "cancelled", "stop_tool"]);
+    assert.equal(got.result.item.commandState, "failed", "a cancelled job reports the shared command state (card U13)");
     assert.deepEqual((await api(boot.token, "job.list", { taskId: build })).result.items.map((j: { id: string }) => j.id), [handle]);
     await until(async () => (await s.jobs.get(owner, other2))?.state === "running", "the second job runs");
     assert.deepEqual((await api(boot.token, "job.live", {})).result.items.map((j: { id: string }) => j.id), [other2]);
+    assert.equal((await api(boot.token, "job.live", {})).result.items[0].commandState, "running", "a running job reports running (card U13)");
     // A supervisor with job.control stops it; the process ignores the Stop, which is recorded as not obeyed; the supervisor's Force Stop ends it with the orphan the launcher could not end.
     const supStop = await api(supToken, "job.cancel", { jobId: other2, reason: "taking too long" }, "sup-stop");
     assert.equal(supStop.ok, true, JSON.stringify(supStop));

@@ -532,6 +532,100 @@ for (const backend of backends) {
     assert.deepEqual([...seen].sort(), [...ids].sort(), "the cursors still reach every call");
   });
 
+  suite("attention: stale artifacts (superseded, or old on a task still open), filtered, paged, with the artifact right (card U13)", async (c) => {
+    const DAY = 24 * 60 * MIN;
+    const publish = (name: string, taskId: string | undefined, project = c.project) => c.artifacts.publish({ commandId: cid("art"), actor: c.owner.id, name, projectId: project, ...(taskId === undefined ? {} : { taskId }), files: [{ path: `${name}.txt`, content: Buffer.from(`${name}-${n}`) }] });
+    const open = await c.work("open task", "ann"); await c.seen(open);
+    const finished = await c.work("finished task", "ann");
+    await c.projects.transitionTask({ commandId: cid("done"), actor: c.owner.id, taskId: finished, expectedRevision: (await c.projects.getTask(finished))!.revision, to: "done" }).catch(() => undefined);
+    const v1 = await publish("report", open);
+    const fin = await publish("final", finished);
+    const loose = await publish("loose", undefined);
+    void loose;
+    now += DAY;
+    const v2 = await publish("report", open);
+    const view = (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = c.status) => s.attention(by, { projectId: c.project, kind: "stale_artifact", ...q } as never);
+    let r = await view();
+    assert.deepEqual(r.items.map((i) => [i.detail["artifactId"], i.detail["reason"], i.detail["supersededBy"]]), [[v1.id, "superseded", v2.id]], "only the replaced version is stale after one day");
+    assert.equal(r.items[0]!.at, at(), "it became stale when the newer one was recorded");
+    assert.deepEqual([r.items[0]!.cite.kind, r.items[0]!.cite.id], ["artifact", v1.id]);
+    now += 8 * DAY;
+    r = await view();
+    const reasons = r.items.map((i) => `${i.detail["reason"]}:${i.detail["artifactId"]}`).sort();
+    const finState = (await c.projects.getTask(finished))!.state;
+    assert.deepEqual(reasons, [`aged:${v2.id}`, `superseded:${v1.id}`, ...(finState === "done" ? [] : [`aged:${fin.id}`])].sort(), "the newest report of an open task is old now; a done task's final artifact never goes stale; an artifact with no task is not listed");
+    assert.ok(r.items.every((i) => i.taskId === open || i.taskId === finished));
+    // Filters: time on `at`, agent (the one who recorded it), the other kinds stay out.
+    assert.equal((await view({ since: at() })).items.length, 0, "since is exclusive of the time of the item");
+    assert.equal((await view({ agentId: "nobody" })).items.length, 0);
+    assert.equal((await view({ taskId: undefined, state: "done" })).items.filter((i) => i.taskId === open).length, 0);
+    assert.equal((await c.status.attention(c.owner, { projectId: c.project, kind: "paused_assignee" })).items.length, 0);
+    // Paging with cursors that name the last item handed out.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const page = await view({ limit: 1, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      for (const x of page.items) seen.push(String(x.detail["artifactId"]));
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    assert.deepEqual(seen.sort(), r.items.map((i) => String(i.detail["artifactId"])).sort(), "every stale artifact once");
+    // Rights: the task right alone shows none; the artifact right shows them; another project's reader sees nothing.
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    assert.equal((await view({}, reader)).items.length, 0);
+    const viewer = await c.agent("viewer", [{ action: "task.read", project: c.project }, { action: "artifact.read", project: c.project }]);
+    assert.equal((await view({}, viewer)).items.length, r.items.length);
+    // Too many artifact records to read: say so rather than list a partial answer as whole.
+    const small = c.rebuild({ scanPageSize: 1, scanPages: 1 });
+    assert.equal((await small.attention(c.owner, { taskId: open, kind: "stale_artifact" })).artifactsPartial, true);
+    assert.equal(r.artifactsPartial, undefined);
+    // The chat's `attention` kind answers in cited lines and tells when nothing needs attention.
+    const said1 = await c.status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "stale_artifact" });
+    cited(said1!.lines);
+    assert.match(said(said1!.lines), /replaced by a newer version/);
+    const none = await c.status.ask(c.owner, { kind: "attention", projectId: c.other });
+    assert.match(said(none!.lines), /Nothing needs attention/);
+    cited(none!.lines);
+    await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "x" } as never));
+    await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "attention", projectId: c.project, kind2: 1 } as never));
+  });
+
+  suite("the tool calls of a task are listed with their state, revision and caller, filtered and paged; an unknown result is never confirmed (card U13)", async (c) => {
+    const server = await c.mcp.register(c.owner, { commandId: cid("rg"), name: "files", mode: "local", transport: "stdio", protocolRevision: "2025-06-18", sdk: SDK, launch: { command: "/opt/mcp/files-server", args: [], env: {}, secretRefs: [] }, audience: [c.project], allowed: { tools: ["write_file"], resources: [], prompts: [] } } as never);
+    const cat = await c.host("catalog");
+    const snap = await c.mcp.recordCatalog(cat, { commandId: cid("sn"), serverId: server.id, protocolRevision: "2025-06-18", tools: [item("write_file")] });
+    await c.mcp.acceptCatalog(c.owner, { commandId: cid("ac"), serverId: server.id, revision: snap.revision, expectedRevision: 2 });
+    const coder = await c.agent("coder", [{ action: "attempt.work", project: c.project }, { action: "mcp.use", project: c.project }, { action: "history.read", project: c.project }]);
+    const t = await c.work("tooling", "coder"); await c.seen(t);
+    const call = async (outcome?: "ok" | "error" | "uncertain") => {
+      now += MIN;
+      const made = await c.mcp.authorizeCall(coder, { commandId: cid("cl"), serverId: server.id, kind: "tool", name: "write_file", taskId: t });
+      if (outcome !== undefined) await c.mcp.recordOutcome(coder, { commandId: cid("oc"), taskId: t, callId: made.callId, outcome });
+      return made.callId;
+    };
+    const ok = await call("ok"); const bad = await call("error"); const unsure = await call("uncertain"); const open = await call();
+    const all = (await c.status.toolActivity(c.owner, { taskId: t }))!;
+    assert.deepEqual(all.items.map((i) => [i.id, i.state]).sort(), [[ok, "confirmed"], [bad, "failed"], [unsure, "uncertain"], [open, "in_progress"]].sort());
+    assert.ok(all.items.every((i) => i.revision >= 1 && i.by === coder.id && i.projectId === c.project && i.taskId === t && i.server.length > 0 && i.protocolRevision === "2025-06-18"));
+    assert.equal(all.next, undefined);
+    for (const st of ["confirmed", "failed", "uncertain", "in_progress"]) assert.equal((await c.status.toolActivity(c.owner, { taskId: t, state: st }))!.items.length, 1, st);
+    assert.equal((await c.status.toolActivity(c.owner, { taskId: t, agentId: "nobody" }))!.items.length, 0);
+    assert.equal((await c.status.toolActivity(c.owner, { taskId: t, agentId: coder.id }))!.items.length, 4);
+    const byTime = all.items.map((i) => i.at).sort();
+    assert.equal((await c.status.toolActivity(c.owner, { taskId: t, since: byTime[1]!, until: byTime[2]! }))!.items.length, 1, "since is exclusive, until inclusive");
+    const seen: string[] = []; let cursor: string | undefined;
+    for (let i = 0; i < 6; i++) { const pg = (await c.status.toolActivity(c.owner, { taskId: t, limit: 3, ...(cursor === undefined ? {} : { afterId: cursor }) }))!; seen.push(...pg.items.map((x) => x.id)); cursor = pg.next; if (cursor === undefined) break; }
+    assert.deepEqual(seen.sort(), [ok, bad, unsure, open].sort(), "paging reaches every call once");
+    const small = c.rebuild({ scanPageSize: 2, scanPages: 1 });
+    const cut = (await small.toolActivity(c.owner, { taskId: t }))!;
+    assert.equal(cut.scanLimited, true); assert.ok(cut.next !== undefined);
+    // Rights and bad input.
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    assert.equal(await c.status.toolActivity(reader, { taskId: t }), undefined, "no tool-history right reads as a missing task");
+    assert.equal(await c.status.toolActivity(c.owner, { taskId: "task-aaaaaaaaaaaaaaaaaaaa" }), undefined);
+    for (const bad2 of [{ limit: 0 }, { limit: 101 }, { state: "done" }, { since: "x" }, { afterId: "mcc-short" }, { extra: 1 }]) await refuses("invalid_command", () => c.status.toolActivity(c.owner, { taskId: t, ...bad2 } as never));
+  });
+
   suite("the overview filters by project, agent and state and shows observation time, freshness and uncertainty", async (c) => {
     const w1 = await c.work("ann working", "ann"); await c.seen(w1);
     const w2 = await c.work("ann silent", "ann");
