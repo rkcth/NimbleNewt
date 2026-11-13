@@ -279,6 +279,11 @@ for (const backend of backends) {
       assert.equal(((await make(undefined).status(owner)).thinking as Record<string, unknown>)["storesReached"], false);
       const agent = await principals.authenticate((await (async () => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "ann", grants: [] } as never); return principals.issueCredential(owner, "agent:ann"); })()).token);
       await assert.rejects(svc.status(agent), /may not read the retention status/);
+      // A project reader, a chat client, a host and the service are refused as well: the thinking figures are the owner's only.
+      await principals.enroll(owner, { commandId: cid("e2"), kind: "agent", name: "reader", grants: [{ action: "project.read", project }, { action: "task.read", project }] } as never);
+      const reader = await principals.authenticate((await principals.issueCredential(owner, "agent:reader")).token);
+      await assert.rejects(svc.status(reader), (e: unknown) => (e as { code?: string }).code === "forbidden");
+      for (const kind of ["client", "host", "service"] as const) await assert.rejects(svc.status({ ...owner, id: `${kind}:x`, kind, grants: [] } as unknown as Principal), (e: unknown) => (e as { code?: string }).code === "forbidden");
     } finally { await world.close(); }
   });
 }

@@ -210,16 +210,25 @@ export class RetentionService {
     const newest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1))[0];
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record", "thinking-purge"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
     // Stored model thinking (card K06c, shown by card K06d): the setting, whether the dispatcher removes it by itself, how many task copies are kept and removed and how many conversation stores were cleaned. Counts only, never a word of the thinking.
+    // Counted in the same bounded pass as the growth figures (one scan of each kind, not two).
     let kept = 0; let removed = 0; let tasksCleaned = 0; let storesCleaned = 0; let storesWithout = 0; let blocksRemoved = 0;
-    const tc = await scan(this.#runner, "thinking-record", (a) => { if ((a.body as { removedAt?: unknown }).removedAt === undefined) kept += 1; else removed += 1; });
-    const pc = await scan(this.#runner, "thinking-purge", (a) => {
-      const b = a.body as { attempts?: unknown; blocks?: unknown }; tasksCleaned += 1;
-      if (typeof b.attempts === "object" && b.attempts !== null) for (const v of Object.values(b.attempts as Record<string, unknown>)) { if (v === "purged") storesCleaned += 1; else if (v === "none") storesWithout += 1; }
-      if (typeof b.blocks === "number" && Number.isFinite(b.blocks) && b.blocks > 0) blocksRemoved += Math.floor(b.blocks);
-    });
-    const thinking = { days: values.thinkingDays, auto: values.thinkingAuto, storesReached: this.#deps.thinkingStores !== undefined, copiesKept: kept, copiesRemoved: removed, tasksCleaned, storesCleaned, storesWithout, blocksRemoved, ...(tc && pc ? {} : { partial: true }) };
+    const tally: Readonly<Record<string, (a: Aggregate) => void>> = {
+      "thinking-record": (a) => { if ((a.body as { removedAt?: unknown }).removedAt === undefined) kept += 1; else removed += 1; },
+      "thinking-purge": (a) => {
+        const b = a.body as { attempts?: unknown; blocks?: unknown }; tasksCleaned += 1;
+        if (typeof b.attempts === "object" && b.attempts !== null) for (const v of Object.values(b.attempts as Record<string, unknown>)) { if (v === "purged") storesCleaned += 1; else if (v === "none") storesWithout += 1; }
+        if (typeof b.blocks === "number" && Number.isFinite(b.blocks) && b.blocks > 0) blocksRemoved += Math.floor(b.blocks);
+      },
+    };
+    let thinkingComplete = true;
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record", "thinking-purge"]) {
+      let n = 0; const extra = tally[kind];
+      const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); });
+      growth[kind] = complete ? n : `${n}+`;
+      if (extra !== undefined && !complete) thinkingComplete = false;
+    }
+    const thinking = { days: values.thinkingDays, auto: values.thinkingAuto, storesReached: this.#deps.thinkingStores !== undefined, copiesKept: kept, copiesRemoved: removed, tasksCleaned, storesCleaned, storesWithout, blocksRemoved, ...(thinkingComplete ? {} : { partial: true }) };
     return {
       values: values as unknown as JsonObject,
       thinking: thinking as unknown as JsonObject,
