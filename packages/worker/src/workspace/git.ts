@@ -663,7 +663,7 @@ export class GitBridge {
    * Before the push every file is read once more without following a link and handed to `scan`: a file the scan names, a link, a submodule entry, a file over the size limit and a file that changed while it was read are
    * LEFT OUT of the commit and listed in `blocked` (a missing scan refuses the whole backup: no scan, no push). The push names one ref under `refs/heads/nn-wip/` and never forces; the remote's own answer is then read
    * back (`ls-remote`) and must be the commit, or the backup failed. The commit is only counted (the local `refs/nn/wip-last/*` ref moves) after that read-back, so a failed push is never a backup; the next commit builds on
-   * the last counted one, so successive pushes are fast-forwards. Throws a `WorkspaceError` with a plain reason when anything fails; nothing is half-counted.
+   * the last counted one, so successive pushes are fast-forwards; the first one has no parent, so nothing but scanned trees ever reaches the remote (the project's history stays here). Throws a `WorkspaceError` with a plain reason when anything fails; nothing is half-counted.
    */
   async backupWip(options: { gitDir: string; checkout: string; remote: string; ref: string; taskId: string; projectId: string; developer: string; executor: string; scan: (file: { path: string; bytes: Buffer }) => string | undefined | Promise<string | undefined>; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; tree: string; base: string; unchanged: boolean; files: number; blocked: { path: string; reason: string }[]; ignored: number }> {
     if (typeof options.scan !== "function") throw new WorkspaceError("invalid_path", "a work-in-progress backup needs a scan of its files; none was given, so nothing was backed up");
@@ -708,7 +708,9 @@ export class GitBridge {
       else {
         const message = `Work in progress of task ${options.taskId} (not reviewed)\n\nBacked up by NimbleNewt; ${listing.length - blocked.length} file(s). Not reviewed work: never merged, integrated or landed.\n\nDeveloper: ${options.developer}\nExecutor: ${options.executor}\nNimbleNewt-Task: ${options.taskId}\nNimbleNewt-Project: ${options.projectId}\nNimbleNewt-Base: ${base}\nNimbleNewt-WIP: unreviewed\n`;
         const who = { GIT_AUTHOR_NAME: WIP_IDENTITY.name, GIT_AUTHOR_EMAIL: WIP_IDENTITY.email, GIT_COMMITTER_NAME: WIP_IDENTITY.name, GIT_COMMITTER_EMAIL: WIP_IDENTITY.email };
-        commitId = (await this.#run(["commit-tree", tree, "-p", last ?? head, "-F", "-"], { gitDir: options.gitDir, input: message, env: who })).stdout.trim();
+        // The first backup of a branch has NO parent (P02b review): its tree is the whole scanned snapshot, and the checkout's head would carry the project's committed history (files the scan never saw,
+        // or saw and left out of this tree) to the remote with it. Later backups build on the last counted one, so the branch holds only scanned trees and successive pushes are fast-forwards.
+        commitId = (await this.#run(["commit-tree", tree, ...(last === undefined ? [] : ["-p", last]), "-F", "-"], { gitDir: options.gitDir, input: message, env: who })).stdout.trim();
         if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
       }
       // Never forced (no plus on the refspec, no force flag): a remote that moved on its own refuses, and that is a failed backup.
@@ -723,8 +725,10 @@ export class GitBridge {
   /**
    * Puts a work-in-progress branch back as a workspace (card P02b): `checkout` must be an empty directory and `gitDir` a repository that does not exist yet. The branch is fetched from `remote`, its tree is written into the
    * checkout and the checkout's base (and head) is the commit the work was based on, so `status` shows exactly the work that was backed up. Only a commit that carries `NimbleNewt-WIP: unreviewed` is restored.
+   * The branch carries no project history (P02b review), so the base commit is taken from `baseFrom` (the project's shared workspace or another repository that holds it); when it cannot be had, the restored
+   * snapshot itself is the base (`baseFound: false`: every file is there, the changes just do not show against the old base). A branch whose tree holds a link or a submodule entry is refused (a backup never makes one).
    */
-  async restoreWip(options: { remote: string; ref: string; gitDir: string; checkout: string; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; base: string; files: number }> {
+  async restoreWip(options: { remote: string; ref: string; gitDir: string; checkout: string; baseFrom?: string; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; base: string; baseFound: boolean; files: number }> {
     wipRemote(options.remote);
     wipRef(options.ref);
     await mkdir(options.checkout, { recursive: true });
@@ -736,14 +740,19 @@ export class GitBridge {
     if (!/^NimbleNewt-WIP: unreviewed$/m.test(message)) throw new WorkspaceError("invalid_path", "that branch does not hold a NimbleNewt work-in-progress commit; nothing was restored");
     const base = /^NimbleNewt-Base: ([0-9a-f]{40})$/m.exec(message)?.[1];
     if (base === undefined) throw new WorkspaceError("invalid_path", "the work-in-progress commit names no base commit; nothing was restored");
+    const entries = (await this.#run(["ls-tree", "-r", "-z", commitId], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean);
+    if (entries.some((e) => e.startsWith("120000 ") || e.startsWith("160000 "))) throw new WorkspaceError("invalid_path", "that branch holds a link or a submodule entry, which a backup never makes; nothing was restored");
+    const has = (id: string): Promise<boolean> => this.#run(["cat-file", "-e", `${id}^{commit}`], { gitDir: options.gitDir }).then(() => true, () => false);
+    if (!(await has(base)) && options.baseFrom !== undefined) await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", "--", await this.#sharedGitDir(options.baseFrom), base], { gitDir: options.gitDir, allowFile: true }).catch(() => undefined);
+    const baseFound = await has(base);
+    const startFrom = baseFound ? base : commitId;
     await this.#neutralAttributes(options.gitDir);
     await this.#run(["read-tree", "--reset", "-u", commitId], { gitDir: options.gitDir, workTree: options.checkout });
     await rm(join(options.checkout, ".git"), { recursive: true, force: true });
-    await this.#run(["update-ref", "refs/nn/base", base], { gitDir: options.gitDir });
-    await this.#run(["update-ref", "HEAD", base], { gitDir: options.gitDir });
-    await this.#run(["read-tree", base], { gitDir: options.gitDir });
-    const files = (await this.#run(["ls-tree", "-r", "--name-only", "-z", commitId], { gitDir: options.gitDir })).stdout.split("\0").filter(Boolean).length;
-    return { commitId, base, files };
+    await this.#run(["update-ref", "refs/nn/base", startFrom], { gitDir: options.gitDir });
+    await this.#run(["update-ref", "HEAD", startFrom], { gitDir: options.gitDir });
+    await this.#run(["read-tree", startFrom], { gitDir: options.gitDir });
+    return { commitId, base: startFrom, baseFound, files: entries.length };
   }
 
   /** A blob's bytes (never more than the file limit: a larger one is an error). */

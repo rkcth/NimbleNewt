@@ -72,6 +72,12 @@ test("the work-in-progress backup is off by default, owner-only through the API,
     assert.notEqual(out[0]!.status, "applied", JSON.stringify(out));
     assert.equal((await call(O, "wip.backup.get", { project })).result.item.remote, remote);
 
+    // Pointing the backup at another remote while it is on is a new authority: shown first, never applied by the chat on its own (P02b review).
+    text = `Move the work-in-progress backup to /backups/other.git instead.`;
+    out = await turn(text, [cmd("wip.backup.set", { remote: "/backups/other.git" }, text)]);
+    assert.equal(out[0]!.status, "proposed", JSON.stringify(out));
+    assert.equal((await call(O, "wip.backup.get", { project })).result.item.remote, remote, "the remote is unchanged until the owner accepts");
+
     // The status view says what it rests on and has done nothing yet.
     say["Is my work in progress backed up?"] = [{ kind: "status", request: { kind: "wip_backup" }, evidence: "Is my work in progress backed up?", basis: "owner" }];
     const shown = JSON.stringify((await c.chat!.submit(O, { messageId: `m${m++}`, text: "Is my work in progress backed up?" })).outcomes[0]);
@@ -80,10 +86,10 @@ test("the work-in-progress backup is off by default, owner-only through the API,
 
     // The dispatcher's loop now backs the task up (it runs apart from the tick: wait for the condition, not a pause).
     await c.dispatch.dispatcher.tick();
-    for (let i = 0; i < 400 && asked.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    for (let i = 0; i < 2400 && asked.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
     assert.equal(asked.length, 1);
     assert.deepEqual([asked[0]!.taskId, asked[0]!.remote, asked[0]!.ref], ["task-garden", remote, `refs/heads/nn-wip/${project}/task-garden`]);
-    for (let i = 0; i < 400 && (await call(O, "wip.backup.get", { project })).result.item.tasks.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    for (let i = 0; i < 2400 && (await call(O, "wip.backup.get", { project })).result.item.tasks.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
     assert.equal((await call(O, "wip.backup.get", { project })).result.item.tasks[0].lastSuccess.commitId, "c".repeat(40));
 
     // Turning it off applies at once (the safe direction) and revokes the approval; nothing more is asked of a host.

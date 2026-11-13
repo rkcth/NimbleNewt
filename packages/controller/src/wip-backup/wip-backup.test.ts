@@ -116,6 +116,8 @@ for (const backend of backends) {
   suite("a remote with a password or key in it, a helper or option, or a protocol that is not https, ssh or a folder is refused and never recorded", async ({ svc, owner, project }) => {
     const planted = ["gh", "p_", "A1b2C3d4".repeat(5)].join("");
     const bad = [`https://rob:hunter2@git.example.com/me/wip.git`, `https://git.example.com/me/wip.git?token=${planted}`, `https://${planted}@git.example.com/me/wip.git`, "--upload-pack=evil", "ext::sh -c evil", "a b", "x\ny", "http://git.example.com/wip.git", "git://git.example.com/wip.git", "ftp://x/y", "a".repeat(501)];
+    // The scp-like form with a password in its user part (P02b review): it would put the password into the setting record.
+    assert.notEqual(remoteProblem(["rob:", "hunter", "2x@git.example.com:me/wip.git"].join("")), undefined);
     for (const remote of bad) { assert.notEqual(remoteProblem(remote), undefined, remote.slice(0, 40)); await refuses("invalid_command", () => svc.set(owner, { commandId: cid("r"), projectId: project, enabled: true, remote })); }
     for (const ok of ["/backups/garden.git", "C:\\backups\\garden.git", "git@git.example.com:me/wip.git", "ssh://git@git.example.com/me/wip.git", "https://git.example.com/me/wip.git", "file:///backups/garden.git", "../relative/wip.git"]) assert.equal(remoteProblem(ok), undefined, ok);
     assert.equal((await svc.get(owner, project)).revision, 0);
@@ -166,6 +168,23 @@ for (const backend of backends) {
     const before = h.calls.length;
     await svc.sweep(owner, { port: h.port, tasks: tasks("task-one") });
     assert.equal(h.calls.length, before, "a revoked approval stops every push");
+  });
+
+  suite("turning it off while a sweep is under way stops the pushes still queued in that sweep, and a remote changed meanwhile is not pushed to under the old setting (P02b review)", async ({ svc, owner, project }) => {
+    await svc.set(owner, { commandId: cid("on"), projectId: project, enabled: true, remote: REMOTE });
+    let turnedOff = false;
+    const h = host((call) => call.taskId === "task-one" ? good(COMMIT_A) : good(COMMIT_B));
+    const port = { backup: async (call: WipBackupCall) => { const r = await h.port.backup(call); if (!turnedOff) { turnedOff = true; await svc.set(owner, { commandId: cid("off"), projectId: project, enabled: false }); } return r; } };
+    const r = await svc.sweep(owner, { port, tasks: tasks("task-one", "task-two", "task-three") });
+    assert.deepEqual(h.calls.map((c) => c.taskId), ["task-one"], "the owner's off reached the tasks the sweep had not done yet");
+    assert.equal(r.succeeded, 1);
+    // On again for another remote while a sweep is under way: the queued tasks are not pushed to either remote under the setting the sweep began with.
+    await svc.set(owner, { commandId: cid("on2"), projectId: project, enabled: true, remote: REMOTE });
+    let moved = false;
+    const h2 = host(() => good(COMMIT_B));
+    const port2 = { backup: async (call: WipBackupCall) => { const out = await h2.port.backup(call); if (!moved) { moved = true; await svc.set(owner, { commandId: cid("move"), projectId: project, remote: "/backups/elsewhere.git" }); } return out; } };
+    await svc.sweep(owner, { port: port2, tasks: tasks("task-four", "task-five") });
+    assert.deepEqual(h2.calls.map((c) => [c.taskId, c.remote]), [["task-four", REMOTE]], "task-five was not pushed to the old remote after the owner moved it");
   });
 
   suite("a failed push is reported once and never counted as a backup: the last confirmed commit stays, failures are counted, and a host that does not name the commit counts for nothing", async ({ svc, owner, project, clock }) => {

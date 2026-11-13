@@ -92,7 +92,7 @@ export function remoteProblem(remote: unknown): string | undefined {
   if (typeof remote !== "string" || remote.length === 0) return "name the remote (a git address or a folder) the backup goes to";
   if (remote.length > WIP_LIMITS.remote) return `is longer than ${WIP_LIMITS.remote} characters`;
   if (remote.startsWith("-") || /[\s\u0000-\u001f\u007f]/.test(remote) || remote.includes("::") || /^ext:/i.test(remote)) return "must be one address or folder, with no option, space, line break or helper syntax";
-  if (/^[a-z][a-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/i.test(remote) || /^[a-z][a-z0-9+.-]*:\/\/[^/@]*@[^/]*\?/i.test(remote) || redactText(remote) !== remote || findCredentialShapes(remote).length > 0) return "carries a password or key; keep the credential in the host's own credential helper or SSH key, never in the address";
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/i.test(remote) || /^[a-z][a-z0-9+.-]*:\/\/[^/@]*@[^/]*\?/i.test(remote) || (!remote.includes("://") && /^[^/@:\\]+:[^/@\\]*@/.test(remote)) || redactText(remote) !== remote || findCredentialShapes(remote).length > 0) return "carries a password or key; keep the credential in the host's own credential helper or SSH key, never in the address";
   const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(remote)?.[1]?.toLowerCase();
   if (scheme !== undefined && !["https", "ssh", "file"].includes(scheme)) return `a ${scheme}:// address is not allowed (https, ssh and local folders are)`;
   return undefined;

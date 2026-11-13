@@ -5,14 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { GitBridge, WipBackupHost, type CheckoutLocation } from "@nimblenewt/worker";
-import { backends, stopServer } from "../domain/testing/backends.js";
-import { ProjectService } from "../domain/service.js";
-import { PrincipalService } from "../security/index.js";
-import { WipBackupService, createWipScanner, wipRefOf, type WipReport } from "./index.js";
+import { PrincipalService, ProjectService, WipBackupService, createWipScanner, wipRefOf, type WipReport } from "@nimblenewt/controller";
+import { backends, stopServer } from "@nimblenewt/controller/testing";
 
 after(stopServer);
 
-// Card P02b, from the owner's turning it on to a restore: the service, the controller's scan and the worker's host against real git and a disposable bare repository on the local disk (never a real remote), on every storage backend.
+// Card P02b (moved here from the controller package in review: the controller may not import the worker), from the owner's turning it on to a restore: the service, the controller's scan and the worker's host against real git and a disposable bare repository on the local disk (never a real remote), on every storage backend.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const skip = hasGit ? false : "git is not installed";
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -94,7 +92,10 @@ for (const backend of backends) {
       assert.equal(last.commitId, sh(remote, "rev-parse", ref));
       await writeFile(join(where.checkout, "after.txt"), "work after the last push\n");
       const restored = join(dir, "restored");
-      const r = await git.restoreWip({ remote, ref, gitDir: join(dir, "restored.git"), checkout: restored });
+      const r = await git.restoreWip({ remote, ref, gitDir: join(dir, "restored.git"), checkout: restored, baseFrom: shared });
+      assert.equal(r.baseFound, true);
+      assert.equal(sh(remote, "rev-list", "--max-parents=0", ref), sh(remote, "rev-list", "--reverse", ref).split("\n")[0], "the branch starts with the first backup: no project history went to the remote");
+      assert.equal(sh(remote, "rev-list", "--count", ref), "2", "the first backup and the one after the remote was put right (the failed push was never counted)");
       assert.equal(r.commitId, last.commitId);
       assert.equal(await readFile(join(restored, "src", "later.ts"), "utf8"), "export const l = 1;\n");
       assert.equal(await readFile(join(restored, "src", "a.ts"), "utf8"), "export const a = 2;\n");

@@ -54,3 +54,21 @@ test("a secret store that cannot be read makes the scan fail, so the host leaves
   const scan = createWipScanner({ secrets: () => { throw new Error("the store is locked"); } });
   await assert.rejects(scan(file("plain text\n")), /locked/);
 });
+
+test("a secret value stored as UTF-16, hexadecimal or base64 inside a file is found too, at any byte alignment (P02b review)", async () => {
+  // Short enough that the generic high-entropy check does not fire on the encoded forms: only the value search can find them.
+  const value = run(10, 12);
+  const scan = createWipScanner({ secrets: () => [{ name: "deploy-token", value }] });
+  assert.equal(await createWipScanner()(file(`blob = ${Buffer.from(value).toString("hex")} ${Buffer.from(value).toString("base64")}\n`)), undefined, "the shape scan alone does not find these");
+  const named = "holds the value of the secret deploy-token";
+  const wrap = (inner: Buffer): Buffer => Buffer.concat([Buffer.from([0, 7, 255, 1]), inner, Buffer.from([9, 0, 200])]);
+  assert.equal(await scan(file(wrap(Buffer.from(value, "utf16le")), "res.bin")), named, "UTF-16 little endian");
+  assert.equal(await scan(file(wrap(Buffer.from(value, "utf16le").swap16()), "res.bin")), named, "UTF-16 big endian");
+  assert.equal(await scan(file(`blob = ${Buffer.from(value).toString("hex").toUpperCase()}\n`)), named, "hexadecimal, upper case");
+  for (let prefix = 0; prefix < 3; prefix++) {
+    const encoded = Buffer.concat([Buffer.from("xyz".slice(0, prefix)), Buffer.from(value), Buffer.from("!?")]).toString("base64");
+    assert.equal(await scan(file(`config: ${encoded}\n`)), named, `base64 after ${prefix} other byte(s)`);
+    assert.equal(await scan(file(`config: ${encoded.replace(/\+/g, "-").replace(/\//g, "_")}\n`)), named, `URL-safe base64 after ${prefix} other byte(s)`);
+  }
+  assert.equal(await scan(file("the hex digits 0123456789abcdef and a base64 alphabet ABCDEFGHIJKLMNOP are ordinary\n")), undefined);
+});

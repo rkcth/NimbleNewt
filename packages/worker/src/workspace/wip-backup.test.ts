@@ -156,9 +156,10 @@ test("a restore from the branch matches what the last successful push held, with
     // Work done after the last push is not in the branch: the restore matches the push, not the later state.
     await writeFile(join(w.where.checkout, "later.txt"), "after the push\n");
     const restored = join(w.dir, "restored");
-    const r = await w.git.restoreWip({ remote: w.remote, ref: REF, gitDir: join(w.dir, "restored.git"), checkout: restored });
+    const r = await w.git.restoreWip({ remote: w.remote, ref: REF, gitDir: join(w.dir, "restored.git"), checkout: restored, baseFrom: w.shared });
     assert.equal(r.commitId, pushed.commitId);
     assert.equal(r.base, await w.git.baseOf(w.where.gitDir));
+    assert.equal(r.baseFound, true);
     const list = async (dir: string): Promise<string[]> => (await readdir(dir, { recursive: true, withFileTypes: true })).filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name).slice(dir.length + 1).split("\\").join("/")).sort();
     assert.deepEqual(await list(restored), ["README.md", "added.txt", "src/a.ts"]);
     assert.equal(await readFile(join(restored, "src", "a.ts"), "utf8"), "export const a = 2;\r\n");
@@ -166,7 +167,7 @@ test("a restore from the branch matches what the last successful push held, with
     assert.deepEqual(status.entries.map((e) => e.path).sort(), ["added.txt", "src/a.ts", "src/b.ts"], "the work is the difference from the base, as it was");
     // A restore into a used folder, and of a branch that is not a work-in-progress commit, refuse.
     await assert.rejects(w.git.restoreWip({ remote: w.remote, ref: REF, gitDir: join(w.dir, "again.git"), checkout: restored }), /must be empty/);
-    sh(w.remote, "update-ref", "refs/heads/nn-wip/prj-one/plain", pushed.base);
+    sh(w.remote, "update-ref", "refs/heads/nn-wip/prj-one/plain", sh(w.remote, "commit-tree", "-m", "a plain commit", sh(w.remote, "rev-parse", `${pushed.commitId}^{tree}`)));
     await assert.rejects(w.git.restoreWip({ remote: w.remote, ref: "refs/heads/nn-wip/prj-one/plain", gitDir: join(w.dir, "plain.git"), checkout: join(w.dir, "plain") }), /does not hold a NimbleNewt work-in-progress commit|could not be fetched/);
   } finally { await w.done(); }
 });
@@ -188,5 +189,50 @@ test("the host asks for a backup by task: a task it does not hold, a refused bra
     assert.equal((b as { detail: Record<string, unknown> }).detail["unchanged"], true);
     const down = await host.backup({ ...call, remote: join(w.dir, "gone.git") });
     assert.equal(down.ok, false);
+  } finally { await w.done(); }
+});
+
+test("the branch carries only scanned snapshots: the first backup has no parent, so a committed file the scan names never reaches the remote through the project's history (P02b review)", { skip }, async () => {
+  const w = await world();
+  try {
+    // A file holding the secret is in the project's own committed history (the base), and the agent leaves it as it is.
+    await writeFile(join(w.shared, "committed-secret.txt"), `key ${SECRET_WORD}\n`);
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    const dir2 = join(w.dir, "c2");
+    const where = { gitDir: join(dir2, "task.git"), checkout: join(dir2, "checkout") };
+    await w.git.createCheckout({ shared: w.shared, commit: await w.git.head(w.shared), gitDir: where.gitDir, checkout: where.checkout });
+    await writeFile(join(where.checkout, "work.txt"), "w\n");
+    const r = await w.ask({ gitDir: where.gitDir, checkout: where.checkout });
+    assert.deepEqual(r.blocked.map((b) => b.path), ["committed-secret.txt"]);
+    assert.equal(sh(w.remote, "rev-list", "--count", REF), "1", "one commit, with no parent: the project's history was not pushed");
+    const objects = sh(w.remote, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)").split("\n");
+    assert.ok(!objects.some((l) => l.endsWith(" commit") && l.split(" ")[0] !== r.commitId), "no commit but the backup is on the remote");
+    for (const id of objects.filter((l) => l.endsWith(" blob")).map((l) => l.split(" ")[0]!)) assert.ok(!execFileSync("git", ["--git-dir", w.remote, "cat-file", "blob", id]).toString("utf8").includes(SECRET_WORD), "no blob on the remote holds the secret");
+    // The next backup builds on the first, never on the project's head.
+    await writeFile(join(where.checkout, "work2.txt"), "w2\n");
+    const second = await w.ask({ gitDir: where.gitDir, checkout: where.checkout });
+    assert.equal(sh(w.remote, "rev-parse", `${REF}^`), r.commitId);
+    assert.equal(sh(w.remote, "rev-list", "--count", REF), "2");
+    // A restore without the project's repository still brings every file back; the snapshot is then its own base.
+    const bare = await w.git.restoreWip({ remote: w.remote, ref: REF, gitDir: join(w.dir, "nobase.git"), checkout: join(w.dir, "nobase") });
+    assert.equal(bare.commitId, second.commitId);
+    assert.equal(bare.baseFound, false);
+    assert.equal(bare.base, second.commitId);
+    assert.equal(await readFile(join(w.dir, "nobase", "work2.txt"), "utf8"), "w2\n");
+    assert.deepEqual((await w.git.status({ gitDir: join(w.dir, "nobase.git"), checkout: join(w.dir, "nobase") })).entries, []);
+  } finally { await w.done(); }
+});
+
+test("a restore refuses a branch whose tree holds a link entry, which a backup never makes (P02b review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const link = execFileSync("git", ["--git-dir", w.remote, "hash-object", "-w", "--stdin"], { input: "/etc/passwd" }).toString().trim();
+    const tree = execFileSync("git", ["--git-dir", w.remote, "mktree"], { input: `120000 blob ${link}\tpointer\n` }).toString().trim();
+    const base = "0".repeat(39) + "1";
+    const commit = execFileSync("git", ["--git-dir", w.remote, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-m", `x\n\nNimbleNewt-Base: ${base}\nNimbleNewt-WIP: unreviewed\n`]).toString().trim();
+    sh(w.remote, "update-ref", REF, commit);
+    const target = join(w.dir, "linked");
+    await assert.rejects(w.git.restoreWip({ remote: w.remote, ref: REF, gitDir: join(w.dir, "linked.git"), checkout: target }), /link or a submodule/);
+    assert.deepEqual(await readdir(target), [], "nothing was written into the checkout");
   } finally { await w.done(); }
 });
