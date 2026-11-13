@@ -635,3 +635,24 @@ test("reapply: when the merged content of a file cannot be written whole, the ag
     assert.ok(text.includes("mine two") && text.includes("landing fifteen"));
   } finally { await w.done(); }
 });
+
+test("reapply: the agent's version is put back through the file the refresh opened, even when the path can no longer be opened for writing (CI repair round 12, Windows)", { skip: skip || (typeof process.getuid === "function" && process.getuid() === 0 && "root ignores the read-only mode this test relies on") }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.shared, "doc.txt"), lines(20)); sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "doc");
+    const start = await w.git.head(w.shared);
+    const dir = join(w.dir, "c3"); const gd = join(w.dir, "t3.git");
+    await w.git.createCheckout({ shared: w.shared, commit: start, gitDir: gd, checkout: dir });
+    const mine = lines(20, [2, "mine two"]);
+    await writeFile(join(dir, "doc.txt"), mine);
+    const next = await advance(w, { "doc.txt": lines(20, [15, "landing fifteen"]) });
+    const lose = async (): Promise<void> => { for (const e of await readdir(gd)) if (e.startsWith("nn-reapply-")) for (const f of await readdir(join(gd, e))) await rm(join(gd, e, f)); };
+    // Once the refresh has the file open, the path cannot be opened for writing again (as on the Windows runner, where putting the agent's version back that way failed).
+    const lockPath = async (absolute: string): Promise<void> => { await chmod(absolute, 0o444); };
+    try {
+      await assert.rejects(() => w.git.reapply({ shared: w.shared, commit: next, gitDir: gd, checkout: dir, hooks: { beforeOpen: lose, afterOpen: lockPath } }),
+        (e: unknown) => { assert.ok(e instanceof WorkspaceError); assert.match(e.message, /your version of it was put back/); return true; });
+    } finally { await chmod(join(dir, "doc.txt"), 0o644); }
+    assert.equal(await readFile(join(dir, "doc.txt"), "utf8"), mine, "the agent's work is whole");
+  } finally { await w.done(); }
+});

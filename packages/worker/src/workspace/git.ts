@@ -176,7 +176,7 @@ export class GitBridge {
    * this call's markers for the same landing commit (a retry) is not merged again. Files are written without following a link and checked against what was resolved. Afterwards the base is `commit`
    * and what the checkout holds is the agent's work on top of it. When the base already is `commit` nothing at all is done (the agent's own commits stay). Returns the files by outcome.
    */
-  async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void> } }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
+  async reapply(options: { shared: string; commit: string; gitDir: string; checkout: string; hooks?: { beforeOpen?: (absolute: string) => Promise<void>; /** Tests only: once a file is open for writing and checked, just before it is cut. */ afterOpen?: (absolute: string) => Promise<void> } }): Promise<{ base: string; previous: string; unchanged: boolean; kept: string[]; taken: string[]; merged: string[]; conflicts: { path: string; kind: "overlap" | "deleted-here" | "deleted-there" | "binary" | "both-added" }[] }> {
     if (!COMMIT.test(options.commit)) throw new WorkspaceError("invalid_path", "a refresh goes to a full commit ID");
     const previous = await this.#base(options.gitDir);
     const sharedGit = await this.#sharedGitDir(options.shared);
@@ -258,7 +258,6 @@ export class GitBridge {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new WorkspaceError("stale", changedWhile(s.path, true));
           throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be opened for writing`);
         }
-        let streamed = false;
         try {
           const opened = await handle.stat();
           const now = await lstat(safe.absolute).catch(() => undefined);
@@ -266,17 +265,25 @@ export class GitBridge {
           if (now === undefined || !now.isFile() || !sameFile(opened, now) || opened.nlink > 1 || parent !== safe.parent || !(await openedAt(handle, safe.absolute))) throw new WorkspaceError("link_refused", `${JSON.stringify(s.path.slice(0, 80))} was swapped while the refresh ran; it was not written`, { tamper: true });
           // The opened file must still be the one looked at before the agent's work was read (same file, size and times): otherwise the agent wrote it meanwhile and it is not overwritten.
           if (!absent && stamp(await handle.stat({ bigint: true })) !== seen.get(s.path)) throw new WorkspaceError("stale", changedWhile(s.path, true));
+          await options.hooks?.afterOpen?.(safe.absolute);
           await handle.truncate(0);
           if (s.mode !== undefined) await handle.chmod(s.mode);
-          streamed = true; // the stream closes the handle
-          try { await pipeline(createReadStream(s.source), handle.createWriteStream({ start: 0 })); } catch (error) {
+          // Copied through this handle in chunks (it stays this function's), so a failed write is undone through it too.
+          try { await copyInto(s.source, handle); } catch (error) {
             // A merged file holds the agent's work: when its new content could not be written whole (a full disk, a read error), the agent's version is put back, never left cut short.
+            // It is written back through the handle that cut the file, not by opening the path again: the same file for certain, and on Windows that second open failed (CI repair round 12:
+            // "could NOT be put back"), which left the agent's file cut short.
             if (s.prior === undefined) throw error;
             let back = false;
-            try { const again = await open(safe.absolute, constants.O_WRONLY | constants.O_TRUNC | NOFOLLOW); try { await again.writeFile(s.prior); back = true; } finally { await again.close().catch(() => undefined); } } catch { back = false; }
+            try {
+              await handle.truncate(0);
+              let at = 0;
+              while (at < s.prior.length) { const { bytesWritten } = await handle.write(s.prior, at, s.prior.length - at, at); if (bytesWritten <= 0) break; at += bytesWritten; }
+              back = at === s.prior.length;
+            } catch { back = false; }
             throw new WorkspaceError("unavailable", `${JSON.stringify(s.path.slice(0, 80))} could not be written; ${back ? "your version of it was put back" : "your version of it could NOT be put back, so the file may be cut short"} and the refresh stopped there (ask again)`, { cause: error });
           }
-        } finally { if (!streamed) await handle.close().catch(() => undefined); }
+        } finally { await handle.close().catch(() => undefined); }
       }
     } finally { await rm(stage, { recursive: true, force: true }); }
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
@@ -803,3 +810,17 @@ export class GitBridge {
 }
 
 void mkdtemp; void tmpdir; void resolve; void readFile;
+
+/** Copies `source` into the open `target` from its start, in chunks (a taken file can be large), through the handle only. */
+async function copyInto(source: string, target: import("node:fs/promises").FileHandle): Promise<void> {
+  const from = await open(source, "r");
+  try {
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    let at = 0;
+    for (;;) {
+      const { bytesRead } = await from.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      for (let off = 0; off < bytesRead;) { const { bytesWritten } = await target.write(chunk, off, bytesRead - off, at); if (bytesWritten <= 0) throw new Error("the file took no more bytes"); off += bytesWritten; at += bytesWritten; }
+    }
+  } finally { await from.close().catch(() => undefined); }
+}
