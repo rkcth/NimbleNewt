@@ -704,7 +704,9 @@
           "bd04d753",
           "9980bec8"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "Database transfer targets come entirely from the configuration (PostgreSQL address as a secret reference, SQLite path, a name each); a PostgreSQL target reports free room read from the server and empties only a schema this controller created; the Pi conversation stores are checked against the recovery points' checkpoints; the address and password never appear in chat, logs, the journal or the state folder (an integration test starts the controller from a configuration file and moves the database from chat). Left: the launcher that reads an installation's configuration and secret store is card U14; free room is the owner's cap minus the server's database size because PostgreSQL gives no portable free-disk reading; installation.dataDir is not required to be absolute by the configuration. Green exhaustive run pending (to be added to ci_runs)."
@@ -720,12 +722,26 @@
       ],
       "deliverable": "Split from F04e (2026-10-31): after the switch the controller waits for the host to restart it (no automatic restart); an apply_proposal inside a chat message (not applyProposal) records its turn in the fenced database and fails with stale_epoch; a failed copy starts over; the journal and authority file carry no integrity mark; a PostgreSQL controller without a data directory cannot run transfers; from the third review: the holder check and the epoch take are separate steps (take the epoch inside the state lock or with expectedEpoch from the row the check read), writes that bump neither the audit nor the delivery counter are invisible to the rollback check, a failed take-back after a late write leaves a half-settled transfer, the state lock is held across slow start work, and there is no owner-facing wipe of a pending or failed destination",
       "acceptance_and_verification": "The host restarts onto the new database by itself when it opts in; the message path reports the move as applied; an interrupted copy resumes or is cleaned without the owner emptying the destination; the authority file and journal are rejected when changed by anything else; transfers are available without a data directory by a configured state folder",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6e18931e",
+          "ac53bd2e",
+          "39690cef",
+          "8f62a2f1"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "After a database move or rollback the controller asks its host to restart it when the host opts in (the controller entry under the release launcher exits 75 and is started again); the owner turns that off and on in chat. The restarted entry follows the integrity-checked authority file to the configured destination with the configuration unchanged, and refuses a destination that is missing or empty. A move applied from a chat message is reported as applied, and the same message or command sent again is answered from the journal without moving anything again. A copy left by an interrupted move is emptied by the next move, or by the owner's wipe from chat, without the owner emptying it by hand. The journal and authority file carry an HMAC mark, and a changed file, a stripped mark or a lost key is refused. Transfers run from a configured state folder with no data directory, also from a PostgreSQL controller. Left: the integrity key sits beside the files, so it stops accidents and casual edits but not someone who can rewrite the whole folder (a file with both its mark and the key removed reads as a file from before marks existed, and an old folder restored whole is accepted); a half-written copy is copied again from a fresh snapshot, not resumed; a PostgreSQL leftover schema that someone else made is not dropped; the take-back of a failed fence in a rollback is card F04n; the restart test runs both starts of the entry in one process (the launcher's child-process restart is tested under K02a)."
+      }
     },
     {
       "id": "F04n",
@@ -2215,7 +2231,9 @@
           "4eafb11e",
           "9517bae8"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "A standing grant lapses only after it goes unused for its idle window and each use renews it (written when the recorded use is older than min(1 day, window/24)); explicit end dates and grants stored before this change behave as before; chat grants have no cap unless grants.maxDays is set; the owner gets one notice per lapsed grant and a task stalled by a lapsed right names it in its blocker; revocation is never blocked by a use; the A09 maintenance auto-approval counts as a use. Left: being listed as an available reviewer or decider does not count as a use; the running controller's lapse loop into the owner's inbox is not tested end to end; no Windows run. Green exhaustive run pending (to be added to ci_runs)."
@@ -2469,7 +2487,9 @@
           "bbda40ea",
           "74b8f712"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The controller watches each attempt's starting size (context/start-size.ts): one record per task with a point per attempt, a trend alert after a run of rising hand-offs and a warning past a share of the startup limit, both raised once, retried until the owner is told, and cleared when the condition ends; owner-set validated thresholds; state API reads and a start_size status view reachable by free-form chat; the task status shows a warning line. The watch never changes a decision and waits at most 2 seconds on the first call. Left: a remote first call's size is the controller's estimate; the alert goes to the owner and the task status, not into the running agent's context; no installation-wide list of open alerts beyond notifications. Green exhaustive run pending (to be added to ci_runs)."
@@ -2532,7 +2552,9 @@
           "6ac30f51",
           "89469da7"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The hand-off package digests a completed-work section of more than 8 entries (lifecycle/handoff-cut.ts digestSection, used by HandoffService collect): the newest 8 (always including the newest entry of each kind) and owner-marked older entries stay whole while they fit, older entries are counted by kind on the C07j cut marker, and the whole section is archived and read through the existing hand-off archive reads. The 50-hand-off size check (last 10 within 5 percent of the first 10, measured 4.2 percent, steady from hop 2) passes on every backend and its four todos are gone; a property test over 3000 random sections checks shown plus archived equals the original. Left: the digest is a count and a pointer, not a written summary (the controller's summariser is still unused); continuation decisions are bare record IDs so open and resolved cannot be told apart; only completedWork is digested. Green exhaustive run pending (to be added to ci_runs)."
@@ -2590,7 +2612,9 @@
           "834c4470",
           "9b0ff57a"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "An attempt's first call names the hand-off package the task came with, the controller's note of the attempt before it and the task's open blockers, in one bounded paragraph before the route view (dispatch/handoff-brief.ts; agent text quoted). A new agent-side operation context.handoff.read gives the agent the note it is pointed at (gated by attempt.work on the note's task; returns only id, taskId, attemptId, source, endedBecause, text). Best-effort: a failed read is reported and never stops the attempt. Left: a blocker on an effect or attempt of the task is not named; the paragraph can point at a package a recipient who has since lost the task cannot read. Green exhaustive run pending (to be added to ci_runs)."
@@ -2618,7 +2642,9 @@
           "a6919e37",
           "6d866474"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "A route's window has an order: the host's figure, then the routing table's contextTokens, then a refusal (one open context_overflow blocker naming the route and both places the window is set; retryable false, no compaction spent). Only a positive safe integer is a window, on both the first-call guards and the route-move rebuild. A stored conversation is judged before it is resumed; a checkpoint that does not say its size starts fresh with a visible note. Left: a refused resume also drops the turn counter; a transient routing-table read error drops the stored conversation (it starts from the continuation record); tool-output limits still come from the host map only. Green exhaustive run pending (to be added to ci_runs)."
@@ -2649,7 +2675,9 @@
           "7dfd5fc3",
           "81ec1f9a"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The controller judges a remote host's first call and stored conversation before the order is offered (RemoteWorkerHost judge; judgeResume shared with the local worker; the window order host figure, routing table contextTokens, then a refusal with a context_overflow blocker). A refused order is never offered and the host never sees its credential; an oversized or unsized stored conversation is removed and the agent is told it starts fresh. Breaking for embedders: a remote host with no window on a route the routing table does not size is now refused (getting-started documents it). Left: the restart of a handle that already holds the attempt is not judged; remote hosts report no provider input count so the estimate is a lower bound that never calibrates; a previous host's stated conversation size is trusted. Green exhaustive run pending (to be added to ci_runs)."
@@ -2682,7 +2710,9 @@
           "ebc53d47",
           "1b95c2d2"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "A hand-off note or parked-call verdict note that does not fit is cut by one rule (context/budget.ts cutNote): the head lines stay, the newest lines are kept, the marker says how many lines and characters were left out and where the whole text is kept, cuts never split a surrogate pair, agent text is quoted on one line and credentials are removed (a private key block across all its lines). The whole text of a cut hand-off note is archived before the note is stored (ctx-note-archive; capped at 100k characters, and a note over the cap says plainly that the rest cannot be read) and read by the new context.note-archive.read (attempt.work on the note's task). An attempt woken for many parked calls is told how every one was decided (20 verdicts fit). Left: no handoffFacts producer is wired in production, so the cut path is reached only in tests; no retention rule for archives; the parked-verdict note names no archive. Green exhaustive run pending (to be added to ci_runs)."
@@ -2716,7 +2746,9 @@
           "5d9d286d",
           "9b60d4c4"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The acceptance's second branch is taken and recorded (implementation notes, C07q ASSUMPTION): the model process's own compaction is kept, because the conversation lives in the sandbox and the controller's summariser has no stored records to cite, and the owner's pinned decisions are given to it (compaction.keep, from decisions.controllerContext, each cut to 200 characters with its ID and retrievable whole); the process's compactions are reported back and join the controller's compaction chain. The lineage is bounded: a compaction record lists its newest 50 and folds the rest into a count, a chained sha256 digest and a reference (earlierLineage); a capture takes up to 10,000 IDs, lists the newest 200 and folds the rest. A test on the real decision, retrieval, enforcement and continuation services on all four backends runs 250 compactions with 12 pinned decisions and the capture is accepted with every decision present or retrievable. Left: the controller's summariser (compact, registerCompressor) still has no production caller; decisions given to the process are a snapshot from its start; no state-API read of the lineage; not run with a real Pi process compacting. Green exhaustive run pending (to be added to ci_runs)."
@@ -3090,12 +3122,25 @@
       ],
       "deliverable": "Split from L05c (2026-10-31): the tool bridge admits a call as an effect through the generation service (so a partial or withdrawn call can never start an effect by that route either); the remote protocol's stream tap is wired into a remote worker host that runs Pi in its sandbox; a tool call ID the Pi extension rewrote (repeated or unsafe IDs) is matched to its recorded call; a remote relay's waits on the store are reported to stall detection; a remote worker that never opens a stream is detected (its tool calls are then unrecorded, and the bridge cannot bind a call's tool name and arguments to the bridge operation it asks for)",
       "acceptance_and_verification": "A remote worker process in its sandbox has a late reply held and a corrected generation's tool call refused at the bridge, shown with a real worker process; a rewritten call ID is checked against its recorded generation",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a43744d2",
+          "67aabc9c",
+          "1f393171"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A write sent to the tool bridge is admitted through the generation service only while its call is complete in the task's current generation, and it is settled once on the effect ledger. The call's name and arguments must be the ones the model wrote. Call IDs the Pi extension rewrote (h: digests, d: repeat numbers) are matched to their recorded call. Remote model calls report their start, output and end to stall detection, and a remote worker that never opens a stream is noticed (the owner can have its calls refused). The remote worker program (scripts/remote-worker.mjs) runs Pi in bubblewrap, records every model call through the protocol's stream tap using the owner's batching figures, and sends tool calls to the controller's bridge through a protocol route. Tests with the real Pi process in its sandbox show a late reply held back and never reaching Pi, and a corrected generation's call under a rewritten ID refused at the bridge with no effect. Left: the models are scripted (no run against a real model); in those two tests the bridge call reaches the controller in the same process, while the protocol route is shown with the real program on an ordinary run and on a composed controller for the refusal; the remote host is Linux and bubblewrap only; requireStream is off by default; d: matching stops at 1,000 uses; checkCall reads up to 20 generations per call; a controller restart loses open stream calls; tool scripts run on the controller."
+      }
     },
     {
       "id": "L01",
@@ -4455,7 +4500,9 @@
           "722669ec",
           "4af7d09a"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The dispatch contract travels sealed with a remote work order (remote/contract.ts, contract-wire.ts); the worker confirms or refuses it and the controller checks the confirmation itself, refusing begin, usage, checkpoints, heartbeats and a completed result until then, so a remote attempt goes through the same admission, credential, tool gate and S05 ledger path as a local one; effect calls from remote workers run on the controller's own bridges once, keyed by call ID (delayed, duplicated and dropped messages tested), a lost link leaves the effect to the lease-loss reconcile and fences the old placement, and the gateway acknowledgement path is used over the wire after a decision change. The product remote worker program that runs Pi in its sandbox and confirms the contract came later with L05d/L05e (scripts/remote-worker.mjs, merge 67aabc9c). Left: effect.target is not judged by the policy (real bridges are T-card work); no production effect bridge is composed; 64 KiB effect input cap; Linux-only remote host program. Green exhaustive run pending (to be added to ci_runs)."
@@ -6556,7 +6603,9 @@
           "d6f3d9cb",
           "03717af7"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The controller-watched Urgent triggers (notifications/urgent.ts, UrgentWatch): no good backup within backupMaxAgeHours, an active enrolled host silent for hostDownAfterMinutes, repeated policy denials of one agent over deniedThreshold in deniedWindowMinutes (off until set), and security events reported by hosts and services through the state API command security.report. Only the controller raises Urgent (interrupt and label are controller-only); an Urgent item is sent at once on every channel and in quiet hours unless urgentInterruptsQuietHours is false; each condition is told once and closes when cleared (new backup, host heard again); single routine denials are not Urgent; every limit is owner-only and chat-settable through notifications.configure with expectedRevision (a number turns it on, null off); what leaves the installation holds names and counts only. Left (U11d): the detectors that call security.report, critical path, stopped work, the controller-down watchdog. Green exhaustive run pending (to be added to ci_runs)."
@@ -8034,7 +8083,9 @@
           "b2f484c0",
           "3750d6a6"
         ],
-        "ci_runs": [],
+        "ci_runs": [
+          "43455917751"
+        ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
         "note": "The MCP conversation door as amended by the owner on 2026-11-05 (no event stream, no prompts): a stock MCP SDK client over streamable HTTP connects, lists the tools, holds a two-party conversation, reads the thread as a resource, and a second connection after the first closed reads on from the cursor (the door keeps no session or history per connection); the owner switches conversation.mcp.enabled off by chat through the real ModelInterpreter and the next request is refused 404, on again 200; a stdio bridge (stdio-main.js) gives a local client the door with its own credential from NIMBLENEWT_TOKEN, tested with the stock SDK client over StdioClientTransport on all four backends. Left: no run against a real model checked that natural wording reaches the switch (U03b); the stdio bridge keeps no session, cuts a reply after 120 s and takes no credential file. Green exhaustive run pending (to be added to ci_runs)."

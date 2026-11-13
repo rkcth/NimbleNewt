@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **255 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **257 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,10 +106,10 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 17 of 19 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 94% | 18 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 34% | 8 of 23 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
-| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 25 of 29 |
+| Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 26 of 29 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 17 of 19</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 18 of 19</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -164,7 +164,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F04k** · P24 · Pass workspace roots to the startup filesystem check _(needs F04i, U01)_
 - [x] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [x] **F04l** · P34 · Read database transfer targets from configuration and check Pi conversation stores _(needs F04e, F02)_
-- [ ] **F04m** · P34 · Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal _(needs F04e)_
+- [x] **F04m** · P34 · Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal _(needs F04e)_
 - [ ] **F04n** · P35 · Make a failed fence take-back in a database rollback leave the new database startable _(needs F04m)_
 
 </details>
@@ -220,7 +220,7 @@ Project and task records, assignments, durable delivery, the effect ledger and a
 </details>
 
 <details>
-<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 25 of 29</summary>
+<summary><strong>Pause, suspend and resume</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 26 of 29</summary>
 
 Pause, suspend, stop, release and checked resume, interrupting a model mid-generation, the remote watchdog, and shutdown and reboot handling.
 
@@ -230,7 +230,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 - [x] **L05b** · P29 · Feed the model stream into revision-bound generation _(needs L05, H12)_
 - [x] **L05c** · P30 · Feed remote workers' model streams and check tool calls against the recorded generation _(needs L05b, H02)_
 - [x] **L02** · P31 · Implement Suspend and graceful Stop _(needs L01, T07)_
-- [ ] **L05d** · P31 · Admit bridge calls as effects and show remote streams with a sandboxed remote worker _(needs L05c)_
+- [x] **L05d** · P31 · Admit bridge calls as effects and show remote streams with a sandboxed remote worker _(needs L05c)_
 - [x] **H08** · P32 · Implement remote disconnect watchdog and hard stop _(needs H02, L02)_
 - [x] **L03** · P32 · Implement prepared release and reassignment _(needs L02, S02, S05)_
 - [x] **L04** · P32 · Implement checked resume and evidence invalidation _(needs C03, L02, A02)_

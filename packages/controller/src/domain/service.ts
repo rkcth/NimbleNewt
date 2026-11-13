@@ -1,3 +1,4 @@
+import { liveAssignments } from "../retirement/gather.js";
 import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { DomainError } from "./errors.js";
 import { taskEventEntry, taskEventId } from "./events.js";
@@ -128,6 +129,12 @@ export class ProjectService {
             for (const [i, r] of added.entries()) if (known.has(r.id)) throw new DomainError("invalid_command", `addRepositories[${i}].id: the project already has a repository ${r.id}`, { field: `addRepositories[${i}].id` });
             repositories = [...repositories, ...added];
             if (repositories.length > LIMITS.repositories) throw new DomainError("invalid_command", `a project has at most ${LIMITS.repositories} repositories`, { field: "addRepositories" });
+          }
+          // Card P06: a project is not archived while one of its tasks is assigned and unfinished (that work would be stranded). Release or transfer it first. A look that cannot finish refuses too.
+          if (state === "archived" && body.state !== "archived") {
+            const live = await liveAssignments(this.#runner, (_owner, task) => task.projectId === id);
+            if (!live.complete) throw new DomainError("invalid_command", "state: the assignments could not all be read, so the project is not archived on a guess", { field: "state" });
+            if (live.items.length > 0) throw new DomainError("invalid_command", `state: ${live.items.length} task(s) of this project are assigned and unfinished (${live.items.slice(0, 3).map((b) => b.id).join(", ")}${live.items.length > 3 ? ", ..." : ""}); release or transfer them first`, { field: "state" });
           }
           const next: ProjectBody = { ...body, ...defined({ name, goal, state, versionControl: vcs }), repositories };
           return { ref: { kind: "project", id }, creates: false, changes: [{ type: "update", ref: { kind: "project", id }, expectedRevision: expected, body: next as unknown as JsonObject }], detail: defined({ name, state, repositoriesAdded: added?.length, versionControl: vcs?.host }) };

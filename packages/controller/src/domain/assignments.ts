@@ -116,7 +116,11 @@ export class AssignmentService {
       return {
         payload: defined({ taskId, expectedRevision: expected, owner: who as unknown as JsonObject, reason }),
         build: async (): Promise<Built> => {
-          await this.#openTask(taskId);
+          const open = await this.#openTask(taskId);
+          await this.#notRetired(who);
+          // Card P06: an archived project takes no new work (its tasks stay readable; restore the project first).
+          const project = await this.#runner.get("project", open.body.projectId);
+          if ((project?.body as { state?: string } | undefined)?.state === "archived") throw new DomainError("invalid_command", `task ${taskId} is in archived project ${open.body.projectId}; restore the project to assign its tasks`, { field: "taskId" });
           const ref: AggregateRef = { kind: "assignment", id: assignmentIdOf(taskId) };
           const current = await this.#runner.get("assignment", ref.id);
           if (current === undefined) {
@@ -148,6 +152,7 @@ export class AssignmentService {
         payload: defined({ taskId, expectedRevision: expected, to: to as unknown as JsonObject, reason }),
         build: async (): Promise<Built> => {
           await this.#openTask(taskId);
+          await this.#notRetired(to);
           const ref: AggregateRef = { kind: "assignment", id: assignmentIdOf(taskId) };
           const current = await this.#runner.existing("assignment", ref.id, expected);
           const body = current.body as unknown as AssignmentBody;
@@ -335,6 +340,14 @@ export class AssignmentService {
   }
 
   // ---- plumbing --------------------------------------------------------------------------------------------------------------
+
+  /** Card P06: a retired agent is given no work (its identity is disabled, so a task assigned to it would never be worked). The agent is named by its agent ID or its principal ID. */
+  async #notRetired(who: Owner): Promise<void> {
+    if (who.kind !== "agent") return;
+    const id = who.id.startsWith("agent:") ? who.id.slice("agent:".length) : who.id;
+    const agent = await this.#runner.get("agent", id);
+    if ((agent?.body as { state?: string } | undefined)?.state === "retired") throw new DomainError("invalid_command", `agent ${id} is retired; it cannot be given work`, { field: "owner" });
+  }
 
   async #openTask(taskId: string): Promise<{ body: TaskBody; revision: number }> {
     const task = await this.#runner.get("task", taskId);

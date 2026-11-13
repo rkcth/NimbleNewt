@@ -643,7 +643,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
@@ -1444,6 +1444,38 @@ export class ChatService {
     if (intent.op === "catalog.policy.change") {
       const standing = await this.#get(token, "catalog.policy.get", {});
       if (standing?.["source"] === "operator") notes.push(`The operator set this at startup (${String(standing["effective"])}); your setting is saved but does not apply until that startup option is removed.`);
+    }
+    // Retiring an agent or archiving a project (card P06): the agent is named by its name, and the confirmation is the digest of a preview made NOW (never the interpreter's), so the owner's yes is bound to what is shown.
+    // A plan that is blocked (live assignments, active responsibilities) is not proposed at all: the owner is told what to release or transfer first.
+    if (intent.op === "retirement.agent" || intent.op === "retirement.project") {
+      delete args["confirm"];
+      const agentOp = intent.op === "retirement.agent";
+      if (agentOp) {
+        const named = args["agentName"];
+        delete args["agentName"];
+        if (named !== undefined && args["agentId"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as agentId and as agentName; which one is meant has to be settled.");
+        if (args["agentId"] === undefined) {
+          if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "Which agent should be retired? Nothing in your message names one.");
+          const agents = await this.#listAll(token, "agent.list", { state: "active" });
+          const wanted = named.trim().toLowerCase();
+          const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+          const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+          if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent is called ${quotedText(named, 80)}` : `more than one agent fits ${quotedText(named, 80)}; say which`);
+          args["agentId"] = String(found[0]!["id"]);
+          labels[String(found[0]!["id"])] = String(found[0]!["friendlyName"]).slice(0, 80);
+        }
+      }
+      const subject = agentOp ? args["agentId"] : args["projectId"];
+      if (typeof subject !== "string") return refuse("invalid_command", agentOp ? "Which agent should be retired? Nothing in your message names one." : "Which project should be archived? Nothing in your message names one.");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "retirement.preview", args: { kind: agentOp ? "agent" : "project", id: subject } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      const item = found.result["item"] as { digest?: unknown; blockers?: unknown[] };
+      if (typeof item.digest !== "string") return refuse("invalid_command", "the retirement could not be previewed just now");
+      const shown = (found.result["shown"] as string[] | undefined)?.[0] ?? "see the preview";
+      if ((item.blockers ?? []).length > 0) return refuse("invalid_transition", shown);
+      args["confirm"] = item.digest;
+      if (args["reason"] === undefined) args["reason"] = "requested by the owner in chat";
+      fillNotes.push(`What this would do, worked out just now: ${shown}`);
     }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {

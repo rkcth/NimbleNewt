@@ -179,6 +179,9 @@ for (const backend of backends) {
     await refuses("invalid_command", () => capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, computeMs: 5001, decisionId: "d", agreedBy: "policy:spend" }), (e) => assert.equal(e.field, "computeMs"));
     await capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1000, computeMs: 5000, decisionId: "d", agreedBy: "policy:spend" });
     await capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: big, decisionId: "d", agreedBy: "owner:agreed" });
+    // The steward agent's allowance is held to the same ceiling as the policy's (card M02h), and the steward is a named kind of agreement.
+    await refuses("invalid_command", () => capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1001, decisionId: "d", agreedBy: "steward:spend" }), (e) => assert.equal(e.field, "costMicros"));
+    await capped.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1000, decisionId: "d", agreedBy: "steward:spend" });
     const broken = c.withLimits(async () => { throw new Error("setting unreadable"); });
     await assert.rejects(() => broken.raiseAgreed(controller, { commandId: cid("ag"), taskId: c.root, costMicros: 1, decisionId: "d", agreedBy: "policy:spend" }), /unreadable/);
   });
