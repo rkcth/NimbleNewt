@@ -87,6 +87,8 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
   /** Scan limits for `list`, injectable so a test can shrink them (as `logScan` does for meetings). Defaults: 200 rows a page, 10 pages a call. */
   readonly listScan?: { readonly pageSize: number; readonly reads: number };
+  /** Told once a submission is recorded (card U09b), so the task's activity shows it and its replay can link to the diff or the review comment. Best effort and repeatable (keyed by the submission); a failure changes nothing. */
+  readonly onRecorded?: (event: { readonly submissionId: string; readonly taskId: string; readonly kind: SubmissionKind; readonly role: string; readonly submittedBy: string; readonly verdict?: string; readonly decision?: string }) => Promise<void>;
 }
 
 export interface RecordSubmission {
@@ -136,11 +138,12 @@ export class SubmissionService {
   readonly #attemptOf: AttemptOf | undefined;
   readonly #reviewers: SubmissionOptions["reviewersAvailableIn"];
   readonly #assigned: SubmissionOptions["reviewAssignments"];
+  readonly #onRecorded: SubmissionOptions["onRecorded"];
   readonly #scan: { readonly pageSize: number; readonly reads: number };
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
-    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments;
+    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
   }
 
@@ -235,6 +238,7 @@ export class SubmissionService {
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { taskId, kind, role } };
       },
     }));
+    if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
     return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
 

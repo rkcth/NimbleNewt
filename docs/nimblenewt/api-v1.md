@@ -847,6 +847,27 @@ Arguments:
 
 Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note, scanLimited? }`; a step on a side line also links the owner's instructions on the main line.
 
+#### `activity.replay.links`
+
+The links of one replay step (what it cites, the evidence written for it, what led to it) resolved to the records themselves where you may read them: a message, the diff of a code submission (its base, tree and patch), a review or QA comment, an approval, an artifact, a side line. Each is read by its own rules for you and must belong to this task; one you may not read says so in the words used for one that is gone. A kind with no reader is shown as a reference. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+
+Result: `{ seq, items: [{ relation, kind, id, version?, seq?, note?, resolution: { state: readable | not-readable | no-reader, title?, lines?, untrusted?, note? } }], truncated }`; lines are the record's own words (an agent's or reviewer's text is marked untrusted), redacted and bounded.
+
+#### `activity.replay.simulation`
+
+Owner only: a recorded simulation by its ID.
+
+Arguments:
+
+- `id`: the simulation's ID
+
+Result: `{ id, simulation }`.
+
 #### `activity.replay.search`
 
 Finds steps of a task whose summary contains some words. Stored content is not searched. Same checks as reading the steps. Read only.
@@ -3689,16 +3710,40 @@ Appends a step to a task's activity record with the exact context it used. Sensi
 Arguments:
 
 - `taskId`: the task
-- `kind`: owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle or ownership
+- `kind`: owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle, ownership or submission
 - `summary`: one line
 - `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
 - `payload` (optional): { text, sensitive? } or { missing: true, reason }
-- `outcome` (optional): proposed, dispatched, confirmed or uncertain; leave out when not known
+- `outcome` (optional): proposed, dispatched, confirmed, failed (came back without taking effect) or uncertain; leave out when not known
 - `branch` (optional): the branch line the step belongs to (leave out for the main line)
 - `supersedes` (optional): the number of an earlier step this one replaces
 - `commandId`: required
 
 Result: `{ id, seq, replayed }`.
+
+#### `activity.replay.simulate`
+
+Owner only: a rerun of a replay, as a separate command in an isolated scope that has no tool, no model, no message port and no effect ledger. It walks the task's recorded steps from a step on and records what it would do again, every line labelled simulated; `failAt` injects a provider failure at that step so the later steps are not reached. Nothing is run, sent, spent or changed, and no real access is used. (A replay itself never reruns anything: activity.replay.rerun is refused.)
+
+Arguments:
+
+- `taskId`: the task
+- `from` (optional): the first step to walk (default 1)
+- `failAt` (optional): a step at which a provider failure is injected
+- `commandId`: required
+
+Result: `{ id, replayed, simulation: { label, scope, steps: [{ seq, kind, summary, would, recordedOutcome, simulatedOutcome, simulated }], truncated } }`.
+
+#### `activity.replay.rerun`
+
+Always refused: a replay does not rerun anything. Use activity.replay.simulate, a separate owner-only command that runs in an isolated scope and changes nothing.
+
+Arguments:
+
+- `taskId`: the task
+- `commandId`: required
+
+Result: a refusal that names activity.replay.simulate.
 
 #### `activity.replay.thinking`
 
@@ -3797,16 +3842,17 @@ Result: `{ id, replayed, explanation }`.
 
 #### `activity.correct`
 
-Appends a correction to a step. The step is never changed; the correction keeps who and when.
+Appends a correction to a step. The step is never changed; the correction keeps who and when. The owner can add `replaces: true` to say the step was wrong: the owner's word is then also recorded as a step on the same line that replaces it, so a replay shows the old step as replaced (kept for the record, no longer authoritative).
 
 Arguments:
 
 - `taskId`: the task
 - `seq`: the step
 - `note`: the correction
+- `replaces` (optional): owner only: true when the corrected step is wrong and this correction replaces it
 - `commandId`: required
 
-Result: `{ id, replayed }`.
+Result: `{ id, replayed, supersededBy? }`.
 
 #### `activity.unavailable`
 

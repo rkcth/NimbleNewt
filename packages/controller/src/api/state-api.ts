@@ -68,6 +68,7 @@ import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { ReplayService } from "../activity/replay.js";
 import type { ReplayLimitsService } from "../activity/replay-limits.js";
+import type { ReplaySimulationService } from "../activity/replay-simulation.js";
 import type { ThinkingStore } from "../context/thinking-store.js";
 import type { DeliverableService } from "../artifacts/deliverables.js";
 import type { ResumeCheckService } from "../continuation/resume.js";
@@ -213,7 +214,8 @@ export interface StateApiDeps {
   readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "retry" | "cancel" | "advance" | "get" | "sweep" | "approve" | "decline"> & Partial<Pick<ResumeCheckService, "forTask">>;
   readonly continuations?: ContinuationOps;
   readonly activity?: Pick<ActivityService, "record" | "explain" | "explainLater" | "correct" | "markUnavailable" | "steps" | "payload" | "explanations" | "explanationsPage" | "corrections" | "timeline">;
-  readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking">;
+  readonly replay?: Pick<ReplayService, "open" | "step" | "led" | "search" | "export" | "thinking" | "links" | "rerun">;
+  readonly replaySimulation?: Pick<ReplaySimulationService, "simulate" | "get">;
   readonly replayLimits?: Pick<ReplayLimitsService, "get" | "set">;
   readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
@@ -406,6 +408,7 @@ export class StateApi {
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
         ...(this.#deps.replay === undefined ? {} : { replay: this.#deps.replay }),
         ...(this.#deps.replayLimits === undefined ? {} : { replayLimits: this.#deps.replayLimits }),
+        ...(this.#deps.replaySimulation === undefined ? {} : { replaySimulation: this.#deps.replaySimulation }),
         ...(this.#deps.thinkingStore === undefined ? {} : { thinkingStore: this.#deps.thinkingStore }),
         ...(this.#deps.resumes === undefined ? {} : { resumes: this.#deps.resumes }),
         ...(this.#deps.continuations === undefined ? {} : { continuations: this.#deps.continuations }),
