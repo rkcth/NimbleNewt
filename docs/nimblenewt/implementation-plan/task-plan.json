@@ -9103,12 +9103,28 @@
       ],
       "deliverable": "Split from K06 (2026-10-31). Original text of the part: stored model thinking (C06b) is deleted 14 days after the task is done, the same as the default cleanup deadline (owner decision 2026-10-22); for conversations that are not tasks (chat) only the words actually said are kept as the durable log, and thinking is held only as long as the live conversation needs it to resume (owner decision 2026-10-22; the last clause is provisional, an AI session's gap-filler to confirm). Needs adapter support: the Pi conversation is append-only through the adapter and ThinkingService has a read-only source that is not wired, so thinking blocks cannot be rewritten or dropped yet. The retention setting thinkingDays (default 14, owner-only, chat-settable) already exists in K06.",
       "acceptance_and_verification": "Stored thinking is deleted at the cleanup deadline, a deletion is recorded, and a task cannot resume after its thinking is deleted without the provider-invalid handling of C06b; chat keeps the words said and drops thinking when the live conversation no longer needs it",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a997b2ff",
+          "b9ee1543",
+          "004c42a0",
+          "8cd45472",
+          "ac610e14",
+          "628077b0"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Stored model thinking of a done or cancelled task (final: no transition leads out) is removed thinkingDays (default 14) after it ended, by itself (thinkingAuto, on by default) or by a previewed, digest-confirmed retention.run: the controller's own copies keep a marker and a retention.expire audit, and the Pi conversation stores of its attempts, local and remote, are rewritten without thinking blocks (text, signature, encrypted payload), audited as thinking-store-days and tracked per attempt in a thinking-purge record; a running attempt's store is never touched. Whole blocks are removed, so the store still opens and a continued conversation sends the provider no thinking (tested with the real adapter). The chat model call keeps only the reply's words. retention.status and the chat retention view give the rule and the counts. Left: no live provider or real model run is exercised (real adapter on files, fake providers); backups keep old thinking until they are deleted, and a restore brings it back until the next run; a host that never answers keeps its attempts pending; reasoning a model writes inline in its reply text is kept as words; the status's cut-short count over 50,000 records is not exercised by a test."
+      }
     },
     {
       "id": "K06d",
@@ -9120,12 +9136,28 @@
       ],
       "deliverable": "Chat view of the retention status: disk and reserve, quota warnings, backups, recent deletions (split from T02c 2026-11-07: retention.status has no chat view, and the quota notice points to it with 'See retention.status.', which the owner cannot reach in chat). The owner asks in their own words and a status kind answers from the same service as retention.status, owner only, every line citing its records; the interpreter prompt lists the kind.",
       "acceptance_and_verification": "The owner can ask in chat how much room is left, which quotas are near their limit, which backups are kept and what retention deleted lately, and a non-owner gets nothing",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "fd7b9182",
+          "2320a718",
+          "1bf8310e",
+          "7f627402",
+          "ac610e14",
+          "628077b0"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The chat retention status kind answers from the same service call as retention.status, owner only (an agent or any other principal gets nothing): disk free room and the reserve, each quota class with its use and every scope at or over its warning level, the backups (count, untrusted, the keep counts, the latest by name and time), the last five deletions and retention runs and the stored-thinking rule and counts, counts and IDs only, every line citing a record; the interpreter prompt lists the kind from the one table. Left: free-word questions are tested through a scripted interpreter, not a live model; backups are told as a count and the latest, not a list of every backup (ASSUMPTION recorded); a backup directory on another disk is not reported; per-kind growth counts stay in the API only."
+      }
     },
     {
       "id": "K06b",
