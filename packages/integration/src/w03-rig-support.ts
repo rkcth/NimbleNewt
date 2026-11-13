@@ -59,7 +59,7 @@ async function model(steps: Step[]): Promise<{ server: Server; url: string; seen
   return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, seen, bodies };
 }
 
-export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string; /** More start-up options of the controller (card W10: the second agent's model client). */ readonly start?: Partial<Parameters<typeof startController>[0]> } = {}) {
+export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** Card M04h: set up the controller, the real local host and the owner and the project only (no agent, task or attempt); the test makes its own. */ readonly bare?: boolean; /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string; /** More start-up options of the controller (card W10: the second agent's model client). */ readonly start?: Partial<Parameters<typeof startController>[0]> } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn w03 ")));
   const shared = join(directory, "shared");
   mkdirSync(join(shared, "src"), { recursive: true });
@@ -115,7 +115,8 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
   });
   assert.ok(c.dispatch !== undefined, c.dispatchProblem);
   const s = c.services;
-  const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+  const ownerToken = (await s.principals.bootstrapOwner({ name: "rob" })).token;
+  const owner = await s.principals.authenticate(ownerToken);
   await s.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table: { ...ROUTING_TABLE, roles: { coordinator: "r-cloud", "safety-supervisor": "r-cloud" } } } as never);
   await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(owner, { commandId: "sp", expectedRevision: 0, profiles: EXEC_PROFILES } as never);
   await s.principals.enroll(owner, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
@@ -123,6 +124,8 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
   await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap", actor: owner.id, host: "host:w1", capacity: { cpus: 8, memoryMb: 16_384 } });
   await PolicyService.withEpoch(c.storage, c.epoch, s.grants).set(owner, { scope: "installation", commandId: "pol", profile: "autonomous" } as never);
   const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+  const close = async (): Promise<void> => { answer.server.closeAllConnections(); answer.server.close(); await c.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); };
+  if (options.bare === true) return { c, owner, ownerToken, project, ws, answer, local: local!, close, taskId: "", attemptId: "", run: async () => undefined, get: async () => undefined as never };
   await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: workGrants(project) });
   const taskId = (await s.projects.createTask({ commandId: "t1", actor: owner.id, projectId: project, title: "Fix the parser" })).id;
   await s.projects.transitionTask({ commandId: "r1", actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
@@ -130,10 +133,10 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
   const a = (await s.assignments.getAssignment(taskId))!;
   const attemptId = (await s.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: AGENT }, harness: "pi" })).id;
   return {
-    c, owner, project, taskId, attemptId, ws, answer,
+    c, owner, ownerToken, project, taskId, attemptId, ws, answer,
     run: async () => { await c.dispatch!.dispatcher.tick(); await c.dispatch!.dispatcher.idle(); },
     get: async () => (await c.dispatch!.dispatcher.get(c.dispatch!.principal, attemptId))!,
-    close: async () => { answer.server.closeAllConnections(); answer.server.close(); await c.close(); rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); },
+    close, local: local!,
   };
 }
 
