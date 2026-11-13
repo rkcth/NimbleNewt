@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.js";
-import { DISPATCH_KIND, type DispatchBody } from "../dispatch/model.js";
+import { DISPATCH_KIND, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, type DispatchBody, type TaskAttemptsBody } from "../dispatch/model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { BlockerBody } from "../domain/blockers.js";
 import { derivedId } from "../domain/ids.js";
@@ -229,6 +229,8 @@ interface Facts {
   readonly artifacts: Aggregate[];
   /** The project's improvement proposals (the briefs tell proposers of decisions they have not been told yet). */
   readonly improvements: Aggregate[];
+  /** The project's cancelled tasks (not in `tasks`): an attempt of one may have held a slot in the period, so the usage review still looks at them. */
+  readonly cancelled: string[];
   partial: boolean;
 }
 
@@ -868,9 +870,10 @@ export class StandupService {
 
   /** The records a brief and the review rest on, read once for the whole occurrence. Each scan is bounded; a cut scan marks everything built from it `partial`. */
   async #facts(projectId: string, since: string, until: string): Promise<Facts> {
-    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], improvements: [], partial: false };
+    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], improvements: [], cancelled: [], partial: false };
     await this.#scan("task", facts, async (a) => {
       const body = a.body as unknown as TaskBody;
+      if (body.projectId === projectId && body.state === "cancelled") facts.cancelled.push(a.id);
       if (body.projectId !== projectId || body.state === "cancelled" || body.state === "proposed") return;
       if (body.state === "done" && a.updatedAt <= since) { facts.tasks.push({ id: a.id, revision: a.revision, updatedAt: a.updatedAt, body, priority: 5, workClass: await this.#classOf(a.id) }); return; }
       const asg = await this.#assignments.getAssignment(a.id);
@@ -896,14 +899,16 @@ export class StandupService {
    * counted in the basis. A record whose oldest spans were let go and whose cut falls inside the period is counted on what it keeps and said to be. No measurable time in the period: nothing is measured and the
    * review counts tasks. A cut scan marks the review partial, as the other figures.
    */
-  async #slotUsage(projectId: string, since: string, until: string, facts: { partial: boolean }): Promise<{ pcShare: number; basis: string } | undefined> {
+  async #slotUsage(projectId: string, since: string, until: string, facts: Facts): Promise<{ pcShare: number; basis: string } | undefined> {
     const from = Date.parse(since), to = Date.parse(until);
     const sums = { P: 0, PC: 0 };
     const classes = new Map<string, "P" | "PC">();
     let attempts = 0, left = 0, trimmed = 0;
-    await this.#scan(DISPATCH_KIND, facts, async (a) => {
+    const counted = new Set<string>();
+    const count = async (a: Aggregate): Promise<void> => {
       const d = a.body as unknown as DispatchBody;
-      if (d.projectId !== projectId) return;
+      if (d.projectId !== projectId || counted.has(a.id)) return;
+      counted.add(a.id);
       let held = 0;
       if (Array.isArray(d.slotSpans)) {
         for (const span of d.slotSpans) {
@@ -927,7 +932,28 @@ export class StandupService {
       if (workClass === undefined) { workClass = await this.#classOf(d.taskId); classes.set(d.taskId, workClass); }
       sums[workClass] += held;
       attempts++;
-    });
+    };
+    // Each task's attempts are named in its own record (card W08, at most TASK_ATTEMPTS_LIMIT, newest last), so the review reads the project's tasks' attempts and not every dispatch record of the installation.
+    // A task that has worked (or was cancelled) but has no such record is from before it: those are found by one scan of the dispatch records, counted only for those tasks, so nothing is counted twice.
+    const old = new Set<string>();
+    const everyTask = [...facts.tasks.map((t) => ({ id: t.id, state: t.body.state })), ...facts.cancelled.map((id) => ({ id, state: "cancelled" as TaskState }))];
+    for (const t of everyTask) {
+      const rec = (await this.#runner.get(TASK_ATTEMPTS_KIND, t.id))?.body as unknown as TaskAttemptsBody | undefined;
+      if (rec === undefined) { if (t.state !== "ready") old.add(t.id); continue; }
+      let oldest: Aggregate | undefined;
+      for (const attemptId of rec.attempts) {
+        const got = await this.#runner.get(DISPATCH_KIND, derivedId("dpa", attemptId));
+        if (got === undefined) continue;
+        oldest ??= got;
+        await count(got);
+      }
+      // A full list has let older attempts go: when its oldest one is not clearly before the period, attempts inside the period may be missing, and the review says its figures may be low.
+      if (rec.attempts.length >= TASK_ATTEMPTS_LIMIT) {
+        const first = (oldest?.body as unknown as DispatchBody | undefined)?.startedAt;
+        if (oldest === undefined || typeof first !== "string" || !(Date.parse(first) <= from)) facts.partial = true;
+      }
+    }
+    if (old.size > 0) await this.#scan(DISPATCH_KIND, facts, async (a) => { if (old.has((a.body as unknown as DispatchBody).taskId)) await count(a); });
     const total = sums.P + sums.PC;
     if (total === 0) return undefined;
     const notes = [
