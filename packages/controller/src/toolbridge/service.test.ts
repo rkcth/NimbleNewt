@@ -997,6 +997,9 @@ for (const backend of backends) {
       out["note-named"] = await send("work.note", { kind: "did", text: "x", attemptId: "att-other" }, "wn0");
       out["note"] = await send("work.note", { kind: "did", text: "watered" }, "wn1");
       out["answer"] = await send("work.answer", { answers: ["north and south"] }, "wa1");
+      // Card H12p: the agent's own refresh takes no argument; the attempt is the one the request came through, never one it names.
+      out["refresh-named"] = await send("work.refresh", { attemptId: "att-other" }, "wr0");
+      out["refresh"] = await send("work.refresh", {}, "wr1");
       // The step is best effort: an activity record that fails never changes the answer of the write.
       const failing = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true, activity: async () => { throw new Error("activity down"); } });
       out["failing"] = await failing.handle(order.credential, gateway, { op: "desk.write", callId: "w9", args: { kind: "note", title: "still", body: "written", visibility: "shared", status: "accepted" } });
@@ -1021,6 +1024,13 @@ for (const backend of backends) {
     assert.match(bad(out["workend-noreport"]!).message, / END$/, "an ending without a report is refused whole, with the notes");
     assert.equal(bad(out["note-named"]!).code, "invalid_command", "a note names no attempt");
     good(out["note"]!); good(out["answer"]!);
+    assert.equal(bad(out["refresh-named"]!).code, "invalid_command", "work.refresh names no attempt");
+    good(out["refresh"]!);
+    const refreshing = calls.filter((x) => x.raw.op === "work.refresh");
+    assert.equal(refreshing.length, 1, "only the call without a named attempt reached the API");
+    assert.deepEqual(Object.keys(refreshing[0]!.raw.args as object), ["attemptId"], "nothing but the attempt the request came through");
+    assert.match(refreshing[0]!.raw.commandId!, /^bridge:[^:]+:wr1$/);
+    assert.equal(refreshing[0]!.token, calls[0]!.token, "with the attempt's own credential");
     const w10 = calls.filter((x) => x.raw.op === "work.note" || x.raw.op === "work.answer").map((x) => [x.raw.op, x.raw.commandId?.replace(/^bridge:[^:]+:/, "bridge:A:"), JSON.stringify({ ...x.raw.args, attemptId: "A" }), x.token === calls[0]!.token]);
     assert.deepEqual(w10, [["work.note", "bridge:A:wn1", JSON.stringify({ kind: "did", text: "watered", attemptId: "A" }), true], ["work.answer", "bridge:A:wa1", JSON.stringify({ answers: ["north and south"], attemptId: "A" }), true]]);
     const ending = calls.filter((x) => x.raw.op === "work.end");
@@ -1206,6 +1216,8 @@ for (const backend of backends) {
       // Card W10: nor are its notes and answers written.
       out["work.note"] = await send("work.note", { kind: "did", text: "x" }, "w11");
       out["work.answer"] = await send("work.answer", { answers: ["x"] }, "w12");
+      // Card H12p: nor is the agent's own refresh made (it rewrites files of the checkout).
+      out["work.refresh"] = await send("work.refresh", {}, "w13");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -1216,7 +1228,7 @@ for (const backend of backends) {
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");

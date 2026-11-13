@@ -58,6 +58,7 @@ const SPECS: readonly Spec[] = [
   { op: "work.answer", description: "Answer the questions asked about your report, in order; then call work-end again.", parameters: obj({ answers: Type.Array(Type.String()) }, ["answers"]) },
   { op: "work.end", description: "End your attempt: result done (default), partial, blocked or abandoned, always with a report from your notes. submit true offers your changes for landing (you do not commit them). Make it your last call. A done is checked and may be questioned: fix or answer what it lists.", parameters: obj({ submit: Type.Boolean(), result: text("done, partial, blocked or abandoned"), report: text("required: did, found, left, could not do"), note: text("up to 1,000 characters"), message: text("up to 2,000 characters for your supervisor"), evidence: Type.Array(obj({ item: text("as the task names it"), path: text("the file in your checkout, relative") }, ["item", "path"]), { description: "the evidence the task requires" }) }) },
   { op: "work.note", description: "Keep a running note as you work; your report is built from them.", parameters: obj({ kind: text("did, found, left or could-not"), text: text("the note") }, ["kind", "text"]) },
+  { op: "work.refresh", description: "Before you submit, bring your checkout up to the landing branch head. Your changes are re-applied, never resolved for you: overlapping edits keep conflict markers and are listed; fix them yourself.", parameters: obj({}) },
 ];
 
 /** The wire name of an operation: `nimblenewt__desk-read`. */

@@ -26,7 +26,7 @@ import type { GitBridge } from "./git.js";
  *   (provisional decision), and no further landing is made until they have.
  * Nothing here freezes the agent: the controller does that (the quiesce) before it asks.
  */
-export type HostOperation = "integration" | "landing" | "refresh" | "release" | "quarantine";
+export type HostOperation = "integration" | "landing" | "refresh" | "reapply" | "release" | "quarantine";
 export interface HostWorkspaceCall {
   readonly requestId: string;
   readonly operation: HostOperation;
@@ -115,8 +115,8 @@ export interface WorkspaceHostOptions {
 
 const REQUEST = /^wsr-[a-z2-7]{20}$/;
 const IDENT = /^[A-Za-z0-9._:-]{1,120}$/;
-const OPERATIONS: readonly string[] = ["integration", "landing", "refresh", "release", "quarantine"];
-export const HOST_LIMITS = { summary: 600, keptListed: 20 } as const;
+const OPERATIONS: readonly string[] = ["integration", "landing", "refresh", "reapply", "release", "quarantine"];
+export const HOST_LIMITS = { summary: 600, keptListed: 20, conflictsListed: 20, conflictPath: 100, detailBytes: 3000 } as const;
 
 interface JournalRecord { readonly operation: string; readonly taskId?: string; readonly state: "started" | "done"; readonly at: string; readonly finishedAt?: string; readonly outcome?: HostWorkspaceOutcome }
 
@@ -173,7 +173,8 @@ export class WorkspaceHost {
       if (!Number.isFinite(deadline)) return "the request's deadline is not a time";
       if (Date.now() >= deadline) return "the controller stopped waiting for this request before it could start; it was not carried out";
     }
-    if (this.#options.attemptsQuiet !== undefined) {
+    // A `reapply` is the author's own refresh (card H12p): the attempt that asks is running by design, so there is nothing to wait for and no quiet to check.
+    if (call.operation !== "reapply" && this.#options.attemptsQuiet !== undefined) {
       let quiet = false;
       try { quiet = (await this.#options.attemptsQuiet(call.quietAttempts ?? [], { taskId: call.taskId, projectId: call.projectId })) === true; } catch { quiet = false; }
       if (!quiet) return "an attempt of the task is running on this host; the request was not carried out";
@@ -330,6 +331,32 @@ export class WorkspaceHost {
     return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), changed: true } };
   }
 
+  /**
+   * The author's own refresh (card H12p): the agent's work is re-applied three-way onto the shared workspace's current head (`GitBridge.reapply`), over its changed and new files, with no clean-checkout rule. Nothing is resolved
+   * automatically: a file both sides changed keeps conflict markers and is listed. The shared repository is only read. The answer names the counts, and each conflict by path and kind (at most `conflictsListed`, each path cut to
+   * `conflictPath`, the whole detail kept under `detailBytes` so the controller keeps it). At the head already it says so and changes nothing (the agent's own commits stay).
+   */
+  async #reapply(where: CheckoutLocation, call?: HostWorkspaceCall): Promise<HostWorkspaceOutcome> {
+    const git = this.#options.git;
+    let target: string;
+    try { target = await git.head(where.shared); } catch (error) { return no(`the shared workspace's head could not be read: ${cut((error as Error).message)}`); }
+    const before = await git.baseOf(where.gitDir);
+    if (before === target) return { ok: true, summary: `your checkout is already based on the landing branch's head ${target.slice(0, 12)}; nothing to refresh`, detail: { changed: false, base: target } };
+    let made;
+    try { made = await git.reapply({ shared: where.shared, commit: target, gitDir: where.gitDir, checkout: where.checkout }); } catch (error) {
+      if (call !== undefined) this.#flag(call, error);
+      if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
+      throw error;
+    }
+    const listed = made.conflicts.slice(0, HOST_LIMITS.conflictsListed).map((c) => ({ path: c.path.slice(0, HOST_LIMITS.conflictPath), kind: c.kind }));
+    const detail = (): { [key: string]: HostJson } => ({ changed: !made.unchanged, before: made.previous, base: made.base, kept: made.kept.length, taken: made.taken.length, merged: made.merged.length, conflictCount: made.conflicts.length, conflicts: listed, ...(made.conflicts.length > listed.length ? { conflictsNotListed: made.conflicts.length - listed.length } : {}) });
+    while (listed.length > 0 && Buffer.byteLength(JSON.stringify(detail()), "utf8") > HOST_LIMITS.detailBytes) listed.pop();
+    const n = made.conflicts.length;
+    const counts = `${made.kept.length} of your file(s) kept, ${made.taken.length} taken from the landing branch, ${made.merged.length} merged cleanly`;
+    const summary = n === 0 ? `your work was re-applied onto ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}, no conflicts` : `your work was re-applied onto ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}; ${n} file(s) hold conflicts that were NOT resolved and must be fixed by you (an overlapping edit has "<<<<<<< mine" markers; the other kinds are named): ${made.conflicts.slice(0, 5).map((c) => `${c.path.slice(0, 80)} (${c.kind})`).join(", ")}${n > 5 ? ", ..." : ""}`;
+    return { ok: true, summary: cut(summary), detail: detail() };
+  }
+
   async #do(call: HostWorkspaceCall, operation: HostOperation, where: CheckoutLocation): Promise<HostWorkspaceOutcome> {
     const git = this.#options.git;
     // The checkout and its git directory must be there: a task whose checkout was quarantined or never made is answered, not guessed at.
@@ -353,6 +380,7 @@ export class WorkspaceHost {
       }
       return { ok: true, summary: `the checkout moved from ${before.slice(0, 12)} to ${target.slice(0, 12)}`, detail: { changed: true, before, base: target } };
     }
+    if (operation === "reapply") return this.#reapply(where, call);
     if (operation === "landing") return this.#land(call, where);
     if (operation === "release") return this.#release(call, where);
     if (operation === "integration") {

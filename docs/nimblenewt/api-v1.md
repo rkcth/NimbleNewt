@@ -3112,6 +3112,19 @@ Result: `{ notes, replayed }`: how many notes the attempt holds.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `work.refresh`
+
+An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
+
+Arguments:
+
+- `attemptId`: your attempt
+- `commandId`: required
+
+Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, and `round`).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `work.answer`
 
 An agent answers the second agent's questions about the report of its done (card W10): one answer per question of the open round, in order (at most 3, 800 characters each). Then it calls work.end done again, and the second agent reads the answers. Only the attempt's own agent, while it runs; refused when no question is open or the round is answered already; the same command again answers as before.

@@ -39,7 +39,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -156,7 +156,7 @@ export interface ToolExecutionDeps {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
@@ -457,6 +457,7 @@ export class ToolExecutionService {
               case "job.status": case "job.output": return await this.#jobRead(context, request.op as BridgeOperation, args);
               case "job.cancel": return await this.#jobCancel(context, args);
               case "work.end": return await this.#workEnd(token, context, args);
+              case "work.refresh": return await this.#workRefresh(token, context, args);
               case "work.note": case "work.answer": return await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args);
               case "maintenance.request": return await this.#maintenanceRequest(token, context, args);
               case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
@@ -721,6 +722,17 @@ export class ToolExecutionService {
     // agent's questions about the report, and the refusal of an ending without a report (it carries the agent's notes).
     if (response.error.code === "invalid_command" && (response.error.message.startsWith("work.end done was not accepted:") || response.error.message.startsWith("work.end needs a report:"))) return { ok: false, code: response.error.code, message: redactText(response.error.message).slice(0, DONE_REFUSAL_CHARS) };
     return refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * The agent refreshes its own checkout onto the landing branch's head (`work.refresh`, card H12p), through the same door every client uses, for the attempt the request came through (never one the request names). It takes no
+   * arguments. A pause refuses it like every other write; the controller refuses it while the attempt is held. The answer carries the conflicts it left for the agent to fix.
+   */
+  async #workRefresh(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, []);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "work.refresh", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { attemptId: c.attemptId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
   /** Card W10: a running note (`work.note`) or the answers to the second agent's questions (`work.answer`), through the same door every client uses, for the attempt the request came through. */

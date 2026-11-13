@@ -11,14 +11,14 @@ import { redactText } from "../security/redact.js";
 import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/types.js";
 
 /**
- * Integration, checkout refresh and quarantine of an agent's work as controller operations (cards H12l and H12d). The file work lives on the host that holds the checkout (the worker's workspace code), so the controller asks
+ * Integration, checkout refresh and quarantine of an agent's work as controller operations (cards H12l and H12d), and the author's own refresh (`reapply`, card H12p: the agent asks for it itself through `work.refresh`, with no quiesce, and the record counts the refresh rounds of the task). The file work lives on the host that holds the checkout (the worker's workspace code), so the controller asks
  * the host through a `WorkspacePort`; this service is what makes that safe and answerable: the caller needs `workspace.manage` on the task's project (the owner always has it; a task credential never does), the request is
  * recorded before anything runs, and the host is asked only while every live attempt of the task is quiet (`QuiesceCoordinator.around`: new calls refused, calls in flight settled, a checkpoint taken). If an attempt cannot be made
  * quiet the operation does not run and the answer says which blocker. One operation runs per task at a time (a second is `unavailable` until the first ends). The attempts this operation may freeze are written into its record before it starts, and each freeze carries the request's ID, so a
  * controller that crashed can release exactly those (`recover`, or the next request for the task). A repeat of a command returns the recorded answer; a request that was recorded but whose outcome was never written is answered `uncertain` and is not run
  * again, because the host may have done it; if the original call then finishes it replaces `uncertain` with what really happened.
  */
-export const WORKSPACE_OPERATIONS = ["integration", "landing", "refresh", "release", "quarantine"] as const;
+export const WORKSPACE_OPERATIONS = ["integration", "landing", "refresh", "reapply", "release", "quarantine"] as const;
 export type WorkspaceOperation = (typeof WORKSPACE_OPERATIONS)[number];
 export type WorkspaceState = "started" | "done" | "refused" | "failed" | "uncertain";
 
@@ -27,9 +27,11 @@ export const WORKSPACE_LIMITS = { reason: 500, summary: 1000, detailBytes: 4000 
 const RECORD = "workspace-request";
 /** One record per task: the request that is open on it, if any (so a leftover is found without reading every request ever made). */
 const OPEN = "workspace-open";
+/** One record per task: how many refresh rounds the author has made (card H12p), counted in the same write that records the finished request. */
+const ROUNDS = "workspace-rounds";
 const WORKSPACE_ID = /^wsr-[a-z2-7]{20}$/;
 /** A freeze set for this request says so in its reason (the quiesce writes the tag); recovery lifts only that one. */
-const frozenFor = (reason: string, requestId: string): boolean => /^(integration|landing|refresh|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
+const frozenFor = (reason: string, requestId: string): boolean => /^(integration|landing|refresh|reapply|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
 
 /** What the host is asked, with the attempts that were made quiet for it. */
 export interface WorkspaceCall {
@@ -80,6 +82,8 @@ export interface WorkspaceRecordBody {
   readonly held?: readonly string[];
   /** The blocker opened when an attempt could not be made quiet. */
   readonly blocker?: string;
+  /** For a `reapply` that moved the checkout onto a newer head (card H12p): the number of this refresh round for the task (the first is 1). Not set for any other request, nor for a refresh that found the checkout at the head already. */
+  readonly round?: number;
   /** The integrator lease a landing was made under (card P10), for the record. */
   readonly lease?: { readonly leaseId: string; readonly fence: number };
 }
@@ -93,6 +97,8 @@ export interface WorkspaceDeps {
   readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell?(attemptId: string, text: string): Promise<boolean>; stop?(attemptId: string, reason: string): Promise<void> };
   /** Tells the owner (a needs-you notice, once per request): landed files wait uncommitted in the shared tree, or a landing was refused because the tree is not clean. */
   readonly notify?: (notice: { commandId: string; taskId: string; text: string }) => Promise<void>;
+  /** An attempt as the dispatcher knows it (card H12p): its task, its agent, whether it is live and whether it was stopped. Needed for `reapply` (the author's own refresh); without it that operation is unavailable. */
+  readonly attemptOf?: (attemptId: string) => Promise<{ readonly taskId: string; readonly agentId: string; readonly live: boolean; readonly stopped?: boolean } | undefined>;
   /** The agent the task is assigned to, if anyone is. */
   readonly assignee?: (taskId: string) => Promise<string | undefined>;
   /**
@@ -107,6 +113,13 @@ const json = (value: object): JsonObject => value as unknown as JsonObject;
 const clean = <T extends object>(value: T): T => Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
 /** Text from a host or a fault, bounded and with anything credential-shaped removed. */
 const safe = (value: unknown, max: number): string => redactText(typeof value === "string" ? value : String((value as Error)?.message ?? value)).slice(0, max);
+/** A refresh's conflict list as the host sent it, with each path that looks like a credential withheld by itself (the whole detail would otherwise be dropped by `boundedDetail`, and the agent would lose the list of what to fix). */
+const cleanReapplyDetail = (value: unknown): unknown => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const d = value as { conflicts?: unknown };
+  if (!Array.isArray(d.conflicts)) return value;
+  return { ...d, conflicts: d.conflicts.map((c) => (c !== null && typeof c === "object" && typeof (c as { path?: unknown }).path === "string" && redactText((c as { path: string }).path) !== (c as { path: string }).path ? { ...(c as object), path: "(a name that looks like a key; look in the checkout)" } : c)) };
+};
 /** A host's detail, kept only when it is plain JSON of a bounded size with nothing credential-shaped in it. */
 const boundedDetail = (value: unknown): JsonObject | undefined => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -133,6 +146,7 @@ export class WorkspaceOpService {
   async request(by: Principal, command: NoActor & { operation: WorkspaceOperation; taskId: string; reason: string; leaseId?: string; fence?: number }): Promise<WorkspaceAnswer> {
     onlyKnown(command, ["commandId", "operation", "taskId", "reason", "leaseId", "fence"]);
     const operation = (WORKSPACE_OPERATIONS as readonly string[]).includes(command.operation) ? command.operation : invalid("operation", `must be one of ${WORKSPACE_OPERATIONS.join(", ")}`);
+    if (operation === "reapply") invalid("operation", "reapply is the author's own refresh: the agent asks for it itself with work.refresh, while it works (to move a clean checkout to the shared head, ask for refresh)");
     const taskId = checkTaskId(command.taskId);
     const reason = text(command.reason, "reason", { min: 1, max: WORKSPACE_LIMITS.reason, multiline: false });
     if (redactText(reason) !== reason) invalid("reason", "looks like a credential or key; those are not recorded");
@@ -140,18 +154,8 @@ export class WorkspaceOpService {
     const scoped = scopedCommandId(by.id, command.commandId);
     const id = derivedId("wsr", scoped);
 
-    // A repeat finds the record: a finished one is returned as it was. One still running here is `uncertain` for the repeat (the first call goes on, keeps its freeze and writes the real outcome). One left by a stopped controller
-    // is resolved: its freeze lifted, then it is `uncertain`.
-    const existing = await this.#get(id);
-    if (existing !== undefined) {
-      if (existing.body.state !== "started") return { ...existing.body, id, replayed: true };
-      if (this.#busy.get(taskId) === id) {
-        const marked = await this.#markUncertain(by.id, id, existing, "it is not known whether the host did this (the first call has not finished); check the checkout before asking again", `${scoped}:finish:uncertain`, false);
-        return { ...marked, id, replayed: true };
-      }
-      await this.#resolveLeft(id, existing, `${scoped}:finish:uncertain`);
-      return { ...(await this.#get(id))!.body, id, replayed: true };
-    }
+    const replay = await this.#replayOf(by, id, scoped, taskId);
+    if (replay !== undefined) return replay;
     // A landing is made only under the project's integrator lease (card P10): checked before anything is recorded or frozen, and again right before the host is asked.
     // The check may answer the lease it used (the owner may leave it out); the second showing checks that same hold, never a lease taken in between.
     let leased: { leaseId: unknown; fence: unknown } | undefined = operation === "landing" && this.#deps.landingLease !== undefined ? { leaseId: command.leaseId, fence: command.fence } : undefined;
@@ -173,6 +177,69 @@ export class WorkspaceOpService {
       const outcome = await this.#run(id, started.body, pinned === undefined ? undefined : async () => { await this.#deps.landingLease!(by, { taskId, projectId, ...pinned }); });
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
+  }
+
+  /**
+   * A repeat finds the record: a finished one is returned as it was. One still running here is `uncertain` for the repeat (the first call goes on, keeps its freeze and writes the real outcome). One left by a stopped controller
+   * is resolved: its freeze lifted, then it is `uncertain`.
+   */
+  async #replayOf(by: Principal, id: string, scoped: string, taskId: string): Promise<WorkspaceAnswer | undefined> {
+    const existing = await this.#get(id);
+    if (existing === undefined) return undefined;
+    if (existing.body.state !== "started") return { ...existing.body, id, replayed: true };
+    if (this.#busy.get(taskId) === id) {
+      const marked = await this.#markUncertain(by.id, id, existing, "it is not known whether the host did this (the first call has not finished); check the checkout before asking again", `${scoped}:finish:uncertain`, false);
+      return { ...marked, id, replayed: true };
+    }
+    await this.#resolveLeft(id, existing, `${scoped}:finish:uncertain`);
+    return { ...(await this.#get(id))!.body, id, replayed: true };
+  }
+
+  /**
+   * The author's own refresh (card H12p, the agent's `work.refresh`): the host re-applies the agent's work three-way onto the shared workspace's current head. Only the agent of a live attempt asks (a task credential only for its own
+   * task); the owner's `request` refuses this operation. There is NO quiesce: the caller is the attempt itself, in the middle of its own tool call, so nothing is frozen and nothing is told afterwards (the answer is the telling). The attempt
+   * must not be frozen (an ending or another workspace operation has it), and one operation runs per task at a time: a refresh while another operation is open is `unavailable`, never queued. The request is recorded before the host is asked, a
+   * repeat of the call returns the recorded answer, and a call that was recorded but never finished is `uncertain` and not run again. The answer names what was kept, taken and merged and lists each conflict (never resolved here). A refresh that
+   * moved the checkout to a newer head is one refresh ROUND of the task, counted in the same write that records the outcome and read by `refreshRounds` (the submission carries it); a refresh at the head already, a refusal, a failure and an
+   * `uncertain` one are not counted.
+   */
+  async reapply(by: Principal, command: NoActor & { attemptId: string }): Promise<WorkspaceAnswer> {
+    onlyKnown(command, ["commandId", "attemptId"]);
+    if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not refresh an attempt's checkout: only the author's agent does`);
+    const attemptId = text(command.attemptId, "attemptId", { min: 1, max: 200 });
+    const lookup = this.#deps.attemptOf;
+    if (lookup === undefined) throw new DomainError("unavailable", "the attempts are not known to this controller, so a refresh cannot be made now");
+    const attempt = await lookup(attemptId);
+    if (attempt === undefined || attempt.agentId !== by.id || (by.taskScope !== undefined && by.taskScope.taskId !== attempt.taskId)) throw new DomainError("not_found", `attempt ${attemptId} does not exist or is not yours`);
+    if (!attempt.live || attempt.stopped === true) throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    const taskId = checkTaskId(attempt.taskId);
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined) throw new DomainError("not_found", `task ${taskId} does not exist`);
+    const scoped = scopedCommandId(by.id, command.commandId);
+    const id = derivedId("wsr", scoped);
+    const replay = await this.#replayOf(by, id, scoped, taskId);
+    if (replay !== undefined) return replay;
+    const why = await this.#deps.attempts?.frozenReason(attemptId);
+    if (why !== undefined) throw new DomainError("unavailable", `your attempt is held right now (${redactText(why).slice(0, 120)}); a refresh is not made while it is`);
+    if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
+    this.#busy.set(taskId, id);
+    try {
+      await this.#resolveOpen(taskId);
+      if ((await this.openFor(taskId)) !== undefined) throw new DomainError("unavailable", `task ${taskId} has a workspace operation open; ask again when it ends`);
+      let assignee: string | undefined;
+      try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
+      const make: WorkspaceRecordBody = { operation: "reapply", taskId, projectId: task.projectId, requestedBy: by.id, reason: `the author of attempt ${attemptId} refreshes its checkout onto the landing branch's head`, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }) };
+      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation: "reapply", taskId, attemptId }, body: () => make, also: () => this.#openChange(taskId, id) });
+      const started = (await this.#get(id))!;
+      const outcome = await this.#run(id, started.body);
+      return await this.#settle(by.id, scoped, id, outcome);
+    } finally { this.#busy.delete(taskId); }
+  }
+
+  /** How many refresh rounds the task's author has made so far (card H12p). It takes no caller, so it is not an API operation: the code that builds the services passes it to the submission. */
+  async refreshRounds(taskId: string): Promise<number> {
+    const n = ((await this.#runner.get(ROUNDS, checkTaskId(taskId)))?.body as unknown as { rounds?: unknown } | undefined)?.rounds;
+    return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : 0;
   }
 
   /** Whether an operation is running or left open on the task's checkout: the dispatcher does not start an attempt of such a task until it ends (card H12m). */
@@ -294,6 +361,20 @@ export class WorkspaceOpService {
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
     if (port === undefined) return done("refused", { summary: "no host that can do this holds the checkout of that task, so nothing was done" });
+    // The author's own refresh (card H12p) is asked for by the attempt itself, in the middle of its own call: nothing is made quiet or frozen, and nothing is told afterwards (the answer is the telling).
+    if (body.operation === "reapply") {
+      try {
+        const answer = await port.run({ requestId: id, operation: "reapply", taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts: [], ...(body.assignee === undefined ? {} : { assignee: body.assignee }) });
+        if (answer !== null && typeof answer === "object" && answer.ok === true) {
+          const detail = boundedDetail(cleanReapplyDetail(answer.detail));
+          return done("done", { summary: safe(answer.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }) });
+        }
+        return done("refused", { summary: `the host did not do it: ${safe((answer as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}` });
+      } catch (error) {
+        // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.
+        return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary) });
+      }
+    }
     let quietAttempts: readonly string[] = [];
     const stopped: string[] = [];
     const told: string[] = [];
@@ -358,14 +439,25 @@ export class WorkspaceOpService {
   async #settle(actor: string, scoped: string, id: string, outcome: WorkspaceRecordBody): Promise<WorkspaceAnswer> {
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = (await this.#get(id))!;
+      // A refresh that moved the checkout onto a newer head is one round of the task; the count and the record are written together, so one is never without the other.
+      const counts = outcome.operation === "reapply" && outcome.state === "done" && (outcome.detail as { changed?: unknown } | undefined)?.changed === true;
+      const counter = counts ? await this.#runner.get(ROUNDS, outcome.taskId) : undefined;
+      const round = counts ? ((counter?.body as unknown as { rounds?: number } | undefined)?.rounds ?? 0) + 1 : undefined;
+      const final: WorkspaceRecordBody = round === undefined ? outcome : { ...outcome, round };
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => outcome, expectedRevision: current.revision, also: () => (outcome.held !== undefined && outcome.held.length > 0 ? Promise.resolve([]) : this.#openChange(outcome.taskId, null, id)) });
-        return { ...outcome, id, replayed: false };
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        return { ...final, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
       }
     }
     throw new DomainError("unavailable", "the outcome of the workspace operation could not be recorded; the request says uncertain");
+  }
+
+  /** The write of a task's refresh-round count: created at the first round, then updated against the revision that was read. */
+  #roundChange(taskId: string, rounds: number, revision: number | undefined): Change[] {
+    const ref: AggregateRef = { kind: ROUNDS, id: taskId };
+    return [revision === undefined ? { type: "create", ref, body: json({ rounds }) } : { type: "update", ref, expectedRevision: revision, body: json({ rounds }) }];
   }
 
   /** The open index of a task: set to `requestId`, or cleared (only when it still names `from`). */

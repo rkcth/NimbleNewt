@@ -695,6 +695,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       quiesce: { around: (scope, operation, run, after, tag, status) => dispatch === undefined ? run({ attempts: [] }) : dispatch.quiesce.around(scope, operation, run, after, tag, status) },
       portOf: async (taskId) => workspacePort?.(taskId),
       assignee: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" ? a.owner?.id : undefined; },
+      attemptOf: async (attemptId) => {
+        if (dispatch === undefined) return undefined;
+        const d = await dispatch.dispatcher.get(dispatch.principal, attemptId);
+        return d === undefined ? undefined : { taskId: d.taskId, agentId: d.agentId, live: d.state !== "finished", ...(d.stopped === undefined ? {} : { stopped: true }) };
+      },
       attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); }, tell: async (id, text) => (await dispatch?.attemptControl.tell(id, text)) ?? false, stop: async (id, reason) => { await dispatch?.attemptControl.stop(id, reason); } },
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
@@ -810,7 +815,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         for (const [i, detail] of ownerNotices(a, leftovers).entries()) await notifications.emitFromController({ commandId: `scl-left:${a.attemptId}:${i + 1}`, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-${i + 1}` }, projectId: a.projectId, detail });
       },
     });
-    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
+    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, refreshRounds: async (attempt) => workspaceOps.refreshRounds(attempt.taskId), principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
       if (dispatch === undefined) return false;
       const attempt = await dispatch.dispatcher.get(dispatch.principal, a.attemptId).catch(() => undefined);
       return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
