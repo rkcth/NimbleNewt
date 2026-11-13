@@ -13,7 +13,7 @@ import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
-import type { CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import type { CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import type { ContextBranchService } from "../branches/index.js";
 import type { InvitationInbox, MeetingService } from "../meetings/index.js";
 import type { AgentMessageService } from "../messaging/index.js";
@@ -175,6 +175,8 @@ export interface StateApiDeps {
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
+  readonly coverageGaps?: Pick<CoverageGapService, "list">;
+  readonly checkSettings?: Pick<CheckRunSettingsService, "get" | "set">;
   readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
@@ -350,6 +352,8 @@ export class StateApi {
         ...(this.#deps.quietHosts === undefined ? {} : { quietHosts: this.#deps.quietHosts }),
         ...(this.#deps.coverage === undefined ? {} : { coverage: this.#deps.coverage }),
         ...(this.#deps.coverageSettings === undefined ? {} : { coverageSettings: this.#deps.coverageSettings }),
+        ...(this.#deps.coverageGaps === undefined ? {} : { coverageGaps: this.#deps.coverageGaps }),
+        ...(this.#deps.checkSettings === undefined ? {} : { checkSettings: this.#deps.checkSettings }),
         ...(this.#deps.leases === undefined ? {} : { leases: this.#deps.leases }),
         ...(this.#deps.retention === undefined ? {} : { retention: this.#deps.retention }),
         ...(this.#deps.retentionSettings === undefined ? {} : { retentionSettings: this.#deps.retentionSettings }),
