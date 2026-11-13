@@ -115,6 +115,8 @@ export interface ToolExecutionDeps {
    * calls running in another process. Absent: only this process's calls are listed. A record that cannot be written never stops the call.
    */
   readonly runRecords?: RunningCallRecords;
+  /** Card T02d (finish): how often (milliseconds) a starting call also sweeps the durable records of runs that can no longer be running (leftovers of a process that stopped or lost the epoch), not waited for. Default 600000 (10 minutes); `0` turns it off (the start-up sweep remains). */
+  readonly runRecordSweepMs?: number;
   /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   readonly hosts: Pick<HostService, "status">;
@@ -294,6 +296,7 @@ export class ToolExecutionService {
   readonly #applied = new Set<string>();
   #watch: ReturnType<typeof setInterval> | undefined;
   #watching = false;
+  #lastSweep = Date.now();
   #disposed = false;
 
   constructor(deps: ToolExecutionDeps) {
@@ -377,6 +380,14 @@ export class ToolExecutionService {
     const calls = [...here, ...away.map(({ attemptId, callId, taskId, agentId }) => ({ attemptId, callId, taskId, agentId, elsewhere: true as const }))].slice(0, BRIDGE_LIMITS.runningListed);
     // Review: a record too large for one bounded look is not presented as everything; what was read is listed and the rest is said to be unknown.
     return { calls, total: hereTotal + away.length, ...(other.incomplete === true ? { elsewhereUnknown: true as const } : {}) };
+  }
+
+  /** At most one sweep per `runRecordSweepMs`, started by a call that begins and never waited for or allowed to fail it (leftovers used to wait for the next start of the controller). */
+  #sweepSometimes(): void {
+    const every = this.#deps.runRecordSweepMs ?? 600_000;
+    if (this.#deps.runRecords === undefined || every <= 0 || this.#disposed || Date.now() - this.#lastSweep < every) return;
+    this.#lastSweep = Date.now();
+    this.sweepRunRecords().catch(() => undefined);
   }
 
   /** Removes durable records of runs that can no longer be running (left by a process that stopped or lost the epoch). Best effort; answers how many. */
@@ -948,6 +959,7 @@ export class ToolExecutionService {
     const set = this.#running.get(key) ?? new Set<typeof entry>();
     set.add(entry); this.#running.set(key, set); this.#noteRunning();
     const records = this.#deps.runRecords;
+    this.#sweepSometimes();
     const recorded = records?.begin({ name: v.name, version: v.version, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id, seconds: v.manifest.limits.seconds }).catch(() => undefined);
     let gone = false;
     return () => {

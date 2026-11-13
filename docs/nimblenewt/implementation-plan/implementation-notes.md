@@ -6969,6 +6969,26 @@ Review of the close-out (clean-context, 2026-11-11):
 - Mutations of my own (each applied, run, restored; each fails the named tests): the service ignoring `incomplete`; `#all` always answering complete; the chat asking only when `total > 0`; `end` removing another writer's record.
 - Checked, no change: jobs are started at once after admission (no queue), so start + limit + grace covers them; `limits.seconds` is capped at 86,400 by the manifest check, so the record's own 86,400 cap cuts nothing; the start-up sweep removes only records past their time, so a live controller's records survive a takeover; the record ID is a hash of attempt and call (attempt IDs are unique), and cancelling acts on the version's running calls, never on a record ID, so a reused ID cannot cancel the wrong call; `catalog.running` stays owner-only; the composed two-controller test uses a temporary directory removed at the end, manual timers and a deadline loop, no ports.
 - Not done: `until` is the writer's clock and is compared with the reader's; controllers whose clocks differ by more than the 60 s grace may stop listing a call early (same host, as in a takeover, shares one clock). Leftovers are swept only at start, at most 200 from the first page; they are never listed after their time, so this costs storage, not honesty.
+### T02d finish (Claude agent, 2026-11-13): leftover run records are swept while the controller runs, and on every page
+
+What was left after the close-out: leftover running-call records (a process that stopped, or lost the epoch and could not remove its own) were swept only once at controller start, and only from the first page of records, so a long-running controller with many leftovers kept them (they were never listed past their time, so this cost storage, not honesty).
+
+Done:
+- `RunningCallStore.sweep` looks through the same bounded number of pages as the listing (`pages`, default 10 of 500) instead of the first page only; at most 200 removals per run, as before.
+- `ToolExecutionService` sweeps by itself: a call that starts triggers one sweep at most every `runRecordSweepMs` (default 600,000 = 10 minutes; `0` turns it off, the start-up sweep remains). It is never waited for and a failure never reaches the call. `StartOptions` needed no change (the default applies).
+- No new owner control (nothing here is something the owner sets or decides).
+- Tests (every backend): `toolbridge/running-store.test.ts` (4 expired leftovers among 3 live ones with a page size of 2 are all removed, live ones stay), `toolbridge/service.test.ts` (default and `0` do not sweep within a fresh service; a call after the interval sweeps once; and again after the next interval). Mutations (each applied, run, restored; each fails the named tests): sweep reading only the first page; sweep removing live records; the `0` switch ignored; no throttle; the call never triggering the sweep.
+
+What cannot be done offline or remains NOT done (unchanged by this slice):
+- **Remote worker hosts.** The remote worker protocol has no tool-execution leg (a remote host cannot run a catalogue script: `tool.invoke` from a remote attempt is refused with "unavailable"), so no catalogue call can be running on a remote host and there is nothing to revoke there. Making a remote host run scripts is a card of its own (a run order, a sandbox on that host, results, abort, fencing and a `revoke` control message beside `stop`, with the choice already on the revocation record and the running-call record pattern to reuse); it was not started here because a revoke message with nothing running on the other end could not be shown to work. Until then "every host" means every host that can run a catalogue tool.
+- Clock difference: `until` is the writing process's clock compared with the reader's (processes on one machine share a clock; more than 60 s apart may stop listing a call early).
+- A fenced process still cannot remove its own record; a call that ends there stays listed (as in another process) until its time is up. This errs toward asking the owner.
+- Latency of the store check (default 2 s) unchanged. Not run on macOS or Windows here: the new tests use fake clocks and short real waits on conditions, no signals, paths or sandbox.
+
+ASSUMPTION (2026-11-13): sweeping is triggered by a starting call (needs no new timer or process hook; an idle controller has no new leftovers to find) rather than by a dedicated interval.
+ASSUMPTION (2026-11-13): ten minutes between sweeps; the sweep is bounded and cheap, and a leftover is never listed past its time anyway.
+ASSUMPTION (2026-11-13): the remote half is left as a documented gap rather than a protocol message nobody can use; the card's own sentence says remote workers "cannot run catalogue tools yet".
+
 ## K02 (second slice): last-known-good record, launcher decision, startup confirmation, protocol compatibility check (2026-11-10)
 
 Card K02 stays planned. This slice adds the machinery after the first slice's staging and journalled switch; no real deployment, launcher process or updater process is started anywhere (all tests use temporary release roots and fixture files).
