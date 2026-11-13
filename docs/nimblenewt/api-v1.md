@@ -1279,7 +1279,7 @@ Arguments:
 
 - none
 
-Result: `{ item: { pending?, barrier, markerProblem?, restart?, kept? } }`; `restart` (while a restore waits for its start) says whether the controller restarts itself and what the owner must do otherwise, with `failed` when an automatic restart failed; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again); `kept` (PostgreSQL, when any) lists the schemas earlier restores kept aside (`<schema>_br_<stamp>`, oldest first) with a note: NimbleNewt never drops them, the owner removes them by hand.
+Result: `{ item: { pending?, barrier, markerProblem?, restart?, kept?, remotePiState? } }`; `remotePiState` (when remote hosts keep conversation stores) lists the stores a restore left for each host, delivered to the host once it is connected and its agent is not running, and how many were delivered; `restart` (while a restore waits for its start) says whether the controller restarts itself and what the owner must do otherwise, with `failed` when an automatic restart failed; `pending.failed` says a start tried the swap and it was rolled back (cancel it, then prepare it again); `kept` (PostgreSQL, when any) lists the schemas earlier restores kept aside (`<schema>_br_<stamp>`, oldest first) with a note: NimbleNewt never drops them, the owner removes them by hand.
 
 #### `database.transfer.status`
 
@@ -4387,19 +4387,20 @@ Completion: finished when accepted (`completed: true`).
 
 #### `backup.restore.apply`
 
-Owner only, a dangerous action: restores a backup. `confirm` must be the token of the preview the owner approved; the call prepares the restore beside the live data, takes a snapshot of the current state, raises the maintenance barrier (every other command is refused) and waits for the controller to be restarted, which swaps the data in (the old data is kept beside). Refused while agent work is running. For an encrypted backup the passcode or recovery file is read from the host file (never an argument); `method` says which. The chat only proposes this; it is never applied from an interpreter's words.
+Owner only, a dangerous action: restores a backup. `confirm` must be the token of the preview the owner approved; the call prepares the restore beside the live data, takes a snapshot of the current state, raises the maintenance barrier (every other command is refused) and waits for the controller to be restarted, which swaps the data in (the old data is kept beside). Refused while agent work is running, unless `stopAttempts` is true: then all agent work is stopped first (every running attempt is checkpointed and ended, the owner's own graceful Stop of the whole installation) and the restore is prepared once it has settled; work that will not settle refuses the restore. If the restore is not applied (refused, failed or cancelled) the work stays stopped until the owner resumes it with the lifecycle controls; once the restart applies it, the work is as the backup recorded it. For an encrypted backup the passcode or recovery file is read from the host file (never an argument); `method` says which. The chat only proposes this; it is never applied from an interpreter's words.
 
 Arguments:
 
 - `name`: the backup's name
 - `confirm`: the token from backup.restore.preview
 - `method` (optional): passcode or recovery, for an encrypted backup (default passcode)
+- `stopAttempts` (optional): true to stop all running agent work first instead of refusing (default false)
 
 Result: `{ item: { name, restartRequired: true, restart: { automatic, instruction }, safetyCopy, rows, blobsRestored, piStoresRestored, piFilesRestored, effectsMarkedUncertain, deliveriesToResend, blobsSkippedDeleted, changesDiscarded?, secretsRestored?: { restored, same, keptDifferent, overwritten }, secretsLeftOut? } }`; `secretsRestored` (counts only) says what became of the secret values of an encrypted backup (a value already in the secret store that differs is kept, not rolled back), and `secretsLeftOut` why they were not opened; `restart` says whether this host restarts the controller itself or what the owner must do to restart it; `blobsSkippedDeleted` counts artifact files not put back because the artifact was deleted on the retention ledger; `changesDiscarded` is the exact number of recorded changes the restore will discard.
 
 #### `backup.restore.cancel`
 
-Owner only: withdraws a prepared restore that the restart has not applied yet. The staged copy is removed, the maintenance barrier comes down and the live data is exactly as it was.
+Owner only: withdraws a prepared restore that the restart has not applied yet. The staged copy is removed, the maintenance barrier comes down and the live data is exactly as it was. Agent work stopped for the restore (`stopAttempts`) stays stopped until the owner resumes it.
 
 Arguments:
 

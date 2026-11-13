@@ -328,6 +328,8 @@ export interface ComposeInput {
   readonly onError?: (error: unknown) => void;
   /** True while the maintenance barrier is up (card K01h): the driver skips its ticks. */
   readonly hold?: () => boolean;
+  /** Whether a restore left an attempt's conversation store for a remote host and it waits for delivery (card K01i review): the host is not offered the attempt meanwhile. */
+  readonly restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean>;
   /** One installation-level setting, for the controller's own reading (`ConfigurationService.installationSettings`: each value with whether the owner set it): the stand-up's balance review reads the P/PC allocation (`workClass.pcFloor`, `pcTarget`, `pcCeiling`) through it (card M03g). Absent: the review says no allocation is set. */
   readonly installationSettings?: (keys: readonly string[]) => Promise<Readonly<Record<string, { value: unknown; set: boolean }>>>;
   /** The `meeting.leadMinutes` setting (card M01d), already defaulted by the caller: how long before a meeting its occurrence is made and its agents are invited and kept free. */
@@ -749,6 +751,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await recordLaunch(r as never); } }),
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
+        ...(i.restoreWaits === undefined ? {} : { restoreWaits: i.restoreWaits }),
         ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
         ...(i.options.remote.patienceMs === undefined ? {} : { patienceMs: i.options.remote.patienceMs }),
         ...(i.options.remote.confirmWindowMs === undefined ? {} : { confirmWindowMs: i.options.remote.confirmWindowMs }),

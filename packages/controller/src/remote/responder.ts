@@ -23,12 +23,14 @@ export class WorkspaceResponder {
   readonly #now: () => number;
   readonly #busy: () => readonly string[] | Promise<readonly string[]>;
   readonly #verify: ((attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>) | undefined;
+  readonly #piState: { answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> } | undefined;
   #tail: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number; /** The host's check of an attempt's done (card H12a): the worker package's `doneVerifier` over this host's checkouts and sandbox. Absent: a check is refused, so the controller does not count the done. */ readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport> }) {
+  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number; /** The host's check of an attempt's done (card H12a): the worker package's `doneVerifier` over this host's checkouts and sandbox. Absent: a check is refused, so the controller does not count the done. */ readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>; /** The host's answer to a request to send or put back its conversation stores (card K01i): a `PiStateHost`. Absent: such a request is refused, saying so. */ readonly piState?: { answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> } }) {
     if (typeof (options as { busy?: unknown }).busy !== "function") throw new TypeError("a workspace responder needs the host's busy check (which attempts have a call in flight here); without it no workspace request is answered");
     this.#busy = options.busy;
     this.#verify = options.verify;
+    this.#piState = options.piState;
     this.#now = options.now ?? Date.now;
     this.#client = options.client; this.#port = options.port; this.#onError = options.onError;
   }
@@ -58,6 +60,14 @@ export class WorkspaceResponder {
     // The check of an attempt's done (card H12a) changes nothing and is asked while the attempt is live at its end, so it is not held back by the busy check (the attempt asking is itself in a call); it runs checks only in that attempt's own sandbox.
     if (ask.operation === "verify") {
       await this.#send(ask.requestId, await this.#check(ask));
+      this.#running.delete(ask.requestId);
+      return;
+    }
+    // The conversation stores (card K01i): copied and sent for a backup, or fetched and put back after a restore. The host's own `PiStateHost` judges it (a store whose agent is running is not replaced), so the quiet-attempts check below does not apply.
+    if (ask.operation === "pi-state-send" || ask.operation === "pi-state-restore") {
+      let answered: RemoteWorkspaceAnswer;
+      try { answered = this.#piState === undefined ? { ok: false, reason: "this host keeps no conversation stores in backups (it was started without a Pi state handler), so nothing was done" } : await this.#piState.answer(ask); } catch (error) { answered = { ok: false, reason: `this host could not finish the request: ${String((error as Error)?.message ?? error).slice(0, 300)}`, failed: true }; }
+      await this.#send(ask.requestId, answered);
       this.#running.delete(ask.requestId);
       return;
     }

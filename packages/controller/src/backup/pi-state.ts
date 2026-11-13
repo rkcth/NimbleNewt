@@ -9,7 +9,13 @@ import { PI_FOLDER, PI_INDEX, SEALED_SUFFIX, type BackupPiState, type PiIndexLin
  * lists them. `id` names a store inside the backup (an attempt ID); `dir` is where its files are on this machine. A store on another machine is not here (the remote host's own state is not copied yet).
  */
 export interface PiStateStore { readonly id: string; readonly dir: string }
-export interface PiStateSource { list(): Promise<readonly PiStateStore[]> }
+export interface PiStateSource {
+  list(): Promise<readonly PiStateStore[]>;
+  /** Read once, right after `list()`: what could not be listed (a host that did not answer). Each line goes into the backup's `problems`, so a backup never reads as complete about a store it could not reach (card K01i). */
+  problems?(): readonly string[];
+  /** Called when the copy is over, whatever its result: frees what `list()` staged (card K01i, the stores of remote hosts are staged on this machine while a backup copies them). */
+  release?(): Promise<void>;
+}
 
 export const PI_LIMITS = { files: 200_000, stores: 50_000, idLength: 128 } as const;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -135,12 +141,17 @@ async function copyOne(hooks: CopyHooks | undefined, root: string, path: string,
  * is named in the manifest's `problems`, so a backup never says "complete" about a store it could not read. A write failure fails the whole backup.
  */
 export async function copyPiState(source: PiStateSource, staging: string, cipher: BackupCipher | undefined, hooks?: CopyHooks): Promise<BackupPiState> {
+  try { return await copyPiStateOf(source, staging, cipher, hooks); } finally { await source.release?.().catch(() => undefined); }
+}
+
+async function copyPiStateOf(source: PiStateSource, staging: string, cipher: BackupCipher | undefined, hooks?: CopyHooks): Promise<BackupPiState> {
   const folder = join(staging, PI_FOLDER);
   await mkdir(folder, { mode: 0o700 });
   const stores = [...await source.list()];
   if (stores.length > PI_LIMITS.stores) throw new Error("too many conversation stores to back up");
   const lines: string[] = [];
   const problems = new Problems();
+  for (const line of source.problems?.() ?? []) problems.add(line);
   let bytes = 0, count = 0;
   const seen = new Set<string>();
   for (const store of stores) {

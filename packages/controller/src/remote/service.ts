@@ -23,7 +23,7 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type CarriedLanding, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
-import { WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { PI_TRANSFER_ID, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 /** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
 interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
@@ -212,6 +212,13 @@ export function capabilityReasons(host: string, status: HostStatus | undefined, 
   return out;
 }
 
+/** What receives and serves the files of Pi state transfers (card K01i); `remote/pi-state.ts` builds the product one. */
+export interface PiTransferChunk { readonly data: string; readonly offset: number; readonly size: number; readonly eof: boolean; readonly sha256?: string }
+export interface PiTransferPort {
+  put(hostId: string, transferId: unknown, body: unknown): Promise<{ readonly received: number }>;
+  get(hostId: string, transferId: unknown, name: unknown, offset: unknown): Promise<PiTransferChunk>;
+}
+
 interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void> }
 
 /** The branch names a landing policy may carry: the same shape the owner's `workspace.landing.branch` accepts (up to 200 characters), so an owner's valid policy is never refused here as malformed (a host whose pin is another branch refuses it itself, by name). */
@@ -259,6 +266,14 @@ function checkVerifyAsk(requestId: string, attemptId: string, scope: { readonly 
   });
   const evidence = request.evidence.map((e) => (typeof e === "string" && e.length >= 1 && e.length <= 500 && !e.includes("\0") ? e : invalid("verify.evidence", "each path must be 1 to 500 characters")));
   return { requestId, operation: "verify", taskId: scope.taskId, projectId: scope.projectId, reason: "check the work of an attempt that said it is done", quietAttempts: [], verify: { attemptId, checks, evidence, maxOutputBytes: request.maxOutputBytes } };
+}
+
+/** The request that carries a transfer of conversation stores (card K01i): only the two operations, the request ID and the transfer ID; nothing else rides it. */
+function checkPiAsk(operation: unknown, requestId: unknown, transferId: unknown): WorkspaceAsk {
+  if (operation !== "pi-state-send" && operation !== "pi-state-restore") invalid("operation", "is not a Pi state operation");
+  if (typeof requestId !== "string" || !/^wsr-[a-z2-7]{20}$/.test(requestId)) invalid("requestId", "is not a workspace request ID");
+  if (typeof transferId !== "string" || !PI_TRANSFER_ID.test(transferId)) invalid("transferId", "is not a transfer ID");
+  return { requestId: requestId as string, operation: operation as "pi-state-send" | "pi-state-restore", taskId: "pi-state", projectId: "pi-state", reason: operation === "pi-state-send" ? "copy the agents' conversation stores for a backup" : "put restored conversation stores back", quietAttempts: [], piState: { transferId: transferId as string } };
 }
 
 /** A host's answer, checked: the typed outcome and nothing more, with the text and the detail bounded. */
@@ -311,6 +326,11 @@ export interface RemoteDeps {
   readonly relocationPolicy?: RelocationPolicyFor;
   /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
   readonly placementPolicy?: PlacementPolicyFor;
+  /**
+   * Whether a restore left this attempt's conversation store for this host and it has not been delivered yet (card K01i review). While it waits the host is not offered the attempt (a reason that passes): the agent would
+   * otherwise run on the conversation that was there before the restore, and the delivery between two turns would then take its newest turns away. Absent: not judged.
+   */
+  readonly restoreWaits?: (hostId: string, attemptId: string) => Promise<boolean>;
   /** Whether a worker that reconnected may take its still-owned attempt up again by itself (`auto`) or only once the owner approves (`owner`), card H09b. Absent or failing: `owner`. Read at every decision. */
   readonly reaccept?: () => Promise<"auto" | "owner">;
   /** How long the controller keeps the lease of an attempt that waits for the owner's decision alive, in ms, from the moment the waiting was recorded; `undefined`: it does not (off). Absent: 24 hours. */
@@ -421,6 +441,7 @@ export class RemoteWorkerService {
   readonly #platformOf = new Map<string, string>();
   /** Workspace requests carried to hosts and their answers (card H12m). In memory: a request is recorded durably by the workspace service, and one lost with a restart reads there as uncertain. */
   readonly #asks = new Map<string, WorkspaceAskState>();
+  #piTransfers: PiTransferPort | undefined;
   /** The recording taps of attempts and the model calls open on them (card L05c). In memory: a restart loses them, the worker's open call then fails on its next message and the generation stays as the store left it. */
   readonly #taps = new Map<string, ModelStreamTap>();
   readonly #calls = new Map<string, { readonly attemptId: string; readonly placement: number; readonly hostId: string; readonly call: ModelStreamCall; /** What stall detection is told about this call (card L05d). */ readonly watch?: CallMonitor | undefined; seenOutput?: boolean; outputChars?: number; progressAt?: number; last?: LastMessage | undefined }>();
@@ -589,6 +610,57 @@ export class RemoteWorkerService {
     return this.#ask(hostIdOf(hostId), checkVerifyAsk(requestId, attemptId, scope, request), options);
   }
 
+  /**
+   * Asks a host to send its conversation stores to the controller (`pi-state-send`, for a backup) or to fetch the ones the controller holds and put each back where it keeps it (`pi-state-restore`, after a restore), card K01i.
+   * The same channel, limits and answer rules as a workspace request; the files themselves travel in the transfer's own messages (`piStatePut`, `piStateGet`), never in the answer. Only the owner and the dispatcher may ask.
+   */
+  async askPiState(by: Principal, hostId: string, operation: "pi-state-send" | "pi-state-restore", requestId: string, transferId: string, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
+    this.#staff(by);
+    return this.#ask(hostIdOf(hostId), checkPiAsk(operation, requestId, transferId), options);
+  }
+
+  /** Where the files of a transfer are received and served from (card K01i): the composed controller gives it once. Without one, a host's transfer messages are refused. */
+  attachPiTransfers(port: PiTransferPort): void { this.#piTransfers = port; }
+
+  /** One chunk of a file of a `pi-state-send` transfer, from the host that was asked (any other host, or an unknown transfer, reads as missing). */
+  async piStatePut(host: Principal, sessionId: unknown, transferId: unknown, body: unknown): Promise<{ readonly received: number }> {
+    await this.#session(host, sessionId);
+    if (this.#piTransfers === undefined) throw new DomainError("unavailable", "this controller takes no conversation stores from hosts");
+    return this.#piTransfers.put(host.id, transferId, body);
+  }
+
+  /** One chunk of a file of a `pi-state-restore` transfer, for the host that was asked. */
+  async piStateGet(host: Principal, sessionId: unknown, transferId: unknown, name: unknown, offset: unknown): Promise<PiTransferChunk> {
+    await this.#session(host, sessionId);
+    if (this.#piTransfers === undefined) throw new DomainError("unavailable", "this controller gives no conversation stores to hosts");
+    return this.#piTransfers.get(host.id, transferId, name, offset);
+  }
+
+  /**
+   * The hosts that connected to this controller (a remote worker has a session record) and whether each can be asked now: an enrolled, not revoked host heard from lately. The rest are named with the reason, so a backup
+   * says which host's conversation stores it could not take (card K01i).
+   */
+  async piStateHosts(by: Principal): Promise<{ readonly ask: readonly string[]; readonly unreachable: readonly { readonly hostId: string; readonly why: string }[] }> {
+    this.#staff(by);
+    const ask: string[] = [];
+    const unreachable: { hostId: string; why: string }[] = [];
+    let afterId: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list(SESSION_KIND, { ...(afterId === undefined ? {} : { afterId }), limit: 100 });
+      for (const record of page) {
+        const hostId = record.id;
+        if (!HOST.test(hostId) || (await this.#connected(hostId)) === undefined) continue;
+        const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
+        if (status === undefined || status.identity !== "active") unreachable.push({ hostId, why: "its credential is revoked or it is not enrolled" });
+        else if (status.freshness !== "fresh") unreachable.push({ hostId, why: "it has not been heard from lately" });
+        else ask.push(hostId);
+      }
+      if (page.length < 100) break;
+      afterId = page.at(-1)!.id;
+    }
+    return { ask, unreachable };
+  }
+
   async #ask(host: string, wire: WorkspaceAsk, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 3_600_000) invalid("waitMs", "must be a whole number of milliseconds from 1 to 3600000");
     const earlier = this.#asks.get(wire.requestId);
@@ -741,6 +813,12 @@ export class RemoteWorkerService {
     if (!((by.kind === "owner" || dispatcher) && by.taskScope === undefined)) throw new DomainError("forbidden", `${by.id} may not do that; remote placements are the owner's and the dispatcher's`);
   }
 
+  /** A store check that cannot be read holds the attempt back too (fail closed): it is judged again at the next try. */
+  async #restoreWaits(hostId: string, attemptId: string): Promise<boolean> {
+    if (this.#deps.restoreWaits === undefined) return false;
+    try { return await this.#deps.restoreWaits(hostId, attemptId); } catch (error) { this.#reportError(error); return true; }
+  }
+
   async #connected(hostId: string): Promise<SessionBody | undefined> {
     const body = (await this.#runner.get(SESSION_KIND, hostId))?.body as unknown as SessionBody | undefined;
     return body !== undefined && body.sessionEpoch >= 1 && body.protocol !== undefined ? body : undefined;
@@ -758,6 +836,8 @@ export class RemoteWorkerService {
     const reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
     if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements })));
+    // Judged here, where the dispatcher passes the host over and the attempt waits (never at `place`, whose refusal can end an attempt that has no other host).
+    if (await this.#restoreWaits(hostId, attemptId)) reasons.push(RESTORE_WAIT(hostId, attemptId));
     // A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it.
     return { reasons, lasting: lastingReasons(reasons) };
   }
@@ -2305,6 +2385,9 @@ export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
 }
 
 /** A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it (cards H07e, H07b). */
+/** The reason a host is not offered an attempt while its restored conversation store waits for delivery there (card K01i review); it passes once the store is delivered. */
+const RESTORE_WAIT = (hostId: string, attemptId: string): string => `${hostId} has not received the restored conversation store of ${attemptId} yet`;
+
 export function lastingReasons(reasons: readonly string[]): boolean {
-  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted/.test(r));
+  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted|has not received the restored conversation store/.test(r));
 }

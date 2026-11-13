@@ -143,6 +143,9 @@ export function localHostBuilder(setup) {
           // The routing table's context size for the route is used (the host states none of its own).
           window: () => undefined,
           close,
+          // The agents' conversation stores (card K01i): each attempt's home is `<base>/attempts/<attemptId>/home` and the process keeps its conversation in `<home>/pi`. Given here, backups copy every one found there and a restore puts each back
+          // where it was, so the conversation memory comes back with the records.
+          piState: (() => { const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" }); return { source: stores.source, final: stores.final }; })(),
           build: (services) => {
             composed = services;
             const parts = worker.localWorkerParts({
