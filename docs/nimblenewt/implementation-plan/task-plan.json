@@ -6871,12 +6871,38 @@
       ],
       "deliverable": "Added 2026-10-30 after the owner asked how a person does the initial configuration before the first agent exists (guide: docs/nimblenewt/getting-started.md). A launcher that starts the controller from a configuration file (storage choice SQLite or PostgreSQL, data directory, secret references, the supported-environment check with its override) and creates the owner once, keeping the owner credential in the operating system's secret store; a first-run conversation that works through the setup readiness view (setup.readiness, built) in order: approval profile (explains derived in plain words, keeps strict if declined), first project and its repository, per project which version control host and CI it uses (GitHub, GitLab, self-hosted or none; nothing assumes GitHub), model providers and routes (the fallback-list rule explained, a local model or a free route as the starting point), hosts and workers, notification channel, first agent with its role, rights and credential, first task; budgets and time limits are offered and left off unless the owner sets them; operations for the steps that are code-only today (routing table editing, host and agent credentials)",
       "acceptance_and_verification": "On a clean machine the launcher starts the controller and the owner reaches a first working agent and first task using only the launcher and the chat, with no code written; every answer is changeable later by chat and nothing is applied unasked; setup.readiness lists exactly what is still missing at each point and reads no secret; declining a step (for example a paid provider or a budget) leaves it unset and the system still works; a restart half-way resumes at the first missing item; a project can be created for a non-GitHub repository and for one with no remote; docs/nimblenewt/getting-started.md is updated so every step uses a built command",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "54f3a127",
+          "4759bb1c",
+          "389df0b2",
+          "6c4943c7",
+          "9ace644f",
+          "18686993",
+          "3bbee713",
+          "6143b6d3",
+          "cc2862d8",
+          "2759241b",
+          "14926d0c",
+          "ece067c7",
+          "3c89e99b",
+          "fe5c56dc",
+          "c6f24a19",
+          "7cd10100"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The launcher (scripts/nimblenewt.mjs, launch) starts the controller from a configuration file on SQLite or PostgreSQL, makes the owner once with the credential in the secret store and in no file, and a restart resumes at the first open setup step. From a state folder that does not exist, launcher starts and free-form chat messages alone (names, never IDs; every step shown first in the strict profile) set up two model servers, a project with no code host, its repository, this computer as the host, an agent with its rights and a task, and the controller admits and finishes the attempt on the local sandboxed host (integration/u14e-chat-only-first-task). setup.readiness lists the open steps in order and reads no secret; declined steps (budgets, notifications, a paid provider) stay unset and work still runs; projects on self-hosted, GitLab or no host and with no remote are accepted; the guide names only built operations (setup/guide-commands). Limits: no real clean machine (fresh operating system, the operating system's secret store, scripts/nimblenewt.mjs typed by a person) and no real model reading the owner's words or answering the agent were tested; the walk uses an in-process launch, an in-memory secret store and a scripted model, and the worker host and the walk exist on Linux only. A repository named in project.create must still be bound with resource.bind."
+      }
     },
     {
       "id": "V01",
