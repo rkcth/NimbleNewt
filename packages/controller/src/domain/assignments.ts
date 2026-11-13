@@ -1,12 +1,12 @@
-import type { AggregateRef, Change, ControllerStorage, JsonObject, OutboxEntry } from "../storage/types.js";
+import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject, OutboxEntry } from "../storage/types.js";
 import { DomainError } from "./errors.js";
-import { derivedId } from "./ids.js";
+import { derivedId, operationIdOf } from "./ids.js";
 import {
   ASSIGNMENT_LIMITS, activityIdOf, assignmentIdOf, attemptId as checkAttemptId, fence as checkFence, generation as checkGeneration, generationIdOf, owner as checkOwner, sameOwner,
   type ActivityBody, type AssignmentBody, type AttemptBody, type AttemptState, type Fence, type GenerationBody, type Owner,
 } from "./assignment-model.js";
-import { CommandRunner, defined, view, type Built, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
-import { onlyKnown, revision as checkRevision, taskId as checkTaskId, text, type TaskBody, type View } from "./model.js";
+import { CommandRunner, defined, mapStorageError, revisionOf, view, type Built, type CommandMeta, type CommandResult, type RunnerOptions } from "./runner.js";
+import { commandId as checkCommandId, onlyKnown, revision as checkRevision, taskId as checkTaskId, text, type TaskBody, type View } from "./model.js";
 import type { FenceGuard, ProjectService, TransitionTask, UpdateTask } from "./service.js";
 
 /** The outbox destination of assignment events (cards S02, S04). */
@@ -66,6 +66,28 @@ export type FencedUpdate = UpdateTask & { readonly fence: Fence };
 
 const FINAL = new Set(["done", "cancelled"]);
 
+const invalidScan = (): never => { throw new DomainError("invalid_command", "attemptScan: must be a whole number of at least 1", { field: "attemptScan" }); };
+
+/** The most attempt records one `deferredCommand` lookup reads (there is no per-task index of attempts). */
+export const ATTEMPT_SCAN = 2000;
+
+/** The stored facts about a `task.assign` or `task.transfer` that was recorded (see `AssignmentService.deferredCommand`). */
+export interface DeferredCommandRecord {
+  readonly commandId: string;
+  readonly type: "task.assign" | "task.transfer";
+  readonly taskId: string;
+  /** The generation of ownership the command made. */
+  readonly generation: number;
+  /** The assignment's revision the command produced. */
+  readonly revision: number;
+  readonly recordedAt: string;
+  readonly assignment?: { readonly generation: number; readonly state: "assigned" | "released"; readonly revision: number };
+  readonly attempt?: { readonly id: string; readonly number: number; readonly state: AttemptState };
+  readonly taskState?: string;
+  readonly deliveryState?: "pending" | "claimed" | "delivered";
+  readonly attemptsPartial?: boolean;
+}
+
 /**
  * Who may write to a task, and which attempt (card S02).
  *
@@ -83,23 +105,28 @@ const FINAL = new Set(["done", "cancelled"]);
 /** Options of the assignment service. `attemptGate` answers, for a task and the harness named (undefined when none was), why the attempt may not run (or undefined when it may). */
 export interface AssignmentOptions extends RunnerOptions {
   readonly attemptGate?: (taskId: string, harness: string | undefined) => Promise<string | undefined>;
+  /** The most attempt records one `deferredCommand` lookup reads (default `ATTEMPT_SCAN`; tests make it small). */
+  readonly attemptScan?: number;
 }
 
 export class AssignmentService {
   readonly #runner: CommandRunner;
   readonly #projects: ProjectService;
   readonly #gate: AssignmentOptions["attemptGate"];
+  readonly #attemptScan: number;
 
-  private constructor(runner: CommandRunner, projects: ProjectService, gate: AssignmentOptions["attemptGate"]) {
+  private constructor(runner: CommandRunner, projects: ProjectService, gate: AssignmentOptions["attemptGate"], attemptScan: number) {
     this.#runner = runner;
     this.#projects = projects;
     this.#gate = gate;
+    this.#attemptScan = attemptScan;
   }
 
   /** The service writes under `epoch` (the controller's one epoch, shared with `projects`). */
   static withEpoch(storage: ControllerStorage, epoch: number, projects: ProjectService, options: AssignmentOptions = {}): AssignmentService {
     if (projects.epoch !== epoch) throw new DomainError("invalid_command", "epoch: must be the epoch the project service writes under", { field: "epoch" });
-    return new AssignmentService(new CommandRunner(storage, epoch, options), projects, options.attemptGate);
+    const scan = options.attemptScan === undefined ? ATTEMPT_SCAN : Number.isSafeInteger(options.attemptScan) && options.attemptScan >= 1 ? options.attemptScan : invalidScan();
+    return new AssignmentService(new CommandRunner(storage, epoch, options), projects, options.attemptGate, scan);
   }
 
   get epoch(): number { return this.#runner.epoch; }
@@ -337,6 +364,85 @@ export class AssignmentService {
       }
       if (page.length < 200) return out;
     }
+  }
+
+  /**
+   * What is stored about a recorded `task.assign` or `task.transfer` (card U13 finish), found by its command ID: which task and generation it made, the assignment and task now, the latest attempt of that generation and
+   * the state of the message that tells the owner's worker. Undefined when the ID names no such command (a refused command is not recorded). Attempt records have no per-task index, so a generation that is no longer the
+   * current one is looked up by reading attempt records in pages, at most `ATTEMPT_SCAN` of them; `attemptsPartial` says the scan ended before the end and what it found (nothing, or an attempt that may not be the
+   * generation's latest) cannot be relied on. `authorize`, when given, is called with the command's task before anything more than the command's own record is read (the caller's rights are checked before the scan).
+   */
+  async deferredCommand(commandId: string, authorize?: (taskId: string) => Promise<unknown>): Promise<DeferredCommandRecord | undefined> {
+    const id = checkCommandId(commandId);
+    const stored = await this.#runner.storage.getOperation(operationIdOf(id)).catch((error: unknown) => { throw mapStorageError(error); });
+    if (stored === undefined) return undefined;
+    const seq = stored.result.auditSeqs[0];
+    const audit = seq === undefined ? undefined : (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }).catch((error: unknown) => { throw mapStorageError(error); }))[0];
+    if (audit === undefined || audit.seq !== seq || audit.operationId !== stored.operationId || audit.subject === undefined) return undefined;
+    if (audit.type !== "task.assign" && audit.type !== "task.transfer") return undefined;
+    const generation = audit.detail["generation"];
+    if (audit.subject.kind !== "assignment" || typeof generation !== "number") return undefined;
+    const revision = revisionOf(stored.result, audit.subject);
+    const assignmentAggregate = await this.#runner.get("assignment", audit.subject.id);
+    const taskId = (assignmentAggregate?.body as unknown as AssignmentBody | undefined)?.taskId ?? (audit.subject.id.startsWith("asg-") ? `task-${audit.subject.id.slice(4)}` : undefined);
+    if (taskId === undefined) return undefined;
+    if (authorize !== undefined) await authorize(taskId);
+    return this.#progress({ commandId: id, type: audit.type, taskId, generation, revision, recordedAt: audit.at }, assignmentAggregate);
+  }
+
+  /**
+   * The same facts for the task's current generation of ownership, without a command ID (the owner asks about a task in words, card U13 finish): the command is the one that began that generation (`task.assign`, or
+   * `task.transfer` for a transfer), read from the generation's own record. Whether the worker was told is not known without the assignment's revision at that time, so the message state is left out and a generation
+   * with no attempt reads `accepted`. Undefined when the task was never assigned.
+   */
+  async currentCommand(taskId: string): Promise<DeferredCommandRecord | undefined> {
+    const id = checkTaskId(taskId);
+    const assignmentAggregate = await this.#runner.get("assignment", assignmentIdOf(id));
+    if (assignmentAggregate === undefined) return undefined;
+    const generation = (assignmentAggregate.body as unknown as AssignmentBody).generation;
+    const record = await this.#runner.get("assignment-generation", generationIdOf(id, generation));
+    if (record === undefined) return undefined;
+    const cause = (record.body as unknown as GenerationBody).cause;
+    return this.#progress({ commandId: "", type: cause === "transferred" ? "task.transfer" : "task.assign", taskId: id, generation, revision: 0, recordedAt: record.createdAt }, assignmentAggregate, false);
+  }
+
+  async #progress(head: Pick<DeferredCommandRecord, "commandId" | "type" | "taskId" | "generation" | "revision" | "recordedAt">, assignmentAggregate: Aggregate | undefined, withDelivery = true): Promise<DeferredCommandRecord> {
+    const { taskId, generation, revision } = head;
+    const assignment = assignmentAggregate === undefined ? undefined : assignmentAggregate.body as unknown as AssignmentBody;
+    const task = await this.#runner.get("task", taskId);
+    const delivery = withDelivery ? await this.#runner.storage.getDelivery(assignmentEventId(taskId, revision)).catch((error: unknown) => { throw mapStorageError(error); }) : undefined;
+    let attempt: View<AttemptBody> | undefined;
+    let attemptsPartial = false;
+    if (assignment !== undefined && assignment.generation === generation && assignment.activeAttemptId !== undefined) {
+      const active = await this.#runner.get("attempt", assignment.activeAttemptId);
+      if (active !== undefined) attempt = view<AttemptBody>(active);
+    }
+    // No attempt was ever admitted on the task (the count is over all generations): there is nothing to look for.
+    if (attempt === undefined && assignment !== undefined && assignment.attempts > 0) {
+      let after: string | undefined;
+      let seen = 0;
+      const pageSize = Math.min(200, this.#attemptScan);
+      for (;;) {
+        const page = await this.#runner.list("attempt", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
+        for (const aggregate of page) {
+          after = aggregate.id;
+          seen += 1;
+          const body = aggregate.body as unknown as AttemptBody;
+          if (body.taskId === taskId && body.generation === generation && (attempt === undefined || body.number > attempt.number)) attempt = view<AttemptBody>(aggregate);
+        }
+        if (page.length < pageSize) break;
+        // Cut short: a found attempt counts only when it is the task's last attempt of all (numbers rise over all generations, so no later attempt of its generation exists); otherwise nothing found can be relied on.
+        if (seen >= this.#attemptScan) { attemptsPartial = attempt === undefined || attempt.number !== assignment.attempts; break; }
+      }
+    }
+    return {
+      ...head,
+      ...(assignment === undefined ? {} : { assignment: { generation: assignment.generation, state: assignment.state, revision: assignmentAggregate?.revision ?? 0 } }),
+      ...(attempt === undefined ? {} : { attempt: { id: attempt.id, number: attempt.number, state: attempt.state } }),
+      ...(task === undefined ? {} : { taskState: (task.body as unknown as TaskBody).state }),
+      ...(delivery === undefined ? {} : { deliveryState: delivery.state }),
+      ...(attemptsPartial ? { attemptsPartial: true } : {}),
+    };
   }
 
   // ---- plumbing --------------------------------------------------------------------------------------------------------------

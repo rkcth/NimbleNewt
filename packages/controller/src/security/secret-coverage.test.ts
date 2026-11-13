@@ -128,12 +128,14 @@ test("redactError: the same error back when clean, a copy with the message, stac
 
 test("second review: hex runs on one long line stay linear (the key-context look-back was quadratic: 1 MB took over 4 s)", () => {
   const h64 = hexOf(41, 64);
-  const time = (unit: string, n: number): number => { const text = unit.repeat(Math.ceil(n / unit.length)).slice(0, n); const t0 = performance.now(); redactText(text); return performance.now() - t0; };
+  // Measured as this process's own processor time (not the wall clock, which a busy machine stretches by preempting the longer run more often), the fastest of three runs. Quadratic work is about 16 times
+  // slower for 4 times the text, linear about 4; the ceiling only catches something far off on any machine.
+  const time = (unit: string, n: number): number => { const text = unit.repeat(Math.ceil(n / unit.length)).slice(0, n); let best = Infinity; for (let i = 0; i < 3; i++) { const t0 = process.cpuUsage(); redactText(text); const d = process.cpuUsage(t0); best = Math.min(best, (d.user + d.system) / 1000); } return best; };
   for (const unit of [`${h64} `, `key:${h64.slice(0, 40)},`, `{"sha":"${h64}"},`]) {
     time(unit, 1 << 14);
     const small = time(unit, 1 << 18);
     const big = time(unit, 1 << 20);
-    assert.ok(big < 1500, `${unit.slice(0, 8)}: 1 MB on one line took ${big.toFixed(0)} ms`);
+    assert.ok(big < 3000, `${unit.slice(0, 8)}: 1 MB on one line took ${big.toFixed(0)} ms`);
     assert.ok(big < Math.max(small, 20) * 10, `${unit.slice(0, 8)}: linear (${small.toFixed(0)} ms for 256 KB, ${big.toFixed(0)} ms for 1 MB)`);
   }
 });

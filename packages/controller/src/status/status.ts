@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { deferredCommandState } from "../api/command-state.js";
+import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
@@ -259,6 +261,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   database_transfer: { keys: [], about: "which database the controller runs on, the databases it can be moved to, the last move and whether the host restarts the controller onto a new database by itself" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
+  command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
@@ -352,6 +355,7 @@ export type StatusRequest =
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
+  | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "database_transfer" }
@@ -785,6 +789,7 @@ export class StatusService {
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
+      case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
@@ -1606,6 +1611,21 @@ export class StatusService {
       lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at}${r.result === "done" && d.outcome !== undefined && d.outcome.status !== "succeeded" ? ` (the attempt itself finished ${d.outcome.status})` : ""} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
     }
     return { observedAt: at, lines };
+  }
+
+  /** What became of the task's latest assignment or transfer, in the shared command words (card U13 finish). What the caller may not read reads as missing. */
+  async commandStateLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId) || !this.#mayReadAssignment(by, body.projectId, taskId, await this.#deps.assignments.getAssignment(taskId))) return undefined;
+    const at = this.#runner.now();
+    const record = await this.#deps.assignments.currentCommand(taskId);
+    if (record === undefined) return { observedAt: at, lines: [line(`${shown(body.title)} has never been given an owner, so there is no assignment to follow.`, cite("task", taskId))] };
+    const verdict = deferredCommandState({ assignment: record.assignment, generation: record.generation, attempt: record.attempt, taskState: record.taskState, deliveryState: record.deliveryState, ...(record.attemptsPartial === true ? { attemptsPartial: true } : {}) });
+    const what = record.type === "task.transfer" ? "The latest transfer" : "The latest assignment";
+    return { observedAt: at, lines: [line(`${what} of ${shown(body.title)} (generation ${record.generation}) is ${verdict.state.replace("_", " ")}: ${verdict.reason}.`, cite("assignment", assignmentIdOf(taskId), record.assignment?.revision))] };
   }
 
   /**

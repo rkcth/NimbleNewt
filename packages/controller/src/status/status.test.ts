@@ -445,6 +445,23 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.status.task(c.owner, "not-a-task"));
   });
 
+  suite("command_state: the latest assignment or transfer of a task is told in the shared command words, from the stored records, and only to a caller who may read it (card U13 finish)", async (c) => {
+    const said1 = async (t: string): Promise<string> => { const r = await c.status.ask(c.owner, { kind: "command_state", taskId: t }); assert.ok(r !== undefined); cited(r.lines); return r.lines.map((l) => l.text).join(" "); };
+    const t = await c.ready("fresh");
+    assert.match(await said1(t), /never been given an owner/);
+    await c.assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId: t, owner: { kind: "agent", id: "ann" } });
+    assert.match(await said1(t), /latest assignment of fresh \(generation 1\) is accepted/);
+    const w = await c.work("working");
+    assert.match(await said1(w), /is running/);
+    const a = (await c.assignments.getAssignment(w))!;
+    await c.assignments.transferTask({ commandId: cid("tr"), actor: c.owner.id, taskId: w, expectedRevision: a.revision, to: { kind: "agent", id: "ben" } });
+    assert.match(await said1(w), /latest transfer of working \(generation 2\) is accepted/);
+    const outsider = await c.agent("outsider", []);
+    assert.equal(await c.status.ask(outsider, { kind: "command_state", taskId: w }), undefined, "a caller who may not read the task is told nothing");
+    assert.equal(await c.status.ask(c.owner, { kind: "command_state", taskId: "task-zzzzzzzzzzzzzzzzzzzz" }), undefined);
+    await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "command_state", taskId: w, extra: 1 } as never));
+  });
+
   suite("attention: a scan cursor reveals no task the caller cannot read, and a stale or revoked host is still listed (card U13 fixes)", async (c) => {
     const a = await c.work("paused a", "ann"); await c.seen(a);
     const b = await c.work("paused b", "ann"); await c.seen(b);
