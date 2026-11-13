@@ -6,4 +6,5 @@ export { ABSENT, BRIDGE_LIMITS, WorkspaceBridge, versionOf, type PendingChange, 
 export { WorkspaceHost, HOST_LIMITS, type CheckoutLocation, type HostJson, type HostOperation, type HostSecurityEvent, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy, type WorkspaceHostOptions } from "./host.js";
 export { LocalWorkspaces, PROGRESS_LIMITS, readPlan, type LocalWorkspacesOptions } from "./local-host.js";
 export { DEFAULT_PROTECTED_PATHS, isProtectedPath } from "./protected-paths.js";
-export { WipBackupHost, type HostWipBackupCall, type HostWipBackupOutcome, type WipBackupHostOptions } from "./wip-host.js";
+export { WipBackupHost, type HostRestoreTarget, type HostWipBackupCall, type HostWipBackupOutcome, type HostWipRestoreCall, type HostWipRestoreOutcome, type WipBackupHostOptions } from "./wip-host.js";
+export { httpsOrigin, httpsTokenEnv, isSshRemote, redactEnv, sshAgentEnv, wipPushEnv } from "./wip-credential.js";

@@ -135,6 +135,7 @@ test("two tasks of a project share the bridge's state, and names that differ onl
     assert.equal(w.ws.locate({ taskId: "TSK-ONE", projectId: "prj-one" }), undefined);
     for (const bad of ["tsk:one", "tsk-one.", "CON"]) await assert.rejects(w.ws.ensure({ taskId: bad, projectId: "prj-one" }), /plain name/, bad);
     await assert.rejects(w.ws.ensure({ taskId: "tsk-x", projectId: "journal" }), /plain name/, "a project cannot take the name of the host's own folders");
+    for (const own of ["restored", "Restored"]) await assert.rejects(w.ws.ensure({ taskId: "tsk-x", projectId: own }), /plain name/, `a project cannot be named ${own}: the work-in-progress restore keeps its side folders there (P02b)`);
   } finally { await w.done(); }
 });
 

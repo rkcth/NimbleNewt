@@ -278,13 +278,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `wip.backup.get`
 
-Whether the optional work-in-progress backup is on for a project, and what it has done (owner only). The backup is off unless the owner turns it on. Shows the remote and the one standing approval (exactly that remote, that project's own `refs/heads/nn-wip/<project>/` branches), and for each task the last backup the remote confirmed, the last failure (a failed push is never counted as a backup) and the files left out because they looked like secrets.
+Whether the optional work-in-progress backup is on for a project, and what it has done (owner only). The backup is off unless the owner turns it on. Shows the remote, the NAME of the secret used to reach it (never its value), and the one standing approval: a standing grant in the list of standing rules (`approval.grantId`), for exactly that remote and that project's own `refs/heads/nn-wip/<project>/` branches, revocable there; `approvalHeld` says whether it still stands. For each task the last backup the remote confirmed, the last failure (a failed push is never counted as a backup) and the files left out because they looked like secrets.
 
 Arguments:
 
 - `project`: the project ID
 
-Result: `{ item }`: `enabled`, `remote`, `everyMinutes`, `approval` (`scope`, `basis`, `approvedAt`, `revokedAt`), `history` and `tasks` (each `taskId`, `ref`, `lastSuccess`, `lastFailure`, `consecutiveFailures`, `blocked`).
+Result: `{ item }`: `enabled`, `remote`, `credential` (a secret name), `everyMinutes`, `approval` (`scope`, `basis`, `approvedAt`, `revokedAt`, `grantId`), `approvalHeld`, `history` and `tasks` (each `taskId`, `ref`, `lastSuccess`, `lastFailure`, `consecutiveFailures`, `blocked`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -2831,7 +2831,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `wip.backup.set`
 
-The owner turns the work-in-progress backup of a project on or off, or changes its remote or interval (owner only). On: the controller regularly commits the uncommitted work of the project's tasks from a temporary index (its own commit, marked `NimbleNewt-WIP: unreviewed`, never reviewed work) and pushes it, never forced and after a scan for credentials, to a branch under `refs/heads/nn-wip/<project>/` on the remote the owner names. Turning it on records one standing approval for exactly that remote and that project's namespace; turning it off revokes it (what is already on the remote stays there). A push anywhere else needs the normal approval.
+The owner turns the work-in-progress backup of a project on or off, or changes its remote or interval (owner only). On: the controller regularly commits the uncommitted work of the project's tasks from a temporary index (its own commit, marked `NimbleNewt-WIP: unreviewed`, never reviewed work) and pushes it, never forced and after a scan for credentials, to a branch under `refs/heads/nn-wip/<project>/` on the remote the owner names. Turning it on records one standing approval, a real standing grant (listed with the other standing rules, revocable there), for exactly that remote and that project's namespace; turning it off revokes it (what is already on the remote stays there). A push anywhere else needs the normal approval. For an https remote that needs a login, `credential` names a secret in the host's own secret store (the owner puts the value there; it is never typed in chat and never kept in a record); an ssh remote uses the host's ssh agent.
 
 Arguments:
 
@@ -2839,10 +2839,24 @@ Arguments:
 - `enabled` (optional): true to turn on (with `remote`), false to turn off
 - `remote` (optional): the git address or folder to back up to, copied exactly from the owner's words (no password or key in it)
 - `everyMinutes` (optional): how often, 5 to 1440 (default 15)
+- `credential` (optional): the NAME of a secret in the host's secret store used to reach an https remote (never the secret itself; null clears it)
 - `basis` (optional): the owner's own words, kept with the approval
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision, enabled }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `wip.backup.restore`
+
+The owner asks for a task's workspace to be put back from its work-in-progress backup branch (owner only). It restores exactly the last backup the remote confirmed to this controller; a branch that is any other commit, or not an unreviewed work-in-progress commit, is refused. The host that holds the task never writes over a live checkout: when the task's folder is gone the restored workspace becomes its own checkout there, otherwise it goes to a new folder (`where` says which). Files the backup left out because they looked like secrets are not in it. Only tasks on this computer's worker host can be restored; a remote worker host is refused with the reason.
+
+Arguments:
+
+- `project`: the project ID
+- `taskId`: the task whose backup to restore
+
+Result: `{ restored, summary, where, commitId, files, baseFound, replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
