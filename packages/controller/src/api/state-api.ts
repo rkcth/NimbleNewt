@@ -38,6 +38,7 @@ import type { AgreedLimitsSettingsService } from "./agreed-limits-settings.js";
 import type { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import type { LocalHostSettingService, SetupProviderService, SetupReadinessService } from "../setup/index.js";
 import type { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
+import type { NetworkGrantService } from "../network/index.js";
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
 import type { StartSizeService } from "../context/start-size.js";
 import type { EnvironmentService } from "../environments/index.js";
@@ -186,6 +187,8 @@ export interface StateApiDeps {
   readonly retentionSettings?: Pick<RetentionSettingsService, "get" | "set">;
   readonly retirement?: Pick<RetirementService, "preview" | "retireAgent" | "archiveProject" | "restoreProject" | "list">;
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
+  /** Network grants for tasks and their connection log (card H12i). */
+  readonly networkGrants?: Pick<NetworkGrantService, "grant" | "decide" | "revoke" | "forTask" | "connections">;
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
   readonly environments?: Pick<EnvironmentService, "get">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
@@ -377,6 +380,7 @@ export class StateApi {
         ...(this.#deps.recoveryLadder === undefined ? {} : { recoveryLadder: this.#deps.recoveryLadder }),
         ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
+        ...(this.#deps.networkGrants === undefined ? {} : { networkGrants: this.#deps.networkGrants }),
         ...(this.#deps.maintenance === undefined ? {} : { maintenance: this.#deps.maintenance }),
         ...(this.#deps.environments === undefined ? {} : { environments: this.#deps.environments }),
         ...(this.#deps.capacityLimits === undefined ? {} : { capacityLimits: this.#deps.capacityLimits }),

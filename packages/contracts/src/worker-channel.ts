@@ -87,6 +87,11 @@ export interface ChannelStart {
    * `graceMs` is how long after work stops the process ends itself if it has not wound down.
    */
   readonly lease?: { readonly leaseMs: number; readonly graceMs: number };
+  /**
+   * Card H12i: the sandbox has a controlled route out. The process serves a proxy endpoint on its own loopback port `proxyPort` (HTTP proxy: CONNECT and plain requests) and sends every connection over the channel (`net.open`); the host's network
+   * relay lets it through only for a destination the task holds a grant for. Absent: no proxy is served and the process has no way out but the model relay. The port is the one the sandbox recipe's environment names (`HTTP_PROXY` and the like).
+   */
+  readonly network?: { readonly proxyPort: number };
 }
 
 export type BridgeReplyMessage = { readonly ok: true; readonly result: Obj } | { readonly ok: false; readonly code: string; readonly message: string };
@@ -108,6 +113,15 @@ export type ToChild =
   | { readonly t: "fetch.chunk"; readonly id: number; readonly data: string }
   | { readonly t: "fetch.end"; readonly id: number }
   | { readonly t: "fetch.error"; readonly id: number; readonly message: string }
+  /** Card H12i: the connection the process asked for (`net.open`) is open / was refused (the text says why). */
+  | { readonly t: "net.opened"; readonly id: number }
+  | { readonly t: "net.refused"; readonly id: number; readonly message: string }
+  /** Bytes the destination sent, base64; the process may not be sent more on this connection until it has read this (the host waits for its own write). */
+  | { readonly t: "net.data"; readonly id: number; readonly data: string }
+  /** The host wrote the bytes of the process's last `net.data` to the destination: the process may send more on this connection. */
+  | { readonly t: "net.ack"; readonly id: number }
+  /** The connection is over (the destination closed it, the grant ended, the attempt ended); `message` says why. */
+  | { readonly t: "net.close"; readonly id: number; readonly message?: string }
   /**
    * The answer to the process's `lease.renew` (card H08b): the controller extended the attempt's lease and says for how long, as a duration (never a time on the controller's clock). The process counts it from the moment it SENT the request, on its
    * own monotonic clock, so a slow or replayed answer never stretches the lease.
@@ -128,6 +142,14 @@ export type FromChild =
   | { readonly t: "bridge"; readonly id: number; readonly token: string; readonly request: { readonly op: string; readonly callId: string; readonly args?: Obj } }
   | { readonly t: "fetch"; readonly id: number; readonly url: string; readonly method: string; readonly headers: HeaderList; readonly body?: string }
   | { readonly t: "fetch.abort"; readonly id: number }
+  /** Card H12i: the process asks for a connection to a destination (through the host's network relay, which refuses what the task holds no grant for). */
+  | { readonly t: "net.open"; readonly id: number; readonly host: string; readonly port: number }
+  | { readonly t: "net.data"; readonly id: number; readonly data: string }
+  /** The process has no more to send on this connection (the destination may still answer). */
+  | { readonly t: "net.end"; readonly id: number }
+  | { readonly t: "net.close"; readonly id: number }
+  /** The process read the bytes of the host's last `net.data` on this connection: the host may send more. */
+  | { readonly t: "net.ack"; readonly id: number }
   /** `endKind` and `visibleChars` (card W02): how a completed turn ended and the length of its last reply's visible text (trimmed). A worker from before W02 sends neither: the host reads that as `unknown`. */
   /** `nudges` (card W04): how many times the process continued the turn after it yielded without a tool call or work.end; absent from a worker before W04. */
   | { readonly t: "result"; readonly status: "completed" | "failed" | "cancelled"; readonly text?: string; readonly error?: string; readonly endKind?: TurnEndKind; readonly visibleChars?: number; readonly nudges?: number }
@@ -187,6 +209,8 @@ function parseStart(o: Obj): ChannelStart {
   const key = c === undefined ? undefined : optStr(c, "key", 200);
   const context = o["context"] === undefined ? undefined : parseContext(obj(o, "context"));
   const leaseObj = o["lease"] === undefined ? undefined : obj(o, "lease");
+  const netObj = o["network"] === undefined ? undefined : obj(o, "network");
+  const network = netObj === undefined ? undefined : { proxyPort: bounded(netObj, "proxyPort", 1024, 65535) ?? fail("network.proxyPort: required") };
   const lease = leaseObj === undefined ? undefined : { leaseMs: bounded(leaseObj, "leaseMs", 1000, 3_600_000) ?? fail("lease.leaseMs: required"), graceMs: bounded(leaseObj, "graceMs", 0, 600_000) ?? fail("lease.graceMs: required") };
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
@@ -196,6 +220,7 @@ function parseStart(o: Obj): ChannelStart {
     relayBase: str(o, "relayBase", 500),
     ...(context === undefined ? {} : { context }),
     ...(lease === undefined ? {} : { lease }),
+    ...(network === undefined ? {} : { network }),
   };
 }
 
@@ -257,6 +282,11 @@ export function parseFromChild(value: unknown): FromChild {
       return { t: "fetch", id: int(value, "id"), url: str(value, "url", 4000), method: str(value, "method", 16), headers: headers(value, "headers"), ...(body === undefined ? {} : { body }) };
     }
     case "fetch.abort": return { t: "fetch.abort", id: int(value, "id") };
+    case "net.open": return { t: "net.open", id: int(value, "id"), host: str(value, "host", 260), port: bounded(value, "port", 1, 65535) ?? fail("port: required") };
+    case "net.data": return { t: "net.data", id: int(value, "id"), data: base64(value, "data") };
+    case "net.end": return { t: "net.end", id: int(value, "id") };
+    case "net.close": return { t: "net.close", id: int(value, "id") };
+    case "net.ack": return { t: "net.ack", id: int(value, "id") };
     case "result": {
       const status = value["status"];
       if (status !== "completed" && status !== "failed" && status !== "cancelled") return fail("status: completed, failed or cancelled");
@@ -313,6 +343,11 @@ export function parseToChild(value: unknown): ToChild {
     case "fetch.chunk": return { t: "fetch.chunk", id: int(value, "id"), data: base64(value, "data") };
     case "fetch.end": return { t: "fetch.end", id: int(value, "id") };
     case "fetch.error": return { t: "fetch.error", id: int(value, "id"), message: str(value, "message", 4000) };
+    case "net.opened": return { t: "net.opened", id: int(value, "id") };
+    case "net.refused": return { t: "net.refused", id: int(value, "id"), message: str(value, "message", 2000) };
+    case "net.data": return { t: "net.data", id: int(value, "id"), data: base64(value, "data") };
+    case "net.ack": return { t: "net.ack", id: int(value, "id") };
+    case "net.close": return { t: "net.close", id: int(value, "id"), ...(value["message"] === undefined ? {} : { message: str(value, "message", 2000) }) };
     case "lease.ok": return { t: "lease.ok", id: int(value, "id"), leaseMs: bounded(value, "leaseMs", 0, 3_600_000) ?? fail("leaseMs: required") };
     case "lease.fenced": return { t: "lease.fenced", id: int(value, "id"), reason: str(value, "reason", 500) };
     default: return fail(`unknown message ${String(value["t"]).slice(0, 40)}`);

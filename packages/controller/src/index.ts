@@ -48,3 +48,4 @@ export { COMMAND_ALIASES, COMMAND_LIMITS, CommandResolver, CommandService, catal
 export * from "./backup/index.js";
 export * from "./transfer/index.js";
 export type { EnvironmentRuntime, TrialInput as EnvironmentTrialInput, TrialResult as EnvironmentTrialResult, ReloadInput as EnvironmentReloadInput, ReloadResult as EnvironmentReloadResult, ValidateInput as EnvironmentValidateInput, ValidateResult as EnvironmentValidateResult } from "./maintenance/index.js";
+export { NetworkGrantService, NetworkRelay, NetworkRefused, WebFetch, WEB_FETCH_TOOL, NETWORK_LIMITS, type NetworkOpener, type NetworkRelayOptions } from "./network/index.js";

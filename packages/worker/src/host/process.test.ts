@@ -329,3 +329,101 @@ test("a process that dies with a key on its stderr reports it redacted", async (
   const error = (await running) as Error;
   assert.ok(!error.message.includes(leaked.slice(6)) && /boom \[redacted\]/.test(error.message), error.message);
 });
+
+// Card H12i: the connections the process asks for go through the network relay the controller bound to the attempt.
+async function waitFor(label: string, check: () => boolean, ms = 10_000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) { if (Date.now() > end) assert.fail(`timed out waiting for ${label}`); await new Promise((r) => setTimeout(r, 5)); }
+}
+type NetEvents = { data(chunk: Uint8Array): Promise<void> | void; closed(why: string): void };
+function relayFake(rule: (host: string, port: number) => string | undefined = () => undefined) {
+  const opened: Array<{ host: string; port: number; events: NetEvents }> = [];
+  const log: string[] = []; const written: Buffer[] = []; let closedAll = 0;
+  const port = {
+    open: async (target: { host: string; port: number }, events: NetEvents) => {
+      const refusal = rule(target.host, target.port);
+      if (refusal !== undefined) throw new Error(refusal);
+      opened.push({ ...target, events });
+      return { write: async (chunk: Uint8Array) => { written.push(Buffer.from(chunk)); }, end: () => { log.push("end"); }, close: () => { log.push("close"); } };
+    },
+    closeAll: () => { closedAll++; },
+  };
+  return { port, opened, log, written, closedAll: () => closedAll };
+}
+const launchWith = (f: ReturnType<typeof fake>, network?: ReturnType<typeof relayFake>["port"]) => WorkerProcess.launch(f.launcher as never, { recipe: {} as never, command: ["x"], timeoutMs: 1000, maxOutputBytes: 1000 }, { ...handlers, ...(network === undefined ? {} : { network }) });
+
+test("a connection the process asks for is opened by the network relay; bytes and the end go to it, each piece acknowledged; the relay's bytes come back one acknowledged piece at a time", async () => {
+  const f = fake(); const r = relayFake();
+  const p = await launchWith(f, r.port);
+  f.send({ t: "net.open", id: 1, host: "docs.example.com", port: 443 });
+  await waitFor("the open answer", () => f.written.some((m) => m.t === "net.opened"));
+  assert.deepEqual(r.opened.map(({ host, port }) => ({ host, port })), [{ host: "docs.example.com", port: 443 }]);
+  f.send({ t: "net.data", id: 1, data: Buffer.from("GET /").toString("base64") });
+  await waitFor("the ack", () => f.written.some((m) => m.t === "net.ack"));
+  assert.equal(Buffer.concat(r.written).toString(), "GET /");
+  f.send({ t: "net.end", id: 1 });
+  await waitFor("the end", () => r.log.includes("end"));
+  // The destination sends more than one piece's worth: the second piece waits for the process's acknowledgement of the first.
+  const big = Buffer.alloc(PROCESS_LIMITS.netChunkBytes + 10, 1);
+  const sending = Promise.resolve(r.opened[0]!.events.data(big));
+  await waitFor("first piece", () => f.written.filter((m) => m.t === "net.data").length === 1);
+  await new Promise((res) => setTimeout(res, 30));
+  assert.equal(f.written.filter((m) => m.t === "net.data").length, 1, "the second piece is not sent before the first is acknowledged");
+  f.send({ t: "net.ack", id: 1 });
+  await waitFor("second piece", () => f.written.filter((m) => m.t === "net.data").length === 2);
+  f.send({ t: "net.ack", id: 1 });
+  await sending;
+  const pieces = f.written.filter((m): m is Extract<ToChild, { t: "net.data" }> => m.t === "net.data").map((m) => Buffer.from(m.data, "base64").length);
+  assert.deepEqual(pieces, [PROCESS_LIMITS.netChunkBytes, 10]);
+  // The relay ends the connection (a revoke, the destination closing): the process is told with the reason.
+  r.opened[0]!.events.closed("the grant was revoked");
+  await waitFor("the close", () => f.written.some((m) => m.t === "net.close" && /revoked/.test(m.message ?? "")));
+  f.exit(); await p.exited;
+});
+
+test("a refusal by the relay goes back to the process as its reason; with no route every connection is refused; a connection the process closes is closed at the relay", async () => {
+  const f = fake(); const r = relayFake((host) => host === "blocked.example.com" ? "the task holds no grant for that destination" : undefined);
+  const p = await launchWith(f, r.port);
+  f.send({ t: "net.open", id: 1, host: "blocked.example.com", port: 443 });
+  await waitFor("refusal", () => f.written.some((m) => m.t === "net.refused" && m.id === 1 && /no grant/.test(m.message)));
+  f.send({ t: "net.open", id: 2, host: "ok.example.com", port: 443 });
+  await waitFor("opened", () => f.written.some((m) => m.t === "net.opened" && m.id === 2));
+  f.send({ t: "net.close", id: 2 });
+  await waitFor("closed at the relay", () => r.log.includes("close"));
+  f.exit(); await p.exited;
+  const g = fake(); const q = await launch(g);
+  g.send({ t: "net.open", id: 1, host: "x.example.com", port: 443 });
+  await waitFor("no route", () => g.written.some((m) => m.t === "net.refused" && /no route/.test(m.message)));
+  g.exit(); await q.exited;
+});
+
+test("the number of connections open at once is bounded, and the end of the process closes every one at the relay", async () => {
+  const f = fake(); const r = relayFake();
+  const p = await launchWith(f, r.port);
+  for (let i = 1; i <= PROCESS_LIMITS.netInFlight; i++) f.send({ t: "net.open", id: i, host: "a.example.com", port: 443 });
+  await waitFor("all opened", () => f.written.filter((m) => m.t === "net.opened").length === PROCESS_LIMITS.netInFlight);
+  f.send({ t: "net.open", id: 99, host: "a.example.com", port: 443 });
+  await waitFor("over the limit", () => f.written.some((m) => m.t === "net.refused" && m.id === 99 && /too many/.test(m.message)));
+  f.exit(); await p.exited;
+  await waitFor("every one closed", () => r.log.filter((l) => l === "close").length === PROCESS_LIMITS.netInFlight && r.closedAll() >= 1);
+});
+
+test("a process that sends a second piece before the first was acknowledged has that connection closed, and no second write is started", async () => {
+  const f = fake();
+  let writes = 0; let release!: () => void; const stuck = new Promise<void>((r) => { release = r; }); const log: string[] = [];
+  const port = {
+    open: async () => ({ write: async () => { writes++; await stuck; }, end: () => { log.push("end"); }, close: () => { log.push("close"); } }),
+    closeAll: () => undefined,
+  };
+  const p = await launchWith(f, port as never);
+  f.send({ t: "net.open", id: 1, host: "docs.example.com", port: 443 });
+  await waitFor("opened", () => f.written.some((m) => m.t === "net.opened"));
+  f.send({ t: "net.data", id: 1, data: Buffer.from("one").toString("base64") });
+  await waitFor("first write started", () => writes === 1);
+  for (let i = 0; i < 5; i++) f.send({ t: "net.data", id: 1, data: Buffer.from("more").toString("base64") });
+  await waitFor("closed for the breach", () => f.written.some((m) => m.t === "net.close" && m.id === 1 && /acknowledged/.test(m.message ?? "")));
+  assert.equal(writes, 1, "the unacknowledged pieces were not written");
+  assert.ok(log.includes("close"));
+  release();
+  f.exit(); await p.exited;
+});
