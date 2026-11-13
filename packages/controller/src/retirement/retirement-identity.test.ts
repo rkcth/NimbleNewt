@@ -110,6 +110,14 @@ for (const backend of backends) {
       assert.match(back.record.note ?? "", /1 grant\(s\) written on principals' own records \(agent:writer\|task.update\) were only suspended and work again now/);
       assert.equal(await update(writer.token, t, "Water in spring"), "ok", "restoring the project brings the identity grant back");
       assert.equal((await r.retirement.preview(w.owner, { kind: "project", id: p })).release.fencedGrants?.length, 1);
+      // A project with no such grants (only a read-only one) has no fenced list at all: its digest is made from exactly the lists it was made from before this was added.
+      const bare = await w.project("Bare");
+      await w.agent("bare-reader", [{ action: "task.read", project: bare }]);
+      const bp = await r.retirement.preview(w.owner, { kind: "project", id: bare });
+      assert.equal(Object.hasOwn(bp.release, "fencedGrants"), false);
+      const bareDone = await r.retirement.archiveProject(w.owner, { commandId: cid("ab"), projectId: bare, reason: "over", confirm: bp.digest });
+      assert.equal(Object.hasOwn(bareDone.record.released, "fencedGrants"), false, "nor in the ledger");
+      assert.doesNotMatch((await r.retirement.restoreProject(w.owner, { commandId: cid("rb"), projectId: bare, reason: "back" })).record.note ?? "", /suspended/);
     } finally { await r.close(); }
   });
 }

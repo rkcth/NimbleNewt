@@ -635,8 +635,12 @@ export async function heldRecords(runner: CommandRunner, principalId: string, no
   return mine.filter(({ body }) => holds(body, 0));
 }
 
-/** A grant that only lets its holder read (`task.read`, `desk.read`, ...). Archiving a project leaves these working. */
-export const readOnlyGrant = (action: string): boolean => /^[a-z][a-z.-]*\.read$/.test(action);
+const READ_ACTIONS: ReadonlySet<string> = new Set(ACTIONS.filter((a) => a.endsWith(".read")));
+/**
+ * A grant that only lets its holder read (`task.read`, `desk.read`, ...). Archiving a project leaves these working. Only the controller's own `.read` actions (the `ACTIONS` table) count: a tool
+ * (`tool.<name>`, whose name may itself end in `.read` but which can do anything), a wildcard (`task.*`, `*`) and any action the table does not name, a new one included, count as more than a read.
+ */
+export const readOnlyGrant = (action: string): boolean => READ_ACTIONS.has(action);
 
 /**
  * Card P06 (project archive): a grant for ONE project that lets its holder do more than read does not work while that project is archived. This covers the grants written on a principal's own record (enrolment, `setGrants`),
@@ -645,9 +649,34 @@ export const readOnlyGrant = (action: string): boolean => /^[a-z][a-z.-]*\.read$
 async function fenceArchived(runner: CommandRunner, grants: Grant[]): Promise<Grant[]> {
   const ids = [...new Set(grants.filter((g) => g.project !== "*" && !readOnlyGrant(g.action)).map((g) => g.project))];
   if (ids.length === 0) return grants;
-  const archived = new Set<string>();
-  for (const id of ids) { const p = await runner.get("project", id); if (p !== undefined && (p.body as { state?: unknown }).state === "archived") archived.add(id); }
+  const archived = await archivedAmong(runner, ids);
   return archived.size === 0 ? grants : grants.filter((g) => !(archived.has(g.project) && !readOnlyGrant(g.action)));
+}
+
+/** Project pages of this size are read when a principal holds non-read grants for many projects; below `FENCE_PAGE_FROM` projects, each is read on its own. */
+export const FENCE_PAGE = 500;
+export const FENCE_PAGE_FROM = 50;
+
+/**
+ * Which of these projects are archived, read fresh for every snapshot (no cache: an archive or restore made by another controller counts at once). Few projects are read one by one. Many are read
+ * a page of the project list at a time, which costs one call per 500 projects instead of one per project; the pages read are capped at one per `FENCE_PAGE_FROM` projects wanted, so an installation
+ * with far more projects than the principal holds does not read the whole list: the projects not yet seen when the cap is reached are read one by one. A project that does not exist is not archived.
+ */
+export async function archivedAmong(runner: CommandRunner, ids: readonly string[], sizes: { page: number; from: number } = { page: FENCE_PAGE, from: FENCE_PAGE_FROM }): Promise<Set<string>> {
+  const archived = new Set<string>();
+  const left = new Set(ids);
+  const isArchived = (body: unknown): boolean => (body as { state?: unknown } | undefined)?.state === "archived";
+  if (left.size >= sizes.from) {
+    let pages = Math.ceil(left.size / sizes.from);
+    for (let after: string | undefined; pages > 0 && left.size > 0; pages--) {
+      const page = await runner.list("project", { ...(after === undefined ? {} : { afterId: after }), limit: sizes.page });
+      for (const p of page) { after = p.id; if (left.delete(p.id) && isArchived(p.body)) archived.add(p.id); }
+      // The end of the list: a project not seen does not exist.
+      if (page.length < sizes.page) return archived;
+    }
+  }
+  for (const id of left) { const p = await runner.get("project", id); if (p !== undefined && isArchived(p.body)) archived.add(id); }
+  return archived;
 }
 
 /** Takes the snapshot described at `GrantService.effective`. Shared with authentication so that no authenticated principal is ever without its restrictions. */
@@ -686,7 +715,9 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     // A grant for one service resource (`<service>/<resource>`) is the agent's own right and stays on its task credential: the use site asks for the exact resource, so only that one resource is reached (card P03 review).
     .filter((g) => (g.project === "*" || g.project === scope.projectId) && (g.resource === undefined || (g.resource.kind === "task" && g.resource.id === scope.taskId) || g.resource.kind === "service" || (g.resource.kind === "project" && g.resource.id === scope.projectId)))
     .map((g) => ({ ...g, project: scope.projectId }));
-  return { ...principal, grants: kept, restrictions, asOf: now };
+  // A task credential's grants for every project now name its task's project: when that project is archived they stop working too (one read of that project; review of card P06).
+  const fenced = scope === undefined ? kept : await fenceArchived(runner, kept);
+  return { ...principal, grants: fenced, restrictions, asOf: now };
 }
 
 /**
