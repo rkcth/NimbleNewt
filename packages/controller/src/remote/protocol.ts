@@ -74,6 +74,8 @@ export const REMOTE_LIMITS = {
   toolTokenChars: 512,
   /** A worker's report of the processes it holds for an attempt (card L02e): at most this many entries, a reference of at most `processRef` characters each, in a body of at most `processBytes` bytes. */
   processes: 50,
+  /** The most cleanup compute (ms) a worker's report may count for one placement: a day. A larger figure is refused, not cut (card L02e). */
+  cleanupMs: 24 * 3600 * 1000,
   processRef: 120,
   processBytes: 16 * 1024,
   /**
@@ -93,7 +95,11 @@ export type ControlMessage =
   | { readonly kind: "tell"; readonly text: string }
   | { readonly kind: "restart"; readonly recipe: RecipeSummary; readonly checkpoint: JsonObject }
   | { readonly kind: "checkpoint" }
-  | { readonly kind: "stop"; readonly emergency: boolean };
+  | { readonly kind: "stop"; readonly emergency: boolean }
+  /** Force Stop (card L02e): kill whatever the sandbox of this attempt still holds, now. A worker that does not know the message ignores it. */
+  | { readonly kind: "kill" }
+  /** A fresh look (card L02e): report the processes the sandbox holds now, whether or not they changed. A worker that does not know the message ignores it (and never says it can look). */
+  | { readonly kind: "look" };
 export type SequencedControl = ControlMessage & { readonly seq: number };
 
 export interface SessionInfo {
@@ -145,6 +151,10 @@ export type RemoteWorkspaceAnswer = { readonly ok: true; readonly summary: strin
 export interface ProcessReport {
   readonly seq: number;
   readonly final: boolean;
+  /** The worker answers the `look` and `kill` control messages: the controller may ask it for a fresh look before it reads a live report (a worker that does not say so is read as it always was). */
+  readonly canLook?: true;
+  /** What winding the attempt's sandbox down has cost in compute so far, in ms, as a running total (the controller charges only what it has not charged yet). */
+  readonly computeMs?: number;
   readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[];
 }
 

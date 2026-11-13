@@ -230,6 +230,18 @@ for (const backend of backends) {
       const stranger: WorkerHost = { hostId: "host:other", resources: { cpus: 1, memoryMb: 1 }, start: async () => { throw new Error("unused"); }, localWork: async () => ({ processes: [{ attemptId: "att-not-asked", ref: "x", kind: "process", state: "running" }, { attemptId: attemptId!, ref: "mine", kind: "process", state: "running" }] }) };
       const filtered = await w.restart({ workers: [stranger] }).localWorkOf(w.owner, [attemptId!]);
       assert.deepEqual(filtered.processes.map((p) => p.ref), ["mine"]);
+      // The hosts are asked at once, a bounded number at a time (review of L02e: a remote host waits a few seconds for its workers' fresh looks, and one after another a Stop of many hosts waited that long for each); the answers keep the host order.
+      let inFlight = 0, most = 0;
+      const slow = (n: number): WorkerHost => ({ hostId: `host:s${n}`, resources: { cpus: 1, memoryMb: 1 }, start: async () => { throw new Error("unused"); }, localWork: async () => {
+        inFlight += 1; most = Math.max(most, inFlight);
+        // The answers come back in reverse order; the result must still be in host order.
+        await new Promise((ok) => setTimeout(ok, 5 * (20 - n)));
+        inFlight -= 1;
+        return { processes: [{ attemptId: attemptId!, ref: `from ${n}`, kind: "process", state: "running" }] };
+      } });
+      const many = await w.restart({ workers: Array.from({ length: 20 }, (_, n) => slow(n)) }).localWorkOf(w.owner, [attemptId!]);
+      assert.deepEqual(many.processes.map((p) => p.ref), Array.from({ length: 20 }, (_, n) => `from ${n}`));
+      assert.equal(most, 16, "sixteen hosts are asked at a time, not one after another and not all twenty");
       turn.release?.();
       await d.idle();
     } finally { await store.close(); }

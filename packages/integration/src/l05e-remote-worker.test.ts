@@ -121,6 +121,12 @@ test("a remote worker program in a real process takes an offer over the protocol
     assert.equal(answer.seen[0]!.authorization, `Bearer ${SECRET_TOKEN_MARK}`, "the provider key reached the provider from the host's environment, by the name the configuration gave");
     await until(() => out.join("").includes(`attempt ${attemptId} completed`), () => `the host did not say the attempt completed: ${out.join("")}`, 20_000);
 
+    // Card L02e: the deployed program reports what its sandbox holds. Its last word (after the sandbox was stopped) is on the placement: final, saying it can answer a fresh look, and listing nothing the agent left behind.
+    let report: { final: boolean; canLook?: boolean; processes: unknown[]; placement: number } | undefined;
+    await until(async () => { report = ((await c.storage.getAggregate({ kind: "remote-placement", id: attemptId }))?.body as unknown as { processReport?: typeof report } | undefined)?.processReport; return report?.final === true; }, () => `the program never gave its final process report: ${JSON.stringify(report)} ${out.join("")}`, 20_000);
+    assert.equal(report!.canLook, true, "the program says it can answer a look");
+    assert.deepEqual(report!.processes, [], `a finished attempt left nothing in its sandbox: ${JSON.stringify(report)}`);
+
     // Nothing the program printed holds the host credential, the task credential or the provider key, and the configuration file holds none.
     const printed = out.join("");
     for (const secret of [hostToken, SECRET_TOKEN_MARK]) { assert.equal(printed.includes(secret), false); assert.equal(readFileSync(configFile, "utf8").includes(secret), false); }

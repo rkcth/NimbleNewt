@@ -103,7 +103,17 @@ export interface PlacementBody {
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
   readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
   /** The latest report of the worker on the processes it holds for this placement (card L02e). Belongs to the placement it names and to no other: a new placement (a move, a restart, a re-offer) starts without one. */
-  readonly processReport?: { readonly placement: number; /** The worker session that sent it: `seq` rises within one session (absent on a record written before this was kept). */ readonly sessionId?: string; readonly seq: number; readonly at: string; readonly final: boolean; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] };
+  readonly processReport?: StoredProcessReport;
+  /**
+   * What an earlier holder of the attempt last said about the processes it held (card L02e): kept when the attempt moves to another host or is placed again, newest last, at most `EARLIER` entries. The old worker is told to stop, and its
+   * last word (a final report) is still taken for the placement it names, so a Stop reads what the old host left, not only what the current one holds.
+   */
+  readonly earlier?: readonly { readonly hostId: string; readonly placement: number; readonly sessionId?: string; readonly report?: StoredProcessReport }[];
+  /**
+   * What the bound on `earlier` could no longer keep (review of L02e): an attempt can be moved any number of times, and a dropped entry that still listed something must not make a Stop read clean. Entries that list nothing are dropped
+   * first; an entry that listed something is counted here (its placements, the processes it listed, its cleanup compute) and read by Stop as one unknown item that nothing can confirm any more.
+   */
+  readonly earlierLost?: { readonly placements: number; readonly processes: number; readonly computeMs: number };
   readonly checkpoints: number;
   readonly controlSeq: number;
   readonly control: readonly SequencedControl[];
@@ -116,6 +126,33 @@ export interface PlacementBody {
   readonly withdrawn?: true;
   readonly history: readonly { readonly hostId: string; readonly placement: number; readonly at: string; readonly reason: string; /** For a move: the command that made it. */ readonly commandId?: string }[];
 }
+
+/** What a worker last reported of its processes for one placement (card L02e). */
+export interface StoredProcessReport { readonly placement: number; /** The worker session that sent it: `seq` rises within one session (absent on a record written before this was kept). */ readonly sessionId?: string; readonly seq: number; readonly at: string; readonly final: boolean; /** The worker answers `look` and `kill`. */ readonly canLook?: true; /** Cleanup compute so far, ms. */ readonly computeMs?: number; readonly processes: readonly { readonly ref: string; readonly kind: "process" | "child"; readonly state: "running" | "uncooperative" | "unknown" }[] }
+const EARLIER = 5;
+/**
+ * The placement as a record of an earlier holder, when something ran under it (it was accepted by a worker session), with what the bound could not keep. Over the bound the entry dropped is, in this order: the oldest whose worker confirmed
+ * it left nothing (a final report listing nothing), the oldest that lists nothing, then the oldest of all, which is counted in `earlierLost` (review of L02e: a list nobody confirmed is never silently dropped).
+ */
+const earlierOf = (x: PlacementBody): { earlier?: PlacementBody["earlier"]; earlierLost?: PlacementBody["earlierLost"] } => {
+  const list = [...(x.earlier ?? [])];
+  if (x.sessionId !== undefined) {
+    const report = x.processReport !== undefined && x.processReport.placement === x.placement ? x.processReport : undefined;
+    list.push({ hostId: x.hostId, placement: x.placement, sessionId: x.sessionId, ...(report === undefined ? {} : { report }) });
+  }
+  let lost = x.earlierLost;
+  while (list.length > EARLIER) {
+    let i = list.findIndex((e) => e.report?.final === true && e.report.processes.length === 0);
+    if (i < 0) i = list.findIndex((e) => (e.report?.processes.length ?? 0) === 0);
+    if (i < 0) i = 0;
+    const e = list[i]!;
+    const listed = e.report?.processes.length ?? 0;
+    const compute = e.report?.computeMs ?? 0;
+    if (listed > 0 || compute > 0) lost = { placements: (lost?.placements ?? 0) + (listed > 0 ? 1 : 0), processes: (lost?.processes ?? 0) + listed, computeMs: Math.min(Number.MAX_SAFE_INTEGER, (lost?.computeMs ?? 0) + compute) };
+    list.splice(i, 1);
+  }
+  return { ...(list.length === 0 ? {} : { earlier: list }), ...(lost === undefined ? {} : { earlierLost: lost }) };
+};
 
 /** The native Pi store of an agent has one exclusive owner host. The record says which, and which attempt holds it right now. */
 export interface StoreBody {
@@ -781,7 +818,8 @@ export class RemoteWorkerService {
         // After a relocation the offer completes the move at the number already fenced; any other second placement is a new run and fences the earlier one.
         const number = b.state === "relocating" ? b.placement : b.placement + 1;
         const { sessionId: _s, acceptedAt: _a, result: _r, contract: _c, processReport: _p, withdrawn: _w, ...rest } = b; void _s; void _a; void _r; void _c; void _p; void _w;
-        next = { ...rest, ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
+        const kept = b.state === "relocating" ? { earlier: b.earlier, earlierLost: b.earlierLost } : earlierOf(b);
+        next = { ...rest, ...(kept.earlier === undefined ? {} : { earlier: kept.earlier }), ...(kept.earlierLost === undefined ? {} : { earlierLost: kept.earlierLost }), ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
       const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
@@ -974,7 +1012,10 @@ export class RemoteWorkerService {
           contract = { ...rest, reconfirmSince: this.#runner.now(), digest: restartDigest(contract.digest, msg.recipe), recipe: { revision: msg.recipe.revision, reach: [...msg.recipe.reach], ...(msg.recipe.limits === undefined ? {} : { limits: { ...msg.recipe.limits } as JsonObject }) } };
         }
       }
-      return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...current.body.control, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
+      // A `look` or a `kill` replaces one of its kind still queued (review of L02e): every Stop pass asks for a look, and a worker that is slow to read must not find its stop, checkpoint, restart or note pushed out of the bounded
+      // queue by repeated looks. The newer one says all the older one did; a worker that read the older one already is not hurt by its going.
+      const queued = msg.kind === "look" || msg.kind === "kill" ? current.body.control.filter((m) => m.kind !== msg.kind) : current.body.control;
+      return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...queued, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
     }, "control");
     return done.body.controlSeq;
   }
@@ -1661,33 +1702,52 @@ export class RemoteWorkerService {
    * a tool call it is taken after the attempt ended or expired too, since a worker's last word is exactly "I stopped it": only a placement that was never accepted, or that moved on, is refused. `seq` must rise: an older report changes nothing
    * (`kept: false`), the same report again is the same answer, another report under a sequence already used is `payload_changed`, and nothing follows a final report of a placement. Entries are checked one by one and their references redacted and cut.
    */
-  async reportProcesses(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, report: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): Promise<{ readonly kept: boolean }> {
+  async reportProcesses(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, report: { readonly seq: unknown; readonly final: unknown; readonly canLook?: unknown; readonly computeMs?: unknown; readonly processes: unknown }): Promise<{ readonly kept: boolean }> {
     const session = await this.#session(host, sessionId);
     const id = attemptIdOf(attemptId);
     const found = (await this.#runner.get(PLACEMENT_KIND, id))?.body as unknown as PlacementBody | undefined;
-    this.#holds(host, found, placement);
-    if (found.sessionId === undefined) throw new DomainError("fenced", `attempt ${id} was never accepted by this worker`);
-    if (found.sessionId !== session.sessionId) throw new DomainError("fenced", "the attempt was taken up in another session; accept it again", { field: "session" });
-    if (!["accepted", "completed", "ended"].includes(found.state)) throw new DomainError("fenced", `the placement of attempt ${id} is ${found.state}`);
+    // A worker that held the attempt before (it was moved, or placed again) may still give its last word for the placement it held (card L02e): only a final report, only in the session that accepted it, kept beside the others.
+    const earlierAt = (x: PlacementBody | undefined): number => (x === undefined || typeof placement !== "number" ? -1 : (x.earlier ?? []).findIndex((e) => e.hostId === host.id && e.placement === placement));
+    const old = earlierAt(found) >= 0 && found !== undefined && !(found.hostId === host.id && found.placement === placement);
+    if (!old) this.#holds(host, found, placement);
+    if (found === undefined) throw new DomainError("not_found", "no such attempt");
+    if (old) {
+      const entry = found.earlier![earlierAt(found)]!;
+      if (entry.sessionId === undefined || entry.sessionId !== session.sessionId) throw new DomainError("fenced", `placement ${String(placement)} of attempt ${id} was accepted in another session`, { field: "session" });
+      if ((report as { final?: unknown }).final !== true) throw new DomainError("fenced", `placement ${String(placement)} of attempt ${id} is over; only its worker's final report is taken`, { field: "placement" });
+    } else {
+      if (found.sessionId === undefined) throw new DomainError("fenced", `attempt ${id} was never accepted by this worker`);
+      if (found.sessionId !== session.sessionId) throw new DomainError("fenced", "the attempt was taken up in another session; accept it again", { field: "session" });
+      if (!["accepted", "completed", "ended"].includes(found.state)) throw new DomainError("fenced", `the placement of attempt ${id} is ${found.state}`);
+    }
     const checked = checkProcessReport(report);
-    const sameAs = (x: NonNullable<PlacementBody["processReport"]>): boolean => canonicalJson({ final: x.final, processes: x.processes } as unknown as JsonObject) === canonicalJson({ final: checked.final, processes: checked.processes } as unknown as JsonObject);
-    const decide = (x: PlacementBody): "keep" | "same" | "old" | "final" => {
-      const had = x.processReport;
+    const sameAs = (x: StoredProcessReport): boolean => canonicalJson({ final: x.final, processes: x.processes, computeMs: x.computeMs ?? null, canLook: x.canLook ?? null } as unknown as JsonObject) === canonicalJson({ final: checked.final, processes: checked.processes, computeMs: checked.computeMs ?? null, canLook: checked.canLook ?? null } as unknown as JsonObject);
+    const decide = (had: StoredProcessReport | undefined, number: number, sessionNow: string | undefined): "keep" | "same" | "old" | "final" => {
       // A sequence belongs to the worker session that sent it (review of L02e): a worker program that restarted and took the attempt up again in a new session counts from 1, and its reports are the newest word.
-      if (had === undefined || had.placement !== x.placement || had.sessionId !== x.sessionId) return "keep";
+      if (had === undefined || had.placement !== number || had.sessionId !== sessionNow) return "keep";
+      // A fresh look sends the same figures again under a higher number (the controller asked for it): that is a new report, never a conflict.
       if (checked.seq === had.seq) { if (!sameAs(had)) throw new DomainError("payload_changed", `report ${checked.seq} of attempt ${id} was already given with other figures`, { field: "seq" }); return "same"; }
       if (checked.seq < had.seq) return "old";
       return had.final ? "final" : "keep";
     };
-    const first = decide(found);
+    const at = (x: PlacementBody): { had: StoredProcessReport | undefined; number: number; session: string | undefined } => {
+      if (!old) return { had: x.processReport, number: x.placement, session: x.sessionId };
+      const e = (x.earlier ?? []).find((y) => y.hostId === host.id && y.placement === placement);
+      return { had: e?.report, number: e?.placement ?? -1, session: e?.sessionId };
+    };
+    const first = (() => { const t = at(found); return decide(t.had, t.number, t.session); })();
     if (first !== "keep") return { kept: first === "same" };
     let verdict: "keep" | "same" | "old" | "final" = "keep";
     await this.#changePlacement(id, async (current) => {
       const x = current?.body;
-      if (x === undefined || x.hostId !== host.id || x.placement !== found.placement || x.sessionId !== found.sessionId) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
-      verdict = decide(x);
+      if (x === undefined || (!old && (x.hostId !== host.id || x.placement !== found.placement || x.sessionId !== found.sessionId))) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+      if (old && earlierAt(x) < 0) throw new DomainError("fenced", `the placement of attempt ${id} changed`);
+      const t = at(x);
+      verdict = decide(t.had, t.number, t.session);
       if (verdict !== "keep") return undefined;
-      return { next: { ...x, processReport: { placement: x.placement, ...(x.sessionId === undefined ? {} : { sessionId: x.sessionId }), seq: checked.seq, at: this.#runner.now(), final: checked.final, processes: checked.processes } } };
+      const stored: StoredProcessReport = { placement: t.number, ...(t.session === undefined ? {} : { sessionId: t.session }), seq: checked.seq, at: this.#runner.now(), final: checked.final, ...(checked.canLook === true ? { canLook: true as const } : {}), ...(checked.computeMs === undefined ? {} : { computeMs: checked.computeMs }), processes: checked.processes };
+      if (!old) return { next: { ...x, processReport: stored } };
+      return { next: { ...x, earlier: (x.earlier ?? []).map((e) => (e.hostId === host.id && e.placement === placement ? { ...e, report: stored } : e)) } };
     }, "processes", { actor: host.id });
     return { kept: verdict === "keep" || verdict === "same" };
   }
@@ -2000,9 +2060,10 @@ export class RemoteWorkerService {
       const storeBody = store?.body as unknown as StoreBody | undefined;
       if (storeBody !== undefined && storeBody.ownerHostId !== x.hostId) throw new DomainError("invalid_transition", `the native Pi store of ${x.agentId} belongs to ${storeBody.ownerHostId}, not to the host the attempt runs on`);
       const at = this.#runner.now();
-      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, ...rest } = x; void _s; void _a; void _r; void _p;
+      const { sessionId: _s, acceptedAt: _a, result: _r, processReport: _p, earlier: _e, earlierLost: _l, ...rest } = x; void _s; void _a; void _r; void _p; void _e; void _l;
+      const kept = earlierOf(x);
       const next: PlacementBody = {
-        ...rest, hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
+        ...rest, ...(kept.earlier === undefined ? {} : { earlier: kept.earlier }), ...(kept.earlierLost === undefined ? {} : { earlierLost: kept.earlierLost }), hostId: to, placement: x.placement + 1, state: "relocating", relocations: x.relocations + 1, control: [], lastRelocation: { commandId, at },
         history: pushHistory(x.history, { hostId: x.hostId, placement: x.placement, at, reason: `relocated: ${reason}`, commandId }),
       };
       const storeChange: Change[] = [];
@@ -2151,12 +2212,14 @@ function checkControl(value: unknown): ControlMessage {
       if (limits !== undefined && (limits === null || typeof limits !== "object" || Array.isArray(limits) || Object.entries(limits).some(([k, v]) => !["cpus", "memoryMb", "diskMb", "processes"].includes(k) || !Number.isSafeInteger(v) || (v as number) < 1))) invalid("recipe.limits", "must be whole numbers for cpus, memoryMb, diskMb and processes");
       return { kind: "restart", recipe: { revision: text(recipe!.revision, "recipe.revision", { min: 1, max: 120 }), reach: (recipe!.reach as unknown[]).slice(0, 100).map((x, i) => text(x, `recipe.reach[${i}]`, { min: 1, max: 120 })), ...(limits === undefined ? {} : { limits: { ...(limits as object) } }) }, checkpoint: m["checkpoint"] as JsonObject };
     }
-    default: return invalid("kind", "must be tell, restart, checkpoint or stop");
+    case "kill": onlyKnown(m, ["kind"]); return { kind: "kill" };
+    case "look": onlyKnown(m, ["kind"]); return { kind: "look" };
+    default: return invalid("kind", "must be tell, restart, checkpoint, stop, kill or look");
   }
 }
 
 /** A process report as the worker sent it, checked field by field: nothing is kept that was not asked for (card L02e). */
-function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknown; readonly processes: unknown }): { seq: number; final: boolean; processes: { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] } {
+function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknown; readonly canLook?: unknown; readonly computeMs?: unknown; readonly processes: unknown }): { seq: number; final: boolean; canLook?: true; computeMs?: number; processes: { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" }[] } {
   if (typeof raw.seq !== "number" || !Number.isSafeInteger(raw.seq) || raw.seq < 1) return invalid("seq", "must be a whole number from 1");
   if (typeof raw.final !== "boolean") return invalid("final", "must be true or false");
   const list = raw.processes;
@@ -2174,7 +2237,9 @@ function checkProcessReport(raw: { readonly seq: unknown; readonly final: unknow
     const key = `${e["kind"]}|${ref}`;
     return seen.has(key) ? undefined : (seen.add(key), { ref, kind: e["kind"], state: e["state"] });
   }).filter((x): x is { ref: string; kind: "process" | "child"; state: "running" | "uncooperative" | "unknown" } => x !== undefined);
-  return { seq: raw.seq, final: raw.final, processes };
+  if (raw.canLook !== undefined && raw.canLook !== true) return invalid("canLook", "must be true when given");
+  if (raw.computeMs !== undefined && (typeof raw.computeMs !== "number" || !Number.isSafeInteger(raw.computeMs) || raw.computeMs < 0 || raw.computeMs > REMOTE_LIMITS.cleanupMs)) return invalid("computeMs", `must be a whole number of milliseconds from 0 to ${REMOTE_LIMITS.cleanupMs}`);
+  return { seq: raw.seq, final: raw.final, ...(raw.canLook === true ? { canLook: true as const } : {}), ...(raw.computeMs === undefined ? {} : { computeMs: raw.computeMs as number }), processes };
 }
 
 function checkEnforcement(value: unknown): ContractEnforcement[] {

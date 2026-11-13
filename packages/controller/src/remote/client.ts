@@ -286,7 +286,7 @@ export class RemoteAttempt implements ToolGateway {
   }
   async acknowledgeDecisions(): Promise<void> { await this.#post("acknowledge", {}); }
   /** Tells the controller what this worker holds for the attempt (card L02e); `final` when the sandbox was stopped and looked at again. `kept: false`: the controller already has a newer report (or a final one) and ignored this. */
-  async reportProcesses(report: ProcessReport): Promise<{ readonly kept: boolean }> { return await this.#post("processes", { seq: report.seq, final: report.final, processes: report.processes as unknown as Json }) as { kept: boolean }; }
+  async reportProcesses(report: ProcessReport): Promise<{ readonly kept: boolean }> { return await this.#post("processes", { seq: report.seq, final: report.final, ...(report.canLook === true ? { canLook: true } : {}), ...(report.computeMs === undefined ? {} : { computeMs: report.computeMs }), processes: report.processes as unknown as Json }) as { kept: boolean }; }
 
   /**
    * The recorder of this worker's own model calls (card L05c), for the worker's `ModelRelay` (`stream:`). Each call begins a generation on the controller under the task's current context revision and this attempt's fence; the decoded events
