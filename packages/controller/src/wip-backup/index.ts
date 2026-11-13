@@ -1,2 +1,3 @@
-export { WIP_LIMITS, WIP_NAMESPACE, WipBackupService, remoteProblem, wipRefOf, type WipApproval, type WipBackupCall, type WipBackupOutcome, type WipBackupPort, type WipBlocked, type WipReport, type WipSettingBody, type WipStateBody, type WipSuccess, type WipSweepOptions, type WipTaskRef } from "./wip-backup.js";
+export { WIP_GRANTEE, WIP_GRANT_ACTION, WIP_GRANT_RESOURCE_KIND, WIP_LIMITS, WIP_NAMESPACE, WipBackupService, remoteProblem, wipRefOf, type WipApproval, type WipBackupApi, type WipBackupCall, type WipBackupOutcome, type WipBackupPort, type WipGrants, type WipRestoreCall, type WipRestoreOutcome, type WipRestoreRecord, type WipBlocked, type WipReport, type WipSettingBody, type WipStateBody, type WipSuccess, type WipSweepOptions, type WipTaskRef } from "./wip-backup.js";
 export { createWipScanner, type WipScan, type WipScannerOptions } from "./scan.js";
+export { wipBackupRouter, wipTasksSource, type WipTaskSourceDeps } from "./tasks.js";

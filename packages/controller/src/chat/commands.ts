@@ -19,7 +19,7 @@ export interface ChatOp {
 }
 
 /** Operations whose project argument is named `project`, not `projectId`. */
-export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["project.branches.set", "project.branches.change", "wip.backup.set"]);
+export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["project.branches.set", "project.branches.change", "wip.backup.set", "wip.backup.restore"]);
 
 export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "project.create": { verb: "Create project", mode: "propose" },
@@ -256,6 +256,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "project.branches.change": { verb: "Change the protected branches of project", mode: "propose", needsProject: true },
   // The work-in-progress backup pushes a project's unfinished work to a remote the owner names: turning it on (or pointing it at another remote) is an authority and is shown first; turning it off only stops it and applies at once.
   "wip.backup.set": { verb: "Turn the work-in-progress backup of project on or off, or change its remote or interval (remote: the address or folder, copied exactly)", mode: "propose", needsProject: true },
+  // A restore writes files on the owner's computer from a remote branch: shown first, with the task named.
+  "wip.backup.restore": { verb: "Restore a task's workspace of project from its work-in-progress backup (taskId: the task)", mode: "propose", needsProject: true },
   // How long a subscription may sit idle before it expires: a reversible setting with no authority in it.
   "events.configure-idle": { verb: "Change how long an event subscription may sit idle", mode: "apply" },
   // Which models work may reach: switching one off is the safe direction and follows the profile; bringing one back, and how failed ones return by themselves, widen what is used and are shown first.

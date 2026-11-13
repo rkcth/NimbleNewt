@@ -119,6 +119,9 @@ export function localHostBuilder(setup) {
       // The worker-side security hook (card U11d), reported to the owner's Urgent watch.
       security: (event) => { composed?.reportSecurity(event); },
     });
+    // The optional work-in-progress backup (card P02b) over the same checkouts. The scan (credential shapes plus every secret value the installation uses, read from the secret store at each scan) is required; the push credential is a
+    // secret the OWNER named, read by name at the moment of a push or restore and handed to that one git process (an ssh remote uses this computer's ssh agent). Nothing is read, kept or printed here.
+    const wipHost = workspaces.wipHost({ scan: controller.createWipScanner({ secrets: () => ctx.secretValues() }), pushEnv: worker.wipPushEnv({ secret: (name) => ctx.secret(name) }) });
     let heartbeat;
     let closed = false;
     const close = async () => {
@@ -137,6 +140,8 @@ export function localHostBuilder(setup) {
     const start = {
       harnesses: [piAdapter.PI_DECLARATION],
       tools,
+      // This computer's host is the only one that can carry a backup or a restore (a remote worker host cannot over the worker protocol yet): a task that works elsewhere is refused with that reason.
+      wipBackup: { port: wipHost, localHostId: LOCAL_HOST_ID },
       ...(environments?.runtime === undefined ? {} : { maintenance: { environmentRuntime: environments.runtime } }),
       dispatch: {
         local: {

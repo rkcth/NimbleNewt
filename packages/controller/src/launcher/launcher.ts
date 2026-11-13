@@ -72,11 +72,21 @@ export interface LocalHostContext {
   /** The controller being started, once it has started (the dispatcher's handle, the services). */
   readonly controller: () => Controller;
   readonly fetch?: typeof globalThis.fetch;
+  /**
+   * One secret by NAME, read from the secret store at the moment it is needed (the push credential an owner chose for the work-in-progress backup). The owner's own credential is refused here as everywhere. The value is for the one
+   * git process the host starts and goes nowhere else: not a record, a message, a file or a log line.
+   */
+  readonly secret: (name: string) => Promise<string | undefined>;
+  /**
+   * Every secret VALUE this installation uses (model provider keys, the database address, transfer targets, the owner's credential, the push credentials), with its NAME, read at each call. The host's scan of files before a backup
+   * looks for them as bytes, so a file that holds one is left out. Only names the configuration and the owner's records give are read; the store is never listed. A name with no value is left out.
+   */
+  readonly secretValues: () => Promise<readonly { readonly name: string; readonly value: string }[]>;
 }
 
 /** What the builder made: the start options to add (`dispatch.local`, harnesses, tools, and the environment runtime when the host can change environments), what to do once the controller is up, and how to free what it made. */
 export interface LocalHostPlan {
-  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools" | "maintenance">;
+  readonly start: Pick<StartOptions, "dispatch" | "harnesses" | "tools" | "maintenance" | "wipBackup">;
   /** Enrolls the host with the owner's authority, announces it and sets its capacity. Returns notes for the owner. */
   readonly attach: (controller: Controller, owner: Principal) => Promise<readonly string[]>;
   /** Frees what was made before the controller took it over (safe to call more than once). */
@@ -180,6 +190,21 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     // A cloud route is used for the chat only when no local one is there: the owner chose that provider for the team, and without it there would be no chat at all.
     return local.length > 0 ? local : chatRoutes(routing, { role: "coordinator", data: "cloud-allowed" })();
   };
+  // The secret values in use (card P02b): looked for in files before a work-in-progress backup leaves the machine. Names come from the configuration and the owner's records only; the owner's own credential is included
+  // (it must never reach a remote either), the store is never listed, and an unreadable or missing secret is left out rather than failing the backup's scan (the shapes of credentials are still checked).
+  const secretValues = async (): Promise<readonly { readonly name: string; readonly value: string }[]> => {
+    const names = new Set<string>([ownerSecretName(dataDir)]);
+    for (const p of Object.values(config.models.providers)) if (p.credential?.secret !== undefined) names.add(p.credential.secret);
+    if (config.controller.storage.kind === "postgres") names.add(config.controller.storage.url.secret);
+    for (const t of config.controller.databaseTransfer?.targets ?? []) { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; if (typeof n === "string") names.add(n); }
+    if (live !== undefined) {
+      for (const e of await live.services.setupProviders.endpoints().catch(() => [])) if (e.credentialName !== undefined) names.add(e.credentialName);
+      for (const n of await live.services.wipBackup.credentialNames().catch(() => [])) names.add(n);
+    }
+    const out: { name: string; value: string }[] = [];
+    for (const name of [...names].sort()) { const value = await secrets.resolve(name).catch(() => undefined); if (typeof value === "string" && value.length > 0) out.push({ name, value }); }
+    return out;
+  };
   const interpreter = new ModelInterpreter(model, routes);
   // The second agent that questions a done (card W10 wiring; the resume reviewer of L04d is not given it): the same HTTP client over the recorded provider addresses, which are re-read before each call (a restart has read none yet). It is asked
   // only on the route the owner set (`report.reviewerRoute`); with none set the controller records that no second agent questioned the report.
@@ -216,7 +241,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
       else {
         // A builder that throws (a package that cannot be loaded, a folder that cannot be made) is a reason the host was not started, never a reason the owner has no controller.
         let made: LocalHostPlan | { readonly problem: string };
-        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}` }; }
+        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, secret: (name) => named(name), secretValues, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}` }; }
         if ("problem" in made) notes.push(`You turned on the worker host for this computer, but it was not started: ${made.problem}`);
         else {
           await controller.close();

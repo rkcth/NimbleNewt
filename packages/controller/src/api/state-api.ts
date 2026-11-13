@@ -53,7 +53,7 @@ import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { RemoteWorkerService } from "../remote/service.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
-import type { WipBackupService } from "../wip-backup/index.js";
+import type { WipBackupApi } from "../wip-backup/index.js";
 import type { EventSourceSettingsService } from "../events/source-settings.js";
 import type { PolicyService } from "../policy/policy.js";
 import type { WorkingNoteService } from "../context/notes.js";
@@ -202,7 +202,7 @@ export interface StateApiDeps {
   readonly cleanupSettings?: Pick<CleanupSettingsService, "get" | "change">;
   readonly branchSettings?: Pick<ProtectedBranchService, "get" | "set" | "change">;
   /** The optional work-in-progress branch backup (card P02b). */
-  readonly wipBackup?: Pick<WipBackupService, "get" | "set">;
+  readonly wipBackup?: WipBackupApi;
   /** Which event sources are watched (card H13f). */
   readonly eventSourceSettings?: Pick<EventSourceSettingsService, "get" | "set" | "change" | "define" | "remove">;
   /** Revoking a catalogue version and listing its running calls (card T02b). */

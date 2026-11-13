@@ -769,7 +769,7 @@ export class GitBridge {
    * The branch carries no project history (P02b review), so the base commit is taken from `baseFrom` (the project's shared workspace or another repository that holds it); when it cannot be had, the restored
    * snapshot itself is the base (`baseFound: false`: every file is there, the changes just do not show against the old base). A branch whose tree holds a link or a submodule entry is refused (a backup never makes one).
    */
-  async restoreWip(options: { remote: string; ref: string; gitDir: string; checkout: string; baseFrom?: string; env?: NodeJS.ProcessEnv }): Promise<{ commitId: string; base: string; baseFound: boolean; files: number }> {
+  async restoreWip(options: { remote: string; ref: string; gitDir: string; checkout: string; baseFrom?: string; env?: NodeJS.ProcessEnv; expect?: string }): Promise<{ commitId: string; base: string; baseFound: boolean; files: number }> {
     wipRemote(options.remote);
     wipRef(options.ref);
     await mkdir(options.checkout, { recursive: true });
@@ -777,6 +777,7 @@ export class GitBridge {
     await this.#run(["init", "--bare", options.gitDir]);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", "--", options.remote, `${options.ref}:refs/nn/wip-restored`], { gitDir: options.gitDir, allowFile: true, env: options.env ?? {} }).catch((error: unknown) => { throw new WorkspaceError("unavailable", `the work-in-progress branch could not be fetched: ${(error as Error).message.slice(0, 180)}`, { cause: error }); });
     const commitId = (await this.#run(["rev-parse", "--verify", "refs/nn/wip-restored^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    if (options.expect !== undefined && options.expect !== commitId) throw new WorkspaceError("invalid_path", "the branch on the remote is not the last backup the controller confirmed (someone else changed it, or a later push was not confirmed); nothing was restored");
     const message = (await this.#run(["log", "-1", "--format=%B", commitId], { gitDir: options.gitDir })).stdout;
     if (!/^NimbleNewt-WIP: unreviewed$/m.test(message)) throw new WorkspaceError("invalid_path", "that branch does not hold a NimbleNewt work-in-progress commit; nothing was restored");
     const base = /^NimbleNewt-Base: ([0-9a-f]{40})$/m.exec(message)?.[1];
@@ -793,6 +794,8 @@ export class GitBridge {
     await this.#run(["update-ref", "refs/nn/base", startFrom], { gitDir: options.gitDir });
     await this.#run(["update-ref", "HEAD", startFrom], { gitDir: options.gitDir });
     await this.#run(["read-tree", startFrom], { gitDir: options.gitDir });
+    // The branch the restore came from is the last one counted, so the next backup builds on it (a fast-forward), not as a first commit the remote would refuse.
+    await this.#run(["update-ref", wipLastRef(options.remote, options.ref), commitId], { gitDir: options.gitDir });
     return { commitId, base: startFrom, baseFound, files: entries.length };
   }
 

@@ -5,6 +5,7 @@ import { isAbsolute, join, normalize, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
 import type { GitBridge } from "./git.js";
+import { WipBackupHost, type HostRestoreTarget } from "./wip-host.js";
 import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy } from "./host.js";
 import { fold, plainName } from "./names.js";
 import { NOFOLLOW } from "./paths.js";
@@ -40,7 +41,7 @@ export interface LocalWorkspacesOptions {
 }
 
 /** A project folder cannot take the name of one of the host's own folders. */
-const RESERVED = new Set(["journal", "quarantine", "shared-state", ".making"]);
+const RESERVED = new Set(["journal", "quarantine", "shared-state", ".making", "restored"]);
 const plain = (value: string): boolean => plainName(value) && !RESERVED.has(fold(value));
 /** Whether `name` is an entry of `parent` exactly as spelled (a case-insensitive filesystem would also find another spelling; that is a different task). */
 const hasExactly = (parent: string, name: string): boolean => { try { return readdirSync(parent).includes(name); } catch { return false; } };
@@ -116,6 +117,46 @@ export class LocalWorkspaces {
     const where = this.locate(call);
     if (where === undefined) return undefined;
     return { ...(await this.#options.git.doneState({ gitDir: where.gitDir, checkout: where.checkout, paths })), agentCommits: false };
+  }
+
+  /**
+   * The host of the optional work-in-progress backup (card P02b) over THIS layout: the same `locate` as every other request, so a backup reads exactly the checkout the agent works in, and `restoreTarget` below for a restore.
+   * `scan` (required: no scan, no push) and `pushEnv` (the credential seam) are the operator's own; see `WipBackupHost`.
+   */
+  wipHost(options: { readonly scan: ConstructorParameters<typeof WipBackupHost>[0]["scan"]; readonly pushEnv?: ConstructorParameters<typeof WipBackupHost>[0]["pushEnv"] }): WipBackupHost {
+    return new WipBackupHost({ git: this.#options.git, locate: (call) => this.locate(call), scan: options.scan, ...(options.pushEnv === undefined ? {} : { pushEnv: options.pushEnv }), restoreTarget: (call) => this.#restoreTarget(call) });
+  }
+
+  /** Whether this host holds a finished checkout for the task (the controller asks before it offers the task to a backup). */
+  holds(call: { readonly taskId: string; readonly projectId: string }): boolean { return this.locate(call) !== undefined; }
+
+  /**
+   * Where a restore of a task goes. A task with NO folder here (its disk was lost) is restored into its own place, built privately and renamed into place with the `complete` mark like `ensure`, so the task goes on in it. A task
+   * whose folder is still here is never written over: the backup is restored into a new folder `<root>/restored/<project>/<task>-<random>` that nothing uses, for the owner to compare or copy from.
+   */
+  async #restoreTarget(call: { readonly taskId: string; readonly projectId: string }): Promise<HostRestoreTarget | { readonly problem: string }> {
+    if (!plain(call.taskId) || !plain(call.projectId)) return { problem: "the task or project name is not a plain name" };
+    const shared = this.#options.shared(call.projectId);
+    const root = this.#options.root;
+    const parent = join(root, call.projectId);
+    if (collides(root, call.projectId) || collides(parent, call.taskId)) return { problem: "another task or project folder has a name that differs only in case or form, so a restore here could be mistaken for it" };
+    const inPlace = !hasExactly(parent, call.taskId);
+    if (inPlace && shared === undefined) return { problem: "this host holds no shared repository for that project, so a restored task could not go on here" };
+    const stamp = randomBytes(6).toString("hex");
+    const building = inPlace ? join(root, ".making", `restore-${stamp}`) : join(root, "restored", call.projectId, `${call.taskId}-${stamp}`);
+    await mkdir(building, { recursive: true });
+    const target = { checkout: join(building, "checkout"), gitDir: join(building, "task.git") };
+    const abandon = async (): Promise<void> => { await rm(building, { recursive: true, force: true }); };
+    if (!inPlace) return { ...target, ...(shared === undefined ? {} : { baseFrom: shared }), abandon, finish: async () => `into a new folder, ${building}, that nothing uses (the task's own folder is still here and was not touched)` };
+    return {
+      ...target, ...(shared === undefined ? {} : { baseFrom: shared }), abandon,
+      finish: async () => {
+        await writeFile(join(building, "complete"), "1\n");
+        await mkdir(parent, { recursive: true });
+        try { await rename(building, join(parent, call.taskId)); } catch (error) { throw new WorkspaceError("unavailable", `the restored task folder could not be put in place: ${(error as Error).message.slice(0, 120)}`); }
+        return "as the task's own checkout on this host";
+      },
+    };
   }
 
   readonly #making = new Map<string, Promise<unknown>>();
