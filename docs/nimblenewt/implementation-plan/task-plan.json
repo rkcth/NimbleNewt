@@ -753,12 +753,24 @@
       ],
       "deliverable": "Raised 2026-11-05 from the F04m audit and flagged to the owner as a possible serious defect, recorded and not yet changed (owner instruction 2026-11-05): in a rollback of a database transfer, the journal says rolling-back before the fence is taken, and when work is then found on the new database that was written between the last check and the fence, the fence is taken back and the journal returned to switched in that order; if the take-back fails, the journal stays rolling-back and the next start finishes the rollback onto the previous database, which drops the work recorded on the new one without a word. The new database stays fenced the whole time, so the case needs a write that got past the maintenance barrier and then a failed take-back. The planned change: write the journal back to switched first and take the fence back second, so a failed take-back leaves a state the authority file already allows a restart on the new database to recover from with the work intact. The apply path (source fenced, journal at copying) was checked and is already safe: the next start abandons the transfer and the source stays authoritative",
       "acceptance_and_verification": "A test makes the take-back fail after a late write is found and shows the next start comes up on the new database, with the late records present and the authority file still naming it, and not on the previous one; the same test on the apply path shows the source still authoritative; a failed journal write at that point changes nothing else; the owner's message names what happened and says to restart; no behavior of the successful path changes",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ef1fb030",
+          "11d536a4"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "When a database rollback finds work written on the new database after its last check, the journal is written back to switched first and the fence is taken back second. If the take-back fails, the next start comes up on the new database with the late records, the authority file still names it and the previous database is refused; tested on the reference store, SQLite, SQLite on its worker thread and PostgreSQL. On the apply path a failed take-back leaves the source authoritative and the next start abandons the transfer. A failed journal write changes nothing else: no take-back, the authority file unchanged, the barrier kept up, and the owner is told not to restart until the state folder can be written. The owner's message says what happened and to restart, and never carries the driver's text (so no database address). A take-back whose answer was lost counts as lifted. The successful paths are unchanged (the transfer tests pass as before). Left: the rollback check still compares only the tables named in F04m; a start configured on the previous database while the journal says rolling-back still finishes the rollback without looking at the new database, so a write that bypassed the barrier between the check and the fence can be lost that way (recorded as an assumption; the messages say to restart on the new database)."
+      }
     },
     {
       "id": "F05",
@@ -9014,12 +9026,31 @@
       ],
       "deliverable": "Retention, export and deletion policy and runner covering derived data (summaries, indexes, caches) and backups, per-agent and per-project storage quotas (optional, off by default), and reserved capacity for shutdown and recovery records (operational-contracts 129; pitfalls-and-safeguards 125; README 247, 641; design-decisions 73). Deleting stored model thinking (C06b) 14 days after the task is done (owner decision 2026-10-22) and dropping chat thinking moved to K06c (2026-10-31): it needs adapter support the Pi conversation does not have yet; the 14-day value is a retention setting here.",
       "acceptance_and_verification": "Material referenced by a resumable task or by replay is never deleted and shows as retained; a user-requested deletion removes or marks derived summaries, indexes and cached replies and records how backups are handled; export excludes secrets; archived work restores; with the disk near full the next checkpoint and shutdown and recovery records still write and a disk-full checkpoint is never reported successful; quotas enforced with visible warnings; retention configurable, and the owner changes any retention value by chatting with the supervisor (owner-only, recorded, confirmed back with the old and new value; owner decision 2026-10-22); deleting or archiving a source carries to its derived copies, summaries, indexes and embeddings, which keep their source project and origin (A10)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "2c82cfc9",
+          "bebe9e32",
+          "59087ce6",
+          "54764c41",
+          "b4c7a4b2",
+          "288769e1",
+          "cc74da01",
+          "004c42a0",
+          "8cd45472"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Retention settings, a runner, user-requested deletion, archive and restore, export, quotas and a disk reserve. Material a resumable task or a finished task's replay cites is never expired or deleted and shows as retained with the reason; the owner may release only a replay hold, by name. A user-requested deletion blanks the record and its copies, removes the summaries made from it and blanks the compactions that cite it (following their lineage), keeps project and origin on what is left, and records that existing backups are not altered and hold the text until they expire; a restore of a backup re-applies the deletion ledger. No index, embedding or cached-reply store exists, and every deletion record says so. Export leaves secrets out and masks secret-shaped text. Archived work restores exactly, and a record changed since is listed as a conflict. Per-project and per-agent quotas are optional, refuse a write over them and warn in the status and once to the owner. A real reserve file is given back so that checkpoint, stop and recovery writes still go through with the disk full; a critical write that still fails is an error, never a success. Every retention value is changed by the owner in chat, shown first, revision checked, and confirmed with the old and new value. Stored model thinking is removed 14 days after a task is done by default (owner decision 2026-10-22). Left: the full disk is proven with injected driver errors, a real SQLite 'database or disk is full' error and a real reserve file, not by filling a real file system (a dedicated volume; X01); the reserve covers the database disk only, and a PostgreSQL controller with no data directory has none; quotas meter content kinds, not messages or model calls; export is JSON pages with no file format or import; existing backups and freed disk blocks are not wiped; a remote host that never answers keeps its thinking-store cleanup pending."
+      }
     },
     {
       "id": "K06c",
