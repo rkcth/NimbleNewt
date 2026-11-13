@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { launch, runTerminalChat, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
-import { workGrants } from "@nimblenewt/controller/testing";
+import { launch, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
 import { SandboxLauncher } from "@nimblenewt/worker";
 import { sse } from "./h12-worker-support.js";
 
@@ -77,12 +76,18 @@ test("on an empty state folder, only launcher starts and chat messages take the 
   const intent = (kind: string, rest: Record<string, unknown>, evidence: string) => ({ kind, ...rest, evidence, basis: "owner" });
   const builder = localHostBuilder({ root: repository });
   const open: Awaited<ReturnType<typeof launch>>[] = [];
-  const startOnce = async (): Promise<Awaited<ReturnType<typeof launch>>> => { const l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start: { facts, filesystem: ext4 }, fetch: fetchAll, localHost: builder }); open.push(l); return l; };
-  /** The owner types one free-form message; the stand-in model reads it as `intents`; every proposal shown is confirmed by a second free-form message. Nothing but chat is used. */
+  // What the launcher and controller print (their log) and the notes each start reports are kept, so they can be checked for the keys too.
+  const printed: string[] = [];
+  const startOnce = async (): Promise<Awaited<ReturnType<typeof launch>>> => { const l = await launch({ config, secrets, argv: [], env: {}, print: (line: string) => { printed.push(String(line)); }, start: { facts, filesystem: ext4 }, fetch: fetchAll, localHost: builder }); open.push(l); printed.push(...l.notes); return l; };
+  /**
+   * The owner types one free-form message; the stand-in model reads it as `intents`; every proposal shown is confirmed by a second free-form message. Nothing but chat is used. `first` is how the first
+   * message must end under the strict profile: `proposed` (nothing changes until the owner's yes) for every step but the move to ready, which the profile applies at once.
+   */
   const owner = (l: Awaited<ReturnType<typeof launch>>) => {
     const say = (text: string, intents: unknown[]) => { script[text] = intents; return l.controller.chat!.submit(l.ownerToken, { messageId: `m-${Math.random().toString(36).slice(2)}`, text }); };
-    const settle = async (text: string, intents: unknown[]): Promise<string[]> => {
+    const settle = async (text: string, intents: unknown[], first: "proposed" | "applied" = "proposed"): Promise<string[]> => {
       const turn = await say(text, intents);
+      assert.deepEqual((turn.outcomes as unknown as { status: string }[]).map((o) => o.status), [first], `${text}: ${JSON.stringify(turn.outcomes)}`);
       const statuses: string[] = [];
       for (const o of turn.outcomes as unknown as { status: string; proposalId?: string }[]) {
         if (o.status === "proposed") {
@@ -118,12 +123,13 @@ test("on an empty state folder, only launcher starts and chat messages take the 
 
     // Chat: the first agent and its rights (a plain role by name, then each right the work needs, in words).
     await a.settle("Add an agent called Ann as an author", [intent("command", { op: "agent.create", args: { friendlyName: "Ann", roles: ["author"] } }, "Add an agent called Ann")]);
-    const ann = (await a.call("agent.list")).result.items[0];
-    const grantee = (ann.principal ?? `agent:${ann.id}`) as string;
+    // Each right names the agent by its name, as the owner knows it: the owner never sees or types the agent's principal ID.
     for (const action of ["attempt.work", "effect.perform", "review.request", "task.read", "desk.write", "desk.read", "message.receive"]) {
-      const words = `Give ${grantee} the right ${action} in the project Garden because Ann works in Garden`;
-      await a.settle(words, [intent("command", { op: "grant.create", args: { grantee, action, projectName: "Garden", basis: "Ann works in Garden" } }, words)]);
+      const words = `Give Ann the right ${action} in the project Garden because Ann works in Garden`;
+      await a.settle(words, [intent("command", { op: "grant.create", args: { agentName: "Ann", action, projectName: "Garden", basis: "Ann works in Garden" } }, words)]);
     }
+    const ann = (await a.call("agent.list")).result.items[0];
+    assert.equal(((await a.call("grant.list")).result.items as { grantee: string }[]).filter((g) => g.grantee === `agent:${ann.id}`).length, 7, "the seven rights are Ann's");
     // Chat: the first task.
     await a.settle("Add a task Say hello to Garden", [intent("command", { op: "task.create", args: { title: "Say hello", projectName: "Garden" } }, "Add a task Say hello")]);
     const task = (await a.call("task.list", { projectId: project })).result.items[0];
@@ -141,7 +147,7 @@ test("on an empty state folder, only launcher starts and chat messages take the 
 
     // Chat: make the task ready, then give it to Ann. Nothing else: the controller admits the attempt and the local host runs it.
     const toReady = "Say hello is ready for work";
-    await b.settle(toReady, [intent("command", { op: "task.transition", args: { taskTitle: "Say hello", to: "ready" } }, toReady)]);
+    await b.settle(toReady, [intent("command", { op: "task.transition", args: { taskTitle: "Say hello", to: "ready" } }, toReady)], "applied");
     const give = "Give Say hello to Ann";
     await b.settle(give, [intent("command", { op: "task.assign", args: { taskTitle: "Say hello", agentName: "Ann" } }, give)]);
 
@@ -159,6 +165,12 @@ test("on an empty state folder, only launcher starts and chat messages take the 
     await second.close();
     open.length = 0;
     for (const f of filesUnder(parent)) for (const key of ["sk-primary-secret-value", "sk-backup-secret-value"]) assert.ok(!readFileSync(f).includes(Buffer.from(key)), `${f} must not hold a provider key`);
+    // Nor the log, nor anything the chat was told (the owner's messages name the secrets, never their values).
+    assert.ok(printed.length > 0, "the launcher's notes are checked");
+    for (const key of ["sk-primary-secret-value", "sk-backup-secret-value"]) {
+      assert.ok(!printed.some((x) => x.includes(key)), "no key in the log");
+      assert.ok(!interpreted.some((x) => x.includes(key)), "no key in the chat");
+    }
   } finally {
     for (const l of open) await l.close().catch(() => undefined);
     try { execFileSync("chmod", ["-R", "u+rwX", parent]); } catch { /* nothing to open */ }

@@ -171,6 +171,8 @@ test("the model is told how a first-run owner gives a task to an agent and makes
   await m.interpret(input);
   assert.match(system, /task\.assign\([^)]*agentName[^)]*\)/, "task.assign takes the agent's name");
   assert.match(system, /task\.transfer\([^)]*agentName[^)]*\)/);
+  assert.match(system, /grant\.create\([^)]*agentName[^)]*\)/, "a right is given by the agent's name (review)");
+  assert.match(system, /grant\.create \(agentName: the agent's name/);
   assert.match(system, /To give a task to an agent[\s\S]*?task\.assign with taskTitle[\s\S]*?agentName[\s\S]*?never an ID/);
   assert.match(system, /the controller itself starts the attempt on the worker host/);
 });
