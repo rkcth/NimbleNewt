@@ -25,7 +25,7 @@ export interface RemoteOfferRunnerOptions {
   readonly now?: () => string;
   /** The gap between looks at the controller's control messages while the turn runs, in ms (default 500). */
   readonly controlMs?: number;
-  /** The worker's batching for the stream messages (defaults 250 ms and 4000 characters; `batchMs: 0` sends every piece). */
+  /** The worker's batching for the stream messages (without it the owner's figures from the controller's answer, at least 50 ms apart; else 250 ms and 4000 characters; an explicit `batchMs: 0` sends every piece). */
   readonly stream?: { readonly batchMs?: number; readonly batchChars?: number };
   /** Told about a trouble that does not end the attempt (a control message that failed, a checkpoint that could not be sent). */
   readonly onTrouble?: (attemptId: string, what: string, error: unknown) => void;

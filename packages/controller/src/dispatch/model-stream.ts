@@ -21,6 +21,9 @@ export interface ModelStreamTap {
 export interface ModelStreamCall {
   /** Bytes the relay may hold back while it cannot yet tell a stream from a whole reply (and for a whole reply); past this the reply is passed on unrecorded, with a note. 0 or absent: no cap. */
   readonly heldBufferBytes?: number;
+  /** The owner's batching for the stream messages (card L05d): a remote worker batches its messages to the controller by these figures when it was not given its own. */
+  readonly batchMs?: number;
+  readonly batchChars?: number;
   /** The relay waits on the store (true) or no longer does (false): stall detection must not blame the model for that time. */
   /** A message the relay adds to the request before it is sent: the request was built before a correction and is being sent again (a retry), so it carries the correction. */
   readonly amend?: string;

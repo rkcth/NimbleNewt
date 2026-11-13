@@ -9,6 +9,8 @@ import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITIN
 /** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
 const STREAM_MESSAGE_EVENTS = 400;
 const STREAM_MESSAGE_BYTES = 700_000;
+/** The least time between two stream messages of a worker that takes the owner's batching (the owner's 0 means "every piece" for the controller's own batching only). */
+export const STREAM_MIN_BATCH_MS = 50;
 /** A longer string is cut into slices of this many characters (an escaped slice stays under the message size). */
 const STREAM_SLICE_CHARS = 100_000;
 const safeCut = (value: string, n: number): string => (n < value.length && n > 0 && value.charCodeAt(n - 1) >= 0xd800 && value.charCodeAt(n - 1) <= 0xdbff ? value.slice(0, n - 1) : value.slice(0, n));
@@ -306,18 +308,22 @@ export class RemoteAttempt implements ToolGateway {
    */
   streamTap(options: { readonly batchMs?: number; readonly batchChars?: number; readonly now?: () => number } = {}): ModelStreamTap {
     const failure = (error: unknown): string => (error instanceof WorkerRequestError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : "the controller could not be reached").slice(0, 200);
-    const batchMs = options.batchMs ?? 250;
-    const batchChars = options.batchChars ?? 4000;
+    const ownBatchMs = options.batchMs;
+    const ownBatchChars = options.batchChars;
     const now = options.now ?? ((): number => Date.now());
     return {
       started: async (call): Promise<ModelStreamCall | undefined> => {
-        let answer: { recorded?: false; refused?: string; streamId?: string; amend?: string; heldBufferBytes?: number };
+        let answer: { recorded?: false; refused?: string; streamId?: string; amend?: string; heldBufferBytes?: number; batchMs?: number; batchChars?: number };
         try { answer = await this.#post("stream-start", { call: { requestChars: call.requestChars, ...(call.requestDigest === undefined ? {} : { requestDigest: call.requestDigest }) } }) as typeof answer; } catch (error) {
           throw new ModelStreamRefused(`the controller could not be asked to record the model call (${failure(error)}); the call is not sent`);
         }
         if (answer.refused !== undefined) throw new ModelStreamRefused(answer.refused);
         if (answer.streamId === undefined) return undefined;
         const streamId = answer.streamId;
+        // The worker's own option wins; otherwise the owner's figures from the answer (a worker never sends more often than every STREAM_MIN_BATCH_MS: a zero is the owner's wish to cut late text finely, and a request per token would pass the transport's rate limits and fail the call closed); otherwise the defaults.
+        const fromOwner = (v: unknown, floor: number, max: number): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(max, Math.max(floor, Math.floor(v))) : undefined);
+        const batchMs = ownBatchMs ?? fromOwner(answer.batchMs, STREAM_MIN_BATCH_MS, 60_000) ?? 250;
+        const batchChars = ownBatchChars ?? fromOwner(answer.batchChars, 1, STREAM_MESSAGE_BYTES) ?? 4000;
         let n = 0;
         // Events wait here and go out in few messages (a stream of single tokens would otherwise be one request each, past the transport's rate limits): when `batchChars` are waiting, when `batchMs` have passed since the last send (a timer
         // sends what waits when the model pauses), and always before a completed tool call or the end of the reply is passed on. Whether the reply must be held back is the answer to the latest message; a piece that was sent in the background

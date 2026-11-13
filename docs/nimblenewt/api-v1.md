@@ -2794,7 +2794,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `generation.stream.change`
 
-The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall` or `requireStream`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
+The owner turns the model stream settings on or off (owner only), leaving the other as it is: `enable` and `disable` each name `record`, `cut`, `failClosed`, `recordPaused`, `checkBridge`, `requireRecorded`, `bindCall`, `admitCall` or `requireStream`; `set` gives the limits `storeTimeoutMs` (how long one store call may take, default 20000), `batchMs` (default 250), `batchChars` (default 2000) and `heldBufferBytes` (default 16 MB), each a whole number, 0 = off. A remote worker also batches its messages to the controller by `batchMs` and `batchChars` (never more often than every 50 ms). With `record` off no stream is recorded and nothing is held back; with `cut` off the stream is still recorded and a late reply is shown as late, but it still reaches the worker. Applies from the next model call.
 
 Arguments:
 

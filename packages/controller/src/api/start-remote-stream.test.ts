@@ -182,6 +182,39 @@ test("the worker's tap batches a fast token stream into few messages and splits 
   } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("a worker's tap batches by the owner's figures from the controller's answer unless it was given its own; a zero is not taken as a message per piece (card L05d finish)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-l05d-"));
+  const x = await twoAttempts(d);
+  try {
+    const A = await x.open(x.a.attemptId, true);
+    const token = (await x.w.c.services.principals.issueCredential(x.w.rob, x.w.rob.id)).token;
+    const set = async (values: Record<string, number>): Promise<void> => { assert.ok((await x.w.c.api.handle(token, { v: 1, op: "generation.stream.change", commandId: `bt-${Math.random().toString(36).slice(2, 10)}`, args: { set: values } } as never) as { ok: boolean }).ok); };
+    let posts = 0;
+    const send = A.holder.client.send.bind(A.holder.client);
+    A.holder.client.send = (async (method: string, path: string, call: never) => { if (path.endsWith("/stream-events")) posts++; return send(method, path, call); }) as never;
+    // The clock stands still, so only the character figure (and the end of the reply) can send: the counts do not depend on the speed of the machine.
+    const frozen = (): number => 0;
+    const feed = async (options: Parameters<typeof A.attempt.streamTap>[0], pieces: number): Promise<number> => {
+      posts = 0;
+      const call = await A.attempt.streamTap({ now: frozen, ...options }).started({ requestChars: 1 });
+      assert.ok(call !== undefined);
+      for (let i = 0; i < pieces; i++) assert.deepEqual(await call.events([{ kind: "text", text: "t" }]), {});
+      await call.ended({ ok: true });
+      return posts;
+    };
+    // The owner's batchChars of 100 (and a long time): 1000 characters go out in about ten messages.
+    await set({ batchChars: 100, batchMs: 60_000 });
+    const owners = await feed({}, 1000);
+    assert.ok(owners >= 9 && owners <= 12, `${owners} messages under the owner's 100 characters`);
+    // The worker's own option wins over the owner's: 2000 characters in one message.
+    assert.equal(await feed({ batchChars: 5000 }, 1000), 1);
+    // The owner's zero (every piece, for the controller's own batching) is held to the worker's least gap: the worker does not send a message per token.
+    await set({ batchChars: 65_536, batchMs: 0 });
+    const zero = await feed({}, 1000);
+    assert.ok(zero < 50, `${zero} messages under an owner's zero`);
+  } finally { await x.w.c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 test("stream messages that overlap or repeat are recorded once; a repeated number with other content, another host's stream, the cap of 4 open calls and the end of the attempt (card L05c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-l05c-"));
   const x = await twoAttempts(d);

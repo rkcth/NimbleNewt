@@ -160,6 +160,14 @@ const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
+/**
+ * The command ID of the operation a bridge call runs: `{prefix}:{attempt}:{call}`. A command ID is at most 120 characters and a call ID may be 120, so a long call ID (about 88 characters and over) would be refused as an invalid
+ * command; such a call is keyed by a digest of its ID instead (the same call always gives the same key, and a short ID keeps its readable form).
+ */
+export function bridgeCommandId(prefix: string, attemptId: string, callId: string): string {
+  const plain = `${prefix}:${attemptId}:${callId}`;
+  return plain.length <= 120 ? plain : `${prefix}:${attemptId}:h-${createHash("sha256").update(callId).digest("hex").slice(0, 40)}`;
+}
 const STREAMING_WAIT_MS = 100;
 const STREAMING_WAIT_TOTAL_MS = 3000;
 /**
@@ -655,7 +663,7 @@ export class ToolExecutionService {
     if (this.#deps.desks === undefined) return refusal("unavailable", "the desk is not available");
     onlyKnown(args, ["kind", "title", "body", "visibility", "status", "supersedes", "sources"]);
     // The project and task are the attempt's; the call ID makes asking again the same write.
-    const made = await this.#deps.desks.write(c.scoped, { ...args, commandId: `bridge:${c.attemptId}:${c.callId}`, projectId: c.projectId, taskId: c.taskId } as never);
+    const made = await this.#deps.desks.write(c.scoped, { ...args, commandId: bridgeCommandId("bridge", c.attemptId, c.callId), projectId: c.projectId, taskId: c.taskId } as never);
     return ok({ id: made.id, revision: made.revision, replayed: made.replayed });
   }
 
@@ -664,7 +672,7 @@ export class ToolExecutionService {
     // Only the attempt's own task, through the same door every client uses (its checks are the native ones).
     const name = op;
     onlyKnown(args, name === "task.get" ? [] : name === "task.update" ? ["expectedRevision", "title", "description"] : ["expectedRevision", "to"]);
-    const response = await this.#deps.state.handle(token, { v: 1, op: name, ...(name === "task.get" ? {} : { commandId: `bridge:${c.attemptId}:${c.callId}` }), args: { ...args, taskId: c.taskId } });
+    const response = await this.#deps.state.handle(token, { v: 1, op: name, ...(name === "task.get" ? {} : { commandId: bridgeCommandId("bridge", c.attemptId, c.callId) }), args: { ...args, taskId: c.taskId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
@@ -694,7 +702,7 @@ export class ToolExecutionService {
   async #artifact(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["name", "files"]);
-    const response = await this.#deps.state.handle(token, { v: 1, op: "artifact.publish", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, taskId: c.taskId } });
+    const response = await this.#deps.state.handle(token, { v: 1, op: "artifact.publish", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { ...args, taskId: c.taskId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
@@ -705,7 +713,7 @@ export class ToolExecutionService {
   async #workEnd(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["submit", "result", "note", "message", "evidence", "report"]);
-    const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
+    const response = await this.#deps.state.handle(token, { v: 1, op: "work.end", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { ...args, attemptId: c.attemptId } });
     if (response.ok) return ok(response.result);
     // Card W05: a done the controller did not take is refused with the whole list of what failed (the controller's own fixed-format text, already bounded and redacted), not cut at the usual length of a refusal. Card W10: so are the second
     // agent's questions about the report, and the refusal of an ending without a report (it carries the agent's notes).
@@ -717,7 +725,7 @@ export class ToolExecutionService {
   async #workWrite(token: unknown, c: Context, op: "work.note" | "work.answer", args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, op === "work.note" ? ["kind", "text"] : ["answers"]);
-    const response = await this.#deps.state.handle(token, { v: 1, op, commandId: `bridge:${c.attemptId}:${c.callId}`, args: { ...args, attemptId: c.attemptId } });
+    const response = await this.#deps.state.handle(token, { v: 1, op, commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { ...args, attemptId: c.attemptId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
@@ -761,7 +769,7 @@ export class ToolExecutionService {
   async #maintenanceRequest(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["kind", "spec", "reason", "rollbackPlan"]);
-    const response = await this.#deps.state.handle(token, { v: 1, op: "maintenance.request", commandId: `bridge:${c.attemptId}:${c.callId}`, args });
+    const response = await this.#deps.state.handle(token, { v: 1, op: "maintenance.request", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args });
     if (!response.ok) return refusal(response.error.code, response.error.message);
     const r = response.result;
     return ok({ maintenanceId: r["maintenanceId"] ?? null, status: r["status"] ?? null, replayed: r["replayed"] === true, note: "Keep the maintenanceId: maintenance-status reads it, also in a later attempt. The controller decides and applies the change; applying it may restart your worker, and this call does not wait for that." });
@@ -792,7 +800,7 @@ export class ToolExecutionService {
   async #message(c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.messages === undefined) return refusal("unavailable", "messaging is not available");
     onlyKnown(args, ["to", "class", "purpose", "text", "expectsReply", "replyTo", "coalesceKey"]);
-    const sent = await this.#deps.messages.send(c.scoped, { ...args, commandId: `bridge:${c.attemptId}:${c.callId}`, taskId: c.taskId } as never);
+    const sent = await this.#deps.messages.send(c.scoped, { ...args, commandId: bridgeCommandId("bridge", c.attemptId, c.callId), taskId: c.taskId } as never);
     return ok(sent as unknown as JsonObject);
   }
 
@@ -808,7 +816,7 @@ export class ToolExecutionService {
         if (problems.length > 0) return refusal("invalid_command", `manifest.${field}: ${problems[0]}`);
       }
     }
-    const made = await this.#deps.catalog.register(c.agent, { ...args, commandId: `bridge:${c.attemptId}:${c.callId}` } as never);
+    const made = await this.#deps.catalog.register(c.agent, { ...args, commandId: bridgeCommandId("bridge", c.attemptId, c.callId) } as never);
     return ok({ name: made.name, versionId: made.versionId, digest: made.digest });
   }
 
@@ -955,7 +963,7 @@ export class ToolExecutionService {
     const now = await this.#deps.credentials.principalOf(this.#deps.principal, c.attemptId, { limit: false, uses: v.manifest.requestedAccess });
     const lost = v.manifest.requestedAccess.filter((action) => !allows(now, action, c.projectId, { resource: { kind: "task", id: c.taskId } }));
     if (lost.length > 0) throw new Error(`the task's credential no longer holds ${lost.slice(0, BRIDGE_LIMITS.access).join(", ")}`);
-    const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: `bridge-run:${c.attemptId}:${c.callId}`, name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });
+    const ready = await this.#deps.catalog.authorizeRun(c.agent, { commandId: bridgeCommandId("bridge-run", c.attemptId, c.callId), name: v.name, version: v.version, taskId: c.taskId, projectId: c.projectId, host: facts });
     if (!ready.ready) throw new Error(ready.reasons.join("; "));
     if (ready.digest !== v.digest) throw new Error(`${v.name} ${v.version} changed after it was checked`);
     if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked before it started`);
@@ -1009,7 +1017,7 @@ export class ToolExecutionService {
           let handed = false;
           try {
             await this.#authorizeStart(c, v, facts, own);
-            const admitted = await jobs.admit(c.scoped, { commandId: `bridge:${c.attemptId}:${c.callId}`, taskId: c.taskId, kind: "tool", label: label ?? `${v.name} ${v.version}`, operationId, background, longRunning: true, attemptId: c.attemptId, host: c.hostId });
+            const admitted = await jobs.admit(c.scoped, { commandId: bridgeCommandId("bridge", c.attemptId, c.callId), taskId: c.taskId, kind: "tool", label: label ?? `${v.name} ${v.version}`, operationId, background, longRunning: true, attemptId: c.attemptId, host: c.hostId });
             await runs.start(admitted.id, c.taskId, launch);
             const stopRevoked = (): void => { void jobs.requestCancel(this.#deps.principal, { commandId: `jrev:${admitted.id}`, jobId: admitted.id, reason: `${v.name} ${v.version} was revoked while the job ran`.slice(0, 300) }).catch(() => undefined); };
             if (own.signal.aborted) stopRevoked(); else own.signal.addEventListener("abort", stopRevoked, { once: true });
@@ -1061,7 +1069,7 @@ export class ToolExecutionService {
     const job = await this.#ownJob(c, args, ["reason", "force"]);
     const reason = args["reason"] === undefined ? "asked by the agent" : typeof args["reason"] === "string" && args["reason"].trim().length > 0 && args["reason"].length <= 300 ? args["reason"] : invalid("reason", "must be text of at most 300 characters");
     const force = args["force"] === undefined ? false : typeof args["force"] === "boolean" ? args["force"] : invalid("force", "must be true or false");
-    const asked = await this.#deps.jobs!.requestCancel(c.scoped, { commandId: `bridge:${c.attemptId}:${c.callId}`, jobId: job.id, reason, ...(force ? { force: true } : {}) });
+    const asked = await this.#deps.jobs!.requestCancel(c.scoped, { commandId: bridgeCommandId("bridge", c.attemptId, c.callId), jobId: job.id, reason, ...(force ? { force: true } : {}) });
     const now = await this.#deps.jobs!.get(c.scoped, job.id);
     return ok({ jobId: job.id, operation: asked.operation, force, state: now?.state ?? "cancellation_requested" });
   }
