@@ -11,7 +11,7 @@ after(stopServer);
 // Card H12p: the author's own refresh (`reapply`) as a controller operation: only the live attempt's own agent asks, there is no quiesce, the request is recorded, a repeat of the call returns the
 // recorded answer, one operation runs per task at a time, and a refresh that moved the checkout is one round counted with the record.
 for (const backend of backends) {
-  const rig = async (opts: { live?: boolean; stopped?: boolean; frozen?: string; port?: (call: WorkspaceCall) => Promise<WorkspaceOutcome> } = {}) => {
+  const rig = async (opts: { live?: boolean; stopped?: boolean; frozen?: string; paused?: boolean; port?: (call: WorkspaceCall) => Promise<WorkspaceOutcome> } = {}) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     const ann = await w.agent("ann");
@@ -19,16 +19,24 @@ for (const backend of backends) {
     const { taskId } = await w.task("t", ann);
     const other = (await w.task("t2", bob)).taskId;
     const state = { live: opts.live ?? true, stopped: opts.stopped ?? false, frozen: opts.frozen as string | undefined, asked: [] as WorkspaceCall[], quiesced: 0 };
-    const attempts = new Map<string, { taskId: string; agentId: string }>([["att-ann", { taskId, agentId: ann.id }], ["att-bob", { taskId: other, agentId: bob.id }]]);
+    const attempts = new Map<string, { taskId: string; agentId: string }>([["att-ann", { taskId, agentId: ann.id }], ["att-ann-2", { taskId, agentId: ann.id }], ["att-bob", { taskId: other, agentId: bob.id }]]);
     const port: WorkspacePort = { run: async (call) => { state.asked.push(call); return opts.port === undefined ? { ok: true, summary: "moved", detail: { changed: true, base: "b".repeat(40), kept: 1, taken: 1, merged: 0, conflictCount: 0, conflicts: [] } } : opts.port(call); } };
     const svc = WorkspaceOpService.withEpoch(w.storage, w.epoch, {
       quiesce: { around: async () => { state.quiesced++; throw new Error("a reapply must not be quiesced"); } },
       portOf: async () => port,
       attemptOf: async (id) => { const a = attempts.get(id); return a === undefined ? undefined : { ...a, live: state.live, stopped: state.stopped }; },
       attempts: { live: async () => [], frozenReason: async () => state.frozen, release: async () => undefined },
+      paused: async (t) => opts.paused === true && t === taskId,
     }, { clock: w.clock.now });
     const as = (agent: { id: string; aid: string }, scope?: string, projectId = w.project): Principal => ({ id: agent.id, kind: "agent", name: agent.aid, grants: [], ...(scope === undefined ? {} : { taskScope: { taskId: scope, projectId } }) }) as unknown as Principal;
-    return { store, w, ann, bob, taskId, other, svc, state, as };
+    // A second controller over the same storage (as after a restart): its own in-memory state, the same records.
+    const restarted = (run: (call: WorkspaceCall) => Promise<WorkspaceOutcome>) => WorkspaceOpService.withEpoch(w.storage, w.epoch, {
+      quiesce: { around: async () => { throw new Error("a reapply must not be quiesced"); } },
+      portOf: async () => ({ run }),
+      attemptOf: async (id) => { const a = attempts.get(id); return a === undefined ? undefined : { ...a, live: true }; },
+      attempts: { live: async () => [], frozenReason: async () => undefined, release: async () => undefined },
+    }, { clock: w.clock.now });
+    return { store, w, ann, bob, taskId, other, svc, state, as, restarted };
   };
   const refuses = async (code: string, run: () => Promise<unknown>) => assert.rejects(run, (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, code, e.message); return true; });
 
@@ -96,10 +104,18 @@ for (const backend of backends) {
       await refuses("not_found", () => r.svc.reapply(r.as(r.ann, r.other), { commandId: "x-2", attemptId: "att-ann" }));
       await refuses("not_found", () => r.svc.reapply(r.as(r.ann), { commandId: "x-3", attemptId: "att-nope" }));
       await refuses("forbidden", () => r.svc.reapply(r.w.owner, { commandId: "x-4", attemptId: "att-ann" }));
+      await refuses("invalid_command", () => r.svc.request(r.w.owner, { commandId: "x-4r", operation: "reapply", taskId: r.taskId, reason: "refresh it" }));
       await refuses("invalid_command", () => r.svc.reapply(r.as(r.ann, r.taskId), { commandId: "x-5", attemptId: "att-ann", extra: 1 } as never));
+      // H12p review: another agent with its full (not task) credential, a viewer (any principal that is not an agent), and a key-like attempt ID, which is never shown back.
+      await refuses("not_found", () => r.svc.reapply(r.as(r.bob), { commandId: "x-6", attemptId: "att-ann" }));
+      await refuses("forbidden", () => r.svc.reapply({ ...r.w.owner, id: "client:viewer", kind: "client", grants: [] } as unknown as Principal, { commandId: "x-7", attemptId: "att-ann" }));
+      const key = "sk-" + "Zq9".repeat(12);
+      await assert.rejects(() => r.svc.reapply(r.as(r.ann, r.taskId), { commandId: "x-8", attemptId: key }), (e: unknown) => { assert.ok(e instanceof DomainError); assert.equal(e.code, "not_found"); assert.ok(!e.message.includes(key.slice(3)), e.message); return true; });
+      // Bob's own attempt cannot be pointed at Ann's task: the attempt names its task, the caller never does.
+      await refuses("invalid_command", () => r.svc.reapply(r.as(r.bob, r.other), { commandId: "x-9", attemptId: "att-bob", taskId: r.taskId } as never));
       assert.equal(r.state.asked.length, 0);
     } finally { await r.store.close(); }
-    for (const [name, o, code] of [["ended", { live: false }, "invalid_transition"], ["stopped", { stopped: true }, "invalid_transition"], ["held", { frozen: "ending: the agent called work.end" }, "unavailable"]] as const) {
+    for (const [name, o, code] of [["ended", { live: false }, "invalid_transition"], ["stopped", { stopped: true }, "invalid_transition"], ["held", { frozen: "ending: the agent called work.end" }, "unavailable"], ["paused", { paused: true }, "unavailable"]] as const) {
       const q = await rig(o);
       try {
         await refuses(code, () => q.svc.reapply(q.as(q.ann, q.taskId), { commandId: `y-${name}`, attemptId: "att-ann" }));
@@ -130,6 +146,30 @@ for (const backend of backends) {
       assert.deepEqual([done.state, done.round], ["done", 1]);
       assert.equal(r.state.asked.length, 1);
     } finally { release(); await r.store.close(); }
+  });
+
+  test(`${backend.name}: a controller that stopped after the host moved the checkout but before the record was written counts that refresh as no round (at most one too few, never too many); the rounds are the task's, across its attempts (H12p review)`, async () => {
+    const r = await rig({ port: () => new Promise<WorkspaceOutcome>(() => undefined) });
+    try {
+      const me = r.as(r.ann, r.taskId);
+      // The host does the work, but the answer never reaches this controller (it stops): the record stays `started`.
+      let hostDid = 0;
+      void r.svc.reapply(me, { commandId: "cr-1", attemptId: "att-ann" }).catch(() => undefined);
+      while (r.state.asked.length === 0) await new Promise((ok) => setImmediate(ok));
+      const moved = { ok: true as const, summary: "moved", detail: { changed: true, base: "e".repeat(40), kept: 0, taken: 1, merged: 0, conflictCount: 0, conflicts: [] } };
+      const next = r.restarted(async () => { hostDid++; return moved; });
+      // The next refresh, on the restarted controller, resolves the leftover as uncertain (not a round) and is itself round 1.
+      const after = await next.reapply(me, { commandId: "cr-2", attemptId: "att-ann" });
+      assert.deepEqual([after.state, after.round], ["done", 1]);
+      const left = await next.reapply(me, { commandId: "cr-1", attemptId: "att-ann" });
+      assert.deepEqual([left.state, left.round, left.replayed], ["uncertain", undefined, true], "the stopped one is uncertain and was not run again");
+      assert.equal(hostDid, 1);
+      assert.equal(await next.refreshRounds(r.taskId), 1, "one too few at most, never one too many");
+      // A later attempt of the same task goes on counting; another task's count is its own.
+      const later = await next.reapply(me, { commandId: "cr-3", attemptId: "att-ann-2" });
+      assert.equal(later.round, 2);
+      assert.equal(await next.refreshRounds(r.other), 0);
+    } finally { await r.store.close(); }
   });
 
   test(`${backend.name}: without the attempt lookup the operation is unavailable (card H12p)`, async () => {

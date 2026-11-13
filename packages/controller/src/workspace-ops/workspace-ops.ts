@@ -99,6 +99,8 @@ export interface WorkspaceDeps {
   readonly notify?: (notice: { commandId: string; taskId: string; text: string }) => Promise<void>;
   /** An attempt as the dispatcher knows it (card H12p): its task, its agent, whether it is live and whether it was stopped. Needed for `reapply` (the author's own refresh); without it that operation is unavailable. */
   readonly attemptOf?: (attemptId: string) => Promise<{ readonly taskId: string; readonly agentId: string; readonly live: boolean; readonly stopped?: boolean } | undefined>;
+  /** Whether the task is paused (card H12p review): the author's own refresh rewrites files, so it is refused while the task is paused, here as well as at the tool bridge (a client that calls the API directly is refused too). */
+  readonly paused?: (taskId: string) => Promise<boolean>;
   /** The agent the task is assigned to, if anyone is. */
   readonly assignee?: (taskId: string) => Promise<string | undefined>;
   /**
@@ -210,8 +212,10 @@ export class WorkspaceOpService {
     const lookup = this.#deps.attemptOf;
     if (lookup === undefined) throw new DomainError("unavailable", "the attempts are not known to this controller, so a refresh cannot be made now");
     const attempt = await lookup(attemptId);
-    if (attempt === undefined || attempt.agentId !== by.id || (by.taskScope !== undefined && by.taskScope.taskId !== attempt.taskId)) throw new DomainError("not_found", `attempt ${attemptId} does not exist or is not yours`);
-    if (!attempt.live || attempt.stopped === true) throw new DomainError("invalid_transition", `attempt ${attemptId} is no longer running`);
+    // The ID is the caller's text: it is shown back only with anything credential-shaped removed.
+    const shown = redactText(attemptId).slice(0, 80);
+    if (attempt === undefined || attempt.agentId !== by.id || (by.taskScope !== undefined && by.taskScope.taskId !== attempt.taskId)) throw new DomainError("not_found", `attempt ${shown} does not exist or is not yours`);
+    if (!attempt.live || attempt.stopped === true) throw new DomainError("invalid_transition", `attempt ${shown} is no longer running`);
     const taskId = checkTaskId(attempt.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
     if (task === undefined) throw new DomainError("not_found", `task ${taskId} does not exist`);
@@ -219,6 +223,7 @@ export class WorkspaceOpService {
     const id = derivedId("wsr", scoped);
     const replay = await this.#replayOf(by, id, scoped, taskId);
     if (replay !== undefined) return replay;
+    if ((await this.#deps.paused?.(taskId)) === true) throw new DomainError("unavailable", `task ${taskId} is paused; your checkout is not refreshed until it is resumed`);
     const why = await this.#deps.attempts?.frozenReason(attemptId);
     if (why !== undefined) throw new DomainError("unavailable", `your attempt is held right now (${redactText(why).slice(0, 120)}); a refresh is not made while it is`);
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);

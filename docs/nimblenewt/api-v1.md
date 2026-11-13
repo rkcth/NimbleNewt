@@ -6416,7 +6416,7 @@ Arguments:
 - `base` (optional): code: the base commit (git object ID)
 - `tree` (optional): code: the tree (git object ID)
 - `patchId` (optional): code: the patch ID
-- `refreshRound` (optional): code: the refresh round, default 0
+- `refreshRound` (optional): code: leave it out: the controller counts the refresh rounds (card H12p) and records its own count; a different number is refused
 - `subject` (optional): review, qa, signoff: the submission it is about
 - `verdict` (optional): review: `approve`, `changes` or `reject`
 - `decision` (optional): signoff: `approve` or `decline`
