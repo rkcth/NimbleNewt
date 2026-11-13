@@ -27,7 +27,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); check?.(error); return true; });
 };
 
-type Extra = Partial<Pick<RecordOptions, "appliers" | "shareable" | "widening" | "policyWideningLimit" | "policyWideningCap" | "steward" | "stewardEnabled" | "holdExpiryMinutes" | "stewardSeconds">>;
+type Extra = Partial<Pick<RecordOptions, "appliers" | "shareable" | "widening" | "policyWideningLimit" | "policyWideningCap" | "steward" | "stewardEnabled" | "holdExpiryMinutes" | "stewardSeconds" | "narrateSeconds">>;
 
 for (const backend of backends) {
   interface Ctx {
@@ -35,7 +35,7 @@ for (const backend of backends) {
     asA: Principal; asB: Principal; asC: Principal; asD: Principal; asE: Principal;
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
-    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; stuckMotions: Set<string>; stuckRecords: Set<string>; narrate: "ok" | "throw" };
+    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; stuckMotions: Set<string>; stuckRecords: Set<string>; narrate: "ok" | "throw" | "hang" | "dirty" };
     reopen(extra?: Extra): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
@@ -70,7 +70,7 @@ for (const backend of backends) {
         const meetings = MeetingService.withEpoch(world.storage, epoch, {}, { availability: pauses.availability, ...options });
         const decisions = DecisionService.withEpoch(world.storage, epoch, {}, options);
         const shared = new Set<string>();
-        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, stuckMotions: new Set<string>(), stuckRecords: new Set<string>(), narrate: "ok" as "ok" | "throw" };
+        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, stuckMotions: new Set<string>(), stuckRecords: new Set<string>(), narrate: "ok" as "ok" | "throw" | "hang" | "dirty" };
         // The record service writes through this: with `failLog` set, the next write of a decision log line fails once (a lost log write).
         const flaky = new Proxy(world.storage, { get(target, name, receiver) {
           if (name !== "applyOperation") { const v = Reflect.get(target, name, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
@@ -96,8 +96,14 @@ for (const backend of backends) {
           return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, clock());
         };
         const make = (extra: Extra = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
-          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }), ...(extra.policyWideningLimit === undefined ? {} : { policyWideningLimit: extra.policyWideningLimit }), ...(extra.policyWideningCap === undefined ? {} : { policyWideningCap: extra.policyWideningCap }), ...(extra.steward === undefined ? {} : { steward: extra.steward }), ...(extra.stewardEnabled === undefined ? {} : { stewardEnabled: extra.stewardEnabled }), ...(extra.holdExpiryMinutes === undefined ? {} : { holdExpiryMinutes: extra.holdExpiryMinutes }), ...(extra.stewardSeconds === undefined ? {} : { stewardSeconds: extra.stewardSeconds }),
-          narrate: async ({ summary }) => { if (calls.narrate === "throw") throw new Error("the model is down"); return `A meeting with ${summary.decisions.length} decision(s).`; },
+          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }), ...(extra.policyWideningLimit === undefined ? {} : { policyWideningLimit: extra.policyWideningLimit }), ...(extra.policyWideningCap === undefined ? {} : { policyWideningCap: extra.policyWideningCap }), ...(extra.steward === undefined ? {} : { steward: extra.steward }), ...(extra.stewardEnabled === undefined ? {} : { stewardEnabled: extra.stewardEnabled }), ...(extra.holdExpiryMinutes === undefined ? {} : { holdExpiryMinutes: extra.holdExpiryMinutes }), ...(extra.stewardSeconds === undefined ? {} : { stewardSeconds: extra.stewardSeconds }), ...(extra.narrateSeconds === undefined ? {} : { narrateSeconds: extra.narrateSeconds }),
+          narrate: async ({ summary }) => {
+            if (calls.narrate === "throw") throw new Error("the model is down");
+            if (calls.narrate === "hang") return new Promise<never>(() => undefined);
+            // Model output with terminal escapes, a bell and a text-direction override: kept as plain text without them.
+            if (calls.narrate === "dirty") return `A meeting\u001b[31m with\u0007 ${summary.decisions.length}\u202e decision(s).`;
+            return `A meeting with ${summary.decisions.length} decision(s).`;
+          },
         });
         const records = make();
         const host = await enroll("host", "h1", []);
@@ -1930,6 +1936,33 @@ for (const backend of backends) {
     assert.deepEqual(both2.map((r) => r.applied).sort(), [0, 1], "exactly one of two concurrent decisions got the place");
   });
 
+  suite("the cap's window rolls: each start leaves it one window after it was made (no reset, so no burst of twice the cap at a boundary); a clock set back frees no place early; a new service on the same store keeps the count (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const cap = { policyWideningCap: async () => ({ max: 3, windowMinutes: 60 }) };
+    const waits = (applied: number, pending: number) => ({ applied, notApplied: 0, pending, ...(pending === 0 ? {} : { waitingFor: "owner" }) });
+    const starts = async () => ((await c.storage.getAggregate({ kind: "meeting-widening-window", id: c.project }))?.body as { starts?: string[] } | undefined)?.starts ?? [];
+    // 08:00 two, 08:30 one: full. (Each decideWith opens a new service on the same store, as after a restart.)
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(2, 0));
+    minutes(30);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(1, 1));
+    // 08:59: the 08:00 starts are still inside the hour.
+    minutes(29);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    // 09:00: the two 08:00 starts leave; the 08:30 one stays, so two places, not the three a window reset at 09:00 would give.
+    minutes(1);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend", "w-spend"])).result, waits(2, 1));
+    assert.equal((await starts()).length, 3, "only the starts inside the window are kept");
+    // The clock is set back 90 minutes (07:30): the starts stamped 08:30 and 09:00 still count, nothing is freed.
+    minutes(-90);
+    await c.grantUpdate(c.pA);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    // 09:29: all three are still less than an hour old; 09:30: the 08:30 one leaves, one place.
+    minutes(119);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    minutes(1);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(1, 1));
+  });
+
   suite("a widening change whose class the policy asks about does not hold up the ones that may go on, whatever their order in the decision (card M02h)", async (c) => {
     await c.grantUpdate(c.pA);
     const states = async (kinds: ("w-spend" | "w-rights")[]) => {
@@ -2047,7 +2080,7 @@ for (const backend of backends) {
     assert.deepEqual(after.changes.map((x) => [x.state, x.code]), [["applied", undefined], ["not-applied", "expired"], ["not-applied", "expired"]]);
     assert.deepEqual((await held.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held.d.id).map((e) => [e.outcome, e.code]).sort().map((x) => x.join(":")), ["applied:", "not-applied:expired", "not-applied:expired"]);
     assert.equal((await held.svc.ownerPending(c.owner)).items.some((i) => i.id === held.d.id), false, "it no longer waits");
-    await refuses("invalid_command", () => held.svc.ownerRespond(c.owner, { commandId: cid("late"), decisionId: held.d.id, response: "agree" }), (e) => assert.match(e.message, /already answered/));
+    await refuses("invalid_command", () => held.svc.ownerRespond(c.owner, { commandId: cid("late"), decisionId: held.d.id, response: "agree" }), (e) => assert.match(e.message, /nobody answered this decision in time, so it ended as declined/, "the owner is not told they answered"));
     assert.deepEqual((await held.svc.sweep(c.host, { projectId: c.project })).expired, [], "a repeat does nothing");
     // The owner who answered in time is not overridden; a decision with no expiry set never expires.
     const answered = await decideWith(c, { ...expiry, policyWideningLimit: async () => 0 }, ["w-spend"]);
@@ -2060,6 +2093,52 @@ for (const backend of backends) {
     assert.equal((await never.now()).ownerResponse, "pending");
     assert.equal((await answered.now()).ownerResponse, "agreed");
     assert.deepEqual((await answered.svc.sweep(c.host, { projectId: c.project })).expired, [never.d.id], "the answered decision is left alone; the unanswered one ends once the setting says so");
+  });
+
+  suite("a change that had started when its hold expired is finished by a later sweep if the drive right after the expiry did not finish it (a stop between the two steps), whatever the expiry setting is by then (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const base = taskUpdateApplier(c.projects);
+    const down = { v: true };
+    // The spend's carry-out fails with an unexpected error (not a refusal): the change stays applying, as after a stop.
+    const flakySpend: ChangeApplier = { ...base, widens: "spend", apply: async (ch) => { if (down.v) throw new Error("the process stopped"); return base.apply(ch); } };
+    const appliers: Record<string, ChangeApplier> = { "task.update": base, "w-rights": { ...base, widens: "access-change" }, "w-spend": flakySpend };
+    const week = 7 * 1440;
+    const held = await decideWith(c, { appliers, holdExpiryMinutes: async () => week }, ["w-rights", "w-spend"], { skipApply: true });
+    await assert.rejects(() => held.svc.apply(c.host, { decisionId: held.d.id }), /the process stopped/);
+    assert.deepEqual((await held.now()).changes.map((x) => [x.kind, x.state, x.waiting]), [["w-rights", "adopted", true], ["w-spend", "applying", undefined]]);
+    assert.equal((await held.now()).held, true);
+    minutes(week + 1);
+    // The expiry is saved; the drive of the started change right after it fails again: the decision has expired and the spend is still applying.
+    assert.deepEqual((await held.svc.sweep(c.host, { projectId: c.project })).expired, [held.d.id]);
+    assert.deepEqual((await held.now()).changes.map((x) => [x.state, x.code]), [["not-applied", "expired"], ["applying", undefined]]);
+    // Later, with expiry switched off meanwhile, a sweep finishes it under the agreement it started with; the expired change stays refused.
+    down.v = false;
+    const later = c.reopen({ appliers, holdExpiryMinutes: async () => 0 });
+    assert.deepEqual((await later.sweep(c.host, { projectId: c.project })).expired, []);
+    const after = await held.now();
+    assert.deepEqual(after.changes.map((x) => [x.state, x.code, x.agreedBy]), [["not-applied", "expired", undefined], ["applied", undefined, "policy:spend"]]);
+    assert.equal(after.ownerResponse, "declined");
+    // Once finished and logged it leaves the index, and a further sweep has nothing to do.
+    const idx = ((await c.storage.getAggregate({ kind: "meeting-decision-unlogged", id: c.project }))?.body as { ids?: string[] } | undefined)?.ids ?? [];
+    assert.equal(idx.includes(held.d.id), false);
+  });
+
+  suite("the narrator's overview is plain text and has a time limit: control and text-direction characters are removed, and a narrator that never answers leaves the summary without an overview instead of holding up the sweep (card M02h)", async (c) => {
+    await manager(c);
+    c.calls.narrate = "dirty";
+    const first = await endedTabled(c);
+    assert.deepEqual((await c.records.sweep(c.host, { projectId: c.project })).narrated, [first.rec]);
+    const read = async (rec: string) => (await c.records.summary(c.owner, rec))!;
+    assert.match((await read(first.rec)).overview ?? "", /^A meeting\[31m with \d+ decision\(s\)\.$/);
+    assert.doesNotMatch((await read(first.rec)).overview ?? "", /[\u0000-\u001f\u202e]/);
+    c.calls.narrate = "hang";
+    const slow = c.reopen({ narrateSeconds: 0.05 });
+    const second = await endedTabled(c);
+    assert.deepEqual((await slow.sweep(c.host, { projectId: c.project })).narrated, [second.rec]);
+    const got = await read(second.rec);
+    assert.equal(got.overview, undefined);
+    assert.match(got.overviewFailed ?? "", /took too long/);
+    c.calls.narrate = "ok";
   });
 
   suite("the owner's waiting list and controls read the decisions that may still need something, not every decision ever made (card M02h)", async (c) => {

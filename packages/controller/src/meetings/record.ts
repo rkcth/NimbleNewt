@@ -210,6 +210,8 @@ export interface RecordOptions extends RunnerOptions {
   readonly steward?: (input: StewardInput) => Promise<{ readonly verdict: "allow" | "ask"; readonly reason?: string }>;
   /** Seconds the steward has to answer (default 60). */
   readonly stewardSeconds?: number;
+  /** Seconds the narrator has to write an overview (default 60, as the steward); past that the summary is kept without one, marked `overviewFailed`. */
+  readonly narrateSeconds?: number;
   readonly stewardEnabled?: (cls: "access-change" | "spend", projectId: string) => Promise<boolean>;
   /** Minutes after which a decision that stayed put back to waiting for the owner (a held decision) ends as a decline, so silence never widens anything. Missing or 0: holds never expire. Checked by the sweep (card M02h). */
   readonly holdExpiryMinutes?: () => Promise<number | undefined>;
@@ -280,6 +282,22 @@ const UNLOGGED_KIND = "meeting-decision-unlogged";
 const WINDOW_KIND = "meeting-widening-window";
 /** Agreed on a delegate's leave rather than by the owner: the approval policy or the steward agent (not the vote's own `policy:none`). */
 const delegated = (agreedBy: string | undefined): boolean => agreedBy !== undefined && agreedBy !== "policy:none" && (agreedBy.startsWith("policy:") || agreedBy.startsWith("steward:"));
+/**
+ * The starts of the cap's rolling window still inside it at `now` (card M02h): those less than one window old. A start stamped later than `now` (the clock was set back) still counts until the clock has passed it by one window: a clock set
+ * back never frees places early; the block it can cause lasts the set-back plus one window, and the owner's agreement lifts it at any time.
+ */
+export const windowStarts = (w: WideningWindowBody | undefined, now: string, windowMinutes: number): string[] => {
+  const t = ms(now);
+  const starts = Array.isArray(w?.starts) ? w.starts.filter((s): s is string => typeof s === "string" && Number.isFinite(ms(s))) : [];
+  return starts.filter((s) => t - ms(s) < windowMinutes * 60_000);
+};
+/** Why a decision no longer takes the owner's answer: answered, or (card M02h) its hold ran out unanswered, which is a decline made by time and not the owner's. */
+const answeredText = (d: { readonly ownerResponse: string; readonly holdExpiredAt?: string }): string =>
+  d.holdExpiredAt !== undefined ? `nobody answered this decision in time, so it ended as declined at ${d.holdExpiredAt}; to carry it out now, put it to a meeting again` : `the owner already answered (${d.ownerResponse})`;
+/** Model output kept as text (the narrator's overview, the steward's reason): control and text-direction characters removed, so a stored or shown text cannot hide or reorder what it says. */
+// Built from a string (escapes as text): a literal line or paragraph separator in a regular expression literal would end the line in the emitted code.
+const MODEL_TEXT_STRIP = new RegExp("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff]", "g");
+export const plainModelText = (text: string): string => text.replace(MODEL_TEXT_STRIP, "");
 /** How many decisions one sweep call looks at for missing log lines, and how many storage reads the log reader makes. */
 const LOG_SWEEP_DECISIONS = 20;
 const LOG_READ_PAGES = 20;
@@ -1068,10 +1086,10 @@ export class MeetingRecordService {
               if (capNow !== undefined && delegated(agreement)) {
                 const win = await this.#runner.get(WINDOW_KIND, body.projectId);
                 const w = known<WideningWindowBody>(win);
-                const fresh = w === undefined || ms(now) - ms(w.windowStart) >= capNow.windowMinutes * 60_000;
-                const count = fresh ? 0 : w.count;
-                if (count >= capNow.max) { lost = true; throw new DomainError("invalid_command", "the project reached its limit of widening changes across decisions before this change started"); }
-                const wb: WideningWindowBody = { projectId: body.projectId, windowStart: fresh ? now : w.windowStart, count: count + 1 };
+                // A rolling window (any `windowMinutes`, not a calendar day or a window reset at a fixed time): only the starts still inside it count.
+                const starts = windowStarts(w, now, capNow.windowMinutes);
+                if (starts.length >= capNow.max) { lost = true; throw new DomainError("invalid_command", "the project reached its limit of widening changes across decisions before this change started"); }
+                const wb: WideningWindowBody = { projectId: body.projectId, starts: [...starts, now] };
                 window.push(win === undefined ? { type: "create", ref: { kind: WINDOW_KIND, id: body.projectId }, body: json(wb) } : { type: "update", ref: { kind: WINDOW_KIND, id: body.projectId }, expectedRevision: win.revision, body: json(wb) });
               }
             }
@@ -1133,7 +1151,7 @@ export class MeetingRecordService {
           capNow = this.#options.policyWideningCap === undefined ? undefined : await this.#options.policyWideningCap(d.projectId).catch(() => ({ max: 0, windowMinutes: 1 }));
           if (capNow !== undefined) {
             const w = known<WideningWindowBody>(await this.#runner.get(WINDOW_KIND, d.projectId));
-            if (w !== undefined && ms(this.#runner.now()) - ms(w.windowStart) < capNow.windowMinutes * 60_000 && w.count >= capNow.max) { await holdForOwner(); continue; }
+            if (windowStarts(w, this.#runner.now(), capNow.windowMinutes).length >= capNow.max) { await holdForOwner(); continue; }
             if (capNow.max <= 0) { await holdForOwner(); continue; }
           }
         }
@@ -1179,7 +1197,7 @@ export class MeetingRecordService {
       const ms2 = (this.#options.stewardSeconds ?? RECORD_LIMITS.stewardSeconds) * 1000;
       const out = await Promise.race([steward(input), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("the steward took too long")), ms2); })]);
       if (out === null || typeof out !== "object" || out.verdict !== "allow") return undefined;
-      const reason = redactText(typeof out.reason === "string" ? out.reason : "").replace(/\s+/g, " ").trim().slice(0, 300);
+      const reason = redactText(plainModelText(typeof out.reason === "string" ? out.reason : "")).replace(/\s+/g, " ").trim().slice(0, 300);
       return reason === "" ? "the steward agent allowed it" : reason;
     } catch { return undefined; } finally { if (timer !== undefined) clearTimeout(timer); }
   }
@@ -1505,7 +1523,7 @@ export class MeetingRecordService {
               const head = await this.#runner.get("meeting-decision", decisionId);
               const d = known<DecisionRecordBody>(head);
               if (head === undefined || d === undefined) throw new DomainError("not_found", "that decision does not exist");
-              if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", `the owner already answered (${d.ownerResponse})`, { field: "decisionId" });
+              if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked")) throw new DomainError("invalid_command", answeredText(d), { field: "decisionId" });
               const list = marked(d);
               if (!list.includes(altId) && list.length >= RECORD_LIMITS.pendingAlternatives) invalid("alternative", "too many earlier alternatives to this meeting decision were begun and never saved as its answer");
               const { pendingAlternative: _old, ...rest } = d; void _old;
@@ -1525,7 +1543,7 @@ export class MeetingRecordService {
         const d = known<DecisionRecordBody>(found);
         if (found === undefined || d === undefined) throw new DomainError("not_found", "that decision does not exist");
         if (d.outcome !== "adopted" || d.scope !== "in-scope") throw new DomainError("invalid_command", "only an adopted decision the team may carry out waits for the owner", { field: "decisionId" });
-        if (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked") throw new DomainError("invalid_command", `the owner already answered (${d.ownerResponse})`, { field: "decisionId" });
+        if (d.ownerResponse !== "pending" && d.ownerResponse !== "not-asked") throw new DomainError("invalid_command", answeredText(d), { field: "decisionId" });
         const now = this.#runner.now();
         const response: OwnerResponse = command.response === "agree" ? "agreed" : command.response === "decline" ? "declined" : "alternative";
         const reason = command.response === "decline" ? "the owner declined it" : `the owner chose an alternative (${ownerDecisionId ?? ""})`;
@@ -1694,12 +1712,16 @@ export class MeetingRecordService {
    * that waits for the owner stays in it), and is safe to repeat.
    */
   async #expireHolds(by: Principal, projectId: string): Promise<string[]> {
-    const minutes = await this.#options.holdExpiryMinutes?.().catch(() => undefined);
-    if (minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) return [];
+    const read = await this.#options.holdExpiryMinutes?.().catch(() => undefined);
+    const minutes = read === undefined || !Number.isFinite(read) || read <= 0 ? undefined : read;
     const ids = known<UnloggedIndexBody>(await this.#runner.get(UNLOGGED_KIND, projectId))?.ids ?? [];
     const out: string[] = [];
     for (const decisionId of ids.slice(0, RECORD_LIMITS.pendingScan)) {
       const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+      // A decision that expired with a change already started: the expiry's save and the drive of that change are two steps, so a stop between them is finished here, on every pass, whatever the expiry setting is now (the change
+      // goes on under the agreement it started with; the expiry itself never starts anything). It stays in the unlogged index until that change is final, so it is found again.
+      if (d !== undefined && d.holdExpiredAt !== undefined && d.changes.some((c) => c.state === "applying")) { await this.#applyDecision(by, decisionId).catch(() => undefined); continue; }
+      if (minutes === undefined) continue;
       if (d === undefined || d.ownerResponse !== "pending" || d.held !== true || d.outcome !== "adopted" || d.scope !== "in-scope") continue;
       if (ms(this.#runner.now()) - ms(d.heldAt ?? d.concludedAt) < minutes * 60_000) continue;
       let ended = false;
@@ -1815,8 +1837,10 @@ export class MeetingRecordService {
         let overviewFailed: string | undefined;
         if (this.#options.narrate !== undefined) {
           try {
-            const raw = await this.#options.narrate({ summary: content });
-            const cleaned = typeof raw === "string" ? raw.trim() : "";
+            // The narrator is a model call: it has the same time limit as the steward, so a model that never answers cannot hold up the sweep that writes summaries (card M02h); a late answer is dropped.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const raw = await Promise.race([this.#options.narrate({ summary: content }), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("it took too long")), (this.#options.narrateSeconds ?? RECORD_LIMITS.stewardSeconds) * 1000); })]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+            const cleaned = typeof raw === "string" ? plainModelText(raw).trim() : "";
             if (cleaned === "" || redactText(cleaned) !== cleaned || [...cleaned].length > RECORD_LIMITS.text) overviewFailed = "the summarizer returned nothing usable";
             else overview = cleaned;
           } catch (error) { overviewFailed = redactText(`the summarizer failed: ${error instanceof Error ? error.message : String(error)}`).slice(0, 300); }

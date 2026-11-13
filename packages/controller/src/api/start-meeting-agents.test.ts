@@ -12,7 +12,7 @@ const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
 /** Five budget raises adopted in one meeting under a policy that lets spend through, with the owner's limit settings as given (card M02g): returns what the apply did. */
-async function scenario(settings: Record<string, unknown>, profile: "derived" | "strict" = "derived", extra: Record<string, unknown> = {}) {
+async function scenario(settings: Record<string, unknown>, profile: "derived" | "strict" = "derived", extra: Record<string, unknown> = {}, prep?: (call: (token: string, op: string, args: Record<string, unknown>, commandId?: string) => Promise<any>, token: string) => Promise<void>) {
   const d = mkdtempSync(join(tmpdir(), "nn-wlimit-"));
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], ...extra } as never);
   try {
@@ -24,6 +24,7 @@ async function scenario(settings: Record<string, unknown>, profile: "derived" | 
       const staged = await c.services.configuration.stage(rob, { commandId: "cfg1", layer: "installation", set: settings as never });
       await c.services.configuration.apply(rob, { commandId: "cfg2", layer: "installation", expectedRevision: staged.revision });
     }
+    if (prep !== undefined) await prep(call, boot.token);
     const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
     const tasks: { id: string; revision: number }[] = [];
     for (let i = 0; i < 5; i++) {
@@ -57,7 +58,7 @@ async function scenario(settings: Record<string, unknown>, profile: "derived" | 
   } catch (e) { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); throw e; }
 }
 
-const run = async (settings: Record<string, unknown>, body: (s: Awaited<ReturnType<typeof scenario>>) => Promise<void>, profile: "derived" | "strict" = "derived", extra: Record<string, unknown> = {}) => { const s = await scenario(settings, profile, extra); try { await body(s); } finally { await s.done(); } };
+const run = async (settings: Record<string, unknown>, body: (s: Awaited<ReturnType<typeof scenario>>) => Promise<void>, profile: "derived" | "strict" = "derived", extra: Record<string, unknown> = {}, prep?: Parameters<typeof scenario>[3]) => { const s = await scenario(settings, profile, extra, prep); try { await body(s); } finally { await s.done(); } };
 
 test("the project's cap across decisions is a setting (default 10 a day), the owner raises, lowers or switches it off, and bad values are refused (card M02h)", async () => {
   await run({ "meeting.decision.maxPolicyWidening": 50, "meeting.decision.maxPolicyWideningPerDay": 2 }, async (s) => {
@@ -99,6 +100,28 @@ test("the steward agent a host provides decides a budget raise the strict policy
   mode.v = "allow";
   // The per-decision limit holds the steward too.
   await run({ "meeting.decision.maxPolicyWidening": 2, "meeting.decision.steward": true }, async (s) => assert.deepEqual([s.applied.applied, s.applied.pending], [2, 3]), "strict", extra);
+});
+
+test("the steward's allow never goes past the owner's ceiling on raises, and nobody but the owner can switch the steward on or change the cap and expiry (card M02h review)", async () => {
+  const steward = async () => ({ verdict: "allow" as const, reason: "small raise" });
+  // The owner's ceiling is below each 0.5 USD raise: the steward allows, the budget service refuses, nothing is raised and the log says so.
+  await run({ "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true }, async (s) => {
+    assert.deepEqual([s.applied.applied, s.applied.pending], [0, 0], JSON.stringify(s.applied));
+    assert.equal(await s.raised(), 0);
+    assert.deepEqual(await s.logged(), ["not-applied:steward", "not-applied:steward", "not-applied:steward", "not-applied:steward", "not-applied:steward"]);
+  }, "strict", { meetingRecords: { steward } }, async (call, token) => { assert.ok((await call(token, "agreed.limits.change", { set: { raiseMaxCostMicros: 100_000 } }, "lim1")).ok); });
+  // At the ceiling exactly the same raises go through.
+  await run({ "meeting.decision.maxPolicyWidening": 50, "meeting.decision.steward": true }, async (s) => assert.equal(await s.raised(), 5), "strict", { meetingRecords: { steward } }, async (call, token) => { assert.ok((await call(token, "agreed.limits.change", { set: { raiseMaxCostMicros: 500_000 } }, "lim1")).ok); });
+  // An agent, even one granted config.write, cannot set any of the widening settings (installation layer: the owner's only).
+  await run({}, async (s) => {
+    await s.c.services.principals.enroll(s.rob, { commandId: "e-cfg", kind: "agent", name: "cfg", grants: [{ action: "config.write", project: "*" }] });
+    const cfg = await s.c.services.principals.authenticate((await s.c.services.principals.issueCredential(s.rob, "agent:cfg")).token);
+    for (const key of ["meeting.decision.steward", "meeting.decision.stewardRights", "meeting.decision.maxPolicyWideningPerDay", "meeting.decision.holdExpiryDays", "meeting.decision.limitPolicyWidening"]) {
+      const value = key === "meeting.decision.maxPolicyWideningPerDay" ? 500 : key === "meeting.decision.holdExpiryDays" ? 0 : key !== "meeting.decision.limitPolicyWidening";
+      await assert.rejects(() => s.c.services.configuration.stage(cfg, { commandId: `cfg-${key}`, layer: "installation", set: { [key]: value } as never }), (e: Error & { code?: string }) => e.code === "forbidden", key);
+    }
+    assert.deepEqual(await s.c.services.configuration.installationValues(["meeting.decision.steward", "meeting.decision.stewardRights"]), { "meeting.decision.steward": false, "meeting.decision.stewardRights": false });
+  });
 });
 
 test("the narrator a host provides writes the overview of a summary; without one there is none (card M02h)", async () => {

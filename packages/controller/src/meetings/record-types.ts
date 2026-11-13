@@ -168,8 +168,11 @@ export interface ChangeRecord extends ProposedChange {
   readonly at?: string;
 }
 
-/** The project's count of widening changes started on a delegate's leave (the approval policy or the steward) in the current window: the cap across decisions (card M02h). */
-export interface WideningWindowBody { readonly projectId: string; readonly windowStart: string; readonly count: number }
+/**
+ * The project's widening changes started on a delegate's leave (the approval policy or the steward): the cap across decisions (card M02h). A rolling window: `starts` holds the start time of each such change still inside the window
+ * (at most the cap, 500), so "N in any 24 hours" holds at every moment and there is no burst of twice the cap around a reset.
+ */
+export interface WideningWindowBody { readonly projectId: string; readonly starts: readonly string[] }
 
 export type OwnerResponse = "not-asked" | "pending" | "agreed" | "declined" | "alternative";
 
