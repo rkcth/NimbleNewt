@@ -722,12 +722,26 @@
       ],
       "deliverable": "Split from F04e (2026-10-31): after the switch the controller waits for the host to restart it (no automatic restart); an apply_proposal inside a chat message (not applyProposal) records its turn in the fenced database and fails with stale_epoch; a failed copy starts over; the journal and authority file carry no integrity mark; a PostgreSQL controller without a data directory cannot run transfers; from the third review: the holder check and the epoch take are separate steps (take the epoch inside the state lock or with expectedEpoch from the row the check read), writes that bump neither the audit nor the delivery counter are invisible to the rollback check, a failed take-back after a late write leaves a half-settled transfer, the state lock is held across slow start work, and there is no owner-facing wipe of a pending or failed destination",
       "acceptance_and_verification": "The host restarts onto the new database by itself when it opts in; the message path reports the move as applied; an interrupted copy resumes or is cleaned without the owner emptying the destination; the authority file and journal are rejected when changed by anything else; transfers are available without a data directory by a configured state folder",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "6e18931e",
+          "ac53bd2e",
+          "39690cef",
+          "8f62a2f1"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "After a database move or rollback the controller asks its host to restart it when the host opts in (the controller entry under the release launcher exits 75 and is started again); the owner turns that off and on in chat. The restarted entry follows the integrity-checked authority file to the configured destination with the configuration unchanged, and refuses a destination that is missing or empty. A move applied from a chat message is reported as applied, and the same message or command sent again is answered from the journal without moving anything again. A copy left by an interrupted move is emptied by the next move, or by the owner's wipe from chat, without the owner emptying it by hand. The journal and authority file carry an HMAC mark, and a changed file, a stripped mark or a lost key is refused. Transfers run from a configured state folder with no data directory, also from a PostgreSQL controller. Left: the integrity key sits beside the files, so it stops accidents and casual edits but not someone who can rewrite the whole folder (a file with both its mark and the key removed reads as a file from before marks existed, and an old folder restored whole is accepted); a half-written copy is copied again from a fresh snapshot, not resumed; a PostgreSQL leftover schema that someone else made is not dropped; the take-back of a failed fence in a rollback is card F04n; the restart test runs both starts of the entry in one process (the launcher's child-process restart is tested under K02a)."
+      }
     },
     {
       "id": "F04n",
@@ -3108,12 +3122,25 @@
       ],
       "deliverable": "Split from L05c (2026-10-31): the tool bridge admits a call as an effect through the generation service (so a partial or withdrawn call can never start an effect by that route either); the remote protocol's stream tap is wired into a remote worker host that runs Pi in its sandbox; a tool call ID the Pi extension rewrote (repeated or unsafe IDs) is matched to its recorded call; a remote relay's waits on the store are reported to stall detection; a remote worker that never opens a stream is detected (its tool calls are then unrecorded, and the bridge cannot bind a call's tool name and arguments to the bridge operation it asks for)",
       "acceptance_and_verification": "A remote worker process in its sandbox has a late reply held and a corrected generation's tool call refused at the bridge, shown with a real worker process; a rewritten call ID is checked against its recorded generation",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "a43744d2",
+          "67aabc9c",
+          "1f393171"
+        ],
+        "ci_runs": [
+          "43455917751"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A write sent to the tool bridge is admitted through the generation service only while its call is complete in the task's current generation, and it is settled once on the effect ledger. The call's name and arguments must be the ones the model wrote. Call IDs the Pi extension rewrote (h: digests, d: repeat numbers) are matched to their recorded call. Remote model calls report their start, output and end to stall detection, and a remote worker that never opens a stream is noticed (the owner can have its calls refused). The remote worker program (scripts/remote-worker.mjs) runs Pi in bubblewrap, records every model call through the protocol's stream tap using the owner's batching figures, and sends tool calls to the controller's bridge through a protocol route. Tests with the real Pi process in its sandbox show a late reply held back and never reaching Pi, and a corrected generation's call under a rewritten ID refused at the bridge with no effect. Left: the models are scripted (no run against a real model); in those two tests the bridge call reaches the controller in the same process, while the protocol route is shown with the real program on an ordinary run and on a composed controller for the refusal; the remote host is Linux and bubblewrap only; requireStream is off by default; d: matching stops at 1,000 uses; checkCall reads up to 20 generations per call; a controller restart loses open stream calls; tool scripts run on the controller."
+      }
     },
     {
       "id": "L01",
