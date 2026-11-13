@@ -73,7 +73,8 @@ test("an approved package is installed into the agent's environment directory by
     assert.deepEqual(restarts, [2]);
     assert.equal((await call(boot.token, "environment.get", { agentId })).result.item.active.revision, 2);
     assert.equal((await c.services.pauses.gate(rob, { kind: "agent", id: ann.id }))?.intent, "active", "the agent works again");
-    assert.deepEqual(fetched, ["https://registry.example.org/ripgrep.tgz"], "fetched once, for the trial; the reload used the verified copy");
+    // One fetch is the reviewer's reading made when the request was made (card A09 seventh slice, it may not have started when the owner decided at once) and one is the trial's; the reload used the verified copy and never fetched.
+    assert.ok(fetched.length >= 1 && fetched.length <= 2 && fetched.every((u) => u === "https://registry.example.org/ripgrep.tgz"), `the trial fetched once and the review reading at most once: ${JSON.stringify(fetched)}`);
     const grant = await host.reach("environment", { agentId, environmentRevision: 2 });
     assert.equal(grant!.readOnly![0]!.guest, "/opt/environment");
     assert.deepEqual(await host.reach("environment", { agentId }), {}, "an attempt pinned to no environment gets none (card A09 sixth slice)");

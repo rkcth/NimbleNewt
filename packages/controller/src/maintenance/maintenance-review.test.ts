@@ -7,7 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { AgentService } from "../agents/index.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import { scopedCommandId } from "../security/credentials.js";
-import { FakeApplier, MaintenanceService, type MaintenanceBody } from "./index.js";
+import { FakeApplier, MaintenanceService, type ArtifactInspection, type MaintenanceBody, type MaintenanceOptions } from "./index.js";
 
 after(stopServer);
 
@@ -21,7 +21,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface World {
   readonly m: MaintenanceService; readonly applier: FakeApplier; readonly owner: Principal; readonly agents: AgentService; readonly grants: GrantService; readonly principals: PrincipalService;
   readonly time: { ms: number };
-  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean> }): MaintenanceService;
+  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number }): MaintenanceService;
   make(name: string, by?: Principal, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
@@ -41,7 +41,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     const grants = GrantService.withEpoch(open.storage, projects.epoch, options);
     const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
     const applier = new FakeApplier();
-    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean> } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
+    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     const m = service();
     const make: World["make"] = async (friendlyName, by = owner, supervisorId) => {
       const created = await agents.create(by, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
@@ -378,6 +378,158 @@ for (const [index, backend] of backends.entries()) {
       await mm.idle();
       assert.equal((await w.body(three.maintenanceId)).status, "pending");
       assert.equal(w.applier.calls.filter((c) => c.op === "apply" && c.id === three.maintenanceId).length, before);
+    });
+  });
+}
+
+// ---- A09 seventh slice: the reviewer reads what the artifact declares before approving it -------------------------------------------------------
+
+const read = (scripts: { phase: string; entry: string; text: string }[] = [], extra: Partial<Extract<ArtifactInspection, { ok: true }>> = {}): ArtifactInspection => ({ ok: true, name: "native-thing", version: "1.2.3", digestVerified: true, files: 4, bytes: 900, scripts: scripts.map((x) => ({ ...x, bytes: x.text.length, sha256: D("e"), truncated: false })), ...extra });
+const reviewOf = async (w: World, by: Principal, id: string): Promise<Record<string, unknown>> => (await w.m.get(by, id)).review as Record<string, unknown>;
+
+for (const [index, backend] of backends.entries()) {
+  test(`a waiting package request shows the reviewer the install scripts the host read from the artifact, bound to the exact request, to readers only, and without anything being installed (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const asked: unknown[] = [];
+      const m = w.service({ inspector: async (a) => { asked.push(a); return read([{ phase: "postinstall", entry: "setup.js", text: "console.log('building');" }]); } });
+      const boss = await w.make("Boss");
+      const ann = await w.make("Ann", w.owner, boss.id);
+      const eve = await w.make("Eve");
+      const r = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("native-thing", { installScripts: true, digest: D("c") }), reason: "needed", rollbackPlan: "undo it" });
+      assert.equal(r.status, "pending");
+      await m.idle();
+      assert.deepEqual(asked, [{ name: "native-thing", version: "1.2.3", digest: D("c"), source: SRC }], "the host was asked about exactly the requested artifact");
+      for (const reader of [w.owner, ann.principal, boss.principal]) {
+        const got = ((await m.get(reader, r.maintenanceId)).review as Record<string, any>);
+        assert.equal(got.inspection.read, true);
+        assert.equal(got.inspection.digestVerified, true);
+        assert.equal(got.inspection.scripts[0].phase, "postinstall");
+        assert.equal(got.inspection.scripts[0].file, "setup.js");
+        assert.match(got.inspection.scripts[0].text, /building/);
+        assert.match(got.inspection.note, /nothing was installed or run/);
+        assert.equal(got.inspectionWarning, undefined, "the requester said it has scripts and it has");
+      }
+      await refuses("not_found", () => m.get(eve.principal, r.maintenanceId));
+      assert.equal((await w.body(r.maintenanceId) as unknown as Record<string, unknown>).inspection, undefined, "the request record itself is unchanged by the reading");
+      assert.equal(w.applier.effects.size, 0, "reading applied nothing");
+      assert.equal((await w.m.list(w.owner, { agentId: ann.principal.id })).items.every((i) => typeof (i.review as Record<string, unknown>).inspection === "object"), true, "listing carries it too");
+      const again = await m.request(ann.principal, { commandId: "same", kind: "package", spec: pkg("native-thing", { installScripts: true, digest: D("c") }), reason: "needed", rollbackPlan: "undo it" });
+      await m.request(ann.principal, { commandId: "same", kind: "package", spec: pkg("native-thing", { installScripts: true, digest: D("c") }), reason: "needed", rollbackPlan: "undo it" });
+      await m.idle();
+      assert.equal(asked.length, 2, "a replayed request does not ask the host again");
+      assert.ok(again.maintenanceId);
+    });
+  });
+
+  test(`what the artifact declares is compared with what the requester said, and a text with a secret, hidden characters or a huge size is cleaned and bounded (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      const bad = "line one\u202Eevil\nAWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE1234567890abcdefghij\n" + "z".repeat(5000);
+      const scripts = Array.from({ length: 9 }, (_, i) => ({ phase: "install", entry: `s${i}.js`, text: i === 0 ? bad : "ok" }));
+      let result: ArtifactInspection = read(scripts);
+      const m = w.service({ inspector: async () => result });
+      // the requester says no scripts, the artifact declares some
+      const liar = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("liar"), reason: "needed", rollbackPlan: "undo" });
+      await m.idle();
+      const a = await reviewOf(w, w.owner, liar.maintenanceId) as Record<string, any>;
+      assert.match(a.inspectionWarning, /declares install scripts although the requester said it has none/);
+      assert.equal(a.inspection.scripts.length, 6, "at most six scripts are shown");
+      assert.equal(a.inspection.omittedScripts, 3, "and the rest is counted, not hidden silently");
+      const text = String(a.inspection.scripts[0].text);
+      assert.ok(text.length <= 2003, "one script's text is bounded");
+      assert.doesNotMatch(text, /AKIAIOSFODNN7EXAMPLE1234567890/, "a secret-shaped value is redacted");
+      assert.doesNotMatch(text, /\u202E/, "a direction-changing character is removed");
+      assert.equal(a.inspection.scripts[0].truncated, true);
+      // the requester says scripts, the artifact has none
+      result = read([]);
+      const other = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("other", { installScripts: true, digest: D("d") }), reason: "needed", rollbackPlan: "undo" });
+      await m.idle();
+      assert.match(String((await reviewOf(w, w.owner, other.maintenanceId)).inspectionWarning), /declares none: approving it runs nothing/);
+    });
+  });
+
+  test(`a host that cannot read the artifact, throws or is too slow leaves the request waiting with the reason shown; no inspector, or an approved or non-package request, is never read (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      let calls = 0;
+      let mode: "no" | "throw" | "slow" | "ok" = "no";
+      const m = w.service({ inspectTimeoutMs: 50, inspector: async () => { calls++; if (mode === "throw") throw new Error("registry says token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 is bad"); if (mode === "slow") await sleep(400); return mode === "no" ? { ok: false, reason: "no way to fetch" } : read(); } });
+      for (const next of ["no", "throw", "slow"] as const) {
+        mode = next;
+        const r = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg(`p-${next}`, { digest: D("b") }), reason: "needed", rollbackPlan: "undo" });
+        await m.idle();
+        assert.equal((await w.body(r.maintenanceId)).status, "pending", `${next}: the request still waits for a person`);
+        const got = (await reviewOf(w, w.owner, r.maintenanceId)).inspection as Record<string, unknown>;
+        assert.equal(got.read, false, next);
+        assert.match(String(got.note), /requester's own claims are all there is/);
+        if (next === "throw") assert.doesNotMatch(String(got.why), /ghp_abcdefghijklmnopqrstuvwxyz/, "a secret in the host's error is not shown");
+        if (next === "slow") assert.match(String(got.why), /too long/);
+      }
+      assert.equal(calls, 3);
+      // an owner's request approved by a rule, a mount and a request on a service without an inspector are never read
+      await m.change(w.owner, { commandId: cid("s"), catalogueAdd: [{ name: "listed", version: "1.2.3", digest: D("a"), source: SRC }] });
+      mode = "ok";
+      const approved = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("listed"), reason: "needed", rollbackPlan: "undo" });
+      await m.request(ann.principal, { commandId: cid("r"), kind: "mount", spec: { mountPath: "/data/x", resource: `${ann.id.replace(/^agent:/, "")}.x`, mode: "read" }, reason: "needed", rollbackPlan: "undo" });
+      await m.idle();
+      assert.equal(calls, 3, "an approved request and a mount ask the host nothing");
+      assert.equal((await reviewOf(w, w.owner, approved.maintenanceId)).inspection, undefined);
+      const plain = w.service();
+      const r2 = await plain.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("noinspector", { digest: D("9") }), reason: "needed", rollbackPlan: "undo" });
+      await plain.idle();
+      assert.equal((await reviewOf(w, w.owner, r2.maintenanceId)).inspection, undefined, "without an inspector the review shows only the requester's claims");
+    });
+  });
+
+  test(`a request decided before the host answers is not written to afterwards, and a review does not show a reading while the host is still reading (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const m = w.service({ inspector: async () => { await gate; return read([{ phase: "install", entry: "a.js", text: "a" }]); } });
+      const r = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("native-thing", { installScripts: true, digest: D("c") }), reason: "needed", rollbackPlan: "undo it" });
+      assert.equal((await reviewOf(w, w.owner, r.maintenanceId)).inspection, undefined, "while the host is still reading, the review says nothing of it");
+      await m.decide(w.owner, { commandId: cid("d"), maintenanceId: r.maintenanceId, verdict: "reject", specDigest: await specOf(w, r.maintenanceId) });
+      release(); await m.idle();
+      assert.equal((await w.storage.getAggregate({ kind: "maintenance-inspection", id: r.maintenanceId })), undefined, "a request that is no longer waiting is not read on");
+    });
+  });
+
+  test(`readings run one at a time, a reading given up at the limit is told to stop, and past the queue bound a request is recorded as not read (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const ann = await w.make("Ann");
+      // One at a time: three waiting requests never have two readings running together.
+      let running = 0, most = 0, entered = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const m = w.service({ inspector: async () => { running++; entered++; most = Math.max(most, running); try { await gate; return read(); } finally { running--; } } });
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) ids.push((await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg(`q${i}`, { digest: D(String(i + 1)) }), reason: "needed", rollbackPlan: "undo" })).maintenanceId);
+      // Give readings that could overlap the chance to (bounded); one that waits its turn never starts while the gate holds.
+      for (let k = 0; k < 50 && entered < 2; k++) await sleep(10);
+      assert.equal(entered, 1, "the second reading waits for the first");
+      release(); await m.idle();
+      assert.equal(most, 1, "never two readings at once");
+      for (const id of ids) assert.equal(((await reviewOf(w, w.owner, id)).inspection as Record<string, unknown>).read, true, "each was read in turn");
+      // A reading given up at the limit is told to stop (its fetch is aborted).
+      let aborted = false;
+      const slow = w.service({ inspectTimeoutMs: 50, inspector: async (_a, signal) => { await new Promise<void>((r) => { if (signal === undefined) return; signal.addEventListener("abort", () => { aborted = true; r(); }); }); return read(); } });
+      const s = await slow.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("slow", { digest: D("5") }), reason: "needed", rollbackPlan: "undo" });
+      await slow.idle();
+      assert.equal(aborted, true, "the host was told to stop");
+      assert.match(String(((await reviewOf(w, w.owner, s.maintenanceId)).inspection as Record<string, unknown>).why), /too long/);
+      // Past the bound a request is not queued: it is recorded as not read, and the host is not asked.
+      let asked = 0;
+      let open!: () => void;
+      const held = new Promise<void>((r) => { open = r; });
+      const small = w.service({ inspectQueue: 2, inspector: async () => { asked++; await held; return read(); } });
+      const q: string[] = [];
+      for (let i = 0; i < 3; i++) q.push((await small.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg(`b${i}`, { digest: D(String(i + 6)) }), reason: "needed", rollbackPlan: "undo" })).maintenanceId);
+      open(); await small.idle();
+      assert.equal(asked, 2, "the third was not handed to the host");
+      const third = (await reviewOf(w, w.owner, q[2]!)).inspection as Record<string, unknown>;
+      assert.equal(third.read, false);
+      assert.match(String(third.why), /too many artifacts were waiting/);
     });
   });
 }
