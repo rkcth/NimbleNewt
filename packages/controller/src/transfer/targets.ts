@@ -1,7 +1,7 @@
 import { dirname, isAbsolute } from "node:path";
 import { canon } from "../backup/canon.js";
 import type { StatsFs } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import type { ControllerStorage } from "../storage/types.js";
 import { PostgresStorage, discardPostgresTransferCopy, postgresDatabaseBytes } from "../storage/postgres/index.js";
 import { pendingHolder, postgresFingerprint, readAuthority, sqliteFingerprint, type TransferTarget } from "./transfer.js";
@@ -226,7 +226,11 @@ export async function storageFollowingAuthority(configured: ConfiguredStorage, e
     if (o["kind"] === "sqlite" && typeof o["path"] === "string" && absolute(o["path"])) {
       let fingerprint: string;
       try { fingerprint = await sqliteFingerprint(o["path"]); } catch { continue; }
-      if (fingerprint === authority.active.fingerprint) return { storage: { kind: "sqlite", path: o["path"] }, movedTo: { name, kind: "sqlite" } };
+      if (fingerprint === authority.active.fingerprint) {
+        // F04m review: opening a missing file makes a new, empty database; the start would then run on it. Refused before anything is created (a destination on a disk that is not attached, or a file removed).
+        if (!(await stat(o["path"]).then((s) => s.isFile(), () => false))) throw new Error(`NimbleNewt will not start: the database transfer files say the controller database was moved to ${name.slice(0, 80)} (sqlite), but that database file is not there. It may be on a disk that is not attached, or it was removed. Nothing was started or created: attach or restore it, then start again.`);
+        return { storage: { kind: "sqlite", path: o["path"] }, movedTo: { name, kind: "sqlite" } };
+      }
     } else if (o["kind"] === "postgres") {
       const ref = o["url"];
       const secretName = ref !== null && typeof ref === "object" && !Array.isArray(ref) && typeof (ref as Record<string, unknown>)["secret"] === "string" && SECRET_NAME.test((ref as { secret: string }).secret) ? (ref as { secret: string }).secret : undefined;

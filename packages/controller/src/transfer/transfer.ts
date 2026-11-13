@@ -352,6 +352,14 @@ export async function assertNotFenced(stateDirectory: string | undefined, config
   const snap = await storage.snapshot();
   let holder: string | null, epoch: number | undefined;
   try { const row = (await snap.read("state", { limit: 1 }))[0]; holder = row === undefined ? null : (row["holder"] as string | null); epoch = row === undefined ? undefined : Number(row["epoch"]); } finally { await snap.close(); }
+  // F04m review: the database the authority file names for a transfer holds the data (a copy carries its source's epoch; the previous database was started on). One that was never started on and is not a copy (epoch 0, no
+  // holder: what opening a missing file or an empty schema makes) is not it: a destination on a disk that is not attached, or a file removed or replaced. Starting on it would run the installation on an empty database.
+  if (stateDirectory !== undefined && (epoch === undefined || epoch === 0) && (holder === null || holder === undefined)) {
+    const authority = await readAuthority(stateDirectory);
+    if (authority?.transferId !== undefined && authority.active.fingerprint === configured.fingerprint) {
+      return refusal(`the database transfer files name this database (${authority.active.name}) as the one that holds the data since database transfer ${authority.transferId}, but it is empty (never started on, and not a copy). It may be on a disk that is not attached, or it was removed or replaced. Nothing was started on it: attach or restore that database, then start again.`);
+    }
+  }
   const id = wasTransferred(holder);
   if (id === undefined) return epoch;
   if (stateDirectory !== undefined) {

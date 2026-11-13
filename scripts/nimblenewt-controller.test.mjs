@@ -2,7 +2,7 @@
 // release launcher (launcher -> entry -> startController -> confirmation -> clean SIGTERM stop, exit 0; and exit 75 -> the launcher starts it again).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -247,6 +247,49 @@ test("a database move under the launcher ends with exit 75, and the entry starte
     });
     assert.equal(third.code, 0, third.log);
     assert.doesNotMatch(third.log, /was moved to/, "back on the configured database: nothing to follow");
+  } finally { inst.cleanup(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test("after a move, a destination whose file is gone (a disk not attached) is not started on as a new empty database: refused whether the launcher follows the move or the configuration names it by hand (entry, F04m review)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "nn-entry-"));
+  const away = join(base, "elsewhere"), parked = join(base, "parked");
+  const moved = join(away, "moved.sqlite");
+  const inst = installation((c) => ({ ...c, controller: { ...c.controller, databaseTransfer: { targets: [{ name: "moved", kind: "sqlite", path: moved }] } } }));
+  try {
+    const { ownerSecretName } = await dist("controller", "index.js");
+    const env = { NIMBLENEWT_RELEASE_ROOT: join(inst.base, "rel"), NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+    const c = capture();
+    let seen;
+    const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, ready: (handle) => { seen = handle; } });
+    await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+    const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+    const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+    assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
+    const preview = await call("database.transfer.preview", { target: "moved" });
+    assert.equal((await call("database.transfer.apply", { target: "moved", confirm: preview.result.item.token }, "move-1")).ok, true);
+    assert.equal(await done, 75, c.text);
+    // The disk the new database is on is not attached: its folder is gone.
+    renameSync(away, parked);
+    const refused = async (what) => {
+      const c2 = capture();
+      const code = await main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c2.stderr, env, ready: () => { throw new Error(`${what}: the controller came up on an empty database:\n${c2.text}`); } });
+      assert.equal(code, 1, `${what}:\n${c2.text}`);
+      return c2.text;
+    };
+    assert.match(await refused("the launcher follows the move"), /moved to moved \(sqlite\), but that database file is not there/);
+    assert.equal(existsSync(moved), false, "nothing was created where the database should be");
+    // The owner points the configuration at the destination by hand: the start opens it (a new file) and refuses it as empty.
+    writeFileSync(inst.configFile, `${JSON.stringify({ ...inst.config, controller: { ...inst.config.controller, storage: { kind: "sqlite", path: moved } } }, null, 2)}\n`, { mode: 0o600 });
+    mkdirSync(away, { recursive: true });
+    assert.match(await refused("the configuration names it"), /name this database \(moved\) as the one that holds the data since database transfer [^ ]+, but it is empty/);
+    // The disk is attached again: the start comes up on the moved data.
+    rmSync(away, { recursive: true, force: true });
+    renameSync(parked, away);
+    const back = await runEntry(["--data", inst.dataDir], {}, async ({ controller }) => {
+      const t = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+      assert.match(JSON.stringify(await controller.api.handle(t, { v: 1, op: "project.list", args: {} })), /Garden/);
+    });
+    assert.equal(back.code, 0, back.log);
   } finally { inst.cleanup(); rmSync(base, { recursive: true, force: true }); }
 });
 
