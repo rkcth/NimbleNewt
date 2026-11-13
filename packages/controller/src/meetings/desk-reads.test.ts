@@ -168,6 +168,76 @@ const flaky = (storage: ControllerStorage, broken: { on: boolean }): ControllerS
   },
 });
 
+/** A storage that runs `before` (once, when set) just ahead of the next commit of a chair read or attempt: another writer getting in between the read and its commit. */
+const racing = (storage: ControllerStorage, hook: { before?: (() => Promise<void>) | undefined }): ControllerStorage => new Proxy(storage, {
+  get(target, prop) {
+    const value = Reflect.get(target, prop, target) as unknown;
+    if (prop === "applyOperation") return async (...args: unknown[]) => {
+      const op = args[0] as { audit?: readonly { type: string }[] };
+      const run = hook.before;
+      if (run !== undefined && op.audit?.some((a) => a.type.startsWith("meeting.desk-") || a.type === "meeting.note-read") === true) { hook.before = undefined; await run(); }
+      return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+    };
+    return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+  },
+});
+
+for (const backend of backends) {
+  test(`${backend.name}: a chair read or refused attempt that races another writer of the meeting is done again, not lost or misreported; concurrent attempts are all counted`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+      const agents = AgentService.withEpoch(world.storage, epoch, options);
+      const grants = GrantService.withEpoch(world.storage, epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("pa"), actor: owner.id, name: "A" })).id;
+      const ids: string[] = [];
+      for (const nm of ["A", "B", "D"]) ids.push(`agent:${(await agents.create(owner, { commandId: cid("ag"), friendlyName: nm })).id}`);
+      const [pA, pB, pD] = ids as [string, string, string];
+      await grants.grant(owner, { commandId: cid("g"), grantee: pB, action: "desk.write", project, source: "direct", basis: "test" } as never);
+      const login = async (id: string): Promise<Principal> => principals.authenticate((await principals.issueCredential(owner, id)).token);
+      const [asA, asB, asD] = [await login(pA), await login(pB), await login(pD)] as [Principal, Principal, Principal];
+      const mgr = await (async () => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "mgr", grants: [{ action: "meeting.manage", project }] }); return principals.authenticate((await principals.issueCredential(owner, "agent:mgr")).token); })();
+      const meetings = MeetingService.withEpoch(world.storage, epoch, {}, { ...options, availability: async () => "available" });
+      const records = MeetingRecordService.withEpoch(world.storage, epoch, { meetings, decisions: undefined as never }, { ...options, authority: async () => undefined } as never);
+      const desks = DeskService.withEpoch(world.storage, epoch, options);
+      const notes = WorkingNoteService.withEpoch(world.storage, epoch, options);
+      const occ = (await meetings.callUrgent(mgr, { commandId: cid("urg"), projectId: project, title: "Sync", reason: "decide something", roster: [pA, pB] })).id;
+      const rec = (await records.open(mgr, { commandId: cid("open"), occurrenceId: occ, chair: pD })).id;
+      await records.append(asA, { commandId: cid("s"), recordId: rec, kind: "statement", text: "I am here." } as never);
+      const file = await desks.write(asB, { commandId: cid("w"), projectId: project, kind: "note", title: "plan", body: "B's plan", visibility: "shared", status: "accepted" } as never);
+      const shared = await notes.write(asB, { commandId: cid("n"), projectId: project, category: "status", title: "Status", body: "Step three." });
+      const hook: { before?: (() => Promise<void>) | undefined } = {};
+      const reads = MeetingDeskReadService.withEpoch(racing(world.storage, hook), epoch, options);
+      const speak = () => async () => { await records.append(asA, { commandId: cid("s"), recordId: rec, kind: "statement", text: "Still talking." } as never); };
+
+      // A present member speaks between the chair's read and its commit (the meeting record moves on): the read is done again and succeeds, once.
+      hook.before = speak();
+      assert.equal((await reads.read(asD, { commandId: cid("rd"), meetingRecordId: rec, deskRecordId: file.id })).record!.body, "B's plan");
+      assert.equal(hook.before, undefined, "the race happened");
+      hook.before = speak();
+      assert.equal((await reads.readNote(asD, { commandId: cid("nr"), meetingRecordId: rec, noteId: shared.id })).record!.body, "Step three.");
+      // B revises its note in between: the read returns the new revision, and the record names it.
+      hook.before = async () => { await notes.revise(asB, { commandId: cid("rv"), noteId: shared.id, expectedRevision: shared.revision, body: "Step four." }); };
+      const fresh = await reads.readNote(asD, { commandId: cid("nr"), meetingRecordId: rec, noteId: shared.id });
+      assert.equal(fresh.record!.body, "Step four.");
+      assert.ok(fresh.record!.revision > shared.revision);
+      const listed = (await reads.reads(owner, { occurrenceId: occ })).reads;
+      assert.equal(listed.length, 3, "one record per read, none left by the lost tries");
+      assert.equal(listed.find((r) => r.id === fresh.readId)!.deskRevision, fresh.record!.revision);
+      assert.equal((await world.storage.listAggregates("inspection", { limit: 100 })).length, 3, "one inspection per read");
+      // An attempt racing a statement is refused as forbidden (not a command conflict) and counted.
+      hook.before = speak();
+      await refuses("forbidden", () => reads.attemptChange(asD, { commandId: cid("at"), meetingRecordId: rec, targetId: file.id, operation: "write" }));
+      // Attempts sent at the same moment are each refused and each counted, exactly once.
+      await Promise.all(Array.from({ length: 4 }, () => refuses("forbidden", () => reads.attemptChange(asD, { commandId: cid("at"), meetingRecordId: rec, targetId: file.id, operation: "write" }))));
+      assert.equal((await reads.attempts(owner, { occurrenceId: occ })).attempts.find((t) => t.operation === "write")!.count, 5);
+    } finally { await world.close(); }
+  });
+}
+
 for (const backend of backends) {
   test(`${backend.name}: the chair's desk read leaves a record per file (and an inspection the owner of the file sees), refuses and records attempts to change, reads shared notes as shared, disturbs nobody, and survives a restart`, async () => {
     const world = await backend.open();
@@ -315,6 +385,8 @@ for (const backend of backends) {
       assert.equal((await status.ask(owner, { kind: "meeting_desk_reads", occurrenceId: occ, deskRecordId: file2.id }))!.lines.length, 1);
       assert.equal(await StatusService.withEpoch(world.storage, epoch, base, opts).ask(owner, { kind: "meeting_desk_reads", occurrenceId: occ }), undefined);
       await refuses("invalid_command", () => status.ask(owner, { kind: "meeting_desk_reads", occurrenceId: occ, limit: 0 }));
+      const short = (await status.ask(owner, { kind: "meeting_desk_reads", occurrenceId: occ, limit: 1 }))!.lines.map((l) => l.text);
+      assert.ok(short.includes("There are more reads than shown.") && short.includes("There are more refused attempts than shown."), short.join("\n"));
 
       // A controller restart: a new epoch. The old service is stale; the new one reads again (a new record), and a repeat of an earlier command is answered from its record with no content and no new record.
       const restarted = await ProjectService.open(world.storage, { holder: "c2", ...opts });

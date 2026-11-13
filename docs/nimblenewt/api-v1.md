@@ -1076,7 +1076,7 @@ Arguments:
 - `after` (optional): the `next` of the previous page
 - `limit` (optional): 1 to 500, default 100
 
-Result: `{ item: { reads: [{ id, deskRecordId, deskOwner, deskRevision, sha256, bytes, visibility, source, reader, at, meetingRecordId, inspectionId }], next?, attempts: [{ targetId, operation, count, first, last, lastBy, deskOwner? }] } }`.
+Result: `{ item: { reads: [{ id, deskRecordId, deskOwner, deskRevision, sha256, bytes, visibility, source, reader, at, meetingRecordId, inspectionId }], next?, attempts: [{ targetId, operation, count, first, last, lastBy, deskOwner? }], moreAttempts?: true (more than the first 100 refused attempts) } }`.
 
 #### `meeting.record.plan`
 

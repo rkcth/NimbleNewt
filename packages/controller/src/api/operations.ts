@@ -1108,7 +1108,7 @@ export const OPERATIONS: readonly Operation[] = [
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.ownerOutcomes(c.principal, limit) } as object);
     } },
-  { name: "meeting.desk-reads", kind: "query", summary: "What a meeting's chair read from absent members' desks and shared working notes, and every refused attempt to change one (card M05b): per file read, which file and revision, whose it is, the digest and size of what was shown, who read it and when, in the order the reads happened; seen by the owner, by the file's own agent and by the meeting's roster and chair. Reading never changes or wakes anyone.", args: { occurrenceId: "the meeting (occurrence) ID", "deskRecordId?": "only reads of this desk record or note", "after?": "the `next` of the previous page", "limit?": "1 to 500, default 100" }, result: "`{ item: { reads: [{ id, deskRecordId, deskOwner, deskRevision, sha256, bytes, visibility, source, reader, at, meetingRecordId, inspectionId }], next?, attempts: [{ targetId, operation, count, first, last, lastBy, deskOwner? }] } }`.",
+  { name: "meeting.desk-reads", kind: "query", summary: "What a meeting's chair read from absent members' desks and shared working notes, and every refused attempt to change one (card M05b): per file read, which file and revision, whose it is, the digest and size of what was shown, who read it and when, in the order the reads happened; seen by the owner, by the file's own agent and by the meeting's roster and chair. Reading never changes or wakes anyone.", args: { occurrenceId: "the meeting (occurrence) ID", "deskRecordId?": "only reads of this desk record or note", "after?": "the `next` of the previous page", "limit?": "1 to 500, default 100" }, result: "`{ item: { reads: [{ id, deskRecordId, deskOwner, deskRevision, sha256, bytes, visibility, source, reader, at, meetingRecordId, inspectionId }], next?, attempts: [{ targetId, operation, count, first, last, lastBy, deskOwner? }], moreAttempts?: true (more than the first 100 refused attempts) } }`.",
     run: async (c, a) => {
       only(a, ["occurrenceId", "deskRecordId", "after", "limit"]);
       const svc = c.deskReads ?? unavailable("meeting desk reads");
@@ -1118,7 +1118,7 @@ export const OPERATIONS: readonly Operation[] = [
       const limit = optNum(a, "limit");
       const reads = await svc.reads(c.principal, { occurrenceId, ...(deskRecordId === undefined ? {} : { deskRecordId }), ...(after === undefined ? {} : { after }), ...(limit === undefined ? {} : { limit }) });
       const attempts = await svc.attempts(c.principal, { occurrenceId, limit: 100 });
-      return asJson({ item: { reads: reads.reads, ...(reads.next === undefined ? {} : { next: reads.next }), attempts: attempts.attempts } } as object);
+      return asJson({ item: { reads: reads.reads, ...(reads.next === undefined ? {} : { next: reads.next }), attempts: attempts.attempts, ...(attempts.next === undefined ? {} : { moreAttempts: true }) } } as object);
     } },
   recordOp("plan", "query", "The project's latest plan from a meeting.", "latestPlan", ["projectId"], "`{ item }`.", "id", ["projectId"]),
   attendOp("admission", "query", "Whether work an agent is about to start would collide with a nearby meeting (long work that cannot yield is advised against; safe long-running operations continue).", "admission", ["agent", "expectedMinutes", "yieldsAtBoundary", "safeLongRunning"], "`{ item }`."),

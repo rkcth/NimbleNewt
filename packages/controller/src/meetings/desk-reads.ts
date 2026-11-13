@@ -62,6 +62,14 @@ const MEETING_RECORD_ID = /^mrc-[a-z2-7]{20}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const forbidden = (chair: Principal): DomainError => new DomainError("forbidden", `${chair.id} may not read that record in this meeting`);
 
+/** Another writer changed the meeting record, the file or the attempt record between the read and its commit (every statement in the meeting moves the meeting record on). Nothing was committed, so the command is built again from what is there now. */
+class LostRace extends DomainError {
+  constructor() { super("stale_revision", "the meeting or the record changed while it was being read; nothing was read or recorded, so ask again"); }
+}
+const lostRace = async (): Promise<DomainError> => new LostRace();
+/** How often a read or attempt is built again after losing a race before the caller is told: a few speakers at once are each overtaken at most once per try. */
+const RACE_TRIES = 8;
+
 interface Listed { readonly occurrenceId: string; readonly meetingRecordId: string; readonly projectId: string; readonly deskOwner?: string; readonly at?: string; readonly last?: string }
 
 /**
@@ -86,6 +94,13 @@ export class MeetingDeskReadService {
   private constructor(runner: CommandRunner) { this.#runner = runner; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): MeetingDeskReadService {
     return new MeetingDeskReadService(new CommandRunner(storage, epoch, options));
+  }
+
+  /** Runs a command again when it lost a race (nothing of it was committed), at most `RACE_TRIES` times. */
+  async #again<T>(run: () => Promise<T>): Promise<T> {
+    for (let tries = 1; ; tries += 1) {
+      try { return await run(); } catch (error) { if (!(error instanceof LostRace) || tries >= RACE_TRIES) throw error; }
+    }
   }
 
   /** The meeting record, when `chair` is the current chair of that open meeting; otherwise `forbidden` (the same answer for a missing record, a stranger, a former chair and a finished meeting). */
@@ -129,7 +144,7 @@ export class MeetingDeskReadService {
     const readId = derivedId("mdr", commandId);
     const inspectionId = derivedId("ins", `mdr:${commandId}`);
     let seen: DeskReadContent | undefined;
-    const r = await this.#runner.command("meeting.desk-read", { commandId, actor: chair.id }, async () => ({
+    const r = await this.#again(() => this.#runner.command("meeting.desk-read", { commandId, actor: chair.id }, async () => ({
       payload: { meetingRecordId, deskRecordId },
       build: async () => {
         const { meeting, revision } = await this.#chairOf(chair, meetingRecordId);
@@ -147,9 +162,9 @@ export class MeetingDeskReadService {
         }
         seen = { id: found.id, revision: found.revision, title: desk.title, body: desk.body };
         const made = this.#records(chair, meeting, meetingRecordId, commandId, { targetId: deskRecordId, owner: desk.owner, revision: found.revision, title: desk.title, body: desk.body, visibility: desk.visibility, source: "desk", policy: policyNow });
-        return { ref: made.readRef, creates: true, changes: [...made.changes, { type: "check", ref: { kind: "desk-record", id: deskRecordId }, expectedRevision: found.revision }, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { deskRecordId, deskOwner: desk.owner, revision: found.revision } };
+        return { ref: made.readRef, creates: true, changes: [...made.changes, { type: "check", ref: { kind: "desk-record", id: deskRecordId }, expectedRevision: found.revision }, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { deskRecordId, deskOwner: desk.owner, revision: found.revision }, contention: lostRace };
       },
-    }));
+    })));
     return r.replayed ? { readId, inspectionId, replayed: true } : { record: seen!, readId, inspectionId, replayed: false };
   }
 
@@ -166,7 +181,7 @@ export class MeetingDeskReadService {
     const readId = derivedId("mdr", commandId);
     const inspectionId = derivedId("ins", `mdr:${commandId}`);
     let seen: DeskReadContent | undefined;
-    const r = await this.#runner.command("meeting.note-read", { commandId, actor: chair.id }, async () => ({
+    const r = await this.#again(() => this.#runner.command("meeting.note-read", { commandId, actor: chair.id }, async () => ({
       payload: { meetingRecordId, noteId },
       build: async () => {
         const { meeting, revision } = await this.#chairOf(chair, meetingRecordId);
@@ -175,9 +190,9 @@ export class MeetingDeskReadService {
         if (found === undefined || note === undefined || note.projectId !== meeting.projectId || note.visibility !== "shared" || note.deleted !== undefined) throw forbidden(chair);
         seen = { id: found.id, revision: found.revision, title: note.title, body: note.body };
         const made = this.#records(chair, meeting, meetingRecordId, commandId, { targetId: noteId, owner: note.owner, revision: found.revision, title: note.title, body: note.body, visibility: "shared", source: "note", policy: "not-applicable" });
-        return { ref: made.readRef, creates: true, changes: [...made.changes, { type: "check", ref: { kind: "working-note", id: noteId }, expectedRevision: found.revision }, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { noteId, noteOwner: note.owner, revision: found.revision } };
+        return { ref: made.readRef, creates: true, changes: [...made.changes, { type: "check", ref: { kind: "working-note", id: noteId }, expectedRevision: found.revision }, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { noteId, noteOwner: note.owner, revision: found.revision }, contention: lostRace };
       },
-    }));
+    })));
     return r.replayed ? { readId, inspectionId, replayed: true } : { record: seen!, readId, inspectionId, replayed: false };
   }
 
@@ -192,7 +207,7 @@ export class MeetingDeskReadService {
     const targetId = typeof command.targetId === "string" && (RECORD_ID.test(command.targetId) || NOTE_ID.test(command.targetId)) ? command.targetId : invalid("targetId", "is not a desk record or note ID");
     const operation = (REFUSED_OPERATIONS as readonly string[]).includes(command.operation) ? command.operation as RefusedOperation : invalid("operation", `must be one of ${REFUSED_OPERATIONS.join(", ")}`);
     const commandId = scopedCommandId(chair.id, command.commandId);
-    await this.#runner.command("meeting.desk-change-attempt", { commandId, actor: chair.id }, async () => ({
+    await this.#again(() => this.#runner.command("meeting.desk-change-attempt", { commandId, actor: chair.id }, async () => ({
       payload: { meetingRecordId, targetId, operation },
       build: async () => {
         const { meeting, revision } = await this.#chairOf(chair, meetingRecordId);
@@ -210,9 +225,9 @@ export class MeetingDeskReadService {
         const change: Change = existing === undefined || prior === undefined
           ? { type: "create", ref, body: body as unknown as JsonObject }
           : { type: "update", ref, expectedRevision: existing.revision, body: body as unknown as JsonObject };
-        return { ref, creates: existing === undefined, changes: [change, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { targetId, operation, refused: true } };
+        return { ref, creates: existing === undefined, changes: [change, { type: "check", ref: { kind: "meeting-record", id: meetingRecordId }, expectedRevision: revision }], detail: { targetId, operation, refused: true }, contention: lostRace };
       },
-    }));
+    })));
     throw new DomainError("forbidden", `the chair's meeting read cannot ${operation} a record; the attempt is recorded`);
   }
 
