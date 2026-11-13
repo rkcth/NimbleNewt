@@ -7,6 +7,12 @@ export const REFERENCE_SCAN_LIMIT = 100_000;
 
 const TERMINAL = new Set(["done", "cancelled"]);
 
+/** The start of every reason that says a task's replay cites a record (card K06): replay holds stop the expiry rules and the user-requested deletion, but not an archive, which keeps the original and puts it back on restore. */
+export const REPLAY_REASON = "cited by the replay of task ";
+export const isReplayReason = (reason: string): boolean => reason.startsWith(REPLAY_REASON);
+/** How a replay step names a record kind elsewhere in the system, to the stored kind. */
+const REPLAY_KIND: Readonly<Record<string, string>> = { summary: "summary-record", "summary-record": "summary-record", "desk-record": "desk-record", artifact: "artifact", compaction: "ctx-compaction", "ctx-compaction": "ctx-compaction", "catalog-version": "catalog-version", "chat-turn": "chat-turn", decision: "decision", "owner-decision": "decision" };
+
 /**
  * What a resumable task or a replay still needs (card K06: "material referenced by a resumable task or by replay is never deleted and shows as retained").
  * A task is resumable while it is not done or cancelled. Its material is: its own desk records, history scopes, artifacts, summaries and spill, what its compactions cite, and everything its continuation records list
@@ -33,7 +39,7 @@ export class RetainedMaterial {
   get size(): number { return this.#reasons.size; }
 
   /** `routeArchive`: also read the archives of cut route-change text (only the context-route-days rule asks about them; the scan is the largest, so the other rules skip it). */
-  static async build(storage: Pick<ControllerStorage, "listAggregates">, options: { routeArchive?: boolean } = {}): Promise<RetainedMaterial> {
+  static async build(storage: Pick<ControllerStorage, "listAggregates">, options: { routeArchive?: boolean; replay?: boolean; transcripts?: boolean } = {}): Promise<RetainedMaterial> {
     const out = new RetainedMaterial();
     const scan = async (kind: string, each: (a: Aggregate) => void, onLimit: () => void = () => { out.#complete = false; }): Promise<void> => {
       let after: string | undefined; let seen = 0;
@@ -46,6 +52,32 @@ export class RetainedMaterial {
         after = page[page.length - 1]!.id;
       }
     };
+    // Chat turns (card K06b, tier "old transcripts"): the owner's words that something else rests on. An owner decision names the turn its wording came from, an agenda item the turn that raised it, an open proposal the turn it came from.
+    if (options.transcripts === true) {
+      await scan("decision", (a) => { const t = (a.body as { source?: { turnId?: unknown } }).source?.turnId; if (typeof t === "string") out.#add("chat-turn", t, `the owner's decision ${a.id} rests on these words`); });
+      await scan("agenda-item", (a) => { const s = (a.body as { source?: { kind?: unknown; id?: unknown } }).source; if (s?.kind === "chat-turn" && typeof s.id === "string") out.#add("chat-turn", s.id, `the agenda item ${a.id} was raised by these words`); });
+      await scan("chat-proposal", (a) => { const b = a.body as { status?: unknown; turnId?: unknown }; if (b.status === "open" && typeof b.turnId === "string") out.#add("chat-turn", b.turnId, `the proposal ${a.id} from these words is still open`); });
+    }
+    // Replay (card K06, "referenced by a resumable task or by replay"): a step of any task's replay names the records the model was given (its manifest and the summary that stood in for earlier history) and an explanation names its evidence.
+    // The owner reads a finished task's replay too, so those records are held for good (until the owner releases one by name in a user-requested deletion). The scan is bounded like the others; an unfinished one holds everything.
+    if (options.replay !== false) {
+      const cite = (kind: unknown, id: unknown, taskId: unknown, where: string): void => {
+        if (typeof kind !== "string" || typeof id !== "string" || typeof taskId !== "string") return;
+        const stored = REPLAY_KIND[kind];
+        if (stored !== undefined) out.#add(stored, id, `${REPLAY_REASON}${taskId} (${where})`);
+      };
+      await scan("activity-step", (a) => {
+        const b = a.body as { taskId?: unknown; seq?: unknown; manifest?: { missing?: unknown; refs?: unknown; summaryId?: unknown } };
+        const where = `step ${typeof b.seq === "number" ? b.seq : "?"}`;
+        if (b.manifest?.missing === true) return;
+        for (const r of Array.isArray(b.manifest?.refs) ? (b.manifest.refs as { kind?: unknown; id?: unknown }[]) : []) cite(r?.kind, r?.id, b.taskId, where);
+        cite("summary", b.manifest?.summaryId, b.taskId, where);
+      });
+      await scan("activity-explanation", (a) => {
+        const b = a.body as { taskId?: unknown; seq?: unknown; evidence?: { ref?: { kind?: unknown; id?: unknown } }[] };
+        for (const e of Array.isArray(b.evidence) ? b.evidence : []) cite(e?.ref?.kind, e?.ref?.id, b.taskId, `explanation of step ${typeof b.seq === "number" ? b.seq : "?"}`);
+      });
+    }
     await scan("task", (a) => { const b = a.body as { state?: string; projectId?: string }; if (typeof b.state === "string" && !TERMINAL.has(b.state) && typeof b.projectId === "string") out.tasks.set(a.id, b.projectId); });
     const live = (taskId: unknown): taskId is string => typeof taskId === "string" && out.tasks.has(taskId);
     const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);

@@ -154,7 +154,7 @@ export interface DispatchStartOptions {
     /** Run agents without the owner's limits, best-effort setting and launch record (the host built by `build` does not connect them). Absent: such a host is refused at start. */
     readonly acceptUnenforcedLimits?: boolean;
     /** Where this host keeps the agents' own conversation stores, and where each one goes back on a restore (card K01h). Given: backups include them and restores put them back, with no separate `backup.piState`. Absent (and no `backup.piState`): Pi state is not in backups, and the backup status says so. */
-    readonly piState?: { readonly source: PiStateSource; readonly final?: (id: string) => string | undefined };
+    readonly piState?: { readonly source: PiStateSource; readonly final?: (id: string) => string | undefined; /** Removes the stored model thinking from one conversation store folder (the Pi adapter's `removeStoredThinking`; card K06c). Given, the retention rule that removes stored thinking also cleans the stores this host keeps; absent, only the controller's copy is removed. */ readonly purge?: (dir: string) => Promise<{ readonly blocks: number }> };
     /** Shuts down what `build` made (live workers, the sandbox launcher, the relay). Called when the controller closes and when a later step of the start fails. */
     readonly close?: () => Promise<void>;
   };

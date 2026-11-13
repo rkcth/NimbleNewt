@@ -11,8 +11,10 @@ import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { diskSpace, QuotaMeter, type ReserveFile } from "./guard.js";
 import { stubDeskBody, type DeletionLedger } from "./ledger.js";
-import { RetainedMaterial } from "./references.js";
-import type { RetentionSettingsService, RetentionValues } from "./settings.js";
+import { RetainedMaterial, isReplayReason } from "./references.js";
+import { RETENTION_FIELDS, type RetentionSettingsService, type RetentionValues } from "./settings.js";
+import type { ThinkingStorePort } from "./thinking-stores.js";
+import { DISPATCH_KIND } from "../dispatch/model.js";
 
 const DAY = 86_400_000;
 const RUN_LIMIT = { default: 200, max: 1000 } as const;
@@ -88,10 +90,32 @@ export interface RetentionDeps {
   readonly now?: () => number;
   /** Where user-requested deletions are recorded outside the database, so a restore of an older backup re-applies them. */
   readonly ledger?: DeletionLedger;
+  /** The conversation stores that keep the model's own copy of its thinking (card K06c): the rule that removes stored thinking `thinkingDays` after a task is done also cleans them. Absent: only the controller's copy is removed (the Pi stores are named as not reached). */
+  readonly thinkingStores?: ThinkingStorePort;
   /** A test seam: called before each batch of removals. */
   readonly beforeBatch?: (batch: number) => Promise<void>;
   /** A test seam: runs after the citations of a revoked executable record were read and before it is blanked (what a task does in that gap must keep the record). */
   readonly beforeBlank?: (recordId: string) => Promise<void>;
+}
+
+/** A chat turn with the owner's words gone (card K06b): the ID, the message it answered, its state and its times stay, so a message sent again is answered as the done turn it was; the words, the plan and the answers do not. */
+function transcriptStub(body: Record<string, unknown>, at: string, days: number): JsonObject {
+  const keep: Record<string, unknown> = {};
+  for (const k of ["ownerId", "messageId", "quotedCount", "projectId", "status", "resumes", "resumedBy", "createdAt", "completedAt"]) if (body[k] !== undefined) keep[k] = body[k];
+  return { ...keep, text: "", plan: [], outcomes: [], retention: { removedAt: at, rule: "transcript-days", days } } as unknown as JsonObject;
+}
+
+/** What the chat context shows for a turn whose words retention removed. */
+const TRANSCRIPT_REMOVED = "(the words of this turn were removed by retention)";
+
+/** The values of a pass that does only the thinking rules: every optional rule off, no flag on. */
+function onlyThinking(values: RetentionValues): RetentionValues {
+  const out: Record<string, unknown> = { ...values };
+  for (const [name, spec] of Object.entries(RETENTION_FIELDS)) {
+    if (name === "thinkingDays" || name === "thinkingAuto") continue;
+    if (spec.nullable) out[name] = null; else if (spec.kind === "flag") out[name] = false;
+  }
+  return out as unknown as RetentionValues;
 }
 
 const isOwner = (by: Principal): boolean => by.kind === "owner";
@@ -142,6 +166,8 @@ export interface DeletionReport {
   readonly derived: { copies: string[]; summaries: string[]; compactions: string[]; archives: string[]; others: string[]; indexes: string; cachedReplies: string };
   readonly backups: { handling: string; holding: number; staysUpToDays: number | null; note: string };
   readonly deletionId?: string;
+  /** Records a replay cites that the owner released in this request (`releaseReplay`): the replay steps now point at a removed record. */
+  readonly replayReleased?: { kind: string; id: string; reasons: string[] }[];
   /** More members than one request handles: ask again (the same command) to finish. */
   readonly remaining?: number;
 }
@@ -153,6 +179,7 @@ export interface DeletionReport {
 export class RetentionService {
   readonly #runner: CommandRunner;
   readonly #deps: RetentionDeps;
+  #lastThinking: number | undefined;
   #lastAuto: number | undefined;
   private constructor(runner: CommandRunner, deps: RetentionDeps) { this.#runner = runner; this.#deps = deps; }
   static withEpoch(storage: ControllerStorage, epoch: number, deps: RetentionDeps, options: RunnerOptions = {}): RetentionService { return new RetentionService(new CommandRunner(storage, epoch, options), deps); }
@@ -183,7 +210,7 @@ export class RetentionService {
     const newest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1))[0];
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record", "thinking-purge"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
     return {
       values: values as unknown as JsonObject,
       growth: growth as unknown as JsonObject,
@@ -253,7 +280,16 @@ export class RetentionService {
     if (!isDispatcher(by)) throw new DomainError("forbidden", `${by.id} is not the dispatcher`);
     const values = await this.#deps.settings.effective();
     await this.#warn(values);
-    if (!values.autoRun) return undefined;
+    if (!values.autoRun) {
+      // Owner decision 2026-10-22 (14 days) and card K06c: stored model thinking goes at its time without the owner turning the general automatic run on, while `thinkingAuto` (the owner's switch, on by default) stands. Nothing else is touched.
+      if (!values.thinkingAuto) return undefined;
+      const now = (this.#deps.now ?? Date.now)();
+      if (this.#lastThinking !== undefined && now - this.#lastThinking < (this.#deps.autoEveryMs ?? 3_600_000)) return undefined;
+      this.#lastThinking = now;
+      // Nothing due: nothing is written (no run record every hour for an empty pass).
+      if ((await this.#run(by, { dryRun: true, thinkingOnly: true }, true)).candidates.length === 0) return undefined;
+      return this.#run(by, { dryRun: false, thinkingOnly: true }, true);
+    }
     // A run reads the whole store, so it is not made every tick.
     const clock = (this.#deps.now ?? Date.now)();
     if (this.#lastAuto !== undefined && clock - this.#lastAuto < (this.#deps.autoEveryMs ?? 3_600_000)) return undefined;
@@ -261,13 +297,16 @@ export class RetentionService {
     return this.#run(by, { dryRun: false }, true);
   }
 
-  async #run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string }, auto: boolean): Promise<RunReport> {
+  async #run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string; thinkingOnly?: boolean }, auto: boolean): Promise<RunReport> {
     const dryRun = options.dryRun ?? true;
     const limit = options.limit ?? RUN_LIMIT.default;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > RUN_LIMIT.max) invalid("limit", `must be a whole number from 1 to ${RUN_LIMIT.max}`);
-    const values = await this.#deps.settings.effective();
+    const stored = await this.#deps.settings.effective();
+    // The thinking-only pass: every other rule is off for it, the backups are not pruned, nothing else is looked at.
+    const values: RetentionValues = options.thinkingOnly === true ? onlyThinking(stored) : stored;
     const now = Date.parse(this.#runner.now());
     const candidates: Candidate[] = []; const retained: RunReport["retained"] = [];
+    const piAttempts = new Map<string, string[]>();
     let partial = false;
     if (values.derivedDays !== null) {
       const cutoff = now - values.derivedDays * DAY;
@@ -454,7 +493,7 @@ export class RetentionService {
       if (revoked.partial) partial = true;
     }
     const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept, preRestoreMaxAgeDays: values.preRestoreMaxAgeDays };
-    const backupsPort = this.#deps.backups;
+    const backupsPort = options.thinkingOnly === true ? undefined : this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     // The incidents a run would archive and remove (card T02c: what the owner confirms includes them): counted in the preview and part of the digest, so a run refuses when they changed.
     if (values.noteArchiveDays !== null) {
@@ -492,6 +531,70 @@ export class RetentionService {
         candidates.push({ kind: "thinking-record", id: a.id, revision: a.revision, projectId: typeof a.projectId === "string" ? a.projectId : undefined, ageDays: Math.floor((now - Math.max(ended, Date.parse(a.updatedAt))) / DAY) });
       }
     }
+    if (this.#deps.thinkingStores !== undefined) {
+      // Card K06c. The model keeps its own copy of its thinking in the conversation store of each attempt (it replays it to itself when it resumes). A task that is done or cancelled never resumes (final), so once the same days have passed the stores of its attempts
+      // lose it too. What was done is a `thinking-purge` record per task: attempts that are cleaned (or have no store) are not asked again; one that could not be reached stays pending and the task is a candidate again on the next run.
+      const cutoff = now - values.thinkingDays * DAY;
+      const attemptsOf = new Map<string, Set<string>>();
+      const finalTasks: Aggregate[] = [];
+      if (!(await scan(this.#runner, "task", (a) => { const b = a.body as { state?: string }; if ((b.state === "done" || b.state === "cancelled") && Date.parse(a.updatedAt) < cutoff) finalTasks.push(a); }))) partial = true;
+      if (finalTasks.length > 0) {
+        const wanted = new Set(finalTasks.map((t) => t.id));
+        // An attempt whose record still says it runs (a cancel that has not reached its process yet, a host that has not reported the end) may still be writing its store: it is left for a later run (review fix).
+        if (!(await scan(this.#runner, DISPATCH_KIND, (a) => { const b = a.body as { taskId?: unknown; attemptId?: unknown; state?: unknown }; if (typeof b.taskId === "string" && wanted.has(b.taskId) && typeof b.attemptId === "string" && b.state !== "running") { const set = attemptsOf.get(b.taskId) ?? new Set<string>(); set.add(b.attemptId); attemptsOf.set(b.taskId, set); } }))) partial = true;
+      }
+      for (const t of finalTasks) {
+        if (candidates.length >= limit) { partial = true; break; }
+        const record = await this.#runner.get("thinking-purge", t.id);
+        const done = (record?.body as { attempts?: Record<string, unknown> } | undefined)?.attempts ?? {};
+        const todo = [...(attemptsOf.get(t.id) ?? [])].filter((id) => done[id] !== "purged" && done[id] !== "none");
+        if (todo.length === 0) continue;
+        piAttempts.set(t.id, todo);
+        candidates.push({ kind: "pi-thinking", id: t.id, revision: record?.revision ?? 0, projectId: typeof (t.body as { projectId?: unknown }).projectId === "string" ? (t.body as { projectId: string }).projectId : undefined, ageDays: Math.floor((now - Date.parse(t.updatedAt)) / DAY) });
+      }
+    }
+    if (values.scratchArchiveDays !== null || values.scratchPurgeDays !== null) {
+      // Card K06b, tier "scratch output": an agent's private scratch (desk records that only it reads) written for a task that is done or cancelled. Archived first when `scratchArchiveDays` is set (the text moves into an archive and
+      // `retention.restore` puts it back exactly), removed for good `scratchPurgeDays` later (the same removal as a user-requested deletion: what was made from it goes with it). A record a resumable task needs, or a replay cites, is not touched.
+      const finalTask = new Map<string, boolean>();
+      const isFinal = async (taskId: string): Promise<boolean> => { let f = finalTask.get(taskId); if (f === undefined) { const st = ((await this.#runner.get("task", taskId))?.body as { state?: string } | undefined)?.state; f = st === "done" || st === "cancelled"; finalTask.set(taskId, f); } return f; };
+      const material = await RetainedMaterial.build(this.#runner.storage);
+      const archiveCut = values.scratchArchiveDays === null ? undefined : now - values.scratchArchiveDays * DAY;
+      const purgeCut = values.scratchPurgeDays === null ? undefined : now - values.scratchPurgeDays * DAY;
+      const scratch: Aggregate[] = [];
+      if (!(await scan(this.#runner, "desk-record", (a) => { const b = a.body as { visibility?: unknown; taskId?: unknown; deleted?: unknown }; if (b.visibility === "private" && typeof b.taskId === "string" && b.deleted === undefined) scratch.push(a); }))) partial = true;
+      for (const a of scratch) {
+        if (candidates.length >= limit) { partial = true; break; }
+        const b = a.body as { taskId: string; projectId?: unknown; archived?: { at?: unknown; archiveId?: unknown } };
+        const projectId = typeof b.projectId === "string" ? b.projectId : undefined;
+        let action: "scratch-archive" | "scratch-purge" | undefined;
+        if (b.archived !== undefined) {
+          const at = Date.parse(String((await this.#runner.get("retention-archive", archiveIdOf(a.id)))?.body?.["at"] ?? b.archived.at ?? ""));
+          if (purgeCut !== undefined && Number.isFinite(at) && at < purgeCut) action = "scratch-purge";
+        } else if (archiveCut !== undefined && Date.parse(a.updatedAt) < archiveCut) action = "scratch-archive";
+        else if (archiveCut === undefined && purgeCut !== undefined && Date.parse(a.updatedAt) < purgeCut) action = "scratch-purge";
+        if (action === undefined || !(await isFinal(b.taskId))) continue;
+        const why = material.why("desk-record", a.id)?.filter((w) => !w.includes(`written for task ${b.taskId}`) && (action === "scratch-purge" || !isReplayReason(w)));
+        if (why !== undefined && why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: why }); continue; }
+        candidates.push({ kind: action, id: a.id, revision: a.revision, projectId, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+      }
+    }
+    if (values.transcriptDays !== null) {
+      // Card K06b, tier "old transcripts": the owner's words in chat turns. A turn that a decision, an agenda item, an open proposal or a held command still names stays.
+      const cutoff = now - values.transcriptDays * DAY;
+      const old: Aggregate[] = [];
+      if (!(await scan(this.#runner, "chat-turn", (a) => { const b = a.body as { status?: string; completedAt?: string; held?: unknown[]; followUps?: unknown[]; retention?: unknown; resumedBy?: unknown; resumes?: unknown }; if (b.status === "done" && b.retention === undefined && Date.parse(b.completedAt ?? "") < cutoff && (b.held === undefined || b.held.length === 0 || b.resumedBy !== undefined) && (b.followUps === undefined || b.followUps.length === 0)) old.push(a); }))) partial = true;
+      if (old.length > 0) {
+        const material = await RetainedMaterial.build(this.#runner.storage, { transcripts: true });
+        for (const a of old) {
+          if (candidates.length >= limit) { partial = true; break; }
+          const why = material.why("chat-turn", a.id);
+          if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "chat-turn", id: a.id, reasons: why }); continue; }
+          const b = a.body as { projectId?: unknown; completedAt: string };
+          candidates.push({ kind: "chat-turn", id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, ageDays: Math.floor((now - Date.parse(b.completedAt)) / DAY) });
+        }
+      }
+    }
     let incidentsDue: { archive: string[]; purge: string[]; more: boolean } | undefined;
     if (this.#deps.incidents?.due !== undefined && this.#deps.projects !== undefined && (values.incidentArchiveDays !== null || values.incidentPurgeDays !== null)) {
       incidentsDue = { archive: [], purge: [], more: false };
@@ -503,7 +606,7 @@ export class RetentionService {
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null || values.scratchArchiveDays !== null || values.scratchPurgeDays !== null || values.transcriptDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -516,11 +619,19 @@ export class RetentionService {
     // A hold can appear while the run is going (a task resumes, a checkpoint cites a summary): the holds are read again before every batch, and a candidate held now is kept and shown as retained.
     for (let i = 0; i < candidates.length; i += REMOVE_BATCH) {
       await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
-      const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: candidates.slice(i, i + REMOVE_BATCH).some((c) => c.kind === "ctx-route-archive") });
-      for (const c of candidates.slice(i, i + REMOVE_BATCH)) {
-        const why = material.why(c.kind, c.id);
-        if (why !== undefined) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
-        const done = await this.#removeOne(by, c, c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
+      const batch = candidates.slice(i, i + REMOVE_BATCH);
+      const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: batch.some((c) => c.kind === "ctx-route-archive"), transcripts: batch.some((c) => c.kind === "chat-turn") });
+      for (const c of batch) {
+        // The tiers of card K06b act on desk records under their own names; an archive is not stopped by a replay's citation (it keeps the original), a removal is.
+        const heldAs = c.kind === "scratch-archive" || c.kind === "scratch-purge" ? "desk-record" : c.kind;
+        const why = c.kind === "pi-thinking" ? undefined : material.why(heldAs, c.id)?.filter((w) => !(c.kind === "scratch-archive" && isReplayReason(w)) && !((c.kind === "scratch-archive" || c.kind === "scratch-purge") && w.includes("written for task")));
+        if (why !== undefined && why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
+        if (c.kind === "pi-thinking" || c.kind === "scratch-archive" || c.kind === "scratch-purge") {
+          const tier = c.kind === "pi-thinking" ? await this.#purgeStores(by, c, piAttempts.get(c.id) ?? [], values.thinkingDays) : c.kind === "scratch-archive" ? await this.#tierArchive(by, c) : await this.#tierPurge(by, c, values.scratchPurgeDays!);
+          if (tier) removedIds.push(`${c.kind}/${c.id}`);
+          continue;
+        }
+        const done = await this.#removeOne(by, c, c.kind === "chat-turn" ? values.transcriptDays! : c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -559,6 +670,8 @@ export class RetentionService {
         }
       }
     }
+    // The automatic thinking-only pass that removed nothing (every candidate still pending: a host that does not answer, a running attempt) leaves no run record, so a store that cannot be reached does not add one every hour (review fix).
+    if (auto && options.thinkingOnly === true && removedIds.length === 0) return { ...base, dryRun: false, removed: 0 };
     // The record of the run: what was removed (IDs only, never content), kept in the same shape the owner reads.
     const runId = derivedId("rtr", options.commandId !== undefined ? scopedCommandId(by.id, options.commandId) : `${by.id}\0run\0${now}\0${digest}`);
     const stamp = this.#runner.now();
@@ -627,11 +740,15 @@ export class RetentionService {
           const arc = await this.#runner.get("retention-archive", archiveIdOf(c.id));
           // Thinking is replaced by its marker, not deleted: the marker is how the replay knows retention removed it, and it stops anything more being kept for the task.
           const fb = fresh.body as { projectId?: unknown; taskId?: unknown; agent?: unknown; next?: unknown; blocks?: unknown; dropped?: unknown };
-          const changes: Change[] = [c.kind === "thinking-record"
+          const changes: Change[] = [c.kind === "chat-turn"
+            ? { type: "update", ref, expectedRevision: fresh.revision, body: transcriptStub(fresh.body as Record<string, unknown>, this.#runner.now(), days) }
+            : c.kind === "thinking-record"
             ? { type: "update", ref, expectedRevision: fresh.revision, body: { projectId: fb.projectId, taskId: fb.taskId, agent: fb.agent, next: fb.next, blocks: [], dropped: Number(fb.dropped ?? 0) + (Array.isArray(fb.blocks) ? fb.blocks.length : 0), marks: [], removedAt: this.#runner.now(), updatedAt: this.#runner.now() } as unknown as JsonObject }
             : { type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          // The chat's conversation context keeps a line of each recent turn (the start of the owner's words and the answer) per project: that copy goes with the turn's words, in the same command (review fix).
+          if (c.kind === "chat-turn") { const ctx = await this.#contextWithout(fresh.body as { ownerId?: unknown }, c.id); if (ctx !== undefined) changes.push(ctx); }
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;
@@ -639,6 +756,70 @@ export class RetentionService {
       if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;
       throw error;
     }
+  }
+
+  /** The chat context of the turn's owner with the lines of that turn replaced by a removal note (`undefined` when it holds none). */
+  async #contextWithout(turn: { ownerId?: unknown }, turnId: string): Promise<Change | undefined> {
+    if (typeof turn.ownerId !== "string") return undefined;
+    const ref = { kind: "chat-context", id: `ctx:${turn.ownerId}` };
+    const cur = await this.#runner.get(ref.kind, ref.id);
+    const body = cur?.body as { projects?: Record<string, { turns?: { turnId?: unknown; summary?: unknown }[] }> } | undefined;
+    if (cur === undefined || body?.projects === undefined || typeof body.projects !== "object") return undefined;
+    let changed = false;
+    const projects: Record<string, unknown> = {};
+    for (const [pid, p] of Object.entries(body.projects)) {
+      const turns = Array.isArray(p?.turns) ? p.turns.map((t) => { if (t?.turnId !== turnId || t.summary === TRANSCRIPT_REMOVED) return t; changed = true; return { ...t, summary: TRANSCRIPT_REMOVED }; }) : p?.turns;
+      projects[pid] = p === null || typeof p !== "object" ? p : { ...p, ...(turns === undefined ? {} : { turns }) };
+    }
+    return changed ? { type: "update", ref, expectedRevision: cur.revision, body: { ...(cur.body as object), projects } as unknown as JsonObject } : undefined;
+  }
+
+  /** Card K06c: removes the model's stored thinking from the conversation stores of a finished task's attempts, and records which were cleaned. Returns whether anything was cleaned now. */
+  async #purgeStores(by: Principal, c: Candidate, todo: readonly string[], days: number): Promise<boolean> {
+    const port = this.#deps.thinkingStores;
+    if (port === undefined || todo.length === 0) return false;
+    // The task is final (done or cancelled) and the record is as previewed; anything else is left for the next run.
+    const task = await this.#runner.get("task", c.id);
+    const state = (task?.body as { state?: string } | undefined)?.state;
+    if (task === undefined || (state !== "done" && state !== "cancelled")) return false;
+    const before = await this.#runner.get("thinking-purge", c.id);
+    if ((before?.revision ?? 0) !== c.revision) return false;
+    const answer = await port.purge(todo);
+    const settled = todo.filter((id) => answer.status[id] === "purged" || answer.status[id] === "none").sort();
+    const purged = settled.filter((id) => answer.status[id] === "purged");
+    if (settled.length === 0) return false;
+    await this.#runner.command("retention.expire", { commandId: cmdId("rtx", "pi-thinking", c.id, c.revision, ...settled), actor: by.id }, async () => ({
+      payload: { kind: "thinking-purge", id: c.id, revision: c.revision, attempts: settled },
+      build: async (): Promise<Built> => {
+        const ref = { kind: "thinking-purge", id: c.id };
+        const cur = await this.#runner.get(ref.kind, ref.id);
+        if ((cur?.revision ?? 0) !== c.revision) throw new DomainError("stale_revision", "changed since the preview");
+        const old = (cur?.body as { attempts?: Record<string, string>; blocks?: number } | undefined);
+        const attempts: Record<string, string> = { ...(old?.attempts ?? {}) };
+        for (const id of settled) attempts[id] = answer.status[id]!;
+        const body = { taskId: c.id, projectId: c.projectId ?? "", attempts, blocks: (old?.blocks ?? 0) + answer.blocks, updatedAt: this.#runner.now() } as unknown as JsonObject;
+        return { ref, creates: cur === undefined, changes: [cur === undefined ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: cur.revision, body }], detail: { rule: "thinking-store-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }), attempts: settled.length, purged: purged.length, blocks: answer.blocks } };
+      },
+    })).catch((error: unknown) => { if (error instanceof DomainError && error.code === "stale_revision") return undefined; throw error; });
+    return purged.length > 0;
+  }
+
+  /** Card K06b, scratch tier: archives one private record of a finished task (restorable by `retention.restore`), if it is still as previewed. */
+  async #tierArchive(by: Principal, c: Candidate): Promise<boolean> {
+    const rec = await this.#runner.get("desk-record", c.id);
+    if (rec === undefined || rec.revision !== c.revision) return false;
+    const b = rec.body as { taskId?: unknown; archived?: unknown; deleted?: unknown };
+    if (typeof b.taskId !== "string" || b.archived !== undefined || b.deleted !== undefined) return false;
+    const r = await this.#archive(by, { commandId: cmdId("rts", "archive", c.id, c.revision), taskId: b.taskId, reason: "retention rule: scratchArchiveDays" }, new Set([c.id]));
+    return r.archived.includes(c.id);
+  }
+
+  /** Card K06b, scratch tier: removes one private record of a finished task for good with what was made from it (a replay's or a resumable task's hold stops it), if it is still as previewed. */
+  async #tierPurge(by: Principal, c: Candidate, days: number): Promise<boolean> {
+    const rec = await this.#runner.get("desk-record", c.id);
+    if (rec === undefined || rec.revision !== c.revision || (rec.body as { deleted?: unknown }).deleted !== undefined) return false;
+    const r = await this.#delete(by, { commandId: cmdId("rts", "purge", c.id, c.revision), recordId: c.id, reason: `retention rule: scratchPurgeDays (${days})` });
+    return r.status === "deleted";
   }
 
   // ---- warnings ---------------------------------------------------------------------------------------------------------------
@@ -669,8 +850,13 @@ export class RetentionService {
    * command ID continues where a crash or a bounded request stopped, and the final record (status deleted) is an upsert by the deletion ID. A request is bounded (`DELETE_MEMBERS` operations): when more remain the answer is
    * `partial` with `remaining`, and asking again continues. Holds are looked at again before every batch of removals.
    */
-  async delete(owner: Principal, command: { commandId: string; recordId: string; reason: string; dryRun?: boolean }): Promise<DeletionReport> {
+  async delete(owner: Principal, command: { commandId: string; recordId: string; reason: string; dryRun?: boolean; releaseReplay?: boolean }): Promise<DeletionReport> {
     if (!isOwner(owner)) throw new DomainError("forbidden", `${owner.id} may not delete records`);
+    return this.#delete(owner, command);
+  }
+
+  /** The removal of a desk record and what stands on it, for the owner's command and for the scratch tier of the runner (which acts on the owner's setting and is recorded the same way). */
+  async #delete(owner: Principal, command: { commandId: string; recordId: string; reason: string; dryRun?: boolean; releaseReplay?: boolean }): Promise<DeletionReport> {
     if (typeof command.recordId !== "string" || !RECORD_ID.test(command.recordId)) invalid("recordId", "is not a desk record ID (only desk records can be deleted; history and decisions are append-only and are kept)");
     if (typeof command.reason !== "string" || command.reason.trim() === "" || command.reason.length > 300) invalid("reason", "must be 1 to 300 characters");
     if (redactText(command.reason) !== command.reason) invalid("reason", "looks like a credential or key");
@@ -687,18 +873,32 @@ export class RetentionService {
     const found = await this.#gather(root, command.recordId, priorBody?.status === "in-progress" ? priorBody.plan : undefined);
     const members = found.desk;
     const derived = { copies: found.desk.filter((a) => a.id !== command.recordId).map((c) => c.id), summaries: found.summaries.map((x) => x.id), compactions: found.compactions.map((c) => c.id), archives: found.archives.map((a) => a.id), others: found.others.map((o) => `${o.kind}/${o.id}`), ...NOT_STORED };
+    // A replay that cites the record holds it like a resumable task does; the owner can release exactly that hold by saying so (`releaseReplay`), and the deletion record then names the replay steps that now point at a removed record.
+    const replayCited: { kind: string; id: string; reasons: string[] }[] = [];
     const heldNow = async (): Promise<{ kind: string; id: string; reasons: string[] }[]> => {
       const material = await RetainedMaterial.build(this.#runner.storage);
       const held: { kind: string; id: string; reasons: string[] }[] = [];
-      for (const a of members) { const why = material.why("desk-record", a.id); if (why !== undefined) held.push({ kind: "desk-record", id: a.id, reasons: why }); }
-      for (const x of found.summaries) { const why = material.why("summary-record", x.id); if (why !== undefined) held.push({ kind: "summary-record", id: x.id, reasons: why }); }
-      for (const c of found.compactions) { const why = material.why("ctx-compaction", c.id); if (why !== undefined) held.push({ kind: "ctx-compaction", id: c.id, reasons: why }); }
+      replayCited.length = 0;
+      const judge = (kind: string, id: string): void => {
+        const why = material.why(kind, id);
+        if (why === undefined) return;
+        if (command.releaseReplay === true && material.complete) {
+          const replay = why.filter(isReplayReason); const rest = why.filter((w) => !isReplayReason(w));
+          if (replay.length > 0) replayCited.push({ kind, id, reasons: replay });
+          if (rest.length > 0) held.push({ kind, id, reasons: rest });
+          return;
+        }
+        held.push({ kind, id, reasons: why });
+      };
+      for (const a of members) judge("desk-record", a.id);
+      for (const x of found.summaries) judge("summary-record", x.id);
+      for (const c of found.compactions) judge("ctx-compaction", c.id);
       if (!found.complete) held.push({ kind: "desk-record", id: command.recordId, reasons: ["too many records to find everything made from it safely; nothing was deleted"] });
       return held;
     };
     const held = await heldNow();
-    const recordBody = (status: string, extra: JsonObject = {}): JsonObject => ({ recordId: command.recordId, projectId: (root.body as { projectId?: string }).projectId ?? "", requestedBy: owner.id, reason: command.reason, at: this.#runner.now(), status, derived: derived as unknown as JsonObject, backups: backups as unknown as JsonObject, ...extra });
-    if (command.dryRun === true) return { status: held.length > 0 ? "retained" : "preview", recordId: command.recordId, ...(held.length > 0 ? { retained: held } : {}), derived, backups };
+    const recordBody = (status: string, extra: JsonObject = {}): JsonObject => ({ ...(replayCited.length > 0 ? { replayReleased: replayCited.slice(0, 50) as unknown as JsonObject[] } : {}), recordId: command.recordId, projectId: (root.body as { projectId?: string }).projectId ?? "", requestedBy: owner.id, reason: command.reason, at: this.#runner.now(), status, derived: derived as unknown as JsonObject, backups: backups as unknown as JsonObject, ...extra });
+    if (command.dryRun === true) return { status: held.length > 0 ? "retained" : "preview", recordId: command.recordId, ...(held.length > 0 ? { retained: held } : {}), ...(replayCited.length > 0 ? { replayReleased: [...replayCited] } : {}), derived, backups };
 
     const attempt = priorBody?.status === "in-progress" ? (priorBody.attempt ?? 1) : (priorBody?.attempt ?? 0) + 1;
     const retain = async (list: typeof held): Promise<DeletionReport> => {
@@ -752,14 +952,14 @@ export class RetentionService {
       await this.#deps.beforeBatch?.(i / BATCH);
       if (i > 0) {
         const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: batch.some((w) => w.kind === "ctx-route-archive") });
-        const nowHeld = batch.flatMap((w) => { const why = material.why(w.kind, w.id); return why === undefined ? [] : [{ kind: w.kind, id: w.id, reasons: why }]; });
+        const nowHeld = batch.flatMap((w) => { const why = material.why(w.kind, w.id)?.filter((r) => command.releaseReplay !== true || !material.complete || !isReplayReason(r)); return why === undefined || why.length === 0 ? [] : [{ kind: w.kind, id: w.id, reasons: why }]; });
         if (nowHeld.length > 0) return retain(nowHeld);
       }
       for (const w of batch) await step(w.name, w.kind, w.id, w.build);
     }
     if (todo > handled) return { status: "partial", recordId: command.recordId, derived, backups, deletionId, remaining: todo - handled };
     await this.#upsertDeletion(owner.id, `${base}.done.${attempt}`, deletionId, recordBody("deleted", { attempt, plan: null as unknown as JsonObject }));
-    return { status: "deleted", recordId: command.recordId, derived, backups, deletionId };
+    return { status: "deleted", recordId: command.recordId, derived, backups, deletionId, ...(replayCited.length > 0 ? { replayReleased: [...replayCited] } : {}) };
   }
 
   /** Writes the deletion record, creating it or replacing the earlier state of the same deletion: the one record per deletion ID, whatever its earlier attempts said. */
@@ -847,6 +1047,11 @@ export class RetentionService {
    */
   async archive(owner: Principal, command: { commandId: string; taskId: string; reason?: string }): Promise<{ taskId: string; archived: string[]; retained: { kind: string; id: string; reasons: string[] }[]; skipped: string[] }> {
     if (!isOwner(owner)) throw new DomainError("forbidden", `${owner.id} may not archive work`);
+    return this.#archive(owner, command);
+  }
+
+  /** The archive of a task's records, for the owner's command and for the scratch tier of the runner (`only` names the records that tier chose; the rest of the task is left as it is). */
+  async #archive(owner: Principal, command: { commandId: string; taskId: string; reason?: string }, only?: ReadonlySet<string>): Promise<{ taskId: string; archived: string[]; retained: { kind: string; id: string; reasons: string[] }[]; skipped: string[] }> {
     if (typeof command.taskId !== "string" || !TASK_ID.test(command.taskId)) invalid("taskId", "is not a task ID");
     if (command.reason !== undefined && (typeof command.reason !== "string" || command.reason.length > 300 || redactText(command.reason) !== command.reason)) invalid("reason", "must be at most 300 characters and no credential");
     const task = await this.#runner.get("task", command.taskId);
@@ -857,6 +1062,7 @@ export class RetentionService {
     const records: Aggregate[] = [];
     const complete = await scan(this.#runner, "desk-record", (a) => { if ((a.body as { taskId?: string }).taskId === command.taskId) records.push(a); });
     if (!complete) throw new DomainError("unavailable", "too many desk records to archive a task safely");
+    if (only !== undefined) records.splice(0, records.length, ...records.filter((r) => only.has(r.id)));
     const material = await RetainedMaterial.build(this.#runner.storage);
     const retained: { kind: string; id: string; reasons: string[] }[] = []; const archived: string[] = []; const skipped: string[] = [];
     const at = this.#runner.now();
@@ -882,7 +1088,7 @@ export class RetentionService {
       if (b.deleted !== undefined || b.archived !== undefined) { skipped.push(rec.id); continue; }
       const why = material.why("desk-record", rec.id);
       // The task's own records count as held only because the task can resume; a finished task's are free, unless another resumable task cites them.
-      const outside = why?.filter((w) => !w.includes(`written for task ${command.taskId}`));
+      const outside = why?.filter((w) => !w.includes(`written for task ${command.taskId}`) && !isReplayReason(w));
       if (!material.complete || (outside !== undefined && outside.length > 0)) { retained.push({ kind: "desk-record", id: rec.id, reasons: outside ?? why ?? [] }); continue; }
       await one("desk-record", rec, (fb, archiveId) => ({ ...fb, title: "(archived)", body: "", archived: { at, by: owner.id, archiveId } }) as JsonObject);
       done.add(rec.id);
@@ -893,8 +1099,8 @@ export class RetentionService {
     for (const sum of derived.sort((a, b) => (a.id < b.id ? -1 : 1))) {
       const sb = sum.body as { deleted?: unknown; archived?: unknown };
       if (sb.deleted !== undefined || sb.archived !== undefined) { skipped.push(sum.id); continue; }
-      const why = material.why("summary-record", sum.id);
-      if (!material.complete || why !== undefined) { retained.push({ kind: "summary-record", id: sum.id, reasons: why ?? [] }); continue; }
+      const why = material.why("summary-record", sum.id)?.filter((w) => !isReplayReason(w));
+      if (!material.complete || (why !== undefined && why.length > 0)) { retained.push({ kind: "summary-record", id: sum.id, reasons: why ?? [] }); continue; }
       await one("summary-record", sum, (fb, archiveId) => ({ ...fb, title: "(archived)", text: "", archived: { at, by: owner.id, archiveId } }) as JsonObject);
     }
     return { taskId: command.taskId, archived, retained, skipped };

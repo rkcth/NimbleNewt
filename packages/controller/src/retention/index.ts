@@ -3,3 +3,4 @@ export { QuotaMeter, ReserveFile, diskSpace, guardStorage, isCriticalOperation, 
 export { DeletionLedger, LEDGER_FILE, ledgerFilter, stubDeskBody, type LedgerEntry } from "./ledger.js";
 export { REFERENCE_SCAN_LIMIT, RetainedMaterial } from "./references.js";
 export { DERIVED_KINDS, EXPORT_KINDS, RetentionService, describeRun, type BackupPort, type CatalogRetentionPort, type DeletionReport, type IncidentPort, type RetentionDeps, type RunReport } from "./service.js";
+export { combineThinkingStores, localThinkingStores, type ThinkingPurgeAnswer, type ThinkingPurgeStatus, type ThinkingStorePort } from "./thinking-stores.js";
