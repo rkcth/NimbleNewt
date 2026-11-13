@@ -316,6 +316,24 @@ export class EventService {
     return out;
   }
 
+  /**
+   * The events of a stream from `from` on, for the controller's own sweeps (card P04f): no principal is checked, so this is never offered through the API. At most `limit` events (suppressed ones included, marked); `next` is where
+   * the next look starts (past every sequence number looked at), `floor` is the lowest sequence number still served (anything below it was cut by retention) and `head` the next number to be written.
+   */
+  async since(stream: string, from: number, limit: number): Promise<{ events: EventBody[]; next: number; floor: number; head: number }> {
+    const s = this.#stream(stream);
+    const head = (await this.#runner.get("events-head", derivedId("sub", s)))?.body as unknown as HeadBody | undefined;
+    if (head === undefined) return { events: [], next: Math.max(from, 1), floor: 1, head: 1 };
+    const events: EventBody[] = [];
+    let seq = Math.max(from, head.floor, 1);
+    const cap = Math.max(1, Math.min(limit, EVENT_LIMITS.scan));
+    for (; seq < head.next && seq < Math.max(from, head.floor, 1) + cap; seq++) {
+      const ev = (await this.#runner.get(kindOf(s), pad(seq)))?.body as unknown as EventBody | undefined;
+      if (ev !== undefined) events.push(ev);
+    }
+    return { events, next: seq, floor: head.floor, head: head.next };
+  }
+
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   #stream(value: unknown): string { return typeof value === "string" && STREAM.test(value) ? value : invalid("stream", "must be project:<id> or task:<id>"); }

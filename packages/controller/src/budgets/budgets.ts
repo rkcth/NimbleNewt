@@ -319,10 +319,10 @@ export class BudgetService {
     if (by.kind !== "service" && by.kind !== "owner") throw new DomainError("forbidden", `${by.id} is not the controller; an agreed raise is carried out by the controller`);
     onlyKnown(command, ["commandId", "taskId", "costMicros", "computeMs", "decisionId", "agreedBy"]);
     if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) throw new DomainError("invalid_command", "decisionId: must name the decision", { field: "decisionId" });
-    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) throw new DomainError("invalid_command", "agreedBy: must be the owner or the policy that let it through", { field: "agreedBy" });
+    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60}|steward:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) throw new DomainError("invalid_command", "agreedBy: must be the owner, the policy or the steward agent that let it through", { field: "agreedBy" });
     // Checked inside the command, after the runner has looked for a record of this very command: a raise that was already made is answered as made even if the owner has since lowered the ceiling (a replay after a crash must not be refused).
     const ceiling = async (): Promise<void> => {
-      if (!command.agreedBy.startsWith("policy:")) return;
+      if (!command.agreedBy.startsWith("policy:") && !command.agreedBy.startsWith("steward:")) return;
       // No ceiling unless the owner set one (owner decision 2026-10-30). A setting that cannot be read refuses the raise.
       const limits = this.#limits === undefined ? {} : await this.#limits();
       if (limits.raiseMaxCostMicros !== undefined && (command.costMicros ?? 0) > limits.raiseMaxCostMicros) throw new DomainError("invalid_command", `costMicros: a raise carried out by policy is at most ${limits.raiseMaxCostMicros}, the ceiling the owner set; a larger one needs the owner's agreement`, { field: "costMicros" });

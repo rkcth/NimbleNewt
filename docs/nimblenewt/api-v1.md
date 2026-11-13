@@ -847,6 +847,27 @@ Arguments:
 
 Result: `{ seq, links: [{ relation, kind?, id?, version?, seq?, note? }], grounded, note, scanLimited? }`; a step on a side line also links the owner's instructions on the main line.
 
+#### `activity.replay.links`
+
+The links of one replay step (what it cites, the evidence written for it, what led to it) resolved to the records themselves where you may read them: a message, the diff of a code submission (its base, tree and patch), a review or QA comment, an approval, an artifact, a side line. Each is read by its own rules for you and must belong to this task; one you may not read says so in the words used for one that is gone. A kind with no reader is shown as a reference. Read only.
+
+Arguments:
+
+- `taskId`: the task
+- `seq`: the step number
+
+Result: `{ seq, items: [{ relation, kind, id, version?, seq?, note?, resolution: { state: readable | not-readable | no-reader, title?, lines?, untrusted?, note? } }], truncated }`; lines are the record's own words (an agent's or reviewer's text is marked untrusted), redacted and bounded.
+
+#### `activity.replay.simulation`
+
+Owner only: a recorded simulation by its ID.
+
+Arguments:
+
+- `id`: the simulation's ID
+
+Result: `{ id, simulation }`.
+
 #### `activity.replay.search`
 
 Finds steps of a task whose summary contains some words. Stored content is not searched. Same checks as reading the steps. Read only.
@@ -1034,6 +1055,17 @@ Arguments:
 - `limit` (optional): 1 to 100, default 50
 
 Result: `{ item: { entries, next?, scanLimited? } }`.
+
+#### `meeting.decisions.patterns`
+
+What the meeting decision log suggests (card M02h): for each project and kind of widening change (grant, budget raise), how many the owner agreed to, refused, how many went ahead on the policy's or the steward's leave and how many were not carried out, with a suggestion to let the class through only where the owner agreed to at least `minAgreed` (default 5) the policy asked about and never refused or lost one. Owner only (not a task-scoped credential). It never changes the policy; the owner accepts by setting it.
+
+Arguments:
+
+- `projectId` (optional): the project
+- `minAgreed` (optional): 2 to 100, default 5
+
+Result: `{ item: { patterns, scanned, scanLimited } }`.
 
 #### `meeting.decisions.waiting`
 
@@ -1509,7 +1541,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `work_report` (the report an agent ended a task's attempt with, its running notes, the second agent's questions and the answers, and whether the report was found supported or not questioned, card W10: `{ kind: "work_report", taskId }`), `attempt_endings` (how each attempt of a task ended or stands, newest first, at most 6: the agent and route, when it started and ended, why its last turn stopped in plain words, the nudges to go on, the plan steps checked of how many, its stops before the work was done, the checks of its done, whether a second agent questioned its report, its waits for jobs, and the blocker it left, then the open agent_stopped_early, done_unverified and report_unsupported blockers of the task with what they say; read as the work report is, card W08: `{ kind: "attempt_endings", taskId }`; in chat the task may be named by its title), `start_size` (a task's starting sizes across its hand-offs, the alerts open on it with the trend, the largest contributors and where the originals are kept, and the watch's thresholds: `{ kind: "start_size", taskId }`; in chat the task may be named by its title), `handoff_archive` (the whole text of a hand-off package section cut to fit, a chat answer at a time: `{ kind: "handoff_archive", taskId, section?, from? }` for the task's latest hand-off, going on or finished, or `{ kind: "handoff_archive", archiveId, from? }`; without a section it lists the cuts; `from` is the line to read on from), `attention` (what in the overview needs a person's eye, as lines: paused assignees, unreachable workers, uncertain tool results and stale artifacts, each with when it was seen: `{ kind: "attention", projectId?, agentId?, state?, attentionKind?, since?, until?, limit? }`; the same list as `status.attention`, which pages), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `setup` (owner only: the first-run walk-through, `{ kind: "setup" }`: what is set up, what is still open in the order a person sets it up, and the plain question, recommendation and meaning of declining for the next open step), `standup_questions` (what the stand-ups asked the owner: the open questions and the latest answers), `agents` (the agents with the coordinator marked and its lifecycle state, read only and under the rules of `agent.list`: `{ kind: "agents", state?, limit? }`, active agents unless state is retired, at most 50; only the owner is told which agent is the coordinator and what holds it; an agent's name is shown quoted), `database_transfer` (which database the controller runs on, where it can be moved, the last move and the restart setting, owner only: `{ kind: "database_transfer" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`; in chat the task, the agent or the team may be named by its title or name, and the chat finds it; a scope with no request of its own is answered from the wider scope whose stop reaches it - its agent, a team above it, a parent task of its swarm or the installation - and the answer names that scope), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `standups` (a project's stand-ups themselves, each one two lines: the schedule as set — whether it is active, paused or ended, how often and at what time it is held, how long, how wide its window and who is on its roster — then its meetings, the one coming up and how the last one ended: `{ kind: "standups", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `thinking` (owner only: what the model was thinking while it worked on a task, kept for a limited time, with `{ kind: "thinking", taskId, after?, limit? }`; shown quoted as the model's own untrusted words and each look is recorded), `replay` (step through a task's activity as it was recorded, read only: a summary with the lines of work and agents to follow and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent?, stepKind?, since?, until? }` (what anyone recorded is shown quoted), or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `meeting_desk_reads` (what a meeting's chair read from absent members' desks and shared working notes, each file with whose it is, its revision, size, reader and time in the order read, and every refused attempt to change one: `{ kind: "meeting_desk_reads", occurrenceId, deskRecordId?, limit? }`; the occurrence ID is the one the meetings answer cites), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set, then the same state as `retention.status` as lines: the data disk's free room against the reserve, each quota class with its use and the scopes near it, the backups and the latest one, the latest deletions and retention runs, counts and record IDs only: `{ kind: "retention" }`), `web_access` (owner only: how the web chat is set up and which browsers are signed in), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `capacity` (owner only: the capacity settings in force, in three groups - the optional caps (attempts at once per project, per agent and the children reporting to one supervising agent), the host and global quotas with each host's declared CPUs and memory and what runs and waits now, and the limits on spawning child tasks - each figure marked as yours or the default and an off one said to be off: `{ kind: "capacity" }`), `environment` (owner only: one agent's environment as it is now - the active revision with the shared base, the agent's own packages and their exact versions, skills and limits, a newer staged revision that waits, and why each revision was made; `{ kind: "environment", agent }` where agent is the agent principal such as agent:agt-..., or `agentName` in the owner's words), `maintenance` (owner only: the agents' requests to change their environment, what each asked for, whether it is waiting, applied, rolled back, failed or revoked and why; `maintenanceId`, `agent` or `agentName`, `status`, `limit` are optional), `release` (owner only: release testing — per candidate the gate result of each platform (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current: `{ kind: "release", candidateId?, limit? }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `jobs` (owner only: the long-running jobs that have not ended, each with its state, task, kind and since when, which are outcome-unknown and wait for a reconciliation, and which a stop could not end: `{ kind: "jobs", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`), `wakes` (owner only, card M04h: the stopped agents the controller woke for a meeting and whether each is waiting, attending, given up on or stopped by you: `{ kind: "wakes" }`), `landing` (owner only: where finished work lands, card H12s: the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, one policy for the whole installation: `{ kind: "landing" }`)}`), `approval_load` (owner only: the approval load - your decisions per day, how long asks waited, how many actions ran by rule, standing grant, agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer and whether the derived-profile question is due: `{ kind: "approval_load", days? }`, days 1 to 90, default 7) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest, then the kind, `{ kind: "needs_you", limit? }`) and `critical_path` (owner only: what the owner marked as the critical path and the decisions waiting for the owner that hold it up, `{ kind: "critical_path" }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `work_report` (the report an agent ended a task's attempt with, its running notes, the second agent's questions and the answers, and whether the report was found supported or not questioned, card W10: `{ kind: "work_report", taskId }`), `attempt_endings` (how each attempt of a task ended or stands, newest first, at most 6: the agent and route, when it started and ended, why its last turn stopped in plain words, the nudges to go on, the plan steps checked of how many, its stops before the work was done, the checks of its done, whether a second agent questioned its report, its waits for jobs, and the blocker it left, then the open agent_stopped_early, done_unverified and report_unsupported blockers of the task with what they say; read as the work report is, card W08: `{ kind: "attempt_endings", taskId }`; in chat the task may be named by its title), `start_size` (a task's starting sizes across its hand-offs, the alerts open on it with the trend, the largest contributors and where the originals are kept, and the watch's thresholds: `{ kind: "start_size", taskId }`; in chat the task may be named by its title), `handoff_archive` (the whole text of a hand-off package section cut to fit, a chat answer at a time: `{ kind: "handoff_archive", taskId, section?, from? }` for the task's latest hand-off, going on or finished, or `{ kind: "handoff_archive", archiveId, from? }`; without a section it lists the cuts; `from` is the line to read on from), `attention` (what in the overview needs a person's eye, as lines: paused assignees, unreachable workers, uncertain tool results and stale artifacts, each with when it was seen: `{ kind: "attention", projectId?, agentId?, state?, attentionKind?, since?, until?, limit? }`; the same list as `status.attention`, which pages), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `setup` (owner only: the first-run walk-through, `{ kind: "setup" }`: what is set up, what is still open in the order a person sets it up, and the plain question, recommendation and meaning of declining for the next open step), `standup_questions` (what the stand-ups asked the owner: the open questions and the latest answers), `agents` (the agents with the coordinator marked and its lifecycle state, read only and under the rules of `agent.list`: `{ kind: "agents", state?, limit? }`, active agents unless state is retired, at most 50; only the owner is told which agent is the coordinator and what holds it; an agent's name is shown quoted), `database_transfer` (which database the controller runs on, where it can be moved, the last move and the restart setting, owner only: `{ kind: "database_transfer" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`; in chat the task, the agent or the team may be named by its title or name, and the chat finds it; a scope with no request of its own is answered from the wider scope whose stop reaches it - its agent, a team above it, a parent task of its swarm or the installation - and the answer names that scope), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `standups` (a project's stand-ups themselves, each one two lines: the schedule as set — whether it is active, paused or ended, how often and at what time it is held, how long, how wide its window and who is on its roster — then its meetings, the one coming up and how the last one ended: `{ kind: "standups", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_patterns` (owner only: what the meeting decision log suggests, per kind of grant or budget raise how often the owner agreed, refused or let it through, and where they always agreed a suggestion to let the class through; it never changes the policy: `{ kind: "decision_patterns", projectId? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `thinking` (owner only: what the model was thinking while it worked on a task, kept for a limited time, with `{ kind: "thinking", taskId, after?, limit? }`; shown quoted as the model's own untrusted words and each look is recorded), `replay` (step through a task's activity as it was recorded, read only: a summary with the lines of work and agents to follow and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent?, stepKind?, since?, until? }` (what anyone recorded is shown quoted), or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `meeting_desk_reads` (what a meeting's chair read from absent members' desks and shared working notes, each file with whose it is, its revision, size, reader and time in the order read, and every refused attempt to change one: `{ kind: "meeting_desk_reads", occurrenceId, deskRecordId?, limit? }`; the occurrence ID is the one the meetings answer cites), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set, then the same state as `retention.status` as lines: the data disk's free room against the reserve, each quota class with its use and the scopes near it, the backups and the latest one, the latest deletions and retention runs, counts and record IDs only: `{ kind: "retention" }`), `web_access` (owner only: how the web chat is set up and which browsers are signed in), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `capacity` (owner only: the capacity settings in force, in three groups - the optional caps (attempts at once per project, per agent and the children reporting to one supervising agent), the host and global quotas with each host's declared CPUs and memory and what runs and waits now, and the limits on spawning child tasks - each figure marked as yours or the default and an off one said to be off: `{ kind: "capacity" }`), `environment` (owner only: one agent's environment as it is now - the active revision with the shared base, the agent's own packages and their exact versions, skills and limits, a newer staged revision that waits, and why each revision was made; `{ kind: "environment", agent }` where agent is the agent principal such as agent:agt-..., or `agentName` in the owner's words), `maintenance` (owner only: the agents' requests to change their environment, what each asked for, whether it is waiting, applied, rolled back, failed or revoked and why; `maintenanceId`, `agent` or `agentName`, `status`, `limit` are optional), `release` (owner only: release testing — per candidate the gate result of each platform (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current: `{ kind: "release", candidateId?, limit? }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `jobs` (owner only: the long-running jobs that have not ended, each with its state, task, kind and since when, which are outcome-unknown and wait for a reconciliation, and which a stop could not end: `{ kind: "jobs", limit? }`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`), `wakes` (owner only, card M04h: the stopped agents the controller woke for a meeting and whether each is waiting, attending, given up on or stopped by you: `{ kind: "wakes" }`), `landing` (owner only: where finished work lands, card H12s: the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, one policy for the whole installation: `{ kind: "landing" }`)}`), `approval_load` (owner only: the approval load - your decisions per day, how long asks waited, how many actions ran by rule, standing grant, agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer and whether the derived-profile question is due: `{ kind: "approval_load", days? }`, days 1 to 90, default 7) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest, then the kind, `{ kind: "needs_you", limit? }`) and `critical_path` (owner only: what the owner marked as the critical path and the decisions waiting for the owner that hold it up, `{ kind: "critical_path" }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2173,6 +2205,28 @@ Arguments:
 
 Result: `{ item }`.
 
+#### `responsibility.gaps`
+
+The times nothing was watching that touch a project: NimbleNewt was not running (`controller-down`), a model route was unavailable (`provider-outage`), an event source could not be polled (`event-source-outage`) or events were lost before they were looked at (`events-missed`). Each has a start, an end (absent while it lasts) and the reason; open ones first. A responsibility with no recent check during a gap was not neglected: the gap is why. Events recorded while NimbleNewt was down are read when it is back and each waking responsibility owes one check for them.
+
+Arguments:
+
+- `projectId`: the project
+- `open` (optional): true for only the gaps still lasting
+- `limit` (optional): 1 to 200 (default 50)
+
+Result: `{ items: [{ id, scope, reason, key, start, end?, detail, open }], truncated }`.
+
+#### `check.settings.get`
+
+Owner only: whether a due check may be given to the answerable agent as a bounded task (on by default), the most check tasks open at once in one project (default 5), and the revision to quote when changing it.
+
+Arguments:
+
+- none
+
+Result: `{ item }`.
+
 #### `retention.settings.get`
 
 Owner only: the retention policy in force. Everything that deletes is off until set; every limit is optional. Gives the values you set, the installation defaults, the effective values and the revision to quote when changing them.
@@ -2215,6 +2269,29 @@ Arguments:
 - `limit` (optional): 1 to 200 (default 100)
 
 Result: `{ projectId, items, redactions, next?, partial? }`.
+
+#### `retirement.preview`
+
+Owner only: what retiring an agent or archiving a project would do, read now, and the digest that confirms it. `blockers` lists what stops it (live assignments: unfinished tasks assigned to the agent or in the project; active responsibilities the agent answers for; active agents that report to it): release or transfer those first. `release` lists what the retirement would release or revoke (maintenance leases and integrator leases held, resource bindings, responsibilities, grants and the agent's credential). Nothing is changed.
+
+Arguments:
+
+- `kind`: `agent` or `project`
+- `id`: the agent's or project's ID
+
+Result: `{ item: { kind, id, name, revision, blockers, release, digest }, shown }`.
+
+#### `retirement.list`
+
+Owner only: the retirement ledger, newest first: each retirement, archive and restore with who asked, why, when, whether it finished and what it released or revoked.
+
+Arguments:
+
+- `subjectId` (optional): only this agent or project
+- `limit` (optional): 1 to 100, default 20
+- `after` (optional): the `next` of the previous page
+
+Result: `{ items, next? }`.
 
 #### `lease.list`
 
@@ -3680,16 +3757,40 @@ Appends a step to a task's activity record with the exact context it used. Sensi
 Arguments:
 
 - `taskId`: the task
-- `kind`: owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle or ownership
+- `kind`: owner-message, agent-message, instruction, source-retrieved, model-selected, harness-selected, tool-call, approval, artifact-version, compression, branch, meeting-decision, lifecycle, ownership or submission
 - `summary`: one line
 - `manifest` (optional): { refs: [{ kind, id, version? }], summaryId? } or { missing: true, reason }
 - `payload` (optional): { text, sensitive? } or { missing: true, reason }
-- `outcome` (optional): proposed, dispatched, confirmed or uncertain; leave out when not known
+- `outcome` (optional): proposed, dispatched, confirmed, failed (came back without taking effect) or uncertain; leave out when not known
 - `branch` (optional): the branch line the step belongs to (leave out for the main line)
 - `supersedes` (optional): the number of an earlier step this one replaces
 - `commandId`: required
 
 Result: `{ id, seq, replayed }`.
+
+#### `activity.replay.simulate`
+
+Owner only: a rerun of a replay, as a separate command in an isolated scope that has no tool, no model, no message port and no effect ledger. It walks the task's recorded steps from a step on and records what it would do again, every line labelled simulated; `failAt` injects a provider failure at that step so the later steps are not reached. Nothing is run, sent, spent or changed, and no real access is used. (A replay itself never reruns anything: activity.replay.rerun is refused.)
+
+Arguments:
+
+- `taskId`: the task
+- `from` (optional): the first step to walk (default 1)
+- `failAt` (optional): a step at which a provider failure is injected
+- `commandId`: required
+
+Result: `{ id, replayed, simulation: { label, scope, steps: [{ seq, kind, summary, would, recordedOutcome, simulatedOutcome, simulated }], truncated } }`.
+
+#### `activity.replay.rerun`
+
+Always refused: a replay does not rerun anything. Use activity.replay.simulate, a separate owner-only command that runs in an isolated scope and changes nothing.
+
+Arguments:
+
+- `taskId`: the task
+- `commandId`: required
+
+Result: a refusal that names activity.replay.simulate.
 
 #### `activity.replay.thinking`
 
@@ -3788,16 +3889,17 @@ Result: `{ id, replayed, explanation }`.
 
 #### `activity.correct`
 
-Appends a correction to a step. The step is never changed; the correction keeps who and when.
+Appends a correction to a step. The step is never changed; the correction keeps who and when. The owner can add `replaces: true` to say the step was wrong: the owner's word is then also recorded as a step on the same line that replaces it, so a replay shows the old step as replaced (kept for the record, no longer authoritative).
 
 Arguments:
 
 - `taskId`: the task
 - `seq`: the step
 - `note`: the correction
+- `replaces` (optional): owner only: true when the corrected step is wrong and this correction replaces it
 - `commandId`: required
 
-Result: `{ id, replayed }`.
+Result: `{ id, replayed, supersededBy? }`.
 
 #### `activity.unavailable`
 
@@ -4039,14 +4141,14 @@ Result: `{ returned, pending, asked, notAsked }`.
 
 #### `meeting.record.sweep`
 
-Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call).
+Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call); writes the summary, with the narrator's overview when the host configured one, of an ended meeting waiting for its hand-back (at most 3 a call, once each); and ends as a decline the held decisions that nobody answered within meeting.decision.holdExpiryDays.
 
 Arguments:
 
 - `projectId`: the project
 - `commandId`: required
 
-Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed }`.
+Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed, expired, narrated }`.
 
 #### `meeting.attend.open-room`
 
@@ -5345,7 +5447,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `agent.retire`
 
-Retires an agent and disables its identity. Refused while active agents report to it. Its ID is never reused; tasks it owns stay assigned to it until explicitly transferred. Any holder of `agent.manage` may retire any agent.
+Retires an agent and disables its identity. Refused while active agents report to it and while it holds live assignments (unfinished tasks assigned to it): release or transfer them first. Its ID is never reused. This plain command releases nothing else; `retirement.agent` (owner only, confirmed and ledgered) also releases the leases it holds and revokes its grants and credential. Any holder of `agent.manage` may retire any agent.
 
 Arguments:
 
@@ -5928,6 +6030,20 @@ Result: `{ revision }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `check.settings.set`
+
+Owner only: turns check tasks on or off (`enabled`; off leaves due checks owed and shown as not observed, and starts no agent work) and/or sets the most check tasks open at once in one project (`maxOpen`, 1 to 50; null for the default of 5). Only the fields given change. This is the form the chat uses.
+
+Arguments:
+
+- `enabled` (optional): true or false
+- `maxOpen` (optional): whole number, or null for the default
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `retention.settings.set`
 
 Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `contextRouteDays` (1 to 3650) removes the records of a task's move to another model route (the text cut from its context, and the decisions) that many days after their last change (off unless set: they are kept); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `checkRecordDays` (7 to 3650) removes finished responsibility checks (never one still owed) that many days after their slot (off unless set: they are kept); `concernDays` (7 to 3650) removes stall concerns that are over that many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once their task is done or cancelled or has been assigned again since (never a suspected one, a dismissal still in force or a concern with a recovery step half made; off unless set: they are kept); `stallEvidenceDays` (7 to 3650) removes the progress evidence of a task that is done, cancelled or gone that many days after its last report or last change (never one with a suspected concern or a recovery step half made; off unless set); `stallSpeedDays` (7 to 3650) removes a route's measured speed not updated for that many days (it is measured again; one a request in flight names is kept; off unless set); `responsibilityHistoryDays` (7 to 3650) removes the history entries and incident counters of a responsibility that was retired that many days ago (the responsibility, its log, incidents and check records stay; a counter whose incident is still open stays; off unless set); `noteArchiveDays` (7 to 3650) removes the whole text of a cut note (the archive its marker names) that many days after it was written, only once its task is done, cancelled or gone (a task that can still run keeps its archives; the note's marker stays and then reads as no longer kept; off unless set); `scratchArchiveDays` (7 to 3650) archives an agent's private scratch of a task that is done or cancelled that many days after its last change (the text moves into an archive and `retention.restore` puts it back exactly; off unless set); `scratchPurgeDays` (30 to 3650) removes that scratch for good that many days after it was archived (or after its last change when it is not archived first), with what was made from it, as a deletion at the owner's request does (a record a resumable task needs or a replay cites stays; off unless set); `transcriptDays` (30 to 3650) removes the owner's words from old chat turns that many days after the turn was completed (the turn stays as a stub; one a decision, an agenda item, an open proposal or a held command names stays; off unless set); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done, before the controller's copy and the model's own copy in the conversation stores are removed; `thinkingAuto` (default on) lets the dispatcher remove stored thinking at that time even while `autoRun` is off; `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `preRestoreMaxAgeDays` (1 to 3650, null for no limit, the default) removes those snapshots when older than that (they never take a scheduled daily or weekly slot); `dataLockStaleMinutes` (1 to 10080, default 10, null for never) is how long a start waits for the data directory lock's refresh before taking it over when the holder's process cannot be looked for (another host name, a container; never sooner than twice the refresh period plus 30 seconds, and hosts whose clocks differ by more need a larger value); `restoreChangeMargin` (0 to 1000000, default 200, null for no check; counted in audit rows, which are several per operation) refuses a restore, asking for a new preview, when more than that many recorded changes were made between the preview and the apply; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has a call pinned to (in any state: parked, approved, running or ended) or lists as a dependency, or that is in the skill library of an agent's active environment or of an environment revision a resumable task's attempt is pinned to, stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites and that no unrevoked version also uses is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
@@ -6023,6 +6139,47 @@ Arguments:
 - `taskId`: the task
 
 Result: `{ taskId, restored, conflicts, conflictDetails }` (a reason for each conflict).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.agent`
+
+Owner only: retires an agent. Refused while it holds live assignments or active responsibilities or active agents report to it (release or transfer them first); a retired agent cannot be given work afterwards. Only one retirement of an agent runs at a time: a second command meeting one under way carries it on (one ledger record). Otherwise it releases the maintenance and integrator leases the agent holds, revokes its grants and its credential, disables its identity and retires the record, and writes one ledger record of what was released. `confirm` must be the digest of a `retirement.preview` made just before, so what is done is what was shown. Nothing is deleted: the agent's records stay, searchable under the same access rules, held by retention, and its ID is never reused. A stopped retirement carries on when the same command is sent again.
+
+Arguments:
+
+- `agentId`: the agent
+- `reason`: why (recorded)
+- `confirm`: the digest of a fresh preview
+
+Result: `{ id, status, replayed, record }` (the ledger record).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.project`
+
+Owner only: archives a project. Refused while any of its tasks is assigned and unfinished (release or transfer them first). Otherwise it retires the project's responsibilities, releases its leases, unbinds its resource bindings, revokes the execution grants made for the project (read-only grants such as `task.read` stay, so whoever could read it still can) and archives the record, and writes one ledger record of what was released. A lease held by an agent still working on an assigned task (in any project) blocks it too; a new task cannot be assigned in an archived project, and the plain `project.update state=archived` is now also refused while a task of the project is assigned and unfinished. `confirm` must be the digest of a `retirement.preview` made just before. Nothing is deleted: tasks, notes and history stay and stay searchable under the same access rules, held by retention and replay holds as before. `retirement.project.restore` brings the project back (what was released stays released). A stopped retirement carries on when the same command is sent again.
+
+Arguments:
+
+- `projectId`: the project
+- `reason`: why (recorded)
+- `confirm`: the digest of a fresh preview
+
+Result: `{ id, status, replayed, record }` (the ledger record).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `retirement.project.restore`
+
+Owner only: brings an archived project back to active and writes a ledger record. What the archiving released (retired responsibilities, unbound resources, revoked execution grants) is not brought back by itself: the record says what to bind and grant again.
+
+Arguments:
+
+- `projectId`: the archived project
+- `reason` (optional): why (recorded)
+
+Result: `{ id, status, replayed, record }`.
 
 Completion: finished when accepted (`completed: true`).
 

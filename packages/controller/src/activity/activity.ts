@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
@@ -10,11 +11,15 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 
 /** What a step of a task's work can be (card C09). */
 export const ACTIVITY_KINDS = [
-  "owner-message", "agent-message", "instruction", "source-retrieved", "model-selected", "harness-selected", "tool-call", "approval", "artifact-version", "compression", "branch", "meeting-decision", "lifecycle", "ownership",
+  "owner-message", "agent-message", "instruction", "source-retrieved", "model-selected", "harness-selected", "tool-call", "approval", "artifact-version", "compression", "branch", "meeting-decision", "lifecycle", "ownership", "submission",
 ] as const;
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
 
-export const STEP_OUTCOMES = ["proposed", "dispatched", "confirmed", "uncertain"] as const;
+/**
+ * Where a step stood (card U09b): `proposed` asked for and not carried out yet (waiting for approval); `dispatched` sent and not answered; `confirmed` done, the answer came back as a success; `failed` the answer came
+ * back and the action did not take effect as asked (it failed, was cancelled or was refused; the step's words say which); `uncertain` it may or may not have happened. Only the first two and the last are still open.
+ */
+export const STEP_OUTCOMES = ["proposed", "dispatched", "confirmed", "failed", "uncertain"] as const;
 export type StepOutcome = (typeof STEP_OUTCOMES)[number];
 export interface ManifestRef { readonly kind: string; readonly id: string; readonly version?: string }
 /** The context actually supplied at a step: the references and versions, including which summary stood in for earlier history. `missing` says it was not recorded, so a reader never mistakes silence for "nothing". */
@@ -57,6 +62,8 @@ export interface ExplanationBody {
 export interface CorrectionBody { readonly taskId: string; readonly projectId: string; readonly seq: number; readonly note: string; readonly by: string; readonly at: string; readonly stepDigest: string }
 
 export const ACTIVITY_LIMITS = { indexed: 2000, indexedLater: 200, summary: 300, summaryInput: 4000, payload: 8000, refs: 100, alternatives: 10, evidence: 10, statement: 500, page: 100, ranges: 200 } as const;
+/** How far back a finishing step looks for the open step it finishes, and how many steps one read round asks for (card U09b). */
+const OPEN_STEP_WINDOW = 200; const OPEN_STEP_CHUNK = 25;
 const KIND_OF = { step: "activity-step", head: "activity-head", payload: "activity-payload", explanation: "activity-explanation", correction: "activity-correction", index: "activity-index" } as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const REF = /^[a-z][a-z0-9-]{0,30}$/;
@@ -243,9 +250,11 @@ export class ActivityService {
   }
 
   /** Appends a correction to a step. The step itself is never changed; the correction keeps who, when and a digest of the step as it was. */
-  async correct(by: Principal, command: NoActor & { taskId: string; seq: number; note: string }): Promise<{ id: string; replayed: boolean }> {
+  async correct(by: Principal, command: NoActor & { taskId: string; seq: number; note: string; replaces?: boolean }): Promise<{ id: string; replayed: boolean; supersededBy?: number }> {
     refuseThinking(command);
-    onlyKnown(command, ["commandId", "taskId", "seq", "note"]);
+    onlyKnown(command, ["commandId", "taskId", "seq", "note", "replaces"]);
+    if (command.replaces !== undefined && typeof command.replaces !== "boolean") invalid("replaces", "must be true or false");
+    if (command.replaces === true && by.kind !== "owner") throw new DomainError("forbidden", "only the owner may mark a step as replaced by a correction");
     const taskId = checkTaskId(command.taskId);
     const task = await this.#task(taskId);
     if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.append", task.projectId))) throw new DomainError("forbidden", `${by.id} may not correct that task's activity`);
@@ -256,10 +265,60 @@ export class ActivityService {
     const ref: AggregateRef = { kind: KIND_OF.correction, id };
     const body: CorrectionBody = { taskId, projectId: task.projectId, seq: command.seq, note, by: by.id, at: this.#runner.now(), stepDigest: digest(step.body) };
     const r = await this.#runner.command("activity.correct", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, seq: command.seq, note },
+      payload: { taskId, seq: command.seq, note, ...(command.replaces === true ? { replaces: true } : {}) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, await this.#indexChange(taskId, (x) => ({ ...x, corrections: [...x.corrections, { seq: command.seq, id }] }), "corrections")] as never, detail: { taskId, seq: command.seq }, contention: async () => new DomainError("stale_revision", "another correction or explanation was recorded at the same moment") }),
     }));
+    // Card U09b: the owner can say the step is wrong and not merely annotate it. The correction is kept as before, and the owner's word is also a step of the same line that replaces it, so the replay shows the step
+    // as replaced (non-authoritative) with a link to what replaced it. Only the owner's own word can do that here; anyone else's correction stays a note.
+    if (command.replaces === true) {
+      // The replacing step's own command is derived from the owner's (fixed length, so a command ID at the length limit still fits) and is told again on a retry, so a retry after a failure between the two writes completes it.
+      const made = await this.record(by, { commandId: `rpl:${createHash("sha256").update(String(command.commandId)).digest("hex").slice(0, 40)}`, taskId, kind: "instruction", summary: `Owner correction replaces step ${command.seq}: ${note}`, manifest: { refs: [{ kind: "activity-correction", id: r.id }] }, outcome: "confirmed", ...(step.body["branch"] === undefined ? {} : { branch: String(step.body["branch"]) }), supersedes: command.seq });
+      return { id: r.id, replayed: r.replayed, supersededBy: made.seq };
+    }
     return { id: r.id, replayed: r.replayed };
+  }
+
+  /**
+   * Card U09b: records a step for a controller service and, when it says which earlier step of its own it finishes (`finishes`: the same reference, such as one tool operation, that the earlier step cited), marks that
+   * step replaced by this one. Only an earlier step of the same writer and the same line that still stands as proposed, dispatched or uncertain is replaced, never a confirmed one and never another writer's;
+   * the nearest 200 steps are looked at. Not an API operation: only the controller's own wiring holds the service.
+   */
+  async recordFinishing(by: Principal, command: Parameters<ActivityService["record"]>[1], finishes?: { kind: string; id: string }): Promise<{ id: string; seq: number; replayed: boolean }> {
+    if (finishes === undefined || command.supersedes !== undefined) return this.record(by, command);
+    // The same command told again is answered as it was first told (a step it replaced is no longer open, and a different claim would be refused as a different command).
+    const told = await this.#told(by, command.commandId);
+    if (told !== undefined) return this.record(by, told.supersedes === undefined ? command : { ...command, supersedes: told.supersedes });
+    const found = await this.#openStep(checkTaskId(command.taskId), by.id, command.branch, finishes);
+    return this.record(by, found === undefined ? command : { ...command, supersedes: found });
+  }
+  /** The step an earlier telling of this command made, if it was applied: what it replaced. */
+  async #told(by: Principal, commandId: string): Promise<{ supersedes?: number } | undefined> {
+    const stored = await this.#runner.storage.getOperation(operationIdOf(scopedCommandId(by.id, commandId)));
+    if (stored === undefined) return undefined;
+    const seq = stored.result.auditSeqs[0];
+    const audit = seq === undefined ? undefined : (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
+    const step = audit?.subject === undefined ? undefined : (await this.#runner.get(KIND_OF.step, audit.subject.id))?.body as unknown as ActivityStepBody | undefined;
+    return step === undefined ? undefined : { ...(step.supersedes === undefined ? {} : { supersedes: step.supersedes }) };
+  }
+  async #openStep(taskId: string, actor: string, branch: string | undefined, ref: { kind: string; id: string }): Promise<number | undefined> {
+    const head = (await this.#runner.get(KIND_OF.head, taskId))?.body as unknown as HeadBody | undefined;
+    if (head === undefined) return undefined;
+    const replaced = new Set<number>();
+    // This runs on the tool path of every recorded call, so the window is read in parallel chunks (newest first) and stops at the first step that decides; the steps are still looked at one by one, newest first.
+    const last = head.next - 1; const first = Math.max(1, head.next - OPEN_STEP_WINDOW);
+    for (let top = last; top >= first; top -= OPEN_STEP_CHUNK) {
+      const seqs: number[] = []; for (let seq = top; seq >= first && seq > top - OPEN_STEP_CHUNK; seq--) seqs.push(seq);
+      const views = await Promise.all(seqs.map((seq) => this.#stepView(taskId, seq, head).catch(() => ({ step: undefined }))));
+      for (let i = 0; i < seqs.length; i++) {
+        const seq = seqs[i]!; const step = views[i]!.step;
+        if (step === undefined) continue;
+        if (step.supersedes !== undefined) replaced.add(step.supersedes);
+        if (step.actor !== actor || (step.branch ?? "main") !== (branch ?? "main") || step.manifest?.missing !== false || !Array.isArray(step.manifest.refs)) continue;
+        // The nearest earlier step of this writer and line that cites the reference decides: it is replaced only while it still stands as not finished.
+        if (step.manifest.refs.some((x) => x.kind === ref.kind && x.id === ref.id)) return !replaced.has(seq) && (step.outcome === "proposed" || step.outcome === "dispatched" || step.outcome === "uncertain") ? seq : undefined;
+      }
+    }
+    return undefined;
   }
 
   /** Marks a range of steps as no longer available (archived, deleted, lost). The steps stay in the list as references and their content is withheld. */

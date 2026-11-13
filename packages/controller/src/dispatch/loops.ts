@@ -3,7 +3,7 @@ import type { WorkspaceOpService } from "../workspace-ops/index.js";
 import type { DecisionService } from "../decisions/index.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
-import type { EventService, EventSource, SourceService, Waker, WatchService } from "../events/index.js";
+import type { EventService, EventSource, SourceRun, SourceService, Waker, WatchService } from "../events/index.js";
 import type { ReviewService } from "../review/index.js";
 import type { StallService } from "../health/index.js";
 import type { AttendanceService, MeetingService, WakeAttender } from "../meetings/index.js";
@@ -258,6 +258,8 @@ export interface SourceLoopOptions {
   readonly log?: (message: string) => void;
   /** Consecutive failed reads of the setting before the owner is told (default 5). */
   readonly unreadableAfter?: number;
+  /** Told after every poll with what each source did (card P04f): a source that failed is a coverage gap while it keeps failing, and one that lost events is one that is already over. A failure here never stops the tick. */
+  readonly ran?: (runs: readonly SourceRun[]) => Promise<void>;
 }
 
 /** `list` is the sources, or (card H13f) a function read at every tick, so sources the owner defines in settings are polled from the next tick without a restart. */
@@ -292,6 +294,7 @@ export function sourceLoops(sources: Pick<SourceService, "run">, list: readonly 
     const runs = await sources.run(by, chosen);
     // A source whose saved position is older than what it can still see lost events: told once per gap (the notice id names the source and where the gap began).
     for (const r of runs) if (r.gap !== undefined) await options.tell?.({ id: `event-gap:${r.source}:${r.gap.from}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 120), text: `Events from ${r.source} between ${r.gap.from} and ${r.gap.to} were not watched; it starts again from now.` }).catch(() => undefined);
+    try { await options.ran?.(runs); } catch (error) { options.log?.(`coverage notes for the event sources could not be kept: ${error instanceof Error ? error.message : String(error)}`); }
     const failed = runs.filter((r) => r.error !== undefined);
     if (failed.length > 0) throw new Error(`${failed.length} event source(s) could not be polled: ${failed.slice(0, 3).map((f) => `${f.source}: ${f.error}`).join("; ")}`);
   } }];
@@ -357,6 +360,69 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
         // A notice that could not be sent is offered again next tick: an escalation is told once it has been told, not once it was recorded.
         // One incident whose notice fails does not hold back the others of the project; the first error is raised after all have been tried.
         if (notify !== undefined) for (const e of await incidents.untold(by, projectId)) { try { try { await notify(e); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* the notice was already committed under this id: it is sent */ } await incidents.markNotified(by, e.id); } catch (error) { failure ??= error; } }
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
+}
+
+/**
+ * P04f: what happens to the checks that came due, after they were recorded. Events that arrived wake the responsibilities that named their source (one check per look), then each owed check is taken as a recorded observation or a
+ * bounded task. One project's failure does not skip the others; the first error is raised after all were tried.
+ */
+export function responsibilityRunLoops(work: { readonly events?: { sweep(by: Principal, projectId: string): Promise<unknown> }; readonly runner: { run(by: Principal, projectId: string): Promise<unknown> } }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "responsibilities.run", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) {
+      try { await work.events?.sweep(by, projectId); } catch (error) { failure ??= error; }
+      try { await work.runner.run(by, projectId); } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
+}
+
+/**
+ * P04f: what the event-source poll tells the coverage gaps, for `sourceLoops`' `ran` option. A source whose poll failed opens an `event-source-outage` gap (closed by its next good poll), and a source that lost events (its saved position
+ * was older than what it keeps) is a closed `events-missed` gap over that time, recorded once. One source's failure does not skip the others; the first is raised after all were tried.
+ */
+export function sourceGapHook(gaps: { open(by: Principal, c: { key: string; reason: "event-source-outage"; start: string; detail: string }): Promise<unknown>; close(by: Principal, c: { key: string; end: string }): Promise<unknown>; record(by: Principal, c: { key: string; reason: "events-missed"; start: string; end: string; detail: string }): Promise<unknown> }, by: () => Principal, now: () => string = () => new Date().toISOString()): (runs: readonly SourceRun[]) => Promise<void> {
+  return async (runs) => {
+    const at = now(); const who = by();
+    let failure: unknown;
+    for (const r of runs) {
+      const key = `source:${r.source}`.slice(0, 160);
+      try {
+        const from = r.gap === undefined ? Number.NaN : Date.parse(r.gap.from); const to = r.gap === undefined ? Number.NaN : Date.parse(r.gap.to);
+        if (r.gap !== undefined && Number.isFinite(from) && Number.isFinite(to) && from <= to) await gaps.record(who, { key, reason: "events-missed", start: r.gap.from, end: r.gap.to, detail: `Events from ${r.source} were not watched: its saved position was older than what it keeps.`.slice(0, 300) });
+        if (r.error !== undefined) await gaps.open(who, { key, reason: "event-source-outage", start: at, detail: `Event source ${r.source} could not be polled: ${r.error}`.slice(0, 300) });
+        else await gaps.close(who, { key, end: at });
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  };
+}
+
+/** One health record of a model route, account or endpoint, as far as the coverage gaps need it. */
+export interface ProviderHealthLike { readonly scope: string; readonly name: string; readonly state: "down" | "healthy"; readonly since: string; readonly lastClass: string; readonly restoredAt?: string }
+
+/**
+ * P04f: times when nothing was watching. Each tick the controller says it is running (the first one after a start turns a long absence into a `controller-down` gap) and, when given the health of the model routes, a route that is down
+ * opens a `provider-outage` gap at the time it went down and ends it when it is healthy again. A failure of the health read skips the provider part of that tick only.
+ */
+export function coverageGapLoops(gaps: { heartbeat(by: Principal, options?: { startup?: boolean }): Promise<unknown>; open(by: Principal, command: { key: string; reason: "provider-outage"; start: string; detail: string }): Promise<unknown>; close(by: Principal, command: { key: string; end: string }): Promise<unknown> }, providers?: () => Promise<{ readonly items: readonly ProviderHealthLike[] }>, now: () => string = () => new Date().toISOString()): DispatcherLoop[] {
+  let started = false;
+  return [{ name: "responsibilities.gaps", run: async (by) => {
+    let failure: unknown;
+    try { await gaps.heartbeat(by, started ? {} : { startup: true }); started = true; } catch (error) { failure ??= error; }
+    if (providers !== undefined) {
+      try {
+        for (const h of (await providers()).items) {
+          const key = `provider:${h.scope}:${h.name}`.slice(0, 160);
+          try {
+            if (h.state === "down") await gaps.open(by, { key, reason: "provider-outage", start: h.since, detail: `${h.scope} ${h.name} was unavailable (${h.lastClass}), so no agent could be asked to look through it.`.slice(0, 300) });
+            else await gaps.close(by, { key, end: h.restoredAt ?? now() });
+          } catch (error) { failure ??= error; }
+        }
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;

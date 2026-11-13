@@ -8,6 +8,7 @@ import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
+import { liveAssignments } from "../retirement/gather.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /**
@@ -391,6 +392,10 @@ export class AgentService {
             const o = other.body as unknown as AgentBody;
             if (o.state === "active" && o.supervisorId === id) invalid("agentId", `${other.id} still reports to this agent; move it first`);
           }
+          // Card P06: retirement is refused while the agent still holds live assignments (an unfinished task assigned to it). Release or transfer them first. A look that cannot finish refuses too.
+          const live = await liveAssignments(this.#runner, (owner) => owner.kind === "agent" && (owner.id === id || owner.id === before.principalId));
+          if (!live.complete) invalid("agentId", "the assignments could not all be read, so the agent is not retired on a guess");
+          if (live.items.length > 0) invalid("agentId", `it still holds ${live.items.length} live assignment(s) (${live.items.slice(0, 3).map((b) => b.id).join(", ")}${live.items.length > 3 ? ", ..." : ""}); release or transfer them first`);
           const ref: AggregateRef = { kind: "agent", id };
           const changes: Change[] = [{ type: "update", ref, expectedRevision: current.revision, body: { ...before, state: "retired" } as unknown as JsonObject }];
           const principal = await this.#runner.get("principal", before.principalId);

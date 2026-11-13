@@ -3,6 +3,7 @@ import { createServer as createHttp, type IncomingMessage, type Server, type Ser
 import { createServer as createHttps } from "node:https";
 import { isIP } from "node:net";
 import type { ApplyResult, CallOptions, TurnResult } from "../chat/index.js";
+import { REPLAY_LABELS } from "../activity/replay.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal } from "../security/index.js";
 import { redactText } from "../security/redact.js";
@@ -23,8 +24,8 @@ export interface WebChatBackend {
   discardProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<{ proposalId: string; replayed: boolean }>;
   /** A button on the page (card U08b): the words it stands for and the intents they mean, run through the same chat turn as a typed message (shown first, applied only when the owner says so). */
   decide(token: string, message: { messageId: string; text: string; intents: readonly unknown[] }, options?: CallOptions): Promise<TurnResult>;
-  /** The state API's read operations only; the door sends nothing but the fixed view queries below. */
-  query(token: string, op: string, args: Record<string, unknown>): Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }>;
+  /** The state API's operations the door's fixed routes name, nothing wider: the view queries below, the replay reads, and (card U09b) the owner's recorded look at thinking and the simulation, which carry a `commandId` (the page's Idempotency-Key). */
+  query(token: string, op: string, args: Record<string, unknown>, commandId?: string): Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }>;
 }
 
 export interface WebChatLimits {
@@ -100,11 +101,17 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }, { key: "thinking", op: "thinking.collection.get", args: {} }],
   // The first-run walk-through (card U14d): what is set up, what is open and the next question, from the readiness view (owner only, records only, no secret). Answers are given in the chat, which shows each one first.
   setup: [{ key: "setup", op: "status.ask", args: { request: { kind: "setup" } } }],
+  // Replay (card U09b): the tasks to choose from; one task's replay is read through /web/replay/{taskId}.
+  replay: [{ key: "tasks", op: "task.list", args: { limit: 50 } }],
   recovery: [{ key: "attention", op: "status.attention", args: { limit: 20 } }, { key: "jobs", op: "status.ask", args: { request: { kind: "jobs", limit: 20 } } }, { key: "reconnect", op: "status.ask", args: { request: { kind: "reconnect", limit: 20 } } }],
 };
 export const WEB_VIEWS: readonly string[] = Object.keys(VIEWS);
 
 const MESSAGE_ID = /^[A-Za-z0-9._-]{1,100}$/;
+const TASK_ID = /^task-[a-z2-7]{20}$/;
+const REPLAY_FILTERS = ["lane", "actor", "kind", "since", "until"] as const;
+/** The reason a recorded look at the model's thinking carries when the owner opens it on the web page: fixed, so the page can say nothing else in the owner's name. */
+const WEB_THINKING_REASON = "the owner expanded it on the web replay page";
 const PROPOSAL_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
 /**
@@ -237,6 +244,75 @@ export class WebChatDoor {
     } catch (error) { this.#fail(res, error); }
   }
 
+  /**
+   * The owner's replay of one task on the web page (card U09b): the summary and a window of steps (`GET /web/replay/{task}`, filtered by lane, actor, kind and time), one step in full with its resolved links
+   * (`.../steps/{seq}`), a search (`.../search?q=`), the model's thinking as an explicit recorded look (`POST .../thinking`, an Idempotency-Key) and a simulated rerun (`POST .../simulate`). Every read is the same
+   * state API operation the chat uses; nothing here runs, sends or spends anything, and the simulation is the separate isolated command.
+   */
+  async #replay(req: IncomingMessage, res: ServerResponse, url: URL, method: string, token: string, taskId: string, rest: string[], allowed: (...m: string[]) => void): Promise<void> {
+    const ask = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<unknown> => {
+      const r = await this.#o.backend.query(token, op, args, commandId);
+      if (r.ok) return r.result;
+      throw new HttpError(STATUS[r.error.code as DomainErrorCode] ?? 400, r.error.code, redactText(r.error.message).slice(0, 300));
+    };
+    const whole = (name: string, max: number, min = 1): number | undefined => {
+      const v = url.searchParams.get(name);
+      if (v === null) return undefined;
+      if (!/^\d{1,9}$/.test(v) || Number(v) < min || Number(v) > max) throw new HttpError(400, "invalid_command", `${name} must be a whole number from ${min} to ${max}`);
+      return Number(v);
+    };
+    const key = (): string => {
+      const commandId = req.headers["idempotency-key"];
+      if (typeof commandId !== "string" || !MESSAGE_ID.test(commandId)) throw new HttpError(400, "idempotency_key_required", "this needs an Idempotency-Key header (1 to 100 letters, digits, dots, dashes or underscores), so a retry runs once");
+      return commandId;
+    };
+    const observedAt = new Date(this.#now()).toISOString();
+    if (rest.length === 0) {
+      allowed("GET");
+      const args: Record<string, unknown> = { taskId };
+      const from = whole("from", 1_000_000_000); const limit = whole("limit", 50);
+      if (from !== undefined) args["from"] = from;
+      if (limit !== undefined) args["limit"] = limit;
+      for (const f of REPLAY_FILTERS) { const v = url.searchParams.get(f); if (v !== null) { if (v.length > 80) throw new HttpError(400, "invalid_command", `${f} is too long`); args[f] = v; } }
+      return this.#reply(res, 200, { observedAt, replay: await ask("activity.replay.open", args), labels: REPLAY_LABELS });
+    }
+    if (rest[0] === "steps" && rest.length === 2) {
+      allowed("GET");
+      if (!/^\d{1,9}$/.test(rest[1]!) || Number(rest[1]) < 1) throw new HttpError(404, "not_found", "no such step");
+      const seq = Number(rest[1]);
+      const step = await ask("activity.replay.step", { taskId, seq });
+      const links = await ask("activity.replay.links", { taskId, seq });
+      return this.#reply(res, 200, { observedAt, detail: step, links });
+    }
+    if (rest[0] === "search" && rest.length === 1) {
+      allowed("GET");
+      const q = url.searchParams.get("q");
+      if (q === null || q.length < 1 || q.length > 200) throw new HttpError(400, "invalid_command", "q must be 1 to 200 characters");
+      return this.#reply(res, 200, { observedAt, search: await ask("activity.replay.search", { taskId, query: q, limit: 20 }) });
+    }
+    if (rest[0] === "thinking" && rest.length === 1) {
+      allowed("POST");
+      const commandId = key();
+      const body = await this.#body(req);
+      for (const k of Object.keys(body)) if (k !== "after" && k !== "limit") throw new HttpError(400, "invalid_command", `${k} is not accepted here`);
+      const args: Record<string, unknown> = { taskId, reason: WEB_THINKING_REASON };
+      if (body["after"] !== undefined) args["after"] = body["after"];
+      if (body["limit"] !== undefined) args["limit"] = body["limit"];
+      return this.#reply(res, 200, { observedAt, thinking: await ask("activity.replay.thinking", args, commandId) });
+    }
+    if (rest[0] === "simulate" && rest.length === 1) {
+      allowed("POST");
+      const commandId = key();
+      const body = await this.#body(req);
+      for (const k of Object.keys(body)) if (k !== "from" && k !== "failAt") throw new HttpError(400, "invalid_command", `${k} is not accepted here`);
+      const args: Record<string, unknown> = { taskId };
+      if (body["from"] !== undefined) args["from"] = body["from"];
+      if (body["failAt"] !== undefined) args["failAt"] = body["failAt"];
+      return this.#reply(res, 200, { observedAt, ...(await ask("activity.replay.simulate", args, commandId) as object) });
+    }
+    throw new HttpError(404, "not_found", "no such route");
+  }
+
   async #api(req: IncomingMessage, res: ServerResponse, url: URL, method: string): Promise<void> {
     const parts = url.pathname.split("/").filter(Boolean).slice(1);
     const [a, b, c] = parts;
@@ -323,6 +399,10 @@ export class WebChatDoor {
       if (run === undefined) { run = this.#o.backend.decide(session.token, { messageId: commandId, text, intents: [intent] }, { stillAllowed: this.#stillLive(session) }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }
       const turn = await run;
       return this.#reply(res, turn.replayed ? 200 : 201, { turnId: turn.turnId, replayed: turn.replayed, text, reply: turn.reply, outcomes: turn.outcomes });
+    }
+    if (a === "replay" && b !== undefined) {
+      if (!TASK_ID.test(b)) throw new HttpError(404, "not_found", "no such task");
+      return this.#replay(req, res, url, method, session.token, b, parts.slice(2), allowed);
     }
     if (a === "views" && b !== undefined && c === undefined) {
       allowed("GET");

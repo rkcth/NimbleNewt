@@ -164,6 +164,12 @@ export const APP_JS = String.raw`(function (root) {
         return flushing;
       },
       view: function (name) { return call('GET', '/web/views/' + encodeURIComponent(name)); },
+      /** The replay of one task (card U09b): reads, plus the owner's recorded look at thinking and the simulation, each under its own Idempotency-Key so a retry runs once. */
+      replay: function (taskId, filters) { var q = Object.keys(filters || {}).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(filters[k]); }).join('&'); return call('GET', '/web/replay/' + encodeURIComponent(taskId) + (q ? '?' + q : '')); },
+      replayStep: function (taskId, seq) { return call('GET', '/web/replay/' + encodeURIComponent(taskId) + '/steps/' + encodeURIComponent(String(seq))); },
+      replaySearch: function (taskId, q) { return call('GET', '/web/replay/' + encodeURIComponent(taskId) + '/search?q=' + encodeURIComponent(q)); },
+      replayThinking: function (taskId) { return call('POST', '/web/replay/' + encodeURIComponent(taskId) + '/thinking', {}, { 'idempotency-key': (deps.newId || function () { return randomId(root.crypto); })() }); },
+      replaySimulate: function (taskId, body) { return call('POST', '/web/replay/' + encodeURIComponent(taskId) + '/simulate', body || {}, { 'idempotency-key': (deps.newId || function () { return randomId(root.crypto); })() }); },
       sessions: function () { return call('GET', '/web/sessions'); },
       settings: function () { return call('GET', '/web/settings'); },
       revoke: function (arg) { return call('POST', '/web/sessions/revoke', arg); },
@@ -204,7 +210,7 @@ export const APP_JS = String.raw`(function (root) {
   var $ = function (id) { return doc.getElementById(id); };
   var client = createClient({ fetch: root.fetch.bind(root), outbox: createOutbox(root.localStorage) });
   var tab = 'chat';
-  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery', setup: 'Setup' };
+  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery', replay: 'Replay', setup: 'Setup' };
 
   function el(tag, cls, text) { var e = doc.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -444,7 +450,174 @@ export const APP_JS = String.raw`(function (root) {
       }
     }
   }
-  var PAGES = { approvals: pageApprovals, models: pageModels };
+
+  // ---- the replay page (card U09b): read only, one task at a time -------------------------------------------------------------------
+  // Summary first, then the steps in lanes side by side, one step in full with what it cites, and the model's thinking collapsed behind a button that says it is model output. Every text is an agent's or the
+  // controller's words and is set as text; labels come from the controller (REPLAY_LABELS), so the page invents none. The simulation is its own button and says it changes nothing.
+  var rp = { taskId: null, filters: {} };
+  function ok200(r) { return r && r.status === 200 && r.body; }
+  function failLine(parent, r) { parent.appendChild(el('p', 'error', 'Could not load: ' + clip((r && r.body && r.body.error && r.body.error.message) || (r && r.status) || 'offline', 300))); }
+  function backTo(box, label, run) { var b = el('button', 'btn', label); b.type = 'button'; b.addEventListener('click', run); box.appendChild(b); }
+  function stepWords(s) {
+    return 'Step ' + s.seq + ' - ' + clip(s.kind, 40) + ' - ' + clip(s.actor, 80) + ' - ' + clip(s.outcome === 'not-recorded' ? 'not recorded' : s.outcome, 20) + (s.outcomeNote ? ' (' + clip(s.outcomeNote, 80) + ')' : '') + (s.authority === 'superseded' ? ' - replaced by step ' + list(s.supersededBy, 5).join(', ') : '');
+  }
+  function pageReplay(box, parts) {
+    box.appendChild(el('h2', null, 'Replay'));
+    note(box, 'Step through what happened on one task, as it was recorded. Nothing here runs, sends or changes anything.');
+    if (rp.taskId) { openReplay(box); return; }
+    var tasks = obj(parts.tasks) ? list(parts.tasks.items, 50) : [];
+    var sec = region(box, 'Choose a task');
+    if (failed(box, 'Tasks', parts.tasks)) return;
+    if (!tasks.length) note(sec, 'There are no tasks yet.');
+    tasks.forEach(function (t) {
+      var row = el('div', 'row');
+      row.appendChild(el('span', 'card-line', clip(t.title, 120) + ' (' + clip(t.state, 30) + ')'));
+      var b = el('button', 'btn', 'Replay'); b.type = 'button'; b.setAttribute('aria-label', 'Replay the task ' + clip(t.title, 80));
+      b.addEventListener('click', function () { rp.taskId = t.id; rp.filters = {}; renderView('replay'); });
+      row.appendChild(b); sec.appendChild(row);
+    });
+  }
+  function openReplay(box) {
+    backTo(box, 'Back to the tasks', function () { rp.taskId = null; renderView('replay'); });
+    var body = el('div'); box.appendChild(body); body.appendChild(el('p', 'meta', 'Loading...'));
+    client.replay(rp.taskId, rp.filters).then(function (r) {
+      clear(body);
+      if (!ok200(r)) { failLine(body, r); return; }
+      drawReplay(body, r.body.replay || {}, r.body.labels || {});
+    }, function () { clear(body); note(body, 'Offline. Try again when the connection is back.'); });
+  }
+  function drawReplay(body, v, labels) {
+    var sm = obj(v.summary) || {};
+    var sec = region(body, 'Summary');
+    sec.appendChild(el('div', 'card-line', (isNum(sm.total) ? sm.total : 0) + ' steps; ' + list(sm.lanes, 100).length + ' lines of work; ' + list(sm.unavailable, 1000).length + ' unavailable; ' + (isNum(sm.superseded) ? sm.superseded : 0) + ' replaced; ' + (isNum(sm.corrected) ? sm.corrected : 0) + ' corrected; ' + (isNum(sm.redactedSteps) ? sm.redactedSteps : 0) + ' with hidden content.'));
+    var oc = obj(sm.byOutcome) || {};
+    sec.appendChild(el('div', 'card-line', 'Where steps stood: ' + Object.keys(oc).slice(0, 8).map(function (k) { return clip(k === 'not-recorded' ? 'not recorded' : k, 20) + ' ' + (isNum(oc[k]) ? oc[k] : 0); }).join(', ') + '.'));
+    if (sm.scanLimited && labels.windowed) note(sec, clip(labels.windowed, 300));
+    // Lines of work and agents to follow: each narrows the window; nothing is hidden from the summary.
+    var follow = region(body, 'Follow a line of work or an agent');
+    var chips = el('div', 'chips'); follow.appendChild(chips);
+    function chip(text, aria, f) { var b = el('button', 'chip', text); b.type = 'button'; b.setAttribute('aria-label', aria); b.addEventListener('click', f); chips.appendChild(b); }
+    list(sm.lanes, 20).forEach(function (l) { chip('Line ' + clip(l.lane, 40) + ' (' + l.steps + ')', 'Show only the line ' + clip(l.lane, 40), function () { rp.filters.lane = l.lane; renderView('replay'); }); });
+    list(sm.agents, 20).forEach(function (a) { chip(clip(a.actor, 40) + ' (' + a.steps + ')', 'Show only the steps of ' + clip(a.actor, 40), function () { rp.filters.actor = a.actor; renderView('replay'); }); });
+    chip('Show everything', 'Remove the filters', function () { rp.filters = {}; renderView('replay'); });
+    if (Object.keys(rp.filters).length) note(follow, 'Showing only: ' + Object.keys(rp.filters).map(function (k) { return k + ' ' + clip(rp.filters[k], 40); }).join(', ') + '.');
+    // The lanes side by side. Steps on different lines are concurrent: their numbers are the order they were recorded in.
+    var lanes = Object.create(null); var order = [];
+    list(v.entries, 200).forEach(function (e) {
+      var lane = e.unavailable !== undefined ? 'unavailable' : (e.lane || 'main');
+      if (!lanes[lane]) { lanes[lane] = []; order.push(lane); }
+      lanes[lane].push(e);
+    });
+    var ls = region(body, 'Steps');
+    if (order.length > 1 && labels.concurrent) note(ls, clip(labels.concurrent, 300));
+    var grid = el('div', 'lanes'); ls.appendChild(grid);
+    order.slice(0, 8).forEach(function (lane) {
+      var col = el('div', 'lane'); col.setAttribute('role', 'group'); col.setAttribute('aria-label', 'Line ' + clip(lane, 40));
+      col.appendChild(el('h4', null, 'Line ' + clip(lane, 40) + (lanes[lane][0] && lanes[lane][0].laneNote ? ' (' + clip(lanes[lane][0].laneNote, 40) + ')' : '')));
+      lanes[lane].forEach(function (e) {
+        if (e.unavailable !== undefined) { col.appendChild(el('div', 'card-line', 'Step ' + e.seq + ' is no longer available: ' + clip(e.unavailable, 200))); return; }
+        var b = el('button', 'btn' + (e.authority === 'superseded' ? ' faded' : ''), stepWords(e)); b.type = 'button';
+        b.setAttribute('aria-label', 'Open ' + stepWords(e));
+        b.addEventListener('click', function () { openStep(body, e.seq, labels); });
+        col.appendChild(b);
+        col.appendChild(el('div', 'meta', clip(e.summary, 300)));
+        if (e.authority === 'superseded' && labels.superseded) col.appendChild(el('div', 'meta', clip(labels.superseded, 200)));
+      });
+      grid.appendChild(col);
+    });
+    if (!order.length) note(ls, 'No step in this window matches.');
+    if (isNum(v.next)) { var more = el('button', 'btn', 'Show the next steps (from step ' + v.next + ')'); more.type = 'button'; more.addEventListener('click', function () { rp.filters.from = String(v.next); renderView('replay'); }); ls.appendChild(more); }
+    if (v.note) note(ls, clip(v.note, 300));
+    // A search over the summaries of the steps (stored content is not searched).
+    var ss = region(body, 'Search the steps');
+    var q = el('input'); q.type = 'text'; q.setAttribute('aria-label', 'Words to look for in the steps');
+    var go = el('button', 'btn', 'Search'); go.type = 'button';
+    var found = el('div'); ss.appendChild(q); ss.appendChild(go); ss.appendChild(found);
+    go.addEventListener('click', function () {
+      clear(found);
+      client.replaySearch(rp.taskId, q.value).then(function (r) {
+        if (!ok200(r)) { failLine(found, r); return; }
+        var m = list(r.body.search && r.body.search.matches, 20);
+        if (!m.length) note(found, 'No step matches.');
+        m.forEach(function (e) { found.appendChild(el('div', 'card-line', stepWords(e) + ': ' + clip(e.summary, 200))); });
+      }, function () { note(found, 'Offline. Try again when the connection is back.'); });
+    });
+    drawSimulation(body);
+  }
+  function openStep(body, seq, labels) {
+    var sec = region(body, 'Step ' + seq + ' in full');
+    var loading = el('p', 'meta', 'Loading...'); sec.appendChild(loading);
+    client.replayStep(rp.taskId, seq).then(function (r) {
+      sec.removeChild(loading);
+      if (!ok200(r)) { failLine(sec, r); return; }
+      var d = obj(r.body.detail) || {}; var s = obj(d.step) || {};
+      sec.appendChild(el('div', 'card-line', stepWords(s) + ' - ' + clip(s.at, 40)));
+      sec.appendChild(el('div', 'card-line', clip(s.summary, 400)));
+      if (s.lane && s.lane !== 'main') sec.appendChild(el('div', 'meta', 'Line ' + clip(s.lane, 40) + (s.laneNote ? ' (' + clip(s.laneNote, 40) + ')' : '')));
+      if (s.authority === 'superseded' && labels.superseded) sec.appendChild(el('div', 'meta', clip(labels.superseded, 200)));
+      var vt = obj(s.versionsThen) || {};
+      sec.appendChild(el('div', 'card-line', vt.state === 'recorded' ? 'Context then: ' + (list(vt.refs, 20).map(function (x) { return clip(x.kind, 30) + ' ' + clip(x.id, 60) + (x.version ? ' @' + clip(x.version, 30) : ''); }).join(', ') || 'none listed') : 'Context then: not recorded' + (vt.reason ? ' (' + clip(vt.reason, 200) + ')' : '')));
+      var ex = obj(d.explanations) || {};
+      ['contemporaneous', 'retrospective'].forEach(function (k) {
+        var g = obj(ex[k]) || {};
+        list(g.items, 10).forEach(function (e) { sec.appendChild(el('div', 'card-line', clip(g.label, 120) + ' ' + clip(e.by, 60) + ' chose ' + clip(e.choice, 300) + '. Uncertain: ' + clip(e.uncertainty, 200))); });
+      });
+      // What the step cites, read for you where you may read it: each record's own words, marked when an agent or a reviewer wrote them.
+      var lk = obj(r.body.links) || {};
+      var ls = region(sec, 'What it cites and what led to it');
+      var items = list(lk.items, 30);
+      if (!items.length) note(ls, 'Nothing is linked.');
+      items.forEach(function (i) {
+        var res = obj(i.resolution) || {};
+        var head = clip(i.relation, 20) + ': ' + (i.kind ? clip(i.kind, 30) + ' ' + clip(i.id, 60) : 'step ' + i.seq);
+        if (res.state === 'readable') {
+          ls.appendChild(el('div', 'card-line', head + ' - ' + clip(res.title, 200)));
+          list(res.lines, 8).forEach(function (l) { ls.appendChild(el('div', 'meta', (res.untrusted ? 'Written by an agent or reviewer: ' : '') + clip(l, 400))); });
+        } else ls.appendChild(el('div', 'card-line', head + ' - ' + clip(res.note || (i.note ? i.note : 'a reference'), 200)));
+      });
+      drawThinking(sec, d, labels);
+    }, function () { sec.removeChild(loading); note(sec, 'Offline. Try again when the connection is back.'); });
+  }
+  function drawThinking(sec, d, labels) {
+    var t = region(sec, 'The model\'s thinking');
+    var th = obj(d.thinking);
+    if (th && (th.state === 'removed-by-retention' || th.state === 'unavailable')) { note(t, clip(th.label, 300)); return; }
+    note(t, 'Collapsed. It is model output, not an explanation of any step. Opening it is recorded as a look.');
+    var out = el('div');
+    var b = el('button', 'btn', 'Expand the model\'s thinking'); b.type = 'button'; b.setAttribute('aria-label', 'Expand the model\'s thinking for this task (recorded as a look)');
+    b.addEventListener('click', function () {
+      b.disabled = true; clear(out);
+      client.replayThinking(rp.taskId).then(function (r) {
+        b.disabled = false;
+        if (!ok200(r)) { failLine(out, r); return; }
+        var x = obj(r.body.thinking) || {};
+        note(out, clip(x.label || labels.thinking, 300));
+        list(x.blocks, 20).forEach(function (blk) { out.appendChild(el('div', 'card-line', clip(blk.text !== undefined ? blk.text : '(kept without text)', 700))); });
+        if (x.state === 'stored' && !list(x.blocks, 1).length) note(out, 'Nothing more is kept.');
+      }, function () { b.disabled = false; note(out, 'Offline. Try again when the connection is back.'); });
+    });
+    t.appendChild(b); t.appendChild(out);
+  }
+  function drawSimulation(body) {
+    var sec = region(body, 'Simulate a rerun');
+    note(sec, 'A walk through the recorded steps in an isolated scope. Nothing is run, sent, spent or changed.');
+    var out = el('div');
+    var b = el('button', 'btn', 'Simulate a rerun'); b.type = 'button';
+    b.addEventListener('click', function () {
+      if (!root.confirm('Walk through this task\'s recorded steps as a simulation? Nothing will be run or changed.')) return;
+      b.disabled = true; clear(out);
+      client.replaySimulate(rp.taskId, {}).then(function (r) {
+        b.disabled = false;
+        if (!ok200(r)) { failLine(out, r); return; }
+        var sim = obj(r.body.simulation) || {};
+        note(out, clip(sim.label, 300));
+        list(sim.steps, 200).forEach(function (s) { out.appendChild(el('div', 'card-line', 'Simulated: step ' + s.seq + ' would ' + clip(s.would, 120) + ' (recorded: ' + clip(s.recordedOutcome, 20) + ')')); });
+        if (sim.truncated) note(out, 'Only the first steps were walked.');
+      }, function () { b.disabled = false; note(out, 'Offline. Try again when the connection is back.'); });
+    });
+    sec.appendChild(b); sec.appendChild(out);
+  }
+  var PAGES = { approvals: pageApprovals, models: pageModels, replay: pageReplay };
 
   function renderView(name) {
     var box = $('view');
