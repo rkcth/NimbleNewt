@@ -67,7 +67,7 @@ export interface AttendanceBody {
   /** `prepare` has been called (with the tasks the agent leaves, or an explicit empty list). A join needs it. */
   readonly prepared?: boolean;
   readonly interrupted: readonly InterruptedWork[];
-  /** Card M04h: tasks named in `prepare` that were not paused because their running attempt carries on during the meeting (idle, waiting on background jobs only). Nothing was interrupted, so nothing is resumed for them. */
+  /** Card M04h: tasks named in `prepare` whose work was only background jobs (the attempt waits for them): they are paused like the others (and resumed with them), and their background jobs carry on under the pause. */
   readonly carriedOn?: readonly string[];
   readonly meetingTaskId?: string;
   readonly joinedAt?: string;
@@ -170,7 +170,7 @@ export interface AttendanceOptions extends RunnerOptions {
   readonly notices?: NoticeSink;
   /** Warnings about the no-long-running-work period of a meeting. */
   readonly window?: WindowSink;
-  /** Card M04h: whether the running work on a task carries on during a meeting (the dispatcher's `carriesOnTask`), so `prepare` does not pause it. Absent, or a failure: the task is paused as before. */
+  /** Card M04h: whether the work on a task is only background jobs that carry on during a meeting (the dispatcher's `carriesOnTask`). Information only: `prepare` pauses the task either way and notes it in `carriedOn`. Absent, or a failure: not noted. */
   readonly carriesOn?: (taskId: string) => Promise<boolean>;
 }
 
@@ -214,7 +214,7 @@ export interface ParticipantView {
   readonly leftAt?: string;
   /** The interrupted tasks that have not yet reached a safe boundary, with what the executor reports. */
   readonly waitingOn: readonly { readonly taskId: string; readonly observed: string }[];
-  /** Card M04h: tasks that were not paused because their running attempt carries on during the meeting. */
+  /** Card M04h: paused tasks whose background jobs carry on during the meeting. */
   readonly carriedOn?: readonly string[];
   /** An unavailable participant whose presence matters (everyone is required, or an agenda item names it): the question for the owner. */
   readonly ownerQuestion?: string;
@@ -679,8 +679,9 @@ export class AttendanceService {
       const asg = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as unknown as AssignmentBody | undefined;
       if (asg === undefined || asg.state !== "assigned" || asg.owner?.kind !== "agent" || asg.owner.id !== agentId) invalid("interrupted", `${taskId} is not assigned to ${agent}`);
       const keep = current.body.interrupted.find((x) => x.taskId === taskId);
-      // Card M04h: a task whose running attempt is idle and waits only on background jobs carries on; it is not paused. One already paused for this attendance stays as it is (a pause is never lifted here).
-      if (keep === undefined && await this.#carries(taskId)) { carried.push(taskId); continue; }
+      // Card M04h: a task whose work is only background jobs (its attempt waits for them) is noted as carrying on, asked before this attendance pauses it. It is STILL paused (review fix): the pause is what refuses the
+      // agent's writes while it attends, and under it the background jobs keep running, their results are recorded and their wakes wait for the meeting to end (L01, W11).
+      if (keep === undefined && await this.#carries(taskId)) carried.push(taskId);
       plan.push(keep ?? { taskId, generation: (asg as AssignmentBody).generation, pausedByUs: false });
     }
     const done: InterruptedWork[] = [];
@@ -701,14 +702,16 @@ export class AttendanceService {
         else done.push({ ...item, pausedByUs: false, alreadyPausedBy: [scope] });
       }
     }
+    // Only a task this attendance paused itself is noted: one another pause holds (the owner's, raced in after the question) is not this meeting's to describe.
+    const noted = carried.filter((t) => done.some((d) => d.taskId === t && d.pausedByUs));
     await this.#update(by, "prepare", attId, (b) => ({
       ...b, state: decided.state, bounded: decided.bounded, prepared: true, ...(decided.reason === undefined ? {} : { reason: decided.reason }),
       // A concurrent prepare may have recorded the pause as ours already: that record wins.
       interrupted: [...b.interrupted.filter((x) => !done.some((d) => d.taskId === x.taskId)), ...done.map((d) => b.interrupted.find((x) => x.taskId === d.taskId && x.pauseRequestId !== undefined) ?? d)],
-      ...(carried.length === 0 && b.carriedOn === undefined ? {} : { carriedOn: [...new Set([...(b.carriedOn ?? []).filter((x) => !done.some((d) => d.taskId === x)), ...carried])] }),
-    }), "preparing", carried.length === 0 ? undefined : `carries on during the meeting, not paused: ${carried.join(", ")}`);
+      ...(noted.length === 0 && b.carriedOn === undefined ? {} : { carriedOn: [...new Set([...(b.carriedOn ?? []), ...noted])] }),
+    }), "preparing", noted.length === 0 ? undefined : `paused for the meeting; its background jobs carry on: ${noted.join(", ")}`);
     const after = (await this.#attendance(occurrenceId, agent))!;
-    if (plan[0] !== undefined) await this.#warn("ahead", after.id, agent, occurrenceId, plan[0].taskId);
+    if (tasks[0] !== undefined) await this.#warn("ahead", after.id, agent, occurrenceId, tasks[0]);
     const waitingOn = await this.#waiting(after.body);
     return { state: this.#effective(after.body, waitingOn).state, waitingOn: waitingOn.map((x) => ({ taskId: x.taskId, observed: x.observed })), carriedOn: after.body.carriedOn ?? [] };
   }

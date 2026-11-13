@@ -1690,6 +1690,10 @@ for (const backend of backendsNamed(backendName)) {
     handle.idle = async () => { throw new Error("worker gone"); };
     assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "a failing worker is not idle");
     handle.idle = async () => true;
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), true);
+    // Review fix: a task held by a pause (the owner's) is never reported as carrying on.
+    await c.pauses.pause(c.owner, { commandId: "m04h-own-pz", scope: { kind: "task", id: taskId }, reason: "the owner paused it" });
+    assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, taskId), false, "paused by the owner");
     assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, "tsk-nothing"), false, "another task");
     assert.equal(await d.carriesOnTask(c.dispatcherPrincipal, undefined as never), false);
     hold.resolve();

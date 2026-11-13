@@ -3979,7 +3979,7 @@ Result: `{ startedWith, missing, fullAttendance }`.
 
 #### `meeting.attend.prepare`
 
-Asks an agent to reach a safe boundary before the meeting. A named task whose running attempt is idle and waits only on background jobs is not paused (it carries on; listed in `carriedOn`).
+Asks an agent to reach a safe boundary before the meeting. A named task whose attempt only waits on its background jobs is paused too; its jobs carry on under the pause (listed in `carriedOn`).
 
 Arguments:
 

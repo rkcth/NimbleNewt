@@ -295,40 +295,45 @@ for (const backend of backends) {
     assert.ok(ends.length >= 1 && ends.every((e) => e.key === ends[0]!.key && e.taskId === joined.meetingTaskId), JSON.stringify(c.windows));
   });
 
-  suite("a task whose running attempt carries on is not paused for the meeting; any other task, a failing check and a task already paused are handled as before (card M04h)", async (c) => {
+  suite("a task whose work is only background jobs is noted as carrying on and is STILL paused for the meeting (the pause refuses the agent's writes); a task the owner paused is neither noted nor taken over; a failing check notes nothing (card M04h, review fix)", async (c) => {
     const t1 = await c.task(c.agentA);
     const t2 = await c.task(c.agentA);
+    const t3 = await c.task(c.agentA);
+    // The owner paused t3 before the meeting; a hook that wrongly says it carries on must not make it this meeting's.
+    await c.pauses.pause(c.owner, { commandId: cid("pz"), scope: { kind: "task", id: t3 }, reason: "the owner paused it" });
     const asked: string[] = [];
-    const carrying = new Set<string>([t1]);
-    const att = c.make({ carriesOn: async (t) => { asked.push(t); if (t === "task-broken") throw new Error("down"); return carrying.has(t); } });
+    const carrying = new Set<string>([t1, t3]);
+    const att = c.make({ carriesOn: async (t) => { asked.push(t); return carrying.has(t); } });
     const id = await c.urgent([c.pA, c.pB]);
     await c.room(id);
-    const prepared = await att.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1, t2] });
-    assert.deepEqual(prepared, { state: "preparing", waitingOn: [{ taskId: t2, observed: "pausing" }], carriedOn: [t1] });
-    assert.equal(await c.gateIntent(t1), "none", "the carrying task is not paused");
-    assert.equal(await c.gateIntent(t2), "pause", "the other task is");
+    const prepared = await att.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1, t2, t3] });
+    assert.deepEqual(prepared.carriedOn, [t1]);
+    assert.deepEqual(prepared.waitingOn.map((x) => x.taskId).sort(), [t1, t2, t3].sort(), "the carrying task waits for its boundary like the others");
+    assert.equal(await c.gateIntent(t1), "pause", "the carrying task is paused: nothing it writes goes through while its agent attends");
+    assert.equal(await c.gateIntent(t2), "pause");
     const body = await c.att(id, c.pA);
-    assert.deepEqual([body.carriedOn, body.interrupted.map((x) => x.taskId)], [[t1], [t2]]);
-    assert.ok(body.events.some((e) => e.note?.includes(t1) === true), "the attendance says what carried on");
+    assert.deepEqual(body.carriedOn, [t1]);
+    const mine = (t: string) => body.interrupted.find((x) => x.taskId === t)!;
+    assert.equal(mine(t1).pausedByUs, true, "the meeting's own pause, so the return lifts it");
+    assert.equal(mine(t3).pausedByUs, false, "the owner's pause stays the owner's");
+    assert.ok(body.events.some((e) => e.note?.includes(t1) === true && e.note.includes("paused") && e.note.includes(t3) === false), "the attendance says what carries on");
     assert.deepEqual(state(await c.status(id), c.pA).carriedOn, [t1], "the room status shows it");
-    await c.boundary(t2);
+    for (const t of [t1, t2, t3]) await c.boundary(t);
     const joined = await att.join(c.owner, { commandId: cid("jn"), occurrenceId: id, agent: c.pA });
     assert.ok(joined.joined);
-    assert.equal(await c.gateIntent(t1), "none", "joining does not pause it either");
-    // A repeated prepare is the same: the carrying task is asked again but never paused; the task already paused for this attendance keeps its pause even if it would now carry on.
-    carrying.add(t2);
-    asked.length = 0;
-    const again = await att.prepare(c.owner, { commandId: cid("pr"), occurrenceId: id, agent: c.pA, interrupted: [t1, t2] }).catch((e: unknown) => e);
-    assert.ok(again instanceof DomainError, "an agent already in the meeting is not prepared again");
-    assert.equal(await c.gateIntent(t2), "pause");
-    // Without the hook, or when it fails, nothing carries on.
+    assert.equal(await c.gateIntent(t1), "pause", "joining keeps the pause");
+    await att.leave(c.owner, { commandId: cid("lv"), occurrenceId: id, agent: c.pA });
+    await att.returnToWork(c.owner, { commandId: cid("rt"), occurrenceId: id, agent: c.pA });
+    assert.notEqual(await c.gateIntent(t1), "pause", "the return lifts the meeting's pause of the carrying task");
+    assert.equal(await c.gateIntent(t3), "pause", "and never the owner's");
+    // Without the hook, or when it fails, nothing is noted and the task is paused as before.
     for (const hook of [undefined, async () => { throw new Error("store down"); }]) {
-      const t3 = await c.task(c.agentB);
+      const t4 = await c.task(c.agentB);
       const other = await c.urgent([c.pB]);
       await c.room(other);
-      const r = await c.make(hook === undefined ? {} : { carriesOn: hook }).prepare(c.owner, { commandId: cid("pr"), occurrenceId: other, agent: c.pB, interrupted: [t3] });
+      const r = await c.make(hook === undefined ? {} : { carriesOn: hook }).prepare(c.owner, { commandId: cid("pr"), occurrenceId: other, agent: c.pB, interrupted: [t4] });
       assert.deepEqual(r.carriedOn, []);
-      assert.equal(await c.gateIntent(t3), "pause");
+      assert.equal(await c.gateIntent(t4), "pause");
     }
   });
 

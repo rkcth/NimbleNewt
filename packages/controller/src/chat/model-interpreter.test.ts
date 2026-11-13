@@ -51,6 +51,8 @@ test("the model is told every operation with the argument names the chat accepts
   }
   for (const [kind, k] of Object.entries(STATUS_KINDS)) assert.ok(system.includes(`${kind}(${k.keys.join(", ")})`), `${kind} is a status kind the model is told`);
   assert.match(system, /there are no fixed phrases/);
+  assert.match(system, /meeting\.safeLongRunning/, "the model is told the owner can turn background work in meetings off in chat (card M04h review)");
+  assert.match(system, /meeting\.leadMinutes/);
   assert.match(system, /web\.access\.revoke/, "the model is told how to sign a browser out of the web chat");
   assert.match(system, /status kind web_access/);
   assert.match(system, /never in chat/, "and that a pairing code is not shown in chat");
