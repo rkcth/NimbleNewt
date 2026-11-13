@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { ModelStreamTap } from "../dispatch/model-stream.js";
-import { STREAM_MIN_BATCH_MS } from "./client.js";
+import { RemoteWorkerClient, STREAM_MIN_BATCH_MS } from "./client.js";
 import { PROTOCOL_HEADER, SESSION_HEADER } from "./protocol.js";
 import { DEFAULT_WORKER_TRANSPORT_LIMITS } from "./server.js";
 import { remoteSuite, type Ctx } from "./testing/suite.js";
@@ -43,6 +43,11 @@ for (const backend of backends) {
     assert.equal(rec.events.get(A.attemptId), 5, "five messages recorded");
     for (let i = 0; i < 7; i++) { const before = sa.n; assert.equal(await send(A, sa), 429); sa.n = before; }
     assert.equal(rec.events.get(A.attemptId), 5, "a refused message is not recorded");
+    // Only stream messages are counted: while A's stream messages are refused, its other messages (a heartbeat, a new call opened and ended) still go through, many times over the bound.
+    for (let i = 0; i < 8; i++) assert.equal((await post(A.attemptId, "heartbeat", { placement: A.placement }, `hb-${i}`)).status, 200, `heartbeat ${i + 1}`);
+    const extra = await post(A.attemptId, "stream-start", { placement: A.placement, call: { requestChars: 1 } }, "start-extra");
+    assert.equal(extra.status, 200, JSON.stringify(extra.body));
+    assert.equal((await post(A.attemptId, "stream-end", { placement: A.placement, streamId: (extra.body as { streamId: string }).streamId, ok: true }, "end-extra")).status, 204);
     // Attempt B has its own counter and its own window (it opens a second later): A's flood did not use it up.
     clock.now = T0 + 1_000;
     for (let i = 0; i < 5; i++) assert.equal(await send(B, sb), 200, `B message ${i + 1}`);
@@ -90,6 +95,26 @@ for (const backend of backends) {
       clock2.now += 120_000;
     }
   }, { transport: { limits: { streamEventsPerMinute: Math.ceil((60_000 / GAP) * 1.5) }, clock: () => clock2.now }, streams: (a) => rec2.tap(a) });
+
+  suite("the attempt's pacing line: overlapping callers get successive slots, a slot taken by a call that then failed blocks nothing once its time passes, lines are per attempt, a clock stepped back does not stall the line, and old lines are dropped", async () => {
+    const client = new RemoteWorkerClient({ url: "http://127.0.0.1:9", token: "unused", workerVersion: "test" });
+    const G = STREAM_MIN_BATCH_MS;
+    // Four callers at the same instant wait 0, 1, 2 and 3 gaps; another attempt's line is its own.
+    assert.deepEqual([0, 1, 2, 3].map(() => client.reserveStreamSlot("att-a", G, 1_000)), [0, G, 2 * G, 3 * G]);
+    assert.equal(client.reserveStreamSlot("att-b", G, 1_000), 0, "a second attempt does not queue behind the first");
+    // The caller of the last slot failed and never sent: once that slot's time has passed, the next caller does not wait at all.
+    assert.equal(client.reserveStreamSlot("att-a", G, 1_000 + 4 * G), 0);
+    assert.equal(client.reserveStreamSlot("att-a", G, 1_000 + 100 * G), 0, "a long pause leaves nothing reserved");
+    // The wall clock is stepped back by an hour (a time correction) right after a slot was taken: the next message waits at most one gap, not an hour.
+    const later = 1_000 + 100 * G;
+    client.reserveStreamSlot("att-a", G, later);
+    const wait = client.reserveStreamSlot("att-a", G, later - 3_600_000);
+    assert.ok(wait <= G, `waited ${wait} ms after the clock went back`);
+    assert.equal(client.reserveStreamSlot("att-a", G, later - 3_600_000), G, "the line goes on at the gap from the new time");
+    // A thousand attempts that each sent once and finished: the table keeps at most a few hundred lines, not one per attempt ever seen.
+    for (let i = 0; i < 1_000; i++) client.reserveStreamSlot(`att-old-${i}`, G, 10_000_000 + i * 10 * G);
+    assert.ok(client.streamSlotLines <= 260, `${client.streamSlotLines} lines kept`);
+  });
 
   suite("the default bound covers the most an honest worker sends (four open calls as one line of messages 50 ms apart) and stays below the host's own allowance", async () => {
     const honestPerMinute = Math.ceil(60_000 / STREAM_MIN_BATCH_MS);

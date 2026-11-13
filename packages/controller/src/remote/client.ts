@@ -165,15 +165,24 @@ export class RemoteWorkerClient {
     return (await this.#send("POST", "/worker/session/security", { body: { event: event as unknown as Json }, key, session: true })).body as { itemId: string; held: boolean };
   }
 
-  /** One attempt as the worker sees it, under the placement number it was offered. */
-  /** The next free time for a stream message of an attempt (card L05d finish): the messages of all the calls of one attempt are spaced `gapMs` apart as one line, whichever call sends them. Returns how long the sender must wait from `now`; the slot is taken at once, so callers that overlap get successive slots. */
+  /**
+   * The next free time for a stream message of an attempt (card L05d finish): the messages of all the calls of one attempt are spaced `gapMs` apart as one line, whichever call sends them. Returns how long the sender must wait from `now`; the
+   * slot is taken at once, so callers that overlap get successive slots. A clock that stepped back (`now` is earlier than the time the line was last asked at) restarts the line at `now`: the slot stored before the step would otherwise make
+   * the next message wait for the whole step (an hour for an hour's correction). One message may then follow the one before it sooner than `gapMs`, once.
+   */
   reserveStreamSlot(attemptId: string, gapMs: number, now: number): number {
-    const slot = Math.max(now, this.#streamSlots.get(attemptId) ?? now);
-    this.#streamSlots.set(attemptId, slot + gapMs);
-    if (this.#streamSlots.size > 256) for (const [id, next] of this.#streamSlots) { if (next <= now) this.#streamSlots.delete(id); if (this.#streamSlots.size <= 128) break; }
+    const line = this.#streamSlots.get(attemptId);
+    const slot = line === undefined || now < line.seen ? now : Math.max(now, line.next);
+    this.#streamSlots.set(attemptId, { next: slot + gapMs, seen: now });
+    // Lines whose last slot has passed (or that were taken before a clock step back) are dropped once many are kept, so the table follows the attempts that are streaming now.
+    if (this.#streamSlots.size > 256) for (const [id, v] of this.#streamSlots) { if (v.next <= now || now < v.seen) this.#streamSlots.delete(id); if (this.#streamSlots.size <= 128) break; }
     return slot - now;
   }
-  readonly #streamSlots = new Map<string, number>();
+  readonly #streamSlots = new Map<string, { next: number; seen: number }>();
+  /** @internal How many attempts' pacing lines are kept (tests). */
+  get streamSlotLines(): number { return this.#streamSlots.size; }
+
+  /** One attempt as the worker sees it, under the placement number it was offered. */
 
   attempt(attemptId: string, placement: number, watchdog?: AttemptWatchdog): RemoteAttempt { return new RemoteAttempt(this, attemptId, placement, watchdog); }
 
