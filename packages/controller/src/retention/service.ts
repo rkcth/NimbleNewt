@@ -105,6 +105,9 @@ function transcriptStub(body: Record<string, unknown>, at: string, days: number)
   return { ...keep, text: "", plan: [], outcomes: [], retention: { removedAt: at, rule: "transcript-days", days } } as unknown as JsonObject;
 }
 
+/** What the chat context shows for a turn whose words retention removed. */
+const TRANSCRIPT_REMOVED = "(the words of this turn were removed by retention)";
+
 /** The values of a pass that does only the thinking rules: every optional rule off, no flag on. */
 function onlyThinking(values: RetentionValues): RetentionValues {
   const out: Record<string, unknown> = { ...values };
@@ -537,7 +540,8 @@ export class RetentionService {
       if (!(await scan(this.#runner, "task", (a) => { const b = a.body as { state?: string }; if ((b.state === "done" || b.state === "cancelled") && Date.parse(a.updatedAt) < cutoff) finalTasks.push(a); }))) partial = true;
       if (finalTasks.length > 0) {
         const wanted = new Set(finalTasks.map((t) => t.id));
-        if (!(await scan(this.#runner, DISPATCH_KIND, (a) => { const b = a.body as { taskId?: unknown; attemptId?: unknown }; if (typeof b.taskId === "string" && wanted.has(b.taskId) && typeof b.attemptId === "string") { const set = attemptsOf.get(b.taskId) ?? new Set<string>(); set.add(b.attemptId); attemptsOf.set(b.taskId, set); } }))) partial = true;
+        // An attempt whose record still says it runs (a cancel that has not reached its process yet, a host that has not reported the end) may still be writing its store: it is left for a later run (review fix).
+        if (!(await scan(this.#runner, DISPATCH_KIND, (a) => { const b = a.body as { taskId?: unknown; attemptId?: unknown; state?: unknown }; if (typeof b.taskId === "string" && wanted.has(b.taskId) && typeof b.attemptId === "string" && b.state !== "running") { const set = attemptsOf.get(b.taskId) ?? new Set<string>(); set.add(b.attemptId); attemptsOf.set(b.taskId, set); } }))) partial = true;
       }
       for (const t of finalTasks) {
         if (candidates.length >= limit) { partial = true; break; }
@@ -666,6 +670,8 @@ export class RetentionService {
         }
       }
     }
+    // The automatic thinking-only pass that removed nothing (every candidate still pending: a host that does not answer, a running attempt) leaves no run record, so a store that cannot be reached does not add one every hour (review fix).
+    if (auto && options.thinkingOnly === true && removedIds.length === 0) return { ...base, dryRun: false, removed: 0 };
     // The record of the run: what was removed (IDs only, never content), kept in the same shape the owner reads.
     const runId = derivedId("rtr", options.commandId !== undefined ? scopedCommandId(by.id, options.commandId) : `${by.id}\0run\0${now}\0${digest}`);
     const stamp = this.#runner.now();
@@ -740,6 +746,8 @@ export class RetentionService {
             ? { type: "update", ref, expectedRevision: fresh.revision, body: { projectId: fb.projectId, taskId: fb.taskId, agent: fb.agent, next: fb.next, blocks: [], dropped: Number(fb.dropped ?? 0) + (Array.isArray(fb.blocks) ? fb.blocks.length : 0), marks: [], removedAt: this.#runner.now(), updatedAt: this.#runner.now() } as unknown as JsonObject }
             : { type: "delete", ref, expectedRevision: fresh.revision }];
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
+          // The chat's conversation context keeps a line of each recent turn (the start of the owner's words and the answer) per project: that copy goes with the turn's words, in the same command (review fix).
+          if (c.kind === "chat-turn") { const ctx = await this.#contextWithout(fresh.body as { ownerId?: unknown }, c.id); if (ctx !== undefined) changes.push(ctx); }
           return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
@@ -748,6 +756,22 @@ export class RetentionService {
       if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "not_found")) return false;
       throw error;
     }
+  }
+
+  /** The chat context of the turn's owner with the lines of that turn replaced by a removal note (`undefined` when it holds none). */
+  async #contextWithout(turn: { ownerId?: unknown }, turnId: string): Promise<Change | undefined> {
+    if (typeof turn.ownerId !== "string") return undefined;
+    const ref = { kind: "chat-context", id: `ctx:${turn.ownerId}` };
+    const cur = await this.#runner.get(ref.kind, ref.id);
+    const body = cur?.body as { projects?: Record<string, { turns?: { turnId?: unknown; summary?: unknown }[] }> } | undefined;
+    if (cur === undefined || body?.projects === undefined || typeof body.projects !== "object") return undefined;
+    let changed = false;
+    const projects: Record<string, unknown> = {};
+    for (const [pid, p] of Object.entries(body.projects)) {
+      const turns = Array.isArray(p?.turns) ? p.turns.map((t) => { if (t?.turnId !== turnId || t.summary === TRANSCRIPT_REMOVED) return t; changed = true; return { ...t, summary: TRANSCRIPT_REMOVED }; }) : p?.turns;
+      projects[pid] = p === null || typeof p !== "object" ? p : { ...p, ...(turns === undefined ? {} : { turns }) };
+    }
+    return changed ? { type: "update", ref, expectedRevision: cur.revision, body: { ...(cur.body as object), projects } as unknown as JsonObject } : undefined;
   }
 
   /** Card K06c: removes the model's stored thinking from the conversation stores of a finished task's attempts, and records which were cleaned. Returns whether anything was cleaned now. */

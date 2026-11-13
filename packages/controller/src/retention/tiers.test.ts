@@ -101,6 +101,8 @@ for (const backend of backends) {
       await put("decision", "dec-1", { projectId: project, source: { turnId: "ct-decided" } }, 90);
       await put("agenda-item", "agi-1", { projectId: project, source: { kind: "chat-turn", id: "ct-agenda" } }, 90);
       await put("chat-proposal", "prop-1", { status: "open", turnId: "ct-proposal" }, 90);
+      // The chat's conversation context keeps the start of each recent turn's words per project (review: that copy must go with the turn's words).
+      await put("chat-context", `ctx:${owner.id}`, { focusProjectId: project, projects: { [project]: { touchedAt: new Date(real - 3 * DAY).toISOString(), turns: [{ turnId: "ct-old", at: new Date(real - 90 * DAY).toISOString(), summary: "the words of ct-old -> done" }, { turnId: "ct-young", at: new Date(real - 3 * DAY).toISOString(), summary: "the words of ct-young -> done" }] } } }, 3);
       const svc = (v: object) => RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => ({ ...off, ...v }) }, now: () => real } as never, options);
       assert.equal((await svc({}).run(owner, {})).candidates.length, 0, "off by default");
       const preview = await svc({ transcriptDays: 60 }).run(owner, {});
@@ -112,6 +114,9 @@ for (const backend of backends) {
       assert.equal(stub["text"], ""); assert.deepEqual(stub["plan"], []); assert.deepEqual(stub["outcomes"], []);
       assert.equal(stub["messageId"], "msg-ct-old"); assert.equal(stub["status"], "done");
       assert.equal(stub["retention"].rule, "transcript-days");
+      const ctx = JSON.stringify((await storage.getAggregate({ kind: "chat-context", id: `ctx:${owner.id}` }))!.body);
+      assert.ok(!ctx.includes("the words of ct-old") && ctx.includes("removed by retention"), "the context's copy of the words is gone too");
+      assert.ok(ctx.includes("the words of ct-young"), "a young turn's line stays");
       for (const id of ["ct-young", "ct-decided", "ct-agenda", "ct-proposal", "ct-held"]) assert.equal(((await storage.getAggregate({ kind: "chat-turn", id }))!.body as { text: string }).text, `the words of ${id}`, id);
       assert.equal((await svc({ transcriptDays: 60 }).run(owner, {})).candidates.length, 0, "a stub is not a candidate again");
       // Audit and decisions are never touched by this tier.

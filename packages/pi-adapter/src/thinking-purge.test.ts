@@ -123,3 +123,83 @@ test("a link in place of a store file is not followed, and a link in place of th
   symlinkSync(dir, link);
   await assert.rejects(removeStoredThinking(link), /plain folder/);
 });
+
+// ---- review (2026-11-13): the store must still open in Pi, and nothing but the thinking may change ------------------------------
+
+async function storeWithThinking(): Promise<{ dir: string; world: ReturnType<typeof rig> }> {
+  const dir = tmp();
+  const world = rig("anthropic-messages");
+  const one = await open(world, dir);
+  world.reply(fauxAssistantMessage([SIGNED, fauxText("kept answer")]));
+  await (await one.root().submit(input("r1", "question one"))).result();
+  await one.close();
+  return { dir, world };
+}
+
+test("an unfinished last write (no line end) is not turned into a complete line: Pi still opens the store and the conversation goes on", async () => {
+  const { dir, world } = await storeWithThinking();
+  // What a crash in the middle of an append leaves: part of a line with no line end. Pi cuts it off when it opens the store; a complete line that is not JSON would make the store unopenable.
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(join(dir, "main.jsonl"), '{"format":1,"type":"commit","seq":99,"writ');
+  const r = await removeStoredThinking(dir);
+  assert.equal(r.blocks, 1);
+  assert.ok(readFileSync(join(dir, "main.jsonl"), "utf8").endsWith('"seq":99,"writ'), "the unfinished tail is left exactly as it was, with no line end added");
+  const two = await open(world, dir);
+  assert.deepEqual(await two.root().thinking(), []);
+  world.reply("still here");
+  await (await two.root().submit(input("r2", "go on"))).result();
+});
+
+test("an unfinished last write that mentions thinking is left out (as Pi's own opening does), and lines without thinking are copied byte for byte (CRLF, any bytes)", async () => {
+  const dir = tmp();
+  const other = Buffer.concat([Buffer.from('{"role":"user","content":"caf'), Buffer.from([0xc3, 0xa9]), Buffer.from('"}\r\n')]);
+  const think = Buffer.from('{"role":"assistant","content":[{"type":"thinking","thinking":"T","thinkingSignature":"S"},{"type":"text","text":"A"}],"usage":{"input":7,"output":9}}\r\n');
+  const torn = Buffer.from('{"role":"assistant","content":[{"type":"thinking","thinking":"half');
+  writeFileSync(join(dir, "doc-3.jsonl"), Buffer.concat([other, think, other, torn]));
+  const r = await removeStoredThinking(dir);
+  assert.equal(r.blocks, 1);
+  const out = readFileSync(join(dir, "doc-3.jsonl"));
+  const expected = Buffer.concat([other, Buffer.from('{"role":"assistant","content":[{"type":"text","text":"A"}],"usage":{"input":7,"output":9}}\r\n'), other]);
+  assert.deepEqual(out, expected, "the answer, the token counts and the line endings stay; the thinking and the unfinished tail go");
+});
+
+test("a file that changes between its read and its replacement is left as it is (nothing is lost), and the next try cleans it", async () => {
+  const { dir } = await storeWithThinking();
+  const { appendFileSync } = await import("node:fs");
+  const added = '{"note":"written by someone else meanwhile"}\n';
+  await assert.rejects(removeStoredThinking(dir, { afterRead: async (name) => { if (name === "main.jsonl") appendFileSync(join(dir, name), added); } }), /changed while/);
+  const text1 = readFileSync(join(dir, "main.jsonl"), "utf8");
+  assert.ok(text1.endsWith(added) && text1.includes("SIGNATURE-ONLY"), "the late write is kept and the original was not replaced");
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".purge") || f.endsWith(".lock")), [], "no temporary or lock file is left");
+  // A replacement of the same size (a different file put in its place) is noticed too.
+  await assert.rejects(removeStoredThinking(dir, { afterRead: async (name) => { if (name === "main.jsonl") { const t = readFileSync(join(dir, name)); rmSync(join(dir, name)); writeFileSync(join(dir, name), t); } } }), /changed while/);
+  const r = await removeStoredThinking(dir);
+  assert.equal(r.blocks, 1);
+  assert.ok(readFileSync(join(dir, "main.jsonl"), "utf8").endsWith(added));
+});
+
+test("two removals never work on one store at once; a lock left by a crash is taken over once it is old", async () => {
+  const { dir } = await storeWithThinking();
+  const { utimesSync } = await import("node:fs");
+  let inner: Promise<unknown> | undefined;
+  await removeStoredThinking(dir, { afterRead: async () => { inner ??= removeStoredThinking(dir).then(() => "ran", (e: Error) => e.message); await inner; } });
+  assert.match(String(await inner), /another removal/);
+  writeFileSync(join(dir, ".thinking-purge.lock"), "");
+  const before = snapshot(dir);
+  await assert.rejects(removeStoredThinking(dir), /another removal/);
+  assert.deepEqual(snapshot(dir), before);
+  const old = new Date(Date.now() - 60 * 60_000);
+  utimesSync(join(dir, ".thinking-purge.lock"), old, old);
+  await removeStoredThinking(dir);
+  assert.ok(!readdirSync(dir).includes(".thinking-purge.lock"));
+});
+
+test("the rewritten file keeps its mode, and a leftover of Pi's own sidecar shortening (which may hold thinking) is removed", { skip: process.platform === "win32" ? "file modes are POSIX" : false }, async () => {
+  const { dir } = await storeWithThinking();
+  const { chmodSync, statSync } = await import("node:fs");
+  chmodSync(join(dir, "main.jsonl"), 0o640);
+  writeFileSync(join(dir, "doc-0.jsonl.reclaim"), '{"role":"assistant","content":[{"type":"thinking","thinking":"LEFT"}]}\n');
+  await removeStoredThinking(dir);
+  assert.equal(statSync(join(dir, "main.jsonl")).mode & 0o777, 0o640);
+  assert.ok(!readdirSync(dir).includes("doc-0.jsonl.reclaim"));
+});

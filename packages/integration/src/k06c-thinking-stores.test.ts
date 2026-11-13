@@ -84,5 +84,5 @@ test("a task done long enough has the thinking removed from its real conversatio
       const next = await (await adapter.root().submit({ kind: "input", requestId: requestId("r-next"), content: "and the delivery?" })).result();
       assert.equal(next.status, "completed");
     } finally { await adapter.close(); }
-  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

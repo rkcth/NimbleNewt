@@ -197,3 +197,49 @@ test("several places combine strictly: purged where any purged it, none only whe
   const single = place({});
   assert.equal(combineThinkingStores(undefined, single), single);
 });
+
+// Review (2026-11-13): an attempt whose record still says it runs is never cleaned (its process may still be writing the store), and an automatic pass that could clean nothing leaves no run record every hour.
+for (const backend of backends) {
+  test(`${backend.name}: a finished task's attempt that is still recorded as running is left alone until it ends, and an hourly thinking pass that cleans nothing records nothing (review, card K06c)`, async () => {
+    const world = await backend.open();
+    try {
+      const storage: ControllerStorage = world.storage;
+      const real = Date.now();
+      const options = { clock: () => new Date(real - 40 * DAY).toISOString(), pause: async () => undefined };
+      const projects = await ProjectService.open(storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(storage, epoch, options);
+      const owner: Principal = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "A" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "cancelled while its attempt ran" })).id;
+      await projects.transitionTask({ commandId: cid("mv"), actor: owner.id, taskId: task, expectedRevision: 1, to: "cancelled" });
+      const write = async (type: "create" | "update", id: string, body: object, expectedRevision?: number): Promise<void> => {
+        await storage.applyOperation({ operationId: cid("put"), epoch, actor: "test", correlationId: "put", at: new Date(real - 40 * DAY).toISOString(), changes: [{ type, ref: { kind: "dispatch", id }, body: body as never, ...(expectedRevision === undefined ? {} : { expectedRevision }) }], audit: [{ type: "test.put", subject: { kind: "dispatch", id }, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      };
+      await write("create", "dsp-run", { taskId: task, attemptId: "att-run", state: "running" });
+      const runs = async (): Promise<number> => (await storage.listAggregates("retention-run", { limit: 100 })).length;
+      const f = fakePort();
+      const svc = RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => on }, now: () => real, thinkingStores: f.port } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      assert.deepEqual((await svc.run(owner, {})).candidates.filter((c) => c.kind === "pi-thinking"), [], "a store still being written is not a candidate");
+      assert.equal(await svc.sweep(owner), undefined);
+      assert.deepEqual(f.asked, [], "the running attempt's store is never asked for");
+      // Once the attempt has ended the store is cleaned.
+      await write("update", "dsp-run", { taskId: task, attemptId: "att-run", state: "finished" }, 1);
+      const ran = await svc.run(owner, {});
+      await svc.run(owner, { dryRun: false, confirm: ran.digest! });
+      assert.deepEqual(f.asked, [["att-run"]]);
+
+      // A host that never answers: the hourly pass tries again each time and writes no run record while nothing is cleaned.
+      const task2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "its host is gone" })).id;
+      await projects.transitionTask({ commandId: cid("mv"), actor: owner.id, taskId: task2, expectedRevision: 1, to: "cancelled" });
+      await write("create", "dsp-gone", { taskId: task2, attemptId: "att-gone", state: "finished" });
+      const stuck = fakePort({ "att-gone": "pending" });
+      const clock = { at: real };
+      const hourly = RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => on }, now: () => clock.at, autoEveryMs: 1000, thinkingStores: stuck.port } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      const before = await runs();
+      for (let i = 0; i < 3; i++) { await hourly.sweep(owner); clock.at += 2000; }
+      assert.equal(stuck.asked.length, 3, "it is tried again every time");
+      assert.equal(await runs(), before, "and nothing is recorded while nothing is cleaned");
+    } finally { await world.close(); }
+  });
+}
