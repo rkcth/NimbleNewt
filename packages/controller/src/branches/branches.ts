@@ -125,18 +125,36 @@ const normal = (s: SourceRef): SourceRef => (s.kind === "desk-record" ? { kind: 
  *   available after, exactly. `switch` suspends one branch and restores another in one step.
  * - **Delegation.** A child task receives `delegate`d links only (with digests), resolved with the child's own rights; it never receives the parent's history range, the branch's scope or a copy.
  */
+/** What happened to a branch (card U09b), told to the host so the task's activity record shows the side line of work: begun, set aside, brought back, its return redirected, or finished. */
+export interface BranchChange {
+  readonly branchId: string; readonly taskId: string; readonly projectId: string; readonly what: "opened" | "suspended" | "restored" | "redirected" | "returned"; readonly by: string;
+  /** Names this change, so telling it twice (a repeated command) records one step. */
+  readonly key: string;
+}
+export interface BranchDeps {
+  readonly histories: HistoryService; readonly retrieval: RetrievalService;
+  /** Best effort and repeatable: a failure never changes what the branch did. */
+  readonly onChange?: (change: BranchChange) => Promise<void>;
+}
 export class ContextBranchService {
   readonly #runner: CommandRunner;
   readonly #histories: HistoryService;
   readonly #retrieval: RetrievalService;
+  readonly #onChange: BranchDeps["onChange"];
 
-  private constructor(runner: CommandRunner, deps: { histories: HistoryService; retrieval: RetrievalService }) {
+  private constructor(runner: CommandRunner, deps: BranchDeps) {
     this.#runner = runner;
     this.#histories = deps.histories;
     this.#retrieval = deps.retrieval;
+    this.#onChange = deps.onChange;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, deps: { histories: HistoryService; retrieval: RetrievalService }, options: RunnerOptions = {}): ContextBranchService {
+  async #told(change: BranchChange): Promise<void> {
+    if (this.#onChange === undefined) return;
+    try { await this.#onChange(change); } catch { /* the record of a step never changes what happened */ }
+  }
+
+  static withEpoch(storage: ControllerStorage, epoch: number, deps: BranchDeps, options: RunnerOptions = {}): ContextBranchService {
     return new ContextBranchService(new CommandRunner(storage, epoch, options), deps);
   }
 
@@ -179,6 +197,7 @@ export class ContextBranchService {
       },
     }));
     const stored = (await this.#runner.get("context-branch", result.id))!.body as unknown as BranchBody;
+    await this.#told({ branchId: result.id, taskId, projectId: task.projectId, what: "opened", by: principal.id, key: scopedCommandId(principal.id, command.commandId) });
     return { id: result.id, scopeId: stored.scopeId, throughSeq: stored.parent.throughSeq, replayed: result.replayed };
   }
 
@@ -309,6 +328,10 @@ export class ContextBranchService {
         return { ref: { kind: "context-branch", id: from.id }, creates: false, changes, detail: { suspended: from.id, restored: to.id } };
       },
     }));
+    const key = scopedCommandId(principal.id, command.commandId);
+    const fb = from.body as unknown as BranchBody; const tb = to.body as unknown as BranchBody;
+    await this.#told({ branchId: from.id, taskId: fb.taskId, projectId: fb.projectId, what: "suspended", by: principal.id, key: `${key}:from` });
+    await this.#told({ branchId: to.id, taskId: tb.taskId, projectId: tb.projectId, what: "restored", by: principal.id, key: `${key}:to` });
   }
 
   /** Changes where the work returns to, on purpose. Nothing else changes it. */
@@ -461,6 +484,9 @@ export class ContextBranchService {
         return this.#change(found.id, current.revision, await step(body, principal.id), {});
       },
     }));
+    const what = type === "branch.suspend" ? "suspended" : type === "branch.restore" ? "restored" : type === "branch.redirect" ? "redirected" : type === "branch.resume" ? "returned" : undefined;
+    const b = found.body as unknown as BranchBody;
+    if (what !== undefined) await this.#told({ branchId: found.id, taskId: b.taskId, projectId: b.projectId, what, by: principal.id, key: scopedCommandId(principal.id, command.commandId) });
   }
 
   async #suspended(body: BranchBody, by: string, reason: string): Promise<BranchBody> {

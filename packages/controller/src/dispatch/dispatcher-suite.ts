@@ -2690,7 +2690,7 @@ for (const backend of backendsNamed(backendName)) {
   test(`${backend.name}: the route and harness an attempt started under and each tool call's outcome are put in the task's activity, and a failing record changes nothing`, async () => {
     const store = await backend.open();
     try {
-      const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[] }[] = [];
+      const steps: { commandId: string; taskId: string; kind: string; summary: string; refs: readonly { kind: string; id: string }[]; outcome?: string; finishes?: { kind: string; id: string } }[] = [];
       let failing = false;
       const c = await buildWorld(store.storage);
       const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
@@ -2709,6 +2709,10 @@ for (const backend of backendsNamed(backendName)) {
       assert.match(steps[0]!.summary, /localp\/small/);
       assert.match(steps[2]!.summary, /read-file confirmed/);
       assert.equal(steps[2]!.refs[0]!.kind, "tool-operation");
+      // Card U09b: where each step stands is the controller's own knowledge: the route and harness it chose and a call that came back are confirmed, and the call's step names the operation it finishes.
+      assert.deepEqual(steps.map((x) => x.outcome), ["confirmed", "confirmed", "confirmed"]);
+      assert.deepEqual(steps[2]!.finishes, steps[2]!.refs[0]);
+      assert.equal(steps[0]!.finishes, undefined);
       assert.match(steps[2]!.commandId, new RegExp(`^dpa-act:${attemptId}:call:[0-9a-f]{24}:confirmed$`));
       assert.equal(outcome, "confirmed");
       // A record that fails does not change the call.
@@ -2718,6 +2722,31 @@ for (const backend of backendsNamed(backendName)) {
       await c.dispatcher.tick(); await c.dispatcher.idle();
       assert.equal(outcome, "confirmed", "the call still succeeded");
       assert.equal((await c.dispatcher.get(c.owner, second.attemptId!))?.state, "finished");
+    } finally { await store.close(); }
+  });
+}
+
+// Card U09b: a failed call is an answer that came back (the step's words say it failed) and names the operation its step finishes (the table of states is tested in dispatcher-outcome.test.ts).
+for (const backend of backendsNamed(backendName)) {
+  test(`${backend.name}: a call that failed is recorded with the outcome the controller knows and names the operation it finishes (card U09b)`, async () => {
+    const store = await backend.open();
+    try {
+      const steps: { kind: string; summary: string; refs: readonly { kind: string; id: string }[]; outcome?: string; finishes?: { kind: string; id: string } }[] = [];
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["write-file"]));
+      await c.task("Edit", ann);
+      await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });
+      c.worker.script = async ({ gateway }) => {
+        await gateway.call({ callId: "f1", tool: { name: "write-file", version: "2.1.0" }, args: { path: "a.txt" } }, { kind: "local", run: async () => { throw new Error("disk full"); } });
+        return { status: "completed", text: "ok" };
+      };
+      c.dispatcher = c.restart({ activity: async (s) => { steps.push(s); } });
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      const call = steps.filter((x) => x.kind === "tool-call");
+      assert.equal(call.length, 1);
+      assert.match(call[0]!.summary, /write-file failed/);
+      assert.equal(call[0]!.outcome, "confirmed", "the answer is known, and the words say it was a failure");
+      assert.deepEqual(call[0]!.finishes, call[0]!.refs[0]);
     } finally { await store.close(); }
   });
 }

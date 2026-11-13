@@ -57,6 +57,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Letting the controller take the next recovery step by itself when nobody answers (autoStep, autoStepMinutes) is set through the same operation, so it is shown first too (card V02c).
   "recovery.ladder.set": { verb: "Change which recovery actions may be taken on a stuck agent at each level, and whether the controller takes the next one by itself after a time with no answer (autoStep true or false; autoStepMinutes, the wait in minutes, null for the default)", mode: "propose" },
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
+  // A rerun of a replay (card U09b) changes nothing: it is a walk through the recorded steps in an isolated scope, so it applies at once. Saying a step was wrong (replaces true) changes how every later replay shows it, so it is first shown.
+  "activity.replay.simulate": { verb: "Rerun a task's replay as a simulation (nothing is run, sent or changed; failAt injects a provider failure at a step)", mode: "apply" },
+  "activity.correct": { verb: "Correct a step of a task's activity; replaces true says the step was wrong, so the replay shows it as replaced", mode: "propose" },
   "thinking.collection.set": { verb: "Turn collecting the model's thinking off or on (enabled true or false); what was kept stays until retention removes it", mode: "apply" },
   "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
   "replay.limits.enable": { verb: "Bound how much of a task's record one replay reads", mode: "apply" },

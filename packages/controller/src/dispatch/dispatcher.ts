@@ -201,7 +201,11 @@ export interface DispatcherDeps {
    * Puts a step in the task's activity record (card C09d): the model route and harness an attempt started under and every tool call's outcome, each with a reference to the record that holds the detail.
    * Best effort: a step that cannot be recorded never stops the attempt or changes a call's result.
    */
-  readonly activity?: (step: { commandId: string; taskId: string; kind: "model-selected" | "harness-selected" | "tool-call"; summary: string; refs: readonly { kind: string; id: string }[] }) => Promise<void>;
+  readonly activity?: (step: { commandId: string; taskId: string; kind: "model-selected" | "harness-selected" | "tool-call"; summary: string; refs: readonly { kind: string; id: string }[];
+    /** Where the step stands (card U09b): `confirmed` when the controller knows the answer (a tool call that came back, even with a failure, which the summary says), `dispatched` when it was sent and has not answered, `proposed` when it was asked for and not carried out (refused, waiting for approval), `uncertain` when it may or may not have happened. */
+    outcome: "proposed" | "dispatched" | "confirmed" | "uncertain";
+    /** The record this step finishes: an earlier step of the same writer that cited it and still stands as proposed, dispatched or uncertain is marked replaced by this one. */
+    finishes?: { kind: string; id: string } }) => Promise<void>;
   /** `settleFromController` (optional) closes the owner's notice that a resume is held once the check is done or cancelled (card L04c). */
   readonly notifications?: Pick<NotificationService, "emitFromController"> & Partial<Pick<NotificationService, "settleFromController">>;
   /**
@@ -431,6 +435,9 @@ export type DoneVerdict =
   | { readonly state: "unknown"; readonly failures: readonly string[]; readonly exhausted: boolean; readonly message: string; readonly summary: string };
 /** An evidence item the agent names in work.end (card W05): the item as the contract says it, and the file of the checkout that holds it. */
 export interface DoneEvidence { readonly item: string; readonly path: string }
+
+/** What a tool call's state means for a replay (card U09b): the answer is known (`confirmed`, also for a failure or a cancel, which the step's words say), still running, asked for but not carried out, or unknown. */
+export const toolOutcome = (state: string): "proposed" | "dispatched" | "confirmed" | "uncertain" => state === "confirmed" || state === "failed" || state === "cancelled" ? "confirmed" : state === "uncertain" ? "uncertain" : state === "in-progress" ? "dispatched" : "proposed";
 
 export class DispatcherService {
   readonly #runner: CommandRunner;
@@ -779,16 +786,16 @@ export class DispatcherService {
     if (typeof attemptId !== "string" || !ATTEMPT.test(attemptId)) invalid("attemptId", "is not an attempt ID");
     return {
       attemptId,
-      call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${createHash("sha256").update(request.callId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }]); return result; },
+      call: async (request, executor) => { const result = await this.#path.call(attemptId, request, executor); await this.#stepOf(attemptId, `call:${createHash("sha256").update(request.callId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool ${request.tool.name} ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: result.operationId }], toolOutcome(result.state), { kind: "tool-operation", id: result.operationId }); return result; },
       begin: async (request) => {
         const started = await this.#path.begin(attemptId, request);
         // A call decided at once (refused, waiting for approval, already settled) is a step now; one that will run is recorded when it is reported.
-        if (!started.run) await this.#stepOf(attemptId, `op:${createHash("sha256").update(started.operationId).digest("hex").slice(0, 24)}:${started.result.state}`, "tool-call", `Tool ${request.tool.name} ${started.result.state}${"reason" in started.result ? `: ${started.result.reason}` : ""}.`, [{ kind: "tool-operation", id: started.operationId }]);
+        if (!started.run) await this.#stepOf(attemptId, `op:${createHash("sha256").update(started.operationId).digest("hex").slice(0, 24)}:${started.result.state}`, "tool-call", `Tool ${request.tool.name} ${started.result.state}${"reason" in started.result ? `: ${started.result.reason}` : ""}.`, [{ kind: "tool-operation", id: started.operationId }], toolOutcome(started.result.state), { kind: "tool-operation", id: started.operationId });
         return started;
       },
       report: async (operationId, outcome) => {
         const result = await this.#path.report(attemptId, operationId, outcome);
-        await this.#stepOf(attemptId, `op:${createHash("sha256").update(operationId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool call ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: operationId }]);
+        await this.#stepOf(attemptId, `op:${createHash("sha256").update(operationId).digest("hex").slice(0, 24)}:${result.state}`, "tool-call", `Tool call ${result.state}${"reason" in result ? `: ${result.reason}` : ""}.`, [{ kind: "tool-operation", id: operationId }], toolOutcome(result.state), { kind: "tool-operation", id: operationId });
         return result;
       },
       usage: (usage, requestKey) => this.#usage(attemptId, usage, requestKey),
@@ -812,11 +819,11 @@ export class DispatcherService {
   }
 
   /** Records a step of an attempt in its task's activity (best effort, see `DispatcherDeps.activity`). */
-  async #stepOf(attemptId: string, key: string, kind: "model-selected" | "harness-selected" | "tool-call", summary: string, refs: readonly { kind: string; id: string }[]): Promise<void> {
+  async #stepOf(attemptId: string, key: string, kind: "model-selected" | "harness-selected" | "tool-call", summary: string, refs: readonly { kind: string; id: string }[], outcome: "proposed" | "dispatched" | "confirmed" | "uncertain" = "confirmed", finishes?: { kind: string; id: string }): Promise<void> {
     if (this.#deps.activity === undefined) return;
     try {
       const taskId = (await this.#load(attemptId))?.body.taskId;
-      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: clipText(redactText(summary), ACTIVITY_LIMITS.summary), refs });
+      if (taskId !== undefined) await this.#deps.activity({ commandId: `dpa-act:${attemptId}:${key}`.slice(0, 120), taskId, kind, summary: clipText(redactText(summary), ACTIVITY_LIMITS.summary), refs, outcome, ...(finishes === undefined ? {} : { finishes }) });
     } catch { /* the record of a step never changes what happened */ }
   }
 

@@ -98,7 +98,7 @@ export interface ToolExecutionDeps {
    * Card C09h: records a write the agent made through the bridge (a desk record, a change of its task, a tool it registered) as a `tool-call` step of the task's activity. Best effort: a failure never changes
    * the answer. Keyed by the attempt and call, so asking again records once. Artifacts and messages are recorded by their own services, and catalogue runs by the dispatcher's tool path; reads are not steps.
    */
-  readonly activity?: (step: { readonly commandId: string; readonly taskId: string; readonly kind: "tool-call"; readonly summary: string; readonly refs: readonly { readonly kind: string; readonly id: string }[] }) => Promise<unknown>;
+  readonly activity?: (step: { readonly commandId: string; readonly taskId: string; readonly kind: "tool-call"; readonly summary: string; readonly refs: readonly { readonly kind: string; readonly id: string }[]; /** Where the step stands (card U09b): a write that was made is `confirmed`; a job that was started is `dispatched`; a request that waits for someone is `proposed`. */ readonly outcome?: "proposed" | "dispatched" | "confirmed" | "uncertain" }) => Promise<unknown>;
   /**
    * What happens to a catalogue tool call already running when its version is revoked (card T02b): `finish` (the default when nothing is wired: the run ends on the bytes it started with; new runs are refused either way),
    * `cancel` (the run's signal is aborted and the call ends as failed) or `pause` (each running call is aborted and its task paused, see `pauseTask`). Read, only when calls are running, at the moment of revocation so a setting change applies at once; if it cannot be read, or answers anything else, the run is cancelled (a revocation is a safety act).
@@ -526,7 +526,7 @@ export class ToolExecutionService {
     if (!this.#silent.has(c.attemptId)) {
       this.#silent.add(c.attemptId);
       while (this.#silent.size > 256) this.#silent.delete(this.#silent.values().next().value as string);
-      try { await this.#deps.activity?.({ commandId: `brq:${createHash("sha256").update(c.attemptId).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", summary: `The worker of ${c.agent.id} on ${c.hostId} has made tool calls but never reported a model stream for this attempt: its calls cannot be checked against what the model wrote.`, refs: [{ kind: "task", id: c.taskId }] }); } catch { /* telling never changes the answer */ }
+      try { await this.#deps.activity?.({ commandId: `brq:${createHash("sha256").update(c.attemptId).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", summary: `The worker of ${c.agent.id} on ${c.hostId} has made tool calls but never reported a model stream for this attempt: its calls cannot be checked against what the model wrote.`, refs: [{ kind: "task", id: c.taskId }], outcome: "uncertain" }); } catch { /* telling never changes the answer */ }
     }
     return mode.requireStream === true ? { refusal: refusal("generation_refused", `this attempt's worker on ${c.hostId} never reported a model stream, so call ${request.callId.slice(0, 60)} cannot be checked; the owner requires a stream from remote workers`) } : {};
   }
@@ -693,7 +693,9 @@ export class ToolExecutionService {
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
-    try { await this.#deps.activity({ commandId: `brs:${createHash("sha256").update(`${c.attemptId}|${c.callId}`).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", ...step }); } catch { /* the record of a step never changes what happened */ }
+    // A job that was started is running, not finished; a maintenance request waits for the owner; every other write has been made.
+    const outcome = op === "job.start" ? "dispatched" : op === "maintenance.request" ? "proposed" : "confirmed";
+    try { await this.#deps.activity({ commandId: `brs:${createHash("sha256").update(`${c.attemptId}|${c.callId}`).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", ...step, outcome }); } catch { /* the record of a step never changes what happened */ }
   }
 
   /**

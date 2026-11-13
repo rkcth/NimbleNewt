@@ -562,7 +562,7 @@ export interface StatusDeps {
   /** The steps of a task's activity record (card C09h). Absent: the view is not offered. */
   readonly activity?: Pick<ActivityService, "steps" | "explanations"> & Partial<Pick<ActivityService, "timeline">>;
   /** Step-through replay of a task's activity (card U09). Read only. Absent: the view is not offered. */
-  readonly replay?: Pick<ReplayService, "open" | "step" | "led"> & Partial<Pick<ReplayService, "thinking">>;
+  readonly replay?: Pick<ReplayService, "open" | "step" | "led"> & Partial<Pick<ReplayService, "thinking" | "links">>;
   /** The reviews only the owner can decide (card U11b). Absent: they are not listed. */
   readonly reviews?: { ownerPending(owner: Principal, limit?: number): Promise<readonly { id: string; taskId: string; projectId: string; name: string; requestedAt: string }[]> };
   /** Questions agents have put to the owner (card U12e). Absent: none are listed. */
@@ -1928,6 +1928,13 @@ export class StatusService {
         for (const e of d.explanations.contemporaneous.items) lines.push(line(`${REPLAY_LABELS.contemporaneous} ${shown(e.by)} chose ${quoted(e.choice)}. Uncertain: ${quoted(e.uncertainty)}`, task));
         for (const e of d.explanations.retrospective.items) lines.push(line(`${REPLAY_LABELS.retrospective} ${quoted(e.choice, 400)}`, task));
         lines.push(line(led.grounded ? `Led to this step (links, not reasons): ${listed(led.links.map((l) => (l.seq !== undefined ? `step ${l.seq} (${l.relation})` : l.kind !== undefined ? `${ref(l.kind, l.id, l.version)} (${l.relation})` : `${l.relation}: ${quoted(l.note ?? "")}`)), "; ")}.` : led.note, task));
+        // Card U09b: what the step cites, read for this reader where they may read it (a message, a diff, a comment, an approval), each quoted as what it is. Five lines at most; the web page and activity.replay.links give them all.
+        if (replay.links !== undefined) {
+          const got = await replay.links(by, taskId, request.seq);
+          const readable = got.items.filter((i) => i.resolution.state === "readable");
+          for (const i of readable.slice(0, 5)) { const r = i.resolution; if (r.state === "readable") lines.push(line(`${r.untrusted ? "Written by an agent or reviewer: " : ""}${quoted(r.title, 200)}${r.lines.length === 0 ? "" : ` - ${quoted(r.lines.join(" / "), 400)}`}`, task)); }
+          if (readable.length > 5) lines.push(line(`${readable.length - 5} more linked record${readable.length - 5 === 1 ? " is" : "s are"} readable through activity.replay.links.`, task));
+        }
         if (d.thinking !== undefined) lines.push(line(d.thinking.state === "removed-by-retention" || d.thinking.state === "unavailable" ? d.thinking.label : "The model's thinking is kept collapsed; ask to expand it. It is model output, not an explanation.", task));
         return { observedAt: this.#runner.now(), lines };
       }

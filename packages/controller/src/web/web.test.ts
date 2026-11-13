@@ -372,7 +372,7 @@ test("the views read status, blockers, cost and recovery; an unknown view is ref
   const w = await world();
   try {
     const s = await w.signIn();
-    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "setup", "recovery"]);
+    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "setup", "replay", "recovery"]);
     for (const name of s.reply.body.views as string[]) {
       const r = await w.call("GET", `/web/views/${name}`, { cookie: s.cookie });
       assert.equal(r.status, 200, `${name}: ${r.text}`);
