@@ -24,13 +24,37 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
   const d = mkdtempSync(join(tmpdir(), "nn-replay-finish-"));
   const built: { recordThinking: (order: never, blocks: never) => Promise<void>; recordCompaction: (order: never, note: never) => Promise<void> }[] = [];
   const say: { [text: string]: unknown[] } = {};
+  // Counting stand-ins for every model the composed controller can call: the chat interpreter, the resume reviewer, the report questioner and the coordinator. A replay must reach none of them.
+  const modelCalls: string[] = [];
+  const interpreter = new ScriptedInterpreter((input) => say[input.text] ?? []);
+  const countingModel = { complete: async (route: string): Promise<string> => { modelCalls.push(`complete:${route}`); throw new Error("no model is reachable in this test"); }, completeDetailed: async (route: string): Promise<never> => { modelCalls.push(`detailed:${route}`); throw new Error("no model is reachable in this test"); } };
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) }, webChat: { host: "127.0.0.1", network: "loopback", assets: ASSETS },
+    resumeReview: { model: countingModel, routes: ["stand-in-a"] }, reportInterrogation: { model: countingModel, routes: ["stand-in-b"] },
+    chat: { interpreter, coordinator: { model: { respond: async (route: string) => { modelCalls.push(`coordinator:${route}`); throw new Error("no model is reachable in this test"); } }, token: async () => undefined, routes: () => ["stand-in-c"] } }, webChat: { host: "127.0.0.1", network: "loopback", assets: ASSETS },
     dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => 8192, build: async (services) => { built.push(services as never); return { hostId: "host:w1" } as unknown as WorkerHost; } } },
   });
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    // Every write is an operation in the store, so the operations table of a consistent copy is the write log: which operations exist, with the audit types, deliveries, effects and timers each one carried.
+    const readTable = async (table: "operations" | "deliveries" | "effects" | "timers" | "state" | "audit"): Promise<Record<string, string | number | null>[]> => {
+      const snap = await c.storage.snapshot();
+      try {
+        const rows: Record<string, string | number | null>[] = [];
+        for (let after: Record<string, string | number | null> | undefined; ; ) { const page = await snap.read(table, { ...(after === undefined ? {} : { after }), limit: 500 }); rows.push(...page); if (page.length < 500) break; after = page[page.length - 1]; }
+        return rows;
+      } finally { await snap.close(); }
+    };
+    // The audit counter in the state row moves with every record, so only the delivery counter is part of the outbox.
+    const outbox = async (): Promise<string> => JSON.stringify({ rows: await readTable("deliveries"), deliverySeq: (await readTable("state"))[0]!["delivery_seq"] });
+    const operationIds = async (): Promise<string[]> => (await readTable("operations")).map((o) => String(o["operation_id"]));
+    /** What operations were written after `known`, with the audit types and the effects that name them. */
+    const writtenSince = async (known: readonly string[]) => {
+      const fresh = (await operationIds()).filter((id) => !known.includes(id));
+      const audit = await readTable("audit"); const effects = await readTable("effects");
+      return { ids: fresh, audit: audit.filter((a) => fresh.includes(String(a["operation_id"]))).map((a) => String(a["type"])), effects: effects.filter((e) => fresh.includes(String(e["operation_id"]))).length };
+    };
+    const watched = async () => ({ outbox: await outbox(), ops: await operationIds(), models: modelCalls.length, interpreted: interpreter.calls.length });
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const owner = await c.services.principals.authenticate(boot.token);
     const call = async (token: string, op: string, args: { [k: string]: unknown }, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
@@ -129,6 +153,7 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal(list.status, 200, list.text);
     assert.ok(list.body.parts.tasks.items.some((t: { id: string }) => t.id === task), "the page offers the task");
     const audit0 = (await auditAll()).length;
+    const quiet0 = await watched();
     const effects0 = (await c.storage.listAggregates("effect", { limit: 100 })).length;
     const web = await http("GET", `/web/replay/${task}?limit=50`, sess);
     assert.equal(web.status, 200, web.text);
@@ -151,6 +176,12 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal((await http("GET", `/web/replay/${task}/search`, sess)).status, 400);
     assert.equal((await auditAll()).length, audit0, "reading the replay wrote nothing, not even an audit entry");
     assert.equal((await c.storage.listAggregates("effect", { limit: 100 })).length, effects0);
+    // The outbox, the write log and every model stand-in are as they were before the reads: nothing queued, nothing written, nothing asked of a model or a route.
+    const quiet1 = await watched();
+    assert.equal(quiet1.outbox, quiet0.outbox, "the delivery table is byte for byte unchanged by the replay reads");
+    assert.deepEqual(quiet1.ops, quiet0.ops, "a replay read wrote an operation");
+    assert.equal(quiet1.models, quiet0.models, `a replay read called a model: ${modelCalls.join(",")}`);
+    assert.equal(quiet1.interpreted, quiet0.interpreted, "no replay read went through the chat interpreter");
 
     // ---- the thinking: collapsed until asked, a recorded look, model output; no key, no CSRF, no extra fields ----
     assert.equal((await http("POST", `/web/replay/${task}/thinking`, { cookie: sess.cookie, body: {}, key: "k1" })).status, 403, "no CSRF header");
@@ -162,12 +193,22 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.match(look.body.thinking.label, /Model output/);
     assert.equal(look.body.thinking.blocks[0].text, "the cache looks stale; check the probe first");
     assert.equal((await http("POST", `/web/replay/${task}/thinking`, { ...sess, body: {}, key: "k2" })).status, 200, "a retry under the same key is answered, not a second look");
+    {
+      const look1 = await watched();
+      assert.equal(look1.outbox, quiet0.outbox, "the thinking look queued no delivery");
+      assert.equal(look1.models, quiet0.models, "the thinking look called no model");
+      assert.equal(look1.interpreted, quiet0.interpreted);
+      const written = await writtenSince(quiet0.ops);
+      assert.equal(written.ids.length, 1, `the look is one write, its own record: ${JSON.stringify(written)}`);
+      assert.equal(written.effects, 0, "the look opened no effect");
+    }
     assert.equal((await call(ann, "activity.replay.thinking", { taskId: task, reason: "peek" }, "pk")).error?.code, "not_found", "an agent never reads it");
 
     // ---- a rerun is refused in the replay and runs only as the separate, isolated simulation ----
     assert.equal((await call(boot.token, "activity.replay.rerun", { taskId: task }, "rr1")).error?.code, "forbidden");
     assert.equal((await call(ann, "activity.replay.simulate", { taskId: task }, "sm0")).error?.code, "forbidden");
     const audit1 = (await auditAll()).length;
+    const beforeSim = await watched();
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { cookie: sess.cookie, body: {}, key: "sim-x" })).status, 403, "no CSRF header");
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { cookie: sess.cookie, csrf: `${sess.csrf}x`, body: {}, key: "sim-x" })).status, 403, "a wrong CSRF header");
     assert.equal((await http("POST", `/web/replay/${task}/thinking`, { cookie: sess.cookie, csrf: "not-the-token", body: {}, key: "k-x" })).status, 403, "a wrong CSRF header");
@@ -175,12 +216,23 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: {}, key: "bad key!" })).status, 400, "an Idempotency-Key that is not a plain name");
     assert.equal((await http("GET", `/web/replay/${task}/simulate`, sess)).status, 405);
     assert.equal((await auditAll()).length, audit1, "nothing refused was written");
+    assert.deepEqual(await operationIds(), beforeSim.ops, "nothing refused wrote anything");
     const sim = await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: { failAt: 5 }, key: "sim-1" });
     assert.equal(sim.status, 200, sim.text);
     assert.match(sim.body.simulation.label, /^Simulated\. Nothing was run, sent, spent or changed/);
     assert.deepEqual(sim.body.simulation.steps.map((s: { simulatedOutcome: string }) => s.simulatedOutcome), ["as-recorded", "as-recorded", "as-recorded", "as-recorded", "failed-injected", "not-reached", "not-reached", "not-reached"]);
     assert.equal((await auditAll()).length, audit1 + 1, "one record: the simulation's own");
     assert.equal((await c.storage.listAggregates("effect", { limit: 100 })).length, effects0, "no effect in the ledger");
+    {
+      const afterSim = await watched();
+      assert.equal(afterSim.outbox, beforeSim.outbox, "the simulation queued no delivery");
+      assert.equal(afterSim.models, beforeSim.models, "the simulation called no model or route");
+      assert.equal(afterSim.interpreted, beforeSim.interpreted);
+      const written = await writtenSince(beforeSim.ops);
+      assert.equal(written.ids.length, 1, `exactly one write, the simulation's own record: ${JSON.stringify(written)}`);
+      assert.equal(written.audit.length, 1, JSON.stringify(written));
+      assert.equal(written.effects, 0, "the simulation opened no effect");
+    }
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: { failAt: 5 }, key: "sim-1" })).body.replayed, true);
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: { tools: ["x"] }, key: "sim-2" })).status, 400);
     // By chat: free words, applied at once (it changes nothing), the interpreter prompt names it.
@@ -191,7 +243,7 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
 
     // ---- the thinking after retention: only the notice; the timeline and the audit records of the work are unchanged ----
     const before = JSON.stringify({ open: (await call(boot.token, "activity.replay.open", { taskId: task, limit: 50 })).result.entries, timeline: (await call(boot.token, "activity.timeline", { projectId: project })).result.steps });
-    const auditBefore = (await auditAll()).filter((a) => a.type !== "retention.expire").length;
+    const auditBefore = await auditAll();
     for (const to of ["in_progress", "done"]) await c.services.projects.transitionTask({ commandId: `end-${to}`, actor: owner.id, taskId: task, expectedRevision: (await c.services.projects.getTask(task))!.revision, to: to as never });
     const future = Date.now() + 30 * DAY;
     const retention = RetentionService.withEpoch(c.storage, c.epoch, { settings: { effective: async () => ({ ...RETENTION_DEFAULTS, reserveBytes: 0 }) }, now: () => future } as never, { clock: () => new Date(future).toISOString() });
@@ -207,7 +259,10 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     const after = JSON.stringify({ open: (await call(boot.token, "activity.replay.open", { taskId: task, limit: 50 })).result.entries, timeline: (await call(boot.token, "activity.timeline", { projectId: project })).result.steps });
     // Only the task's own end is new in the timeline's data; the steps and their wording are the same, and the audit holds nothing but what was added (the task's two moves, the simulation, the looks, the retention run).
     assert.equal(after, before);
-    assert.ok((await auditAll()).filter((a) => a.type !== "retention.expire").length >= auditBefore);
+    // Every earlier audit record is the same, by sequence number and content, after the retention run (and the task's two moves, which come after them).
+    const auditAfter = await auditAll();
+    for (const old of auditBefore) assert.deepEqual(auditAfter.find((a) => a.seq === old.seq), old, `audit record ${old.seq} (${old.type}) changed`);
+    assert.equal(modelCalls.length, 0, `no model or route was called anywhere in the story: ${modelCalls.join(",")}`);
     assert.ok((await auditAll()).some((a) => a.type === "retention.expire"), "the deletion itself is on the audit record");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });
