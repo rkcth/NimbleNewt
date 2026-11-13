@@ -6845,12 +6845,32 @@
       ],
       "deliverable": "StateApi operations for lifecycle intent and observed execution state, checkpoints, decision records, deliverables, tool activity, message references, the project overview and event subscriptions (agent-apis 9-17; README 167-171)",
       "acceptance_and_verification": "Every listed object is readable, and writable where a command exists, with revision and provenance; the overview distinguishes paused assignee, unreachable worker, stale artifact and uncertain tool result with observation time and filters by project, task, agent, state and time under project and payload restrictions; long-running commands report accepted, queued, running, completed, blocked, failed or outcome-unknown; subscription cursors survive restart; the generated contract document stays current",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ab24bfff",
+          "65aa1bf2",
+          "ff1936ea",
+          "0fa127a4",
+          "50b779c3",
+          "a2e83ec6",
+          "54b9cf79",
+          "c441bdc9",
+          "132fac69",
+          "e4901e3d"
+        ],
+        "ci_runs": [
+          "43500570685"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "State API reads with revision and provenance for lifecycle, checkpoints, decisions, deliverables (task artifacts), tool activity and message references; status.attention lists paused assignees, unreachable workers, stale artifacts and uncertain tool results with observation time, filtered by project, task, agent, state and time under the neighbouring rights; command.state follows task.assign and task.transfer through accepted, queued, running, completed, blocked, failed and outcome_unknown, and jobs and stops carry the same words; event subscription cursors survive a restart; api.test keeps api-v1.md current. Q01 (listed blocker, not flipped) does not hold this card: its acceptance service and deliverable.record reads exist, and exposing its review states is Q01's work. Limits: other commands report completed when accepted; record lists without a per-task index are scan-bounded and say partial; attention scan cursors do not survive a restart (event subscription cursors do); a project-level hold of an event stream is not consulted; no live worker, host or model was run."
+      }
     },
     {
       "id": "U14",
