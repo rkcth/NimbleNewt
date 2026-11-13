@@ -70,13 +70,16 @@ export function stagedSubmit(deps: {
   readonly submissions: Pick<SubmissionService, "record">;
   /** The effective principal of the attempt's agent (`agent:<id>`), or undefined when it cannot act. */
   readonly principalOf: (agentId: string) => Promise<Principal | undefined>;
+  /** How many refresh rounds (card H12p) the task's author has made; carried on the submission as `refreshRound`. Absent: 0, as before. */
+  readonly refreshRounds?: (attempt: EndingAttempt) => Promise<number>;
 }): NonNullable<WorkEndDeps["submit"]> {
   return async (attempt, base, key) => {
     const by = await deps.principalOf(attempt.agentId);
     if (by === undefined) throw new DomainError("forbidden", `${attempt.agentId} cannot act, so its work cannot be submitted`);
     const staged = await deps.stage(attempt);
     if (staged.base !== base) throw new DomainError("checkout_changed", `the staged work is based on ${staged.base}, not on ${base} that was checked; it was not submitted`);
-    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId });
+    const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
+    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound });
     return { submissionId: made.id };
   };
 }

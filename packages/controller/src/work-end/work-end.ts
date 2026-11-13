@@ -43,7 +43,7 @@ export interface Landed {
 /** A submit the base of which is stale where the changed files overlap. The agent can refresh (H12p) and submit again, or end plainly. */
 export class SubmitRefused extends DomainError {
   constructor(readonly head: string, readonly overlapping: readonly string[]) {
-    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${overlapping.slice(0, 10).join(", ")}${overlapping.length > 10 ? ", ..." : ""}); refresh and submit again, or end without submitting`);
+    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${overlapping.slice(0, 10).join(", ")}${overlapping.length > 10 ? ", ..." : ""}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
     this.name = "SubmitRefused";
   }
 }
