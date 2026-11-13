@@ -243,3 +243,47 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 }
+
+// Card K06c / K06d: the owner's status tells what the thinking rule has done, counts only.
+for (const backend of backends) {
+  test(`${backend.name}: retention.status tells the thinking rule, the kept and removed copies and what a real run cleaned, counts only, and only to the owner (card K06d)`, async () => {
+    const world = await backend.open();
+    try {
+      const storage: ControllerStorage = world.storage;
+      const real = Date.now();
+      const options = { clock: () => new Date(real - 40 * DAY).toISOString(), pause: async () => undefined };
+      const projects = await ProjectService.open(storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(storage, epoch, options);
+      const owner: Principal = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "A" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "dropped" })).id;
+      await projects.transitionTask({ commandId: cid("mv"), actor: owner.id, taskId: task, expectedRevision: 1, to: "cancelled" });
+      const put = async (kind: string, id: string, body: object): Promise<void> => {
+        await storage.applyOperation({ operationId: cid("put"), epoch, actor: "test", correlationId: "put", at: new Date(real - 40 * DAY).toISOString(), changes: [{ type: "create", ref: { kind, id }, body: body as never }], audit: [{ type: "test.put", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      };
+      await put("dispatch", "dsp-a1", { taskId: task, attemptId: "att-1", state: "finished" });
+      await put("dispatch", "dsp-a2", { taskId: task, attemptId: "att-2", state: "finished" });
+      await put("thinking-record", "th-keep", { projectId: project, taskId: "other", agent: "a", next: 1, blocks: [{ seq: 0, text: "SECRET-THINKING-TEXT" }], dropped: 0, marks: [], updatedAt: new Date(real).toISOString() });
+      await put("thinking-record", "th-gone", { projectId: project, taskId: "gone", agent: "a", next: 0, blocks: [], dropped: 2, marks: [], removedAt: new Date(real).toISOString(), updatedAt: new Date(real).toISOString() });
+      const f = fakePort({ "att-2": "none" });
+      const make = (port: ThinkingStorePort | undefined) => RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => ({ ...on, thinkingDays: 14 }) }, now: () => real, ...(port === undefined ? {} : { thinkingStores: port }) } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      const svc = make(f.port);
+      const before = (await svc.status(owner)).thinking as Record<string, unknown>;
+      assert.deepEqual(before, { days: 14, auto: true, storesReached: true, copiesKept: 1, copiesRemoved: 1, tasksCleaned: 0, storesCleaned: 0, storesWithout: 0, blocksRemoved: 0 });
+      const preview = await svc.run(owner, {});
+      await svc.run(owner, { dryRun: false, confirm: preview.digest! });
+      const after = (await svc.status(owner)).thinking as Record<string, unknown>;
+      assert.equal(after["tasksCleaned"], 1); assert.equal(after["storesCleaned"], 1); assert.equal(after["storesWithout"], 1);
+      assert.ok(!JSON.stringify(await svc.status(owner)).includes("SECRET-THINKING-TEXT"), "counts only");
+      assert.equal(((await make(undefined).status(owner)).thinking as Record<string, unknown>)["storesReached"], false);
+      const agent = await principals.authenticate((await (async () => { await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "ann", grants: [] } as never); return principals.issueCredential(owner, "agent:ann"); })()).token);
+      await assert.rejects(svc.status(agent), /may not read the retention status/);
+      // A project reader, a chat client, a host and the service are refused as well: the thinking figures are the owner's only.
+      await principals.enroll(owner, { commandId: cid("e2"), kind: "agent", name: "reader", grants: [{ action: "project.read", project }, { action: "task.read", project }] } as never);
+      const reader = await principals.authenticate((await principals.issueCredential(owner, "agent:reader")).token);
+      await assert.rejects(svc.status(reader), (e: unknown) => (e as { code?: string }).code === "forbidden");
+      for (const kind of ["client", "host", "service"] as const) await assert.rejects(svc.status({ ...owner, id: `${kind}:x`, kind, grants: [] } as unknown as Principal), (e: unknown) => (e as { code?: string }).code === "forbidden");
+    } finally { await world.close(); }
+  });
+}

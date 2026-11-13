@@ -1855,6 +1855,26 @@ for (const backend of backends) {
     assert.equal(await refused.ask(c.owner, { kind: "retention" }), undefined);
     // The request takes no arguments.
     await refuses("invalid_command", () => status.ask(c.owner, { kind: "retention", limit: 3 } as never));
+    // Stored model thinking (card K06c): the rule, that backups are not changed, the counts, and a count cut short said at the end of the line it covers.
+    answer = { thinking: { days: 21, auto: false, storesReached: true, copiesKept: 3, copiesRemoved: 1, tasksCleaned: 2, storesCleaned: 4, storesWithout: 2, blocksRemoved: 9, partial: true } };
+    const think = (await status.ask(c.owner, { kind: "retention" }))!.lines;
+    cited(think);
+    const thinkText = said(think);
+    assert.match(thinkText, /Stored model thinking is removed 21 days after its task is done, only when you run retention \(the automatic removal is off\); the chat keeps none/);
+    assert.match(thinkText, /Backups are not changed: thinking inside a backup stays until that backup is deleted, and restoring one brings its thinking back/);
+    assert.match(thinkText, /3 task copies of thinking are kept and 1 was removed; the model's own conversation stores were cleaned for 4 attempt\(s\) \(9 block\(s\) removed\) and 2 had none \(counting was cut short, so these figures are low\)\./);
+    answer = { thinking: { days: 14, auto: true, storesReached: false, copiesKept: 1, copiesRemoved: 0 } };
+    const unreached = said((await status.ask(c.owner, { kind: "retention" }))!.lines);
+    assert.match(unreached, /removed 14 days after its task is done, by itself;/);
+    assert.match(unreached, /1 task copy of thinking is kept and 0 were removed; the model's own conversation stores are not reached on this installation\./);
+    assert.ok(!/cut short/.test(unreached), "a whole count is not called low");
+    // A damaged block reads as no figures, never as text from storage.
+    answer = { thinking: { days: hostile, auto: "yes", copiesKept: hostile, copiesRemoved: -2, storesReached: true, storesCleaned: Number.NaN } };
+    const damagedThink = (await status.ask(c.owner, { kind: "retention" }))!.lines;
+    cited(damagedThink);
+    assert.ok(!said(damagedThink).includes("IGNORE"), "storage text is never repeated");
+    assert.match(said(damagedThink), /removed some days after its task is done, only when you run retention/);
+    assert.equal(await status.ask(reader, { kind: "retention" }), undefined, "the thinking figures are the owner's only");
   });
 
   suite("past revocations are told to the owner only: each with which version, who, when and why, a line for the ones not shown, and a closing line when the catalogue was larger than one look covers (card T02c)", async (c) => {
