@@ -28,8 +28,9 @@ export function jobCommandState(state: JobState): CommandState {
 }
 
 /**
- * A suspension or stop request. `done` with something left unresolved (an effect of unknown outcome, a child still running) is `outcome_unknown`, never `completed`; `recovery-required` waits for a person, so it is
- * `blocked`; a request the owner cancelled is `failed`.
+ * A suspension or stop request. A request that ended with something left unresolved (an effect of unknown outcome, a child still running) is `outcome_unknown`, never `completed`: the stop service records that ending as
+ * `recovery-required` with the unresolved items in its outcome (a `done` never has any, but one would read the same). ASSUMPTION (card U13 review): `recovery-required` with nothing listed, and `blocked`, wait for a
+ * person's decision, so they are `blocked`; a request the owner cancelled is `failed`.
  */
 export function stopCommandState(phase: StopPhase, unresolved: number): CommandState {
   switch (phase) {
@@ -37,7 +38,7 @@ export function stopCommandState(phase: StopPhase, unresolved: number): CommandS
     case "prepared": return "running";
     case "terminating": return "running";
     case "blocked": return "blocked";
-    case "recovery-required": return "blocked";
+    case "recovery-required": return unresolved > 0 ? "outcome_unknown" : "blocked";
     case "done": return unresolved > 0 ? "outcome_unknown" : "completed";
     case "cancelled": return "failed";
     default: return "outcome_unknown";

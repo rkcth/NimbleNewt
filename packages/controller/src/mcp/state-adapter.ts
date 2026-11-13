@@ -87,7 +87,7 @@ export class McpStateAdapter {
   }
 
   #toolResult(r: ApiResponse): object {
-    if (r.ok) return { content: [{ type: "text", text: JSON.stringify(r.result) }], structuredContent: r.result, isError: false, ...(r.accepted === true ? { _meta: { accepted: true, completed: r.completed === true, ...(r.awaits === undefined ? {} : { awaits: r.awaits }) } } : {}) };
+    if (r.ok) return { content: [{ type: "text", text: JSON.stringify(r.result) }], structuredContent: r.result, isError: false, ...(r.accepted === true ? { _meta: { accepted: true, completed: r.completed === true, ...(r.state === undefined ? {} : { state: r.state }), ...(r.awaits === undefined ? {} : { awaits: r.awaits }) } } : {}) };
     return { content: [{ type: "text", text: JSON.stringify({ code: r.error.code, message: r.error.message, ...(r.error.field === undefined ? {} : { field: r.error.field }) }) }], isError: true };
   }
 

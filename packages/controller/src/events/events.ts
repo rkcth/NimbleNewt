@@ -79,7 +79,7 @@ export type PublishResult = { accepted: true; seq: number; suppressed: boolean; 
 /** Carries a publish that was answered without being applied out of the command's build. */
 class Rejected extends Error { constructor(readonly result: PublishResult) { super("rejected"); } }
 
-export const EVENT_LIMITS = { queue: 1000, chain: 20, batch: 200, kinds: 20, cooldown: 3600, gaps: 50, scan: 2000, idleDefault: 900, idleMin: 10, idleMax: 604_800, sweep: 100 } as const;
+export const EVENT_LIMITS = { queue: 1000, chain: 20, batch: 200, kinds: 20, cooldown: 3600, gaps: 50, scan: 2000, idleDefault: 900, idleMin: 10, idleMax: 604_800, sweep: 100, /** Active subscriptions one agent or client may hold on one stream (card U13 review). */ perSubscriber: 20 } as const;
 const STREAM = /^(?:project|task):[a-z]+-[a-z2-7]{20}$/;
 const KIND = /^[a-z][a-z0-9._-]{0,59}$/;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
@@ -188,7 +188,7 @@ export class EventService {
   async subscribe(by: Principal, command: NoActor & { stream: string; kinds?: readonly string[]; cooldownSeconds?: number; batch?: number; fromStart?: boolean; idleSeconds?: number }): Promise<{ id: string }> {
     onlyKnown(command, ["commandId", "stream", "kinds", "cooldownSeconds", "batch", "fromStart", "idleSeconds"]);
     const stream = this.#stream(command.stream);
-    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || allows(by, "history.read", this.#projectOf(stream)))) throw new DomainError("forbidden", `${by.id} may not subscribe to ${stream}`);
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service" || await this.#mayRead(by, stream))) throw new DomainError("forbidden", `${by.id} may not subscribe to ${stream}`);
     const kinds = command.kinds ?? [];
     if (!Array.isArray(kinds) || kinds.length > EVENT_LIMITS.kinds || kinds.some((k) => typeof k !== "string" || !KIND.test(k))) invalid("kinds", `must be at most ${EVENT_LIMITS.kinds} lower-case kinds`);
     const cooldown = command.cooldownSeconds ?? 0;
@@ -203,7 +203,11 @@ export class EventService {
     const ref: AggregateRef = { kind: "subscription", id };
     await this.#runner.command("events.subscribe", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { stream, kinds: body.kinds as unknown as string[], cooldown, batch, fromStart: command.fromStart === true, idle: idle ?? null },
-      build: async () => ({ ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, { type: "create", ref: { kind: listedKind(stream), id }, body: { subscription: id } as JsonObject }, ...(body.critical ? [{ type: "create" as const, ref: { kind: watcherKind(stream), id }, body: { subscription: id } as JsonObject }] : [])], detail: { stream } }),
+      build: async () => {
+        // An agent or client may not pile up subscriptions on one stream (card U13 review): each is a record kept for ever.
+        const slot = body.critical ? [] : [await this.#slot(by.id, stream, id)];
+        return { ref, creates: true, changes: [...slot, { type: "create", ref, body: body as unknown as JsonObject }, { type: "create", ref: { kind: listedKind(stream), id }, body: { subscription: id } as JsonObject }, ...(body.critical ? [{ type: "create" as const, ref: { kind: watcherKind(stream), id }, body: { subscription: id } as JsonObject }] : [])], detail: { stream } };
+      },
     }));
     return { id };
   }
@@ -302,7 +306,7 @@ export class EventService {
   /** The events of a stream, with their causation chains, for the owner and those who may read the project (suppressed ones included, marked). */
   async trace(by: Principal, stream: string, from = 1, limit = 100): Promise<EventBody[]> {
     const s = this.#stream(stream);
-    if (!(by.kind === "owner" || allows(by, "history.read", this.#projectOf(s)))) return [];
+    if (!(by.kind === "owner" || await this.#mayRead(by, s))) return [];
     const out: EventBody[] = [];
     const head = (await this.#runner.get("events-head", derivedId("sub", s)))?.body as unknown as HeadBody | undefined;
     for (let seq = Math.max(from, 1); head !== undefined && seq < head.next && out.length < Math.min(limit, EVENT_LIMITS.scan); seq++) {
@@ -322,10 +326,49 @@ export class EventService {
   /** The project a stream belongs to: for `project:` streams the ID itself; a `task:` stream's project is looked up when it is used. */
   #projectOf(stream: string): string | undefined { return stream.startsWith("project:") ? stream.slice("project:".length) : undefined; }
 
+  /**
+   * Whether a principal other than the owner may read a stream (card U13 review). A project stream: `history.read` in the project. A task stream: `history.read` in the task's project, or the right to
+   * work on that task (`attempt.work` on it), the same as the task's tool history; a task with no record falls back to a grant over every project. A task credential reads its own task's stream only.
+   */
+  async #mayRead(by: Principal, stream: string): Promise<boolean> {
+    if (by.kind === "owner") return true;
+    if (by.taskScope !== undefined && stream !== `task:${by.taskScope.taskId}`) return false;
+    if (stream.startsWith("project:")) return allows(by, "history.read", this.#projectOf(stream));
+    const taskId = stream.slice("task:".length);
+    const project = ((await this.#runner.get("task", taskId))?.body as { projectId?: unknown } | undefined)?.projectId;
+    if (typeof project !== "string") return allows(by, "history.read", undefined);
+    const resource = { resource: { kind: "task", id: taskId } };
+    return allows(by, "history.read", project, resource) || allows(by, "attempt.work", project, resource);
+  }
+
+  /** Whether a subscription may be used by this principal: its subscriber, and for a task credential only a subscription of its own task's stream (the credential carries its agent's ID). */
+  #holds(by: Principal, sub: SubscriptionBody): boolean {
+    return sub.subscriber === by.id && (by.taskScope === undefined || sub.stream === `task:${by.taskScope.taskId}`);
+  }
+
+  /**
+   * The subscriber's active subscriptions to the stream, kept on one small record (card U13 review): IDs whose subscription is no longer active (cancelled, expired) are dropped when it is read, so cancel and expiry need not
+   * touch it. Refuses when `perSubscriber` remain; otherwise returns the change that adds the new one, written with the subscription so two subscribes at once cannot both take the last place.
+   */
+  async #slot(subscriber: string, stream: string, id: string): Promise<{ type: "create"; ref: AggregateRef; body: JsonObject } | { type: "update"; ref: AggregateRef; body: JsonObject; expectedRevision: number }> {
+    const ref: AggregateRef = { kind: "subscriber-streams", id: derivedId("sub", `slots|${subscriber}|${stream}`) };
+    const found = await this.#runner.get(ref.kind, ref.id);
+    const held: string[] = [];
+    for (const sid of ((found?.body as { active?: unknown } | undefined)?.active as string[] | undefined) ?? []) {
+      if (((await this.#runner.get("subscription", sid))?.body as unknown as SubscriptionBody | undefined)?.state === "active") held.push(sid);
+    }
+    if (held.length >= EVENT_LIMITS.perSubscriber) throw new DomainError("invalid_command", `${subscriber} already holds ${EVENT_LIMITS.perSubscriber} subscriptions to ${stream}: cancel one first`, { field: "stream" });
+    const body = { active: [...held, id] } as unknown as JsonObject;
+    return found === undefined ? { type: "create", ref, body } : { type: "update", ref, body, expectedRevision: found.revision };
+  }
+
+
   async #mine(by: Principal, subscriptionId: string): Promise<{ sub: SubscriptionBody; id: string }> {
     const id = typeof subscriptionId === "string" && SUB.test(subscriptionId) ? subscriptionId : invalid("subscriptionId", "is not a subscription ID");
     const sub = (await this.#runner.get("subscription", id))?.body as unknown as SubscriptionBody | undefined;
-    if (sub === undefined || sub.subscriber !== by.id) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    if (sub === undefined || !this.#holds(by, sub)) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    // A subscriber that lost the right to read the stream (a grant revoked) no longer receives its events.
+    if (!(by.kind === "host" || by.kind === "service" || await this.#mayRead(by, sub.stream))) throw new DomainError("forbidden", `${by.id} may no longer read ${sub.stream}`);
     if (sub.state === "expired") throw new DomainError("invalid_transition", `the subscription expired after being idle; it holds the cursor at ${sub.expiredCursor ?? sub.cursor}: resume it`);
     if (sub.state !== "active") throw new DomainError("forbidden", `${by.id} has no such subscription`);
     return { sub, id };
@@ -421,7 +464,7 @@ export class EventService {
   async status(by: Principal, subscriptionId: string): Promise<IdleStatus> {
     const id = typeof subscriptionId === "string" && SUB.test(subscriptionId) ? subscriptionId : invalid("subscriptionId", "is not a subscription ID");
     const sub = (await this.#runner.get("subscription", id))?.body as unknown as SubscriptionBody | undefined;
-    if (sub === undefined || !(by.kind === "owner" || sub.subscriber === by.id)) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+    if (sub === undefined || !(by.kind === "owner" || this.#holds(by, sub))) throw new DomainError("forbidden", `${by.id} has no such subscription`);
     return { state: sub.state, cursor: sub.cursor, lastActiveAt: lastActive(sub), idleSeconds: idleOf(sub, await this.#ceiling()), ...(sub.expiredAt === undefined ? {} : { expiredAt: sub.expiredAt }), ...(sub.expiredCursor === undefined ? {} : { expiredCursor: sub.expiredCursor }) };
   }
 
@@ -438,7 +481,8 @@ export class EventService {
       build: async () => {
         const current = await this.#runner.get(ref.kind, ref.id);
         const sub = current?.body as unknown as SubscriptionBody | undefined;
-        if (current === undefined || sub === undefined || sub.subscriber !== by.id || sub.state === "cancelled") throw new DomainError("forbidden", `${by.id} has no such subscription`);
+        if (current === undefined || sub === undefined || !this.#holds(by, sub) || sub.state === "cancelled") throw new DomainError("forbidden", `${by.id} has no such subscription`);
+        if (!(by.kind === "host" || by.kind === "service" || await this.#mayRead(by, sub.stream))) throw new DomainError("forbidden", `${by.id} may no longer read ${sub.stream}`);
         if (sub.state !== "expired") throw new DomainError("invalid_transition", "the subscription has not expired");
         const { expiredAt: _a, expiredCursor: _c, noticePending: _n, ...rest } = sub;
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...rest, state: "active", lastActiveAt: this.#runner.now() } as unknown as JsonObject }], detail: { subscriber: sub.subscriber, cursor: sub.cursor, expiredAt: sub.expiredAt ?? null } };
@@ -544,7 +588,7 @@ export class EventService {
       build: async () => {
         const current = await this.#runner.get(ref.kind, ref.id);
         const sub = current?.body as unknown as SubscriptionBody | undefined;
-        if (current === undefined || sub === undefined || !(by.kind === "owner" || sub.subscriber === by.id)) throw new DomainError("forbidden", `${by.id} has no such subscription`);
+        if (current === undefined || sub === undefined || !(by.kind === "owner" || this.#holds(by, sub))) throw new DomainError("forbidden", `${by.id} has no such subscription`);
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: { ...sub, state: "cancelled" } as unknown as JsonObject }], detail: { subscriber: sub.subscriber } };
       },
     }));

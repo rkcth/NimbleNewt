@@ -2555,7 +2555,8 @@ export class StatusService {
     const lines: Line[] = result.items.map((i) => line(`${i.at === undefined ? "" : `${i.at}: `}${i.summary}`, i.cite));
     const scope = request.projectId === undefined ? cite("installation", "all") : cite("project", checkProjectId(request.projectId));
     if (lines.length === 0) lines.push(line("Nothing needs attention for that question: no paused assignee, unreachable worker, uncertain tool result or stale artifact was found.", scope));
-    if (result.next !== undefined) lines.push(line(result.scanLimited === true ? "The search stopped before the end, so more may exist; ask again to go on." : "There are more items than are listed; ask again to go on.", scope));
+    // The chat view has no cursor (asking again shows the same first items), so it says how to see the rest: narrow the question, or page with status.attention.
+    if (result.next !== undefined) lines.push(line(result.scanLimited === true ? "The search stopped before the end, so more may exist; ask about one project, one kind of item or a shorter time span to see the rest." : "There are more items than are listed; ask about one project, one kind of item or a shorter time span to see the rest.", scope));
     if (result.artifactsPartial === true) lines.push(line("There are too many artifact records to read them all, so stale artifacts may be missing; ask about one project or task to be sure.", scope));
     return { observedAt: result.observedAt, lines };
   }

@@ -106,6 +106,7 @@ test("long-running commands use one vocabulary: the envelope says accepted or co
   assert.equal(stopCommandState("preparing", 0), "running");
   assert.equal(stopCommandState("blocked", 0), "blocked");
   assert.equal(stopCommandState("recovery-required", 0), "blocked");
+  assert.equal(stopCommandState("recovery-required", 1), "outcome_unknown", "a stop that ended with unresolved work (how the stop service records it) is not merely blocked: what it left is of unknown outcome");
   assert.equal(stopCommandState("done", 0), "completed");
   assert.equal(stopCommandState("done", 2), "outcome_unknown", "a stop that left an effect of unknown outcome is not completed");
   assert.equal(stopCommandState("cancelled", 0), "failed");
