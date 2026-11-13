@@ -211,8 +211,18 @@ export class RetentionService {
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
     for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record", "thinking-purge"]) { let n = 0; const complete = await scan(this.#runner, kind, () => { n += 1; }); growth[kind] = complete ? n : `${n}+`; }
+    // Stored model thinking (card K06c, shown by card K06d): the setting, whether the dispatcher removes it by itself, how many task copies are kept and removed and how many conversation stores were cleaned. Counts only, never a word of the thinking.
+    let kept = 0; let removed = 0; let tasksCleaned = 0; let storesCleaned = 0; let storesWithout = 0; let blocksRemoved = 0;
+    const tc = await scan(this.#runner, "thinking-record", (a) => { if ((a.body as { removedAt?: unknown }).removedAt === undefined) kept += 1; else removed += 1; });
+    const pc = await scan(this.#runner, "thinking-purge", (a) => {
+      const b = a.body as { attempts?: unknown; blocks?: unknown }; tasksCleaned += 1;
+      if (typeof b.attempts === "object" && b.attempts !== null) for (const v of Object.values(b.attempts as Record<string, unknown>)) { if (v === "purged") storesCleaned += 1; else if (v === "none") storesWithout += 1; }
+      if (typeof b.blocks === "number" && Number.isFinite(b.blocks) && b.blocks > 0) blocksRemoved += Math.floor(b.blocks);
+    });
+    const thinking = { days: values.thinkingDays, auto: values.thinkingAuto, storesReached: this.#deps.thinkingStores !== undefined, copiesKept: kept, copiesRemoved: removed, tasksCleaned, storesCleaned, storesWithout, blocksRemoved, ...(tc && pc ? {} : { partial: true }) };
     return {
       values: values as unknown as JsonObject,
+      thinking: thinking as unknown as JsonObject,
       growth: growth as unknown as JsonObject,
       disk: { ...(space === undefined ? {} : { freeBytes: space.freeBytes, totalBytes: space.totalBytes }), reserve: { wantedBytes: reserve?.wanted ?? 0, inUse: reserve?.released ?? false, short: reserve?.short ?? false, ...(reserve?.releasedAt === undefined ? {} : { usedAt: reserve.releasedAt }) } },
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
