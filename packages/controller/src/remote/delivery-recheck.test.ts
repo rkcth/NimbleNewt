@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { workGrants } from "../dispatch/testing/world.js";
-import { RemoteWorkerService } from "./service.js";
+import { RemoteWorkerService, lastingReasons } from "./service.js";
 import { wireRefuses, remoteSuite, type Ctx } from "./testing/suite.js";
 import { buildRemoteWorld, rawRequest } from "./testing/world.js";
 
@@ -263,9 +263,49 @@ for (const backend of backends) {
     assert.equal((await c.current.get(c.owner, run.attemptId))?.state, "running");
   });
 
+  suite("an offer withdrawn before any host took it up leaves the agent's store unclaimed: the readmitted attempt starts on another listed host; once a host took the store up it stays pinned there (card H07b)", async (c) => {
+    policy.hosts = ["host:a", "host:b"]; policy.fail = false;
+    const a = await c.host("a"), b = await c.host("b");
+    a.worker.requirements = () => req; b.worker.requirements = () => req;
+    const ann = await c.agent("ann", workGrants(c.project, ["read-file", "write-file"]));
+    c.prefer(a);
+    const first = await c.task("Order seeds", ann);
+    assert.ok((await c.tick()).started.includes(first.attemptId!));
+    const store = async (): Promise<{ ownerHostId: string; unused?: boolean; liveAttempt?: string }> => (await c.storage.getAggregate({ kind: "remote-store", id: ann.id }))!.body as never;
+    assert.deepEqual([(await store()).ownerHostId, (await store()).unused], [a.id, true], "an offer claims the store, marked as not taken up");
+    // The owner takes host:a out of the policy before it reads the offer: the offer is withdrawn, and the claim pins nothing.
+    policy.hosts = ["host:b"];
+    assert.deepEqual(await a.client.offers(), []);
+    assert.equal((await c.remote.placement(c.owner, first.attemptId!))!.state, "ended");
+    assert.equal(await c.remote.storeOwner(c.dispatcherPrincipal, ann.id, "att-zzzzzzzzzzzzzzzzzzzz"), undefined, "an unused claim pins the agent nowhere");
+    let next: string | undefined;
+    for (let i = 0; i < 150 && next === undefined; i++) { if (i > 0) await new Promise((r) => setTimeout(r, 20)); next = (await c.tick()).started.find((id) => id !== first.attemptId); }
+    assert.ok(next !== undefined, "readmitted and started on the other listed host");
+    assert.equal((await c.remote.placement(c.owner, next!))!.hostId, b.id);
+    assert.deepEqual([(await store()).ownerHostId, (await store()).unused], [b.id, true], "the claim moved with the placement");
+    // B takes the offer up: the store is now real there and no longer unused.
+    const offers = await b.client.offers();
+    assert.equal(offers.length, 1);
+    await b.client.attempt(next!, offers[0]!.placement).accept();
+    assert.equal((await store()).unused, undefined);
+    assert.deepEqual(await c.remote.storeOwner(c.dispatcherPrincipal, ann.id, "att-zzzzzzzzzzzzzzzzzzzz"), { hostId: b.id, busy: true }, "taken up, it pins the agent to b while that attempt lives");
+  }, { placement: async () => ({ dataHosts: policy.hosts }) });
+
   suite("a worker cannot mark its own result as withdrawn: the field is refused on the wire (card H07b)", async (c) => {
     const a = await c.host("a");
     const run = await c.started(a);
     await wireRefuses("invalid_command", () => (run.attempt as unknown as { complete(r: unknown): Promise<unknown> }).complete({ status: "cancelled", withdrawn: true }), 400);
   });
 }
+
+test("a reason lasts unless it is exactly one of the passing sentences: a lasting reason that merely quotes one inside a name is still lasting (card H07b)", () => {
+  for (const passing of ["host:a has not connected to the controller", "host:a has not been heard from recently (stale)", "host:a has not announced its capabilities", "host:a already has 32 offers that are not accepted", "host:a has not received the restored conversation store of att-aaaaaaaaaaaaaaaaaaaa yet"]) {
+    assert.equal(lastingReasons([passing]), false, passing);
+  }
+  // A harness or workspace named after a passing sentence, text after it, or text before it.
+  for (const lasting of ["host:a does not have the has not connected to the controller harness", "host:a has not connected to the controller, and is revoked", "the attempt's credential may not be given to host:a (host:b has not connected to the controller)", "host:a is revoked"]) {
+    assert.equal(lastingReasons([lasting]), true, lasting);
+  }
+  assert.equal(lastingReasons(["host:a has not connected to the controller", "host:a is revoked"]), true, "one lasting reason among passing ones lasts");
+  assert.equal(lastingReasons([]), false);
+});

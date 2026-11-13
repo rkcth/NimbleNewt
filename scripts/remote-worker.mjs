@@ -23,7 +23,13 @@ try {
   process.exit(1);
 }
 console.log("the remote worker host is running");
-const stop = () => { void host.stop().then(() => process.exit(0)); };
+// A stop ends the held poll at once (the connection is closed, so the controller sees the host go) and then the sandbox launcher; a second signal does not start a second stop, and a stop that fails says so and exits non-zero.
+let stopping = false;
+const stop = () => {
+  if (stopping) return;
+  stopping = true;
+  host.stop().then(() => process.exit(0), (error) => { console.error(`the remote worker host did not stop cleanly: ${safeMessage(error, 400)}`); process.exit(1); });
+};
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
 await host.finished;

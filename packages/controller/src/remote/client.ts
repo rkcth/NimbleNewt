@@ -54,7 +54,7 @@ export interface RemoteWorkerClientOptions {
 
 const isLoopbackHost = (host: string): boolean => host === "localhost" || host === "[::1]" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
 
-interface Call { readonly body?: Json; readonly key?: string; readonly session?: boolean; readonly timeoutMs?: number }
+interface Call { readonly body?: Json; readonly key?: string; readonly session?: boolean; readonly timeoutMs?: number; /** Ends the request at once when it aborts (the host is stopping): the connection is closed, so the controller sees a held poll go, and the request is not sent again. */ readonly signal?: AbortSignal }
 
 /**
  * The worker's side of the controller-worker protocol (card H02): plain JSON over HTTP, the dispatch contract of card H12 carried unchanged. It is given a URL and a credential and nothing else, so a
@@ -78,27 +78,27 @@ export class RemoteWorkerClient {
   forgetSession(): void { this.#session = undefined; }
 
   /** Opens a session. Throws a `WorkerRequestError` with code `protocol_unsupported` (and what the controller speaks) when no protocol version is shared. */
-  async connect(capabilities: Json, key: string = randomUUID()): Promise<SessionInfo> {
-    const { body } = await this.#send("POST", "/worker/connect", { body: { protocol: { ...(this.#options.protocol ?? WORKER_PROTOCOL) }, workerVersion: this.#options.workerVersion, capabilities }, key });
+  async connect(capabilities: Json, key: string = randomUUID(), signal?: AbortSignal): Promise<SessionInfo> {
+    const { body } = await this.#send("POST", "/worker/connect", { body: { protocol: { ...(this.#options.protocol ?? WORKER_PROTOCOL) }, workerVersion: this.#options.workerVersion, capabilities }, key, ...(signal === undefined ? {} : { signal }) });
     this.#session = body as unknown as SessionInfo;
     return this.#session;
   }
 
-  async heartbeat(sequence: number, key: string = randomUUID()): Promise<void> {
-    await this.#send("POST", "/worker/session/heartbeat", { body: { sequence }, key, session: true });
+  async heartbeat(sequence: number, key: string = randomUUID(), signal?: AbortSignal): Promise<void> {
+    await this.#send("POST", "/worker/session/heartbeat", { body: { sequence }, key, session: true, ...(signal === undefined ? {} : { signal }) });
   }
 
   /** The recovery handshake after a reconnect (card H09b): lists the attempts this worker still holds and learns, per attempt, whether to stop, hold, accept again or wait. Nothing resumes by itself. */
-  async reconcile(held: readonly { readonly attemptId: string; readonly placement: number }[], key: string = randomUUID()): Promise<ReconcileAnswer> {
-    return (await this.#send("POST", "/worker/session/reconcile", { body: { held: held as unknown as Json }, key, session: true })).body as never;
+  async reconcile(held: readonly { readonly attemptId: string; readonly placement: number }[], key: string = randomUUID(), signal?: AbortSignal): Promise<ReconcileAnswer> {
+    return (await this.#send("POST", "/worker/session/reconcile", { body: { held: held as unknown as Json }, key, session: true, ...(signal === undefined ? {} : { signal }) })).body as never;
   }
 
   /** The attempts offered to this host and not yet accepted, with their work orders. */
-  async offers(options: { readonly waitMs?: number } = {}): Promise<Offer[]> {
+  async offers(options: { readonly waitMs?: number; readonly signal?: AbortSignal } = {}): Promise<Offer[]> {
     const wait = options.waitMs ?? 0;
     // A held poll must not be given up before the controller ends it: the request may take the whole wait and a margin.
     const path = wait > 0 ? `/worker/session/offers?wait=${wait}` : "/worker/session/offers";
-    return ((await this.#send("GET", path, { session: true, timeoutMs: Math.max(this.#options.timeoutMs ?? 30_000, wait + 10_000) })).body as unknown as { offers: Offer[] }).offers;
+    return ((await this.#send("GET", path, { session: true, timeoutMs: Math.max(this.#options.timeoutMs ?? 30_000, wait + 10_000), ...(options.signal === undefined ? {} : { signal: options.signal }) })).body as unknown as { offers: Offer[] }).offers;
   }
 
   /** The release-test jobs issued to this host, with their payloads (card X09b). */
@@ -127,8 +127,8 @@ export class RemoteWorkerClient {
   }
 
   /** The requests, and the IDs of those the controller withdrew (it stopped waiting): a host drops a withdrawn request it has not started. */
-  async workspaceList(): Promise<{ readonly requests: WorkspaceAsk[]; readonly withdrawn: string[] }> {
-    const body = (await this.#send("GET", "/worker/session/workspace", { session: true })).body as unknown as { requests: WorkspaceAsk[]; withdrawn?: string[] };
+  async workspaceList(signal?: AbortSignal): Promise<{ readonly requests: WorkspaceAsk[]; readonly withdrawn: string[] }> {
+    const body = (await this.#send("GET", "/worker/session/workspace", { session: true, ...(signal === undefined ? {} : { signal }) })).body as unknown as { requests: WorkspaceAsk[]; withdrawn?: string[] };
     return { requests: body.requests, withdrawn: body.withdrawn ?? [] };
   }
 
@@ -167,7 +167,7 @@ export class RemoteWorkerClient {
     const key = call.key ?? (method === "GET" ? undefined : randomUUID());
     for (let attempt = 0; ; attempt++) {
       try { return await this.#once(method, path, call, key); } catch (error) {
-        // Only a request that got no answer at all is sent again.
+        // Only a request that got no answer at all is sent again (a cancelled request fails as a `WorkerRequestError`, so it never is).
         if (error instanceof WorkerRequestError || attempt >= retries) throw error;
       }
     }
@@ -185,7 +185,10 @@ export class RemoteWorkerClient {
       ...(call.session === true ? { [SESSION_HEADER]: session!.sessionId, [PROTOCOL_HEADER]: String(session!.protocol) } : {}),
       ...(this.#options.hostHeader === undefined ? {} : { host: this.#options.hostHeader }),
     };
+    const signal = call.signal;
+    if (signal?.aborted === true) return Promise.reject(new WorkerRequestError(0, "aborted", "the request was cancelled before it was sent"));
     return new Promise((resolve, reject) => {
+      const onAbort = (): void => { reject(new WorkerRequestError(0, "aborted", "the request was cancelled")); req.destroy(); };
       const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, { method, headers, ...(url.protocol === "https:" && this.#options.ca !== undefined ? { ca: this.#options.ca } : {}) }, (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -212,6 +215,10 @@ export class RemoteWorkerClient {
       });
       req.on("error", reject);
       req.setTimeout(call.timeoutMs ?? this.#options.timeoutMs ?? 30_000, () => req.destroy(new Error("the controller did not answer in time")));
+      if (signal !== undefined) {
+        signal.addEventListener("abort", onAbort, { once: true });
+        req.on("close", () => signal.removeEventListener("abort", onAbort));
+      }
       if (data !== undefined) req.write(data);
       req.end();
     });

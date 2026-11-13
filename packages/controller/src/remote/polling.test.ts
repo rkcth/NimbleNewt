@@ -106,6 +106,50 @@ for (const backend of backends) {
     } finally { stop.abort(); await running; }
   });
 
+  suite("stopping a host ends its one held poll at once: the request is cancelled, the controller sees the client go and frees the place, and the poller returns without waiting out the hold (card H07b)", async (c) => {
+    const h = await c.host("h1", { connect: false });
+    const stop = new AbortController();
+    // A hold of 20 s: if stopping waited for the poll to end, this test would take that long.
+    const poller = new HostPoller({ client: h.client, capabilities: REMOTE_CAPS, waitMs: 20_000, heartbeatMs: 30_000, minGapMs: 0, spreadMs: 0, onOffers: async () => undefined });
+    const running = poller.run(stop.signal);
+    try {
+      await openPolls(c, 1);
+      // Idle, the host holds exactly one request however long it waits: a second round would show as `superseded`.
+      assert.equal(c.remote.pollStats(c.dispatcherPrincipal).superseded, 0);
+      const before = Date.now();
+      stop.abort();
+      await running;
+      assert.ok(Date.now() - before < 10_000, "the poller returned without waiting out the 20 s hold");
+      await until(() => c.remote.pollStats(c.dispatcherPrincipal).open === 0);
+      const stats = c.remote.pollStats(c.dispatcherPrincipal);
+      assert.equal(stats.open, 0, "the held poll was freed");
+      assert.equal(stats.disconnected, 1, "the controller saw the client go");
+      assert.equal(stats.timedOut, 0);
+    } finally { stop.abort(); await running; }
+  });
+
+  suite("a request cancelled by its signal fails as cancelled, closes the connection, and is not sent again; one cancelled before it is sent never leaves (card H07b)", async (c) => {
+    const h = await c.host("h1");
+    const stop = new AbortController();
+    const held = h.client.offers({ waitMs: 20_000, signal: stop.signal });
+    const outcome = held.then(() => "answered", (e: unknown) => e);
+    await openPolls(c, 1);
+    stop.abort();
+    const error = await outcome;
+    assert.ok(error instanceof WorkerRequestError, String(error));
+    assert.equal((error as WorkerRequestError).code, "aborted");
+    await until(() => c.remote.pollStats(c.dispatcherPrincipal).open === 0);
+    // Not retried: the controller counted this one poll and no second one (the client retries a request that got no answer twice).
+    assert.equal(c.remote.pollStats(c.dispatcherPrincipal).polls, 1);
+    assert.equal(c.remote.pollStats(c.dispatcherPrincipal).disconnected, 1);
+    const polls = c.remote.pollStats(c.dispatcherPrincipal).polls;
+    await assert.rejects(h.client.offers({ waitMs: 20_000, signal: stop.signal }), (e: unknown) => e instanceof WorkerRequestError && e.code === "aborted");
+    await assert.rejects(h.client.heartbeat(99, undefined, stop.signal), (e: unknown) => e instanceof WorkerRequestError && e.code === "aborted");
+    assert.equal(c.remote.pollStats(c.dispatcherPrincipal).polls, polls, "nothing was sent");
+    // The client still works afterwards.
+    assert.deepEqual(await h.client.offers({ waitMs: 0 }), []);
+  });
+
   suite("a poller reconnects after its session is replaced, and waits the longest when the controller refuses its credential (card H07)", async (c) => {
     const h = await c.host("h1");
     const delays: number[] = []; const troubles: string[] = [];

@@ -161,6 +161,11 @@ export interface StoreBody {
   readonly since: string;
   readonly liveAttempt?: string;
   readonly moves: number;
+  /**
+   * True while the claim was made only by an offer that no host has accepted (card H07b): the agent's store has never been used, so it holds nothing on that host and nothing pins the agent there.
+   * Cleared at the first accept. A record without it (every record made before this) counts as used.
+   */
+  readonly unused?: boolean;
 }
 
 // ---- policy ----------------------------------------------------------------------------------------------------------------------
@@ -882,7 +887,8 @@ export class RemoteWorkerService {
     const result = await this.#changePlacement(attemptId, async (current) => {
       const store = await this.#runner.get(STORE_KIND, order.agentId);
       const storeBody = store?.body as unknown as StoreBody | undefined;
-      if (storeBody !== undefined && storeBody.ownerHostId !== hostId) {
+      // A claim that no host ever took up (an offer withdrawn before delivery) pins nothing: the next placement may claim the store on any host (card H07b).
+      if (storeBody !== undefined && storeBody.ownerHostId !== hostId && storeBody.unused !== true) {
         throw new DomainError("invalid_transition", `the native Pi store of ${order.agentId} belongs to ${storeBody.ownerHostId}; an attempt of that agent runs only there until the store is moved (relocate, or the owner's moveStore)`, { field: "hostId" });
       }
       if (storeBody?.liveAttempt !== undefined && storeBody.liveAttempt !== attemptId && (await this.#isLive(storeBody.liveAttempt))) {
@@ -902,7 +908,8 @@ export class RemoteWorkerService {
         next = { ...rest, ...(kept.earlier === undefined ? {} : { earlier: kept.earlier }), ...(kept.earlierLost === undefined ? {} : { earlierLost: kept.earlierLost }), ...(order.route === "" ? {} : { route: order.route }), contract, placement: number, state: "offered", offeredAt: now, ...(order.expiresAt === undefined ? {} : { expiresAt: order.expiresAt }), requirements: placed, inputs: [...new Set([...b.inputs, ...inputs])], control: [], history: b.state === "relocating" ? b.history : pushHistory(b.history, { hostId: b.hostId, placement: b.placement, at: now, reason: "placed again" }) };
       }
       const storeChanges: Change[] = [];
-      const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0 };
+      const reclaimed = storeBody !== undefined && storeBody.ownerHostId !== hostId;
+      const holder: StoreBody = { agentId: order.agentId, ownerHostId: hostId, since: reclaimed ? now : storeBody?.since ?? now, liveAttempt: attemptId, moves: storeBody?.moves ?? 0, ...(storeBody === undefined || storeBody.unused === true ? { unused: true } : {}) };
       const storeRef: AggregateRef = { kind: STORE_KIND, id: order.agentId };
       storeChanges.push(store === undefined ? { type: "create", ref: storeRef, body: holder as unknown as JsonObject } : { type: "update", ref: storeRef, expectedRevision: store.revision, body: holder as unknown as JsonObject });
       return { next, extra: storeChanges };
@@ -987,6 +994,8 @@ export class RemoteWorkerService {
     const body = (await this.#runner.get(STORE_KIND, agentId))?.body as unknown as StoreBody | undefined;
     if (body === undefined) return undefined;
     const busy = body.liveAttempt !== undefined && body.liveAttempt !== attemptId && (await this.#isLive(body.liveAttempt));
+    // A claim nobody took up pins nothing, unless another attempt of the agent is still waiting on it (card H07b).
+    if (body.unused === true && !busy && body.liveAttempt !== attemptId) return undefined;
     return { hostId: body.ownerHostId, busy };
   }
 
@@ -1272,7 +1281,11 @@ export class RemoteWorkerService {
       }
       waiting = false;
       const { reaccept: _decided, ...rest } = x;
-      return { next: { ...rest, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() } };
+      // The first accept makes the agent's store real on this host: it no longer counts as an unused claim (card H07b).
+      const store = x.state === "offered" ? await this.#runner.get(STORE_KIND, x.agentId) : undefined;
+      const storeBody = store?.body as unknown as StoreBody | undefined;
+      const used: Change[] = store !== undefined && storeBody?.unused === true ? [{ type: "update", ref: { kind: STORE_KIND, id: x.agentId }, expectedRevision: store.revision, body: (({ unused: _u, ...r }) => r)(storeBody) as unknown as JsonObject }] : [];
+      return { next: { ...rest, state: "accepted", sessionId: session.sessionId, acceptedAt: x.acceptedAt ?? this.#runner.now() }, ...(used.length === 0 ? {} : { extra: used }) };
     }, "accept", { actor: host.id });
     if (waiting) {
       await this.#tellOwner(done.body, marker);
@@ -2388,6 +2401,12 @@ export function checkStreamEvents(value: unknown): ModelStreamEvent[] {
 /** The reason a host is not offered an attempt while its restored conversation store waits for delivery there (card K01i review); it passes once the store is delivered. */
 const RESTORE_WAIT = (hostId: string, attemptId: string): string => `${hostId} has not received the restored conversation store of ${attemptId} yet`;
 
+/**
+ * The wording of every reason that passes, matched whole (the host, then the phrase to the end), so a reason that only quotes such a phrase inside a name or a label is still read as lasting (card H07b).
+ * A host name is not tested here: the callers build these from their own host IDs.
+ */
+const PASSING_REASON = /^\S{1,80} (?:has not connected to the controller|has not been heard from recently \([a-z-]{1,20}\)|has not announced its capabilities|already has \d{1,6} offers that are not accepted|has not received the restored conversation store of \S{1,80} yet)$/;
+
 export function lastingReasons(reasons: readonly string[]): boolean {
-  return reasons.some((r) => !/has not connected to the controller|has not been heard from recently|has not announced its capabilities|offers that are not accepted|has not received the restored conversation store/.test(r));
+  return reasons.some((r) => !PASSING_REASON.test(r));
 }

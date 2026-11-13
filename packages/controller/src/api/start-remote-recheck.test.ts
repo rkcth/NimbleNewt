@@ -7,7 +7,7 @@ import { AdmissionService } from "../admission/service.js";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI, workGrants } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { RemoteWorkerClient } from "../remote/index.js";
+import { RemoteAttempt, RemoteWorkerClient } from "../remote/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -97,21 +97,20 @@ test("an offer the policy refused after it was made is not delivered over the wi
     for (let i = 0; i < 100 && (await c.dispatch!.dispatcher.get(rob, first))?.state === "running"; i++) await new Promise((r) => setTimeout(r, 20));
     const rec = (await c.dispatch!.dispatcher.get(rob, first))!;
     assert.match(rec.outcome?.summary ?? "", /withdrawn before it was delivered/);
-    // The task is put back: it has a new attempt. The agent's native store was claimed by r1 when the offer was made, so the new attempt is tied to r1 and waits, with the policy's reason, while r1 is not listed ...
-    let entry: { attemptId: string; reason: string } | undefined;
-    for (let i = 0; i < 150 && entry === undefined; i++) {
+    // The task is put back: it has a new attempt. The offer was never taken up, so r1's claim on the agent's native store pins nothing and the new attempt starts on r2, the host the policy lists.
+    let started: string | undefined;
+    for (let i = 0; i < 150 && started === undefined; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 20));
-      const waiting = await c.dispatch!.dispatcher.tick();
-      assert.deepEqual(waiting.started, []);
-      entry = waiting.skipped.find((x) => x.attemptId !== first);
+      started = (await c.dispatch!.dispatcher.tick()).started.find((id) => id !== first);
     }
-    assert.ok(entry !== undefined, "the readmitted attempt waits");
-    assert.match(entry.reason, /does not list host:r1/);
-    // ... and starts on r1 once the owner lists it again.
+    assert.ok(started !== undefined, "the readmitted attempt starts");
+    assert.equal((await c.dispatch!.remote!.placement(rob, started))!.hostId, "host:r2");
+    assert.equal((await clients.get("host:r2")!.offers()).length, 1, "and this time the host is delivered the offer");
+    assert.deepEqual(await clients.get("host:r1")!.offers(), [], "r1 is never offered it");
+    // r2 takes it up: the store is real there. Another attempt of the agent is now tied to r2 even though r1 is listed again.
+    const taken = (await c.dispatch!.remote!.placement(rob, started))!;
+    await new RemoteAttempt(clients.get("host:r2")!, started, taken.placement).accept();
     policy.dataHosts = ["host:r1", "host:r2"];
-    const second = await c.dispatch!.dispatcher.tick();
-    assert.deepEqual(second.started, [entry.attemptId], JSON.stringify(second));
-    assert.equal((await c.dispatch!.remote!.placement(rob, entry.attemptId))!.hostId, "host:r1");
-    assert.equal((await clients.get("host:r1")!.offers()).length, 1, "and this time the host is delivered the offer");
+    assert.deepEqual(await c.dispatch!.remote!.storeOwner(rob, taken.agentId, "att-zzzzzzzzzzzzzzzzzzzz"), { hostId: "host:r2", busy: true });
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
