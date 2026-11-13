@@ -164,3 +164,13 @@ test("the model is told, in plain words, how the owner turns the host's automati
   assert.equal(CHAT_OPS["database.transfer.set"]!.revision, "database-transfer", "the chat pins the revision");
   assert.equal(CHAT_OPS["database.transfer.set"]!.mode, "propose");
 });
+
+test("the model is told how a first-run owner gives a task to an agent and makes it ready, by names and not IDs (card U14e)", async () => {
+  let system = "";
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  assert.match(system, /task\.assign\([^)]*agentName[^)]*\)/, "task.assign takes the agent's name");
+  assert.match(system, /task\.transfer\([^)]*agentName[^)]*\)/);
+  assert.match(system, /To give a task to an agent[\s\S]*?task\.assign with taskTitle[\s\S]*?agentName[\s\S]*?never an ID/);
+  assert.match(system, /the controller itself starts the attempt on the worker host/);
+});

@@ -1032,6 +1032,15 @@ export class ChatService {
       if (focus.projectName !== undefined) labels[projectId] = focus.projectName;
       if (spec.needsProject === true) args["projectId"] = projectId;
     }
+    // An owner with exactly one project (the first-run case, card U14e) is not asked which project a task title or a project-scoped control is about: there is only one it can be.
+    if (projectId === undefined && needsScope) {
+      const only = await this.#listAll(token, "project.list", {});
+      if (only.length === 1) {
+        projectId = only[0]!["id"] as string;
+        labels[projectId] = only[0]!["name"] as string;
+        if (spec.needsProject === true) args["projectId"] = projectId;
+      }
+    }
     if (projectId === undefined && needsScope) return await this.#askProject();
     // These operations name the project as `project`, not `projectId`: it was read as `projectId` above and is named back here.
     if (PROJECT_AS_PROJECT.has(intent.op)) { delete args["projectId"]; if (projectId !== undefined) args["project"] = projectId; }
@@ -1489,6 +1498,23 @@ export class ChatService {
         if (found.length !== 1) return refuse(found.length === 0 ? "not_found" : "invalid_command", found.length === 0 ? `no active agent called ${quotedText(named, 80)}` : `more than one agent is called ${quotedText(named, 80)}`);
         args["to"] = { kind: "agent", id: String(found[0]!["id"]) };
         labels[String(found[0]!["id"])] = named.trim();
+      }
+    }
+    // Work given to an agent the owner names by name (card U14e): the owner never has to know an agent's ID. The name is looked up in the active agents (exactly one, else asked or refused), and what is shown
+    // and confirmed is the agent's name; the owner may also be given as an ID the owner wrote, as before.
+    if (intent.op === "task.assign" || intent.op === "task.transfer") {
+      const named = args["agentName"];
+      delete args["agentName"];
+      const key = intent.op === "task.assign" ? "owner" : "to";
+      if (named !== undefined && args[key] !== undefined) return refuse("invalid_command", "the agent is named twice over, as an ID and by name; which one is meant has to be settled.");
+      if (named !== undefined) {
+        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "agentName must be the agent's name as the owner said it");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === named.trim().toLowerCase());
+        if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(named.trim(), 80)}`);
+        if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(named.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
+        args[key] = { kind: "agent", id: String(exact[0]!["id"]) };
+        labels[String(exact[0]!["id"])] = named.trim();
       }
     }
     if (intent.op === "resume.retry" || intent.op === "resume.cancel") {
