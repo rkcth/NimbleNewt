@@ -148,7 +148,7 @@ export interface BallotBody {
 }
 
 export type ChangeState = "adopted" | "applying" | "applied" | "not-applied";
-export type NotAppliedCode = "recommendation" | "conflict" | "unauthorized" | "owner" | "gate" | "missing" | "failed";
+export type NotAppliedCode = "recommendation" | "conflict" | "unauthorized" | "owner" | "gate" | "missing" | "failed" | "expired";
 
 export interface ChangeRecord extends ProposedChange {
   readonly state: ChangeState;
@@ -161,8 +161,15 @@ export interface ChangeRecord extends ProposedChange {
   readonly actedAs?: string;
   /** The approval policy's cell for this change's widening class as it was when the change was started or refused (the decision log keeps it; absent for a kind that widens nothing and for an owner's decline). */
   readonly setting?: "allow" | "ask";
+  /** Set while the decision waits for the owner: this widening change was put aside for the owner's answer (the policy asks, or a limit was reached). The other changes of a held decision still go ahead; the owner's answer makes the flag meaningless. */
+  readonly waiting?: true;
+  /** The steward agent's reason, when it allowed this change (agreedBy is then `steward:<class>`); redacted and cut. */
+  readonly stewardReason?: string;
   readonly at?: string;
 }
+
+/** The project's count of widening changes started on a delegate's leave (the approval policy or the steward) in the current window: the cap across decisions (card M02h). */
+export interface WideningWindowBody { readonly projectId: string; readonly windowStart: string; readonly count: number }
 
 export type OwnerResponse = "not-asked" | "pending" | "agreed" | "declined" | "alternative";
 
@@ -191,6 +198,10 @@ export interface DecisionRecordBody {
   readonly ownerResponse: OwnerResponse;
   /** Set when the decision was put back to waiting for the owner part way through (the widening limit, or the policy asking at apply time): changes that widen nothing still go ahead, only widening ones wait. Absent: a pending decision holds all its changes. */
   readonly held?: true;
+  /** When the decision was first put back to waiting for the owner; a hold that stays unanswered for the owner's chosen number of days ends as a decline (card M02h). */
+  readonly heldAt?: string;
+  /** Set when the hold ran out unanswered: the decision ended as a decline made by time, not by the owner (its changes carry the code `expired`). */
+  readonly holdExpiredAt?: string;
   readonly ownerDecisionId?: string;
   /** The owner decisions alternative answers to this decision were about to record (card M02h), oldest first, without repeats, at most `RECORD_LIMITS.pendingAlternatives`: each is written before its decision is recorded, so a crash between the record and the answer is found again. The list stays after the answer; a decision in it is the owner's answer's own only if it is `ownerDecisionId`. Whether one was recorded for this decision is read from the owner decision's `origin.meetingDecisionId`. */
   readonly pendingAlternatives?: readonly string[];
@@ -307,4 +318,23 @@ export interface DecisionLogBody {
   readonly counters: { readonly [key: string]: number | string };
   readonly changedAt: string;
   readonly loggedAt: string;
+}
+
+/**
+ * What the decision log says about one kind of widening change in one project (card M02h): how it was decided over the entries read. `suggestion` is set only when the owner has agreed to this pattern often enough (at least `minAgreed`)
+ * and never declined, overridden or seen it refused for want of rights; it names the policy cell the owner could set so they are no longer asked. Nothing here changes the policy: a learned rule is only ever offered.
+ */
+export interface DecisionPattern {
+  readonly projectId: string;
+  readonly kind: string;
+  readonly widens: "access-change" | "spend";
+  /** Carried out with the owner's agreement after the policy asked. */
+  readonly ownerAgreed: number;
+  /** Declined or overridden by the owner. */
+  readonly ownerRefused: number;
+  /** Carried out on the policy's or the steward's leave. */
+  readonly delegatedApplied: number;
+  /** Not carried out for another reason (moved on, failed, refused by a rule, rights withdrawn). */
+  readonly notApplied: number;
+  readonly suggestion?: { readonly set: "allow"; readonly cls: "access-change" | "spend"; readonly projectId: string; readonly text: string };
 }

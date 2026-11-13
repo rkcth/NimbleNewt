@@ -304,7 +304,7 @@ export class GrantService {
     const given = command as unknown as Record<string, unknown>;
     for (const key of Object.keys(given)) if (!["commandId", "grantee", "action", "project", "resource", "basis", "expiresAt", "decisionId", "agreedBy"].includes(key)) invalid(key, "is not a field of an agreed grant");
     if (typeof command.decisionId !== "string" || command.decisionId.length < 1 || command.decisionId.length > 120) invalid("decisionId", "must name the decision");
-    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) invalid("agreedBy", "must be the owner or the policy that let it through");
+    if (typeof command.agreedBy !== "string" || !/^(owner:[a-z0-9-]{1,60}|policy:[a-z0-9.-]{1,60}|steward:[a-z0-9.-]{1,60})$/.test(command.agreedBy)) invalid("agreedBy", "must be the owner, the policy or the steward agent that let it through");
     if (command.project === "*") invalid("project", "an agreed grant is for one project, not all of them");
     const expires = checkTime(command.expiresAt, "expiresAt");
     if (expires === undefined) invalid("expiresAt", "an agreed grant ends: give the time it expires");

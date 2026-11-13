@@ -21,7 +21,7 @@ import { MEETING_LIMITS, authorityOf, type AgendaBody, type MeetingService, type
 import { safeSlice } from "../lifecycle/handoff-cut.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
-  type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type OwnerResponse,
+  type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionPattern, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type WideningWindowBody, type OwnerResponse,
   type PlanBody, type ProposedChange, type RecordBody, type SourceCite, type MeetingSummaryBody, type SummaryContent,
 } from "./record-types.js";
 import { buildSummary } from "./summary.js";
@@ -41,7 +41,7 @@ export interface ChangeApplier {
    */
   readonly widens?: "access-change" | "spend";
   /** Carries the change out. `commandId` is stable per change, so a repeat after a crash does it once. A `stale_revision` refusal means the target moved and the change is not applied. */
-  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject; /** Who allowed it: `owner:agreed` (the owner agreed to the decision) or `policy:<class>` (the approval policy let its class through). */ readonly agreedBy: string; /** The principal the effect was started as (fixed when the change entered `applying`; `actor` is the same value). */ readonly actedAs?: string }): Promise<{ revision?: number }>;
+  apply(change: { readonly commandId: string; readonly actor: string; readonly target: { kind: string; id: string }; readonly expectedRevision: number; readonly patch: JsonObject; /** Who allowed it: `owner:agreed` (the owner agreed to the decision) `policy:<class>` (the approval policy let its class through) or `steward:<class>` (the steward agent allowed it). */ readonly agreedBy: string; /** The principal the effect was started as (fixed when the change entered `applying`; `actor` is the same value). */ readonly actedAs?: string }): Promise<{ revision?: number }>;
 }
 
 /**
@@ -201,6 +201,18 @@ export interface RecordOptions extends RunnerOptions {
   readonly widening?: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">;
   /** The most widening changes (grants, budget raises) one decision may have carried out without the owner's agreement (the policy letting them through); more wait for the owner. Missing, or resolving to undefined: no limit. The owner agreeing to the decision lifts it (card M02g). */
   readonly policyWideningLimit?: (projectId: string) => Promise<number | undefined>;
+  /** The most widening changes one project may have started on a delegate's leave (the approval policy or the steward) inside `windowMinutes`, counted across all its decisions, so splitting a list over several decisions cannot get round the per-decision limit. Missing or undefined: no cap. At the cap a widening change waits for the owner, as at the per-decision limit; the owner's agreement lifts it (card M02h). */
+  readonly policyWideningCap?: (projectId: string) => Promise<{ readonly max: number; readonly windowMinutes: number } | undefined>;
+  /**
+   * The steward agent (card M02h): asked about a widening change the approval policy would leave to the owner, when `stewardEnabled` says it may decide that class in that project (default: never). It sees a bounded description
+   * (no patch words) and answers allow or ask; anything else, a throw or a timeout counts as ask, so a failing steward only sends the change to the owner. An allow starts the change as `steward:<class>`, under the same limits as the policy's leave.
+   */
+  readonly steward?: (input: StewardInput) => Promise<{ readonly verdict: "allow" | "ask"; readonly reason?: string }>;
+  /** Seconds the steward has to answer (default 60). */
+  readonly stewardSeconds?: number;
+  readonly stewardEnabled?: (cls: "access-change" | "spend", projectId: string) => Promise<boolean>;
+  /** Minutes after which a decision that stayed put back to waiting for the owner (a held decision) ends as a decline, so silence never widens anything. Missing or 0: holds never expire. Checked by the sweep (card M02h). */
+  readonly holdExpiryMinutes?: () => Promise<number | undefined>;
   /** How much of the decision log one read scans: entries per storage read and the most reads per call (default 100 and 20). */
   readonly logScan?: { readonly pageSize: number; readonly reads: number };
   /** Minutes a vote stays open (default 10), unless the vote names its own. */
@@ -209,9 +221,43 @@ export interface RecordOptions extends RunnerOptions {
   readonly autoReturnMinutes?: number;
 }
 
+/** What the steward agent is shown about a change: the kind, class, target, a cut and redacted summary of what the agents wrote, a digest of the patch, safe counters, and how much widening this decision has already done on a delegate's leave. */
+export interface StewardInput {
+  readonly decisionId: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly widens: "access-change" | "spend";
+  readonly target: { readonly kind: string; readonly id: string };
+  readonly summary: string;
+  readonly patchHash: string;
+  readonly counters: { readonly [key: string]: number | string };
+  readonly delegatedInDecision: number;
+}
+
+/** The counting behind `learnedPatterns`, on its own so it is tested without a store. */
+export function patternsOf(entries: readonly DecisionLogBody[], minAgreed: number): DecisionPattern[] {
+  const groups = new Map<string, { projectId: string; kind: string; widens: "access-change" | "spend"; agreed: number; refused: number; delegated: number; other: number; ownerAsked: number }>();
+  for (const e of entries) {
+    if (e.widens === undefined) continue;
+    const key = JSON.stringify([e.projectId, e.kind, e.widens]);
+    const g = groups.get(key) ?? { projectId: e.projectId, kind: e.kind, widens: e.widens, agreed: 0, refused: 0, delegated: 0, other: 0, ownerAsked: 0 };
+    if (e.outcome === "applied" && e.decidedBy === "owner") { g.agreed++; if (e.setting === "ask") g.ownerAsked++; }
+    else if (e.outcome === "applied") g.delegated++;
+    else if (e.outcome === "declined" || e.outcome === "overridden") g.refused++;
+    else g.other++;
+    groups.set(key, g);
+  }
+  return [...groups.values()].sort((a, b) => (a.projectId + a.kind < b.projectId + b.kind ? -1 : 1)).map((g) => {
+    const base = { projectId: g.projectId, kind: g.kind, widens: g.widens, ownerAgreed: g.agreed, ownerRefused: g.refused, delegatedApplied: g.delegated, notApplied: g.other };
+    // Only changes the policy actually asked about count as evidence for letting the class through; a clean record is no refusal and no failure of any kind.
+    if (g.ownerAsked < minAgreed || g.refused > 0 || g.other > 0) return base;
+    return { ...base, suggestion: { set: "allow" as const, cls: g.widens, projectId: g.projectId, text: `You agreed to all ${g.ownerAsked} ${g.kind} changes the policy asked you about for this project and never refused or lost one; if you want them without asking, set the approval policy for ${g.widens === "spend" ? "spend" : "rights"} in this project to allow.` } };
+  });
+}
+
 export const RECORD_LIMITS = {
   text: 4000, reason: 500, entries: 1000, systemEntries: 50, motions: 30, trail: 60, tagged: 100, corrections: 100, changes: 10, versions: 20, sources: 5, openRecords: 100, patchBytes: 4000,
-  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8, askOwner: 10, ownerAnswers: 10, autoReturnMinutes: 60, autoReturnPerPass: 5, autoReturnIndex: 50,
+  voteMinutes: 10, voteMinutesMax: 120, abandonMinutes: 120, page: 100, retries: 12, history: 10, pendingAlternatives: 8, askOwner: 10, ownerAnswers: 10, autoReturnMinutes: 60, autoReturnPerPass: 5, autoReturnIndex: 50, stewardSeconds: 60, narratePerPass: 3, pendingScan: 200,
 } as const;
 
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
@@ -231,6 +277,9 @@ const RETURN_KIND = "meeting-record-return";
 const LOG_KIND = "meeting-decision-log";
 /** Per project: the decisions that may still lack log lines (see `UnloggedIndexBody`). */
 const UNLOGGED_KIND = "meeting-decision-unlogged";
+const WINDOW_KIND = "meeting-widening-window";
+/** Agreed on a delegate's leave rather than by the owner: the approval policy or the steward agent (not the vote's own `policy:none`). */
+const delegated = (agreedBy: string | undefined): boolean => agreedBy !== undefined && agreedBy !== "policy:none" && (agreedBy.startsWith("policy:") || agreedBy.startsWith("steward:"));
 /** How many decisions one sweep call looks at for missing log lines, and how many storage reads the log reader makes. */
 const LOG_SWEEP_DECISIONS = 20;
 const LOG_READ_PAGES = 20;
@@ -883,7 +932,11 @@ export class MeetingRecordService {
     const changeRecords: ChangeRecord[] = !adopted ? [] : motion.changes.map((c) => (scope.scope === "recommendation" ? { ...c, state: "not-applied" as const, code: "recommendation" as const, reason: scope.reason ?? "advisory only", at: now } : { ...c, state: "adopted" as const }));
     // A change that widens rights or spend waits for the owner unless the approval policy lets its class through, whether or not the owner is in the room.
     let widensAsk = false;
-    if (adopted && scope.scope === "in-scope") for (const c of changeRecords) { const cls = this.#options.appliers?.[c.kind]?.widens; if (cls !== undefined && (this.#options.widening === undefined || (await this.#options.widening(cls, motion.projectId).catch(() => "ask" as const)) !== "allow")) widensAsk = true; }
+    if (adopted && scope.scope === "in-scope") for (const c of changeRecords) { const cls = this.#options.appliers?.[c.kind]?.widens; if (cls !== undefined && (this.#options.widening === undefined || (await this.#options.widening(cls, motion.projectId).catch(() => "ask" as const)) !== "allow")) {
+      // A class the owner has given the steward agent to judge is not put to the owner at the vote: the steward is asked when the change is carried out, and its "ask" (or its failure) puts the decision back to waiting for the owner then (card M02h).
+      if (this.#options.steward !== undefined && this.#options.stewardEnabled !== undefined && await this.#options.stewardEnabled(cls, motion.projectId).catch(() => false)) continue;
+      widensAsk = true;
+    } }
     const ownerResponse: OwnerResponse = adopted && scope.scope === "in-scope" && changeRecords.length > 0 && (rec.ownerPresent || widensAsk) ? "pending" : "not-asked";
     const voteSeq = rec.nextSeq;
     const voteEntry = entryIdOf(motion.recordId, voteSeq);
@@ -989,11 +1042,13 @@ export class MeetingRecordService {
         ...(d.ownerResponse === "pending" ? { waitingFor: "owner" as const } : {}),
       });
       if (d.outcome !== "adopted" || d.scope !== "in-scope" || (d.ownerResponse === "pending" && d.held !== true)) return tally();
-      // A decision held part way waits only for its widening changes: a change already started and the ones that widen nothing (the vote carried them) go on.
-      const change = d.changes.find((c) => c.state === "applying" || (c.state === "adopted" && (d.ownerResponse !== "pending" || this.#options.appliers?.[c.kind]?.widens === undefined)));
+      // A decision held part way waits only for the changes put aside for the owner (`waiting`): a change already started and every other change (the vote carried the ones that widen nothing; a widening one is judged on its own) go on,
+      // whatever their order in the list (card M02h).
+      const change = d.changes.find((c) => c.state === "applying" || (c.state === "adopted" && (d.ownerResponse !== "pending" || c.waiting !== true)));
       if (change === undefined) { await this.#announceChanges(decisionId); return tally(); }
       let limitNow: number | undefined;
-      const countPolicy = (body: DecisionRecordBody, exceptId: string): number => body.changes.filter((c) => c.id !== exceptId && (c.state === "applied" || c.state === "applying") && c.agreedBy !== undefined && c.agreedBy.startsWith("policy:") && c.agreedBy !== "policy:none").length;
+      const countPolicy = (body: DecisionRecordBody, exceptId: string): number => body.changes.filter((c) => c.id !== exceptId && (c.state === "applied" || c.state === "applying") && delegated(c.agreedBy)).length;
+      let capNow: { readonly max: number; readonly windowMinutes: number } | undefined;
       // `agreement` is set for the save that starts a change: it holds only while the change is still adopted and the owner's response is still the one the agreement was worked out from.
       const save = async (next: ChangeRecord, agreement?: string): Promise<boolean> => {
         let lost = false;
@@ -1003,14 +1058,25 @@ export class MeetingRecordService {
             const cur = await this.#runner.get("meeting-decision", decisionId);
             const body = known<DecisionRecordBody>(cur)!;
             const now = this.#runner.now();
+            const window: Change[] = [];
             if (agreement !== undefined) {
               const here = body.changes.find((c) => c.id === change.id);
               if (here?.state !== "adopted" || body.ownerResponse !== d.ownerResponse) { lost = true; throw new DomainError("invalid_command", "the owner answered before this change started"); }
               // The limit is counted again here, on the record the save will replace: a concurrent start of another widening change in the same decision is seen on the retry (card M02g).
-              if (limitNow !== undefined && agreement.startsWith("policy:") && agreement !== "policy:none" && countPolicy(body, change.id) >= limitNow) { lost = true; throw new DomainError("invalid_command", "the decision reached its limit of widening changes before this change started"); }
+              if (limitNow !== undefined && delegated(agreement) && countPolicy(body, change.id) >= limitNow) { lost = true; throw new DomainError("invalid_command", "the decision reached its limit of widening changes before this change started"); }
+              // The project's count across decisions is read and raised in the same save as the start, so two decisions starting at once cannot both take the last place (the save is retried on a moved revision and counts again).
+              if (capNow !== undefined && delegated(agreement)) {
+                const win = await this.#runner.get(WINDOW_KIND, body.projectId);
+                const w = known<WideningWindowBody>(win);
+                const fresh = w === undefined || ms(now) - ms(w.windowStart) >= capNow.windowMinutes * 60_000;
+                const count = fresh ? 0 : w.count;
+                if (count >= capNow.max) { lost = true; throw new DomainError("invalid_command", "the project reached its limit of widening changes across decisions before this change started"); }
+                const wb: WideningWindowBody = { projectId: body.projectId, windowStart: fresh ? now : w.windowStart, count: count + 1 };
+                window.push(win === undefined ? { type: "create", ref: { kind: WINDOW_KIND, id: body.projectId }, body: json(wb) } : { type: "update", ref: { kind: WINDOW_KIND, id: body.projectId }, expectedRevision: win.revision, body: json(wb) });
+              }
             }
-            const changes = body.changes.map((c) => (c.id === change.id && (c.state === "adopted" || c.state === "applying") ? { ...next, at: now } : c));
-            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, changes }) }], detail: { projectId: body.projectId, change: change.id, to: next.state } };
+            const changes = body.changes.map((c) => { if (c.id !== change.id || (c.state !== "adopted" && c.state !== "applying")) return c; const { waiting: _w, ...rest } = next; void _w; return { ...rest, at: now }; });
+            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, changes }) }, ...window], detail: { projectId: body.projectId, change: change.id, to: next.state } };
           },
         }))); } catch (error) { if (lost) return false; throw error; }
         return true;
@@ -1020,18 +1086,19 @@ export class MeetingRecordService {
       // Until the change has been started, a refusal is saved only while the change is still adopted and the owner's answer is the one this pass worked from; if the owner answered meanwhile the pass reads the decision again (card M02g).
       let started = change.state === "applying";
       // Who allowed the start and who acted, kept on a refusal after the start (the stale copy of the change lacks them), so the log shows the policy's or the owner's start.
-      let carried: { agreedBy?: string; actedAs?: string } = {};
+      let carried: { agreedBy?: string; actedAs?: string; stewardReason?: string } = {};
       const refuse = async (code: ChangeRecord["code"], reason: string): Promise<void> => { await save({ ...change, ...carried, state: "not-applied", ...(code === undefined ? {} : { code }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), reason }, started ? undefined : "refusal"); };
-      // The decision goes back to waiting for the owner, only while the owner's answer is still the one this pass worked from; needs_you then shows it, an agree carries out what is left and a decline refuses it.
+      // The change is put aside for the owner and the decision goes back to waiting for them, only while the owner's answer is still the one this pass worked from; needs_you then shows it, an agree carries out what is left and a decline refuses it.
+      // A decision already held only has this change marked (the others keep going). The first hold stamps the time the expiry counts from.
       const holdForOwner = async (): Promise<void> => {
         let moved = false;
-        try { await this.#retrying(() => this.#runner.command("meeting.decision.limit-hold", { commandId: `${decisionId}:limit-hold`.slice(0, 120), actor: by.id }, async () => ({
-          payload: { decisionId },
+        try { await this.#retrying(() => this.#runner.command("meeting.decision.limit-hold", { commandId: `${decisionId}:limit-hold:${change.id}`.slice(0, 120), actor: by.id }, async () => ({
+          payload: { decisionId, changeId: change.id },
           build: async () => {
             const cur = await this.#runner.get("meeting-decision", decisionId);
             const body = known<DecisionRecordBody>(cur)!;
-            if (body.ownerResponse !== d.ownerResponse || body.ownerResponse === "pending") { moved = true; throw new DomainError("invalid_command", "the owner answered meanwhile"); }
-            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending", held: true, changes: body.changes.map((c) => (c.id === change.id && c.state === "adopted" && cell !== undefined ? { ...c, setting: cell } : c)) }) }], detail: { projectId: body.projectId, limit: "reached" } };
+            if (body.ownerResponse !== d.ownerResponse || (body.ownerResponse === "pending" && body.held !== true)) { moved = true; throw new DomainError("invalid_command", "the owner answered meanwhile"); }
+            return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur!.revision, body: json({ ...body, ownerResponse: "pending", held: true, heldAt: body.heldAt ?? this.#runner.now(), changes: body.changes.map((c) => (c.id === change.id && c.state === "adopted" ? { ...c, waiting: true as const, ...(cell === undefined ? {} : { setting: cell }) } : c)) }) }], detail: { projectId: body.projectId, limit: "reached" } };
           },
         }))); } catch (error) { if (!moved) throw error; }
       };
@@ -1039,14 +1106,7 @@ export class MeetingRecordService {
         const applier = this.#options.appliers?.[change.kind];
         if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
         if (applier.widens !== undefined) cell = this.#options.widening === undefined ? "ask" : await this.#options.widening(applier.widens, d.projectId).catch(() => "ask" as const);
-        // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through.
-        // The owner was never asked about it, so the decision goes back to waiting for the owner (their agree carries it out, their decline refuses it) instead of ending in a refusal.
-        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") { await holdForOwner(); continue; }
-        // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes. At the limit the decision waits for the owner (as when the policy asks), the rest stay adopted, and the owner's agreement carries them out.
-        if (applier.widens !== undefined && d.ownerResponse !== "agreed") {
-          limitNow = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
-          if (limitNow !== undefined && countPolicy(d, change.id) >= limitNow) { await holdForOwner(); continue; }
-        }
+        // What would be refused whatever the owner says comes first (card M02h): a change that cannot be carried out is refused, not put to the owner, who would be asked about something that cannot happen.
         if (change.target.kind === "task" && this.#deps.decisions !== undefined) {
           const blocked = (await this.#deps.decisions.guard(change.target.id, "start")).blockedBy;
           if (blocked.length > 0) { await refuse("gate", `an owner gate or a superseded decision blocks work on the task (${blocked.join(", ")})`); continue; }
@@ -1056,21 +1116,42 @@ export class MeetingRecordService {
         const target = await this.#runner.get(change.target.kind, change.target.id);
         if (target === undefined) { await refuse("missing", `${change.target.kind} ${change.target.id} no longer exists`); continue; }
         if (target.revision !== change.expectedRevision) { await refuse("conflict", `${change.target.kind} ${change.target.id} is at revision ${target.revision}, not ${change.expectedRevision} as proposed`); continue; }
+        let allowedBy: "policy" | "steward" = "policy";
+        // The policy may have tightened since the vote: a widening change goes ahead without the owner's agreement only while the policy still lets its class through, or the steward agent (when the owner enabled it for the class) allows it.
+        // The owner was never asked about it, so the decision goes back to waiting for the owner (their agree carries it out, their decline refuses it) instead of ending in a refusal.
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed" && cell !== "allow") {
+          const stewardAllows = await this.#askSteward(decisionId, d, change, applier.widens);
+          if (stewardAllows === undefined) { await holdForOwner(); continue; }
+          allowedBy = "steward";
+          carried = { stewardReason: stewardAllows };
+        }
+        // A limit on how much widening one decision may do without the owner: the policy's leave covers that many changes. At the limit the decision waits for the owner (as when the policy asks), the rest stay adopted, and the owner's agreement carries them out.
+        if (applier.widens !== undefined && d.ownerResponse !== "agreed") {
+          limitNow = this.#options.policyWideningLimit === undefined ? undefined : await this.#options.policyWideningLimit(d.projectId).catch(() => 0);
+          if (limitNow !== undefined && countPolicy(d, change.id) >= limitNow) { await holdForOwner(); continue; }
+          // The same across decisions: the project's count in the window (read again inside the save that starts the change). A cap that cannot be read counts as reached.
+          capNow = this.#options.policyWideningCap === undefined ? undefined : await this.#options.policyWideningCap(d.projectId).catch(() => ({ max: 0, windowMinutes: 1 }));
+          if (capNow !== undefined) {
+            const w = known<WideningWindowBody>(await this.#runner.get(WINDOW_KIND, d.projectId));
+            if (w !== undefined && ms(this.#runner.now()) - ms(w.windowStart) < capNow.windowMinutes * 60_000 && w.count >= capNow.max) { await holdForOwner(); continue; }
+            if (capNow.max <= 0) { await holdForOwner(); continue; }
+          }
+        }
         // Who allowed it is fixed now and kept: a replay after a crash uses it (the grant basis is part of the command digest), and a later owner decline does not cancel a change already started.
-        const agreedBy = d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`;
+        const agreedBy = d.ownerResponse === "agreed" ? "owner:agreed" : `${allowedBy}:${applier.widens ?? "none"}`;
         // The owner may have declined since this was read: then the change is not started, and the decline's own record stands.
         // The actor of the effect is fixed the same way: the command digest includes it, and a replay may run under another principal (the owner agreed, the service recovers).
-        if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id, ...(cell === undefined ? {} : { setting: cell }) }, agreedBy))) continue;
+        if (!(await save({ ...change, state: "applying", agreedBy, actedAs: by.id, ...(cell === undefined ? {} : { setting: cell }), ...(carried.stewardReason === undefined ? {} : { stewardReason: carried.stewardReason }) }, agreedBy))) continue;
         started = true;
-        carried = { agreedBy, actedAs: by.id };
+        carried = { ...carried, agreedBy, actedAs: by.id };
       }
       const applier = this.#options.appliers?.[change.kind];
       if (applier === undefined) { await refuse("failed", `no applier is registered for ${change.kind}`); continue; }
       try {
-        const agreedBy = change.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`);
+        const agreedBy = change.agreedBy ?? carried.agreedBy ?? (d.ownerResponse === "agreed" ? "owner:agreed" : `policy:${applier.widens ?? "none"}`);
         const done = await applier.apply({ commandId: `mtg:${decisionId}:${change.id}`, actor: change.actedAs ?? by.id, actedAs: change.actedAs ?? by.id, target: change.target, expectedRevision: change.expectedRevision, patch: change.patch, agreedBy });
         // The final record keeps who allowed it and who acted (the decision log reads them from here).
-        await save({ ...change, agreedBy, actedAs: change.actedAs ?? by.id, ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
+        await save({ ...change, agreedBy, actedAs: change.actedAs ?? by.id, ...(carried.stewardReason === undefined ? {} : { stewardReason: carried.stewardReason }), ...((cell ?? change.setting) === undefined ? {} : { setting: cell ?? change.setting }), state: "applied", ...(done.revision === undefined ? {} : { appliedRevision: done.revision }) });
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_revision") await refuse("conflict", `${change.target.kind} ${change.target.id} changed meanwhile: ${error.message}`);
         else if (error instanceof DomainError && ["invalid_command", "forbidden", "not_found", "invalid_transition"].includes(error.code)) await refuse("failed", error.message);
@@ -1079,6 +1160,28 @@ export class MeetingRecordService {
     }
     await this.#announceChanges(decisionId);
     return this.#applyDecisionTally(decisionId);
+  }
+
+  /**
+   * The steward agent's say on a widening change the policy leaves to the owner (card M02h): the reason when it allows it, otherwise undefined (not configured, not enabled for this class here, said ask, failed, answered nonsense or took
+   * too long: every one of those sends the change to the owner). It is shown no patch words and cannot name anything to do; it only answers allow or ask.
+   */
+  async #askSteward(decisionId: string, d: DecisionRecordBody, change: ChangeRecord, cls: "access-change" | "spend"): Promise<string | undefined> {
+    const steward = this.#options.steward;
+    if (steward === undefined || this.#options.stewardEnabled === undefined) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!(await this.#options.stewardEnabled(cls, d.projectId))) return undefined;
+      const input: StewardInput = {
+        decisionId, projectId: d.projectId, kind: change.kind, widens: cls, target: change.target, summary: redactText(change.summary).slice(0, 200),
+        patchHash: createHash("sha256").update(canonicalJson(change.patch)).digest("hex"), counters: logCounters(change), delegatedInDecision: d.changes.filter((c) => c.id !== change.id && (c.state === "applied" || c.state === "applying") && delegated(c.agreedBy)).length,
+      };
+      const ms2 = (this.#options.stewardSeconds ?? RECORD_LIMITS.stewardSeconds) * 1000;
+      const out = await Promise.race([steward(input), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("the steward took too long")), ms2); })]);
+      if (out === null || typeof out !== "object" || out.verdict !== "allow") return undefined;
+      const reason = redactText(typeof out.reason === "string" ? out.reason : "").replace(/\s+/g, " ").trim().slice(0, 300);
+      return reason === "" ? "the steward agent allowed it" : reason;
+    } catch { return undefined; } finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
   /**
@@ -1107,7 +1210,7 @@ export class MeetingRecordService {
           const body: DecisionLogBody = {
             decisionId, changeId: c.id, projectId: d.projectId, kind: c.kind, targetKind: c.target.kind, outcome, ...(code === undefined ? {} : { code }), decidedBy,
             ...(agreedBy === undefined ? {} : { agreedBy }), ...(c.actedAs === undefined ? {} : { actedAs: c.actedAs }), ...(widens === undefined ? {} : { widens }), ...(widens === undefined || c.setting === undefined ? {} : { setting: c.setting }),
-            ownerResponse: c.agreedBy?.startsWith("policy:") === true ? "not-asked" : d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
+            ownerResponse: c.agreedBy?.startsWith("policy:") === true || c.agreedBy?.startsWith("steward:") === true ? "not-asked" : d.ownerResponse, patchHash: createHash("sha256").update(canonicalJson(c.patch)).digest("hex"), counters: logCounters(c), changedAt: c.at ?? d.concludedAt, loggedAt: this.#runner.now(),
           };
           await this.#retrying(() => this.#runner.command("meeting.decision.log", { commandId: `mdl:${decisionId}:${c.id}:${outcome}`.slice(0, 120), actor: "service:meeting-records" }, async () => ({
             payload: { decisionId, changeId: c.id, outcome },
@@ -1155,6 +1258,28 @@ export class MeetingRecordService {
   }
 
   /**
+   * Learning from the log (card M02h): for each project and kind of widening change in the part of the log read (at most 2000 entries, the log reader's own bound), how the changes were decided, and a suggestion where the owner has agreed
+   * `minAgreed` times or more (default 5) and never declined, overridden or seen one refused or fail. Owner only. It reads and counts; it never sets a policy, so what is learned is only ever offered to the owner, who accepts by changing
+   * the approval policy. With little data (a new installation) it says nothing, which is the honest answer until production data exists.
+   */
+  async learnedPatterns(by: Principal, query: { projectId?: string; minAgreed?: number } = {}): Promise<{ patterns: DecisionPattern[]; scanned: number; scanLimited: boolean }> {
+    onlyKnown(query, ["projectId", "minAgreed"]);
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw forbidden(by, "read what the decision log suggests");
+    const min = query.minAgreed === undefined ? 5 : Number.isSafeInteger(query.minAgreed) && query.minAgreed >= 2 && query.minAgreed <= 100 ? query.minAgreed : invalid("minAgreed", "must be 2 to 100");
+    const entries: View<DecisionLogBody>[] = [];
+    let after: string | undefined;
+    let scanLimited = false;
+    for (;;) {
+      const page = await this.decisionLog(by, { limit: 100, ...(query.projectId === undefined ? {} : { projectId: query.projectId }), ...(after === undefined ? {} : { after }) });
+      entries.push(...page.entries);
+      if (page.scanLimited === true) scanLimited = true;
+      if (page.next === undefined || entries.length >= 2000) { scanLimited = scanLimited || page.next !== undefined; break; }
+      after = page.next;
+    }
+    return { patterns: patternsOf(entries, min), scanned: entries.length, scanLimited };
+  }
+
+  /**
    * The decision log, newest-agnostic in ID order, a page at a time (owner only): `limit` 1 to 100 (default 50), `after` the cursor a page returned as `next`; filters `kind`, `outcome`, `projectId`. Read-only.
    */
   async decisionLog(by: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number } = {}): Promise<{ entries: View<DecisionLogBody>[]; next?: string; scanLimited?: true }> {
@@ -1191,26 +1316,39 @@ export class MeetingRecordService {
   async ownerPending(by: Principal, limit = 50): Promise<{ items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number; applying: number; text: string; topic?: string }[]; truncated: boolean }> {
     if (by.kind !== "owner" || by.taskScope !== undefined) return { items: [], truncated: false };
     const items: { id: string; revision: number; projectId: string; since: string; left: number; applied: number; applying: number; text: string; topic?: string }[] = [];
-    let after: string | undefined;
-    for (let pages = 0; pages < 10; pages++) {
-      const page = await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const a of page) {
-        after = a.id;
-        const d = a.body as unknown as DecisionRecordBody;
-        if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse !== "pending") continue;
-        const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
-        if (left === 0) continue;
-        if (items.length >= limit) return { items, truncated: true };
-        // The topic the owner would recognise: the motion's own, else the topic of the agenda item it answered (the same two topics an owner decision is checked on).
-        const agenda = d.topic === undefined && d.agendaItemId !== undefined ? known<AgendaBody>(await this.#runner.get("agenda-item", d.agendaItemId)) : undefined;
-        const agendaTopic = agenda === undefined ? undefined : normalTopic(agenda.topic);
-        const topic = d.topic ?? (agendaTopic !== undefined && TOPIC.test(agendaTopic) ? agendaTopic : undefined);
-        items.push({ id: a.id, revision: a.revision, projectId: d.projectId, since: d.concludedAt, left, applied: d.changes.filter((c) => c.state === "applied").length, applying: d.changes.filter((c) => c.state === "applying").length, text: d.text.slice(0, 300), ...(topic === undefined ? {} : { topic: topic.slice(0, 80) }) });
-      }
-      if (page.length < 100) return { items, truncated: false };
+    // The decisions that may still need something (the projects' unlogged indexes), not every decision ever made (card M02h): a decision waiting for the owner always has a change left, so it is always in an index.
+    const live = await this.#liveDecisions();
+    for (const a of live.decisions) {
+      const d = a.body as unknown as DecisionRecordBody;
+      if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse !== "pending") continue;
+      const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
+      if (left === 0) continue;
+      if (items.length >= limit) return { items, truncated: true };
+      // The topic the owner would recognise: the motion's own, else the topic of the agenda item it answered (the same two topics an owner decision is checked on).
+      const agenda = d.topic === undefined && d.agendaItemId !== undefined ? known<AgendaBody>(await this.#runner.get("agenda-item", d.agendaItemId)) : undefined;
+      const agendaTopic = agenda === undefined ? undefined : normalTopic(agenda.topic);
+      const topic = d.topic ?? (agendaTopic !== undefined && TOPIC.test(agendaTopic) ? agendaTopic : undefined);
+      items.push({ id: a.id, revision: a.revision, projectId: d.projectId, since: d.concludedAt, left, applied: d.changes.filter((c) => c.state === "applied").length, applying: d.changes.filter((c) => c.state === "applying").length, text: d.text.slice(0, 300), ...(topic === undefined ? {} : { topic }) });
     }
-    // Ten full pages were read: more exist only if the next page is not empty.
-    return { items, truncated: (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
+    return { items, truncated: live.truncated };
+  }
+
+  /**
+   * The pending-decisions index (card M02h): the decisions of every project that may still need something (the unlogged indexes hold a decision until each change has reached a final state, its line is written and the owner is not
+   * pending), read in a bounded number (`pendingScan`, 200); `truncated` says more exist. Replaces reading up to 1000 decisions of all history.
+   */
+  async #liveDecisions(): Promise<{ decisions: Aggregate[]; truncated: boolean }> {
+    const decisions: Aggregate[] = [];
+    const indexes = await this.#runner.list(UNLOGGED_KIND, { limit: 100 });
+    let truncated = indexes.length === 100;
+    for (const index of indexes) {
+      for (const id of (index.body as unknown as UnloggedIndexBody).ids) {
+        if (decisions.length >= RECORD_LIMITS.pendingScan) return { decisions, truncated: true };
+        const found = await this.#runner.get("meeting-decision", id);
+        if (found !== undefined) decisions.push(found);
+      }
+    }
+    return { decisions, truncated };
   }
 
   /**
@@ -1239,22 +1377,18 @@ export class MeetingRecordService {
       }
     }
     const unfinished: { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] = [];
-    let after: string | undefined;
-    scan: for (let pages = 0; pages < 10; pages++) {
-      const page = await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const a of page) {
-        after = a.id;
-        const d = a.body as unknown as DecisionRecordBody;
-        // A decision that still waits for the owner is answered, not carried out. One the owner declined can still hold a change that had started (it stays applying until applied again).
-        if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") continue;
-        const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
-        if (left === 0) continue;
-        if (unfinished.length >= limit) { truncated = true; break scan; }
-        unfinished.push({ id: a.id, projectId: d.projectId, text: d.text.slice(0, 300), ...(d.topic === undefined ? {} : { topic: d.topic }), left, applying: d.changes.filter((c) => c.state === "applying").length });
-      }
-      if (page.length < 100) return { meetings, unfinished, truncated };
+    const live = await this.#liveDecisions();
+    if (live.truncated) truncated = true;
+    for (const a of live.decisions) {
+      const d = a.body as unknown as DecisionRecordBody;
+      // A decision that still waits for the owner is answered, not carried out. One the owner declined can still hold a change that had started (it stays applying until applied again).
+      if (d.outcome !== "adopted" || d.scope !== "in-scope" || d.ownerResponse === "pending") continue;
+      const left = d.changes.filter((c) => c.state === "adopted" || c.state === "applying").length;
+      if (left === 0) continue;
+      if (unfinished.length >= limit) { truncated = true; break; }
+      unfinished.push({ id: a.id, projectId: d.projectId, text: d.text.slice(0, 300), ...(d.topic === undefined ? {} : { topic: d.topic }), left, applying: d.changes.filter((c) => c.state === "applying").length });
     }
-    return { meetings, unfinished, truncated: truncated || (await this.#runner.list("meeting-decision", { ...(after === undefined ? {} : { afterId: after }), limit: 1 })).length > 0 };
+    return { meetings, unfinished, truncated };
   }
 
   /**
@@ -1510,7 +1644,7 @@ export class MeetingRecordService {
    * The lease: closes votes whose time is up (`tied` lists those that came to a tie and now wait for the chair's casting vote), fails ties whose casting window is over, and ends records nobody finished (two hours past the meeting's end), so nothing stays open for ever. Owner, host or service. Each step has a
    * command ID derived from the record, so repeating the sweep, or running it on several processes, does each step once.
    */
-  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[]; logChecked: string[]; returned: string[]; returnFailed: string[] }> {
+  async sweep(by: Principal, command: { projectId: string }): Promise<{ closed: string[]; tied: string[]; failedTies: string[]; interrupted: string[]; logChecked: string[]; returned: string[]; returnFailed: string[]; expired?: string[]; narrated?: string[] }> {
     onlyKnown(command, ["projectId"]);
     if (!isService(by)) throw forbidden(by, "sweep meeting records");
     const projectId = typeof command.projectId === "string" ? command.projectId : invalid("projectId", "is not a project ID");
@@ -1546,8 +1680,71 @@ export class MeetingRecordService {
     // A log line lost to a crash or a failed write is written here (bounded per call).
     const logChecked = await this.#sweepLog(projectId).catch((error: unknown) => { fault ??= error; return [] as string[]; });
     const handBack = await this.#sweepReturns(by, projectId).catch((error: unknown) => { fault ??= error; return { returned: [] as string[], failed: [] as string[] }; });
+    // An ended meeting that waits for its outcomes to go back gets its summary, with the narrator's overview, written once (card M02h).
+    const narrated = await this.#sweepNarration(by, projectId).catch((error: unknown) => { fault ??= error; return [] as string[]; });
+    // A hold that stayed unanswered past the owner's chosen time ends as a decline (card M02h).
+    const expired = await this.#expireHolds(by, projectId).catch((error: unknown) => { fault ??= error; return [] as string[]; });
     if (fault !== undefined) throw fault;
-    return { closed, tied, failedTies, interrupted, logChecked, returned: handBack.returned, returnFailed: handBack.failed };
+    return { closed, tied, failedTies, interrupted, logChecked, returned: handBack.returned, returnFailed: handBack.failed, expired, narrated };
+  }
+
+  /**
+   * Ends the holds that nobody answered in time (card M02h): a decision put back to waiting for the owner (`held`) that is older than `holdExpiryMinutes` becomes a decline made by time. Changes not started are refused with the code
+   * `expired` (never carried out: silence widens nothing); a change already started finishes under the agreement it started with, as after an owner's decline. Reads at most 200 decisions of the project's unlogged index per pass (a decision
+   * that waits for the owner stays in it), and is safe to repeat.
+   */
+  async #expireHolds(by: Principal, projectId: string): Promise<string[]> {
+    const minutes = await this.#options.holdExpiryMinutes?.().catch(() => undefined);
+    if (minutes === undefined || !Number.isFinite(minutes) || minutes <= 0) return [];
+    const ids = known<UnloggedIndexBody>(await this.#runner.get(UNLOGGED_KIND, projectId))?.ids ?? [];
+    const out: string[] = [];
+    for (const decisionId of ids.slice(0, RECORD_LIMITS.pendingScan)) {
+      const d = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+      if (d === undefined || d.ownerResponse !== "pending" || d.held !== true || d.outcome !== "adopted" || d.scope !== "in-scope") continue;
+      if (ms(this.#runner.now()) - ms(d.heldAt ?? d.concludedAt) < minutes * 60_000) continue;
+      let ended = false;
+      await this.#cmd("meeting.decision.expire", by, `exp:${decisionId}`.slice(0, 120), async () => ({
+        payload: { decisionId },
+        build: async () => {
+          const cur = await this.#runner.get("meeting-decision", decisionId);
+          const body = known<DecisionRecordBody>(cur);
+          if (cur === undefined || body === undefined) throw new DomainError("not_found", "that decision does not exist");
+          // Re-read: the owner may have answered since the scan, and then nothing is ended here.
+          if (body.ownerResponse !== "pending" || body.held !== true) throw new DomainError("invalid_command", "the owner answered meanwhile");
+          const now = this.#runner.now();
+          const reason = `nobody answered within ${Math.round(minutes / 1440 * 10) / 10} days, so it was treated as declined`;
+          const { held: _held, ...rest } = body; void _held;
+          const next: DecisionRecordBody = { ...rest, ownerResponse: "declined", holdExpiredAt: now, changes: body.changes.map((c) => { if (c.state !== "adopted") return c; const { waiting: _w, ...plain2 } = c; void _w; return { ...plain2, state: "not-applied" as const, code: "expired" as const, reason, at: now }; }) };
+          ended = true;
+          return { ref: { kind: "meeting-decision", id: decisionId }, creates: false, changes: [{ type: "update", ref: { kind: "meeting-decision", id: decisionId }, expectedRevision: cur.revision, body: json(next) }], detail: { projectId, hold: "expired" } };
+        },
+      })).catch((error: unknown) => { if (!(error instanceof DomainError && error.code === "invalid_command")) throw error; });
+      if (!ended) continue;
+      out.push(decisionId);
+      const left = known<DecisionRecordBody>(await this.#runner.get("meeting-decision", decisionId));
+      if (left?.changes.some((c) => c.state === "applying") === true) await this.#applyDecision(by, decisionId).catch(() => undefined);
+      else await this.#logChanges(decisionId);
+    }
+    return out;
+  }
+
+  /**
+   * The narrator's turn (card M02h): an ended meeting still listed for its hand-back (the meetings that have outcomes to return) that has no summary yet gets one, with the overview the narrator wrote; at most three per pass, once each (a
+   * narrator that fails leaves the summary without an overview, marked `overviewFailed`, and is not asked again by the sweep; `summarize` can be called again by hand). Does nothing without a narrator.
+   */
+  async #sweepNarration(by: Principal, projectId: string): Promise<string[]> {
+    if (this.#options.narrate === undefined) return [];
+    const done: string[] = [];
+    const ids = known<OpenIndexBody>(await this.#runner.get(RETURN_KIND, projectId))?.ids ?? [];
+    for (const recordId of ids) {
+      if (done.length >= RECORD_LIMITS.narratePerPass) break;
+      const rec = known<RecordBody>(await this.#runner.get("meeting-record", recordId));
+      if (rec === undefined || rec.state === "open") continue;
+      if (await this.#runner.get("meeting-summary", derivedId("msu", recordId)) !== undefined) continue;
+      await this.summarize(by, { commandId: `narrate:${recordId}`, recordId });
+      done.push(recordId);
+    }
+    return done;
   }
 
   /** Whether an ended record has a motion that answers an agenda topic and whose outcome has not gone back. */

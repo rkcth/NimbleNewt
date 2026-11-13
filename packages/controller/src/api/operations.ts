@@ -218,7 +218,7 @@ export interface Context {
   /** The model's kept thinking and the owner's switch for collecting it (card U09b). */
   readonly thinkingStore?: Pick<ThinkingStore, "collection" | "setCollection" | "summary">;
   readonly policyContext?: Pick<PolicyService, "contextFor">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "learnedPatterns" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "wakes" | "stopWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
   readonly watchControl?: {
@@ -485,6 +485,7 @@ const NOT_CARRIED_OUT: Readonly<Record<string, string>> = {
   conflict: "what it changes had moved on", unauthorized: "no one with the right to carry it out could be found (the agent lost the right, or the vote did not give one)",
   gate: "the project's rules or a later decision stopped it", missing: "what it changes no longer exists or can no longer be carried out here",
   failed: "it could not be carried out", recommendation: "it was only a recommendation", owner: "you refused it",
+  expired: "it waited for you past the time you set (meeting.decision.holdExpiryDays) and was treated as declined",
 };
 
 /** The owner decision recorded for the meeting decision and never linked to it, in plain words (card M02h). */
@@ -1063,7 +1064,7 @@ export const OPERATIONS: readonly Operation[] = [
   recordOp("finish", "command", "Ends the meeting; an interrupted meeting voids open votes and keeps the record.", "finish", ["recordId", "interrupted", "reason"], "`{ voided }`."),
   recordOp("summarize", "command", "Builds the summary from the record alone.", "summarize", ["recordId"], "`{ builds, overviewFailed? }`."),
   recordOp("outcomes", "command", "Returns the outcomes to the conversations they came from. With `askOwner` (owner, host or service holding meeting.manage; never an agent, an outside app or a task credential) a decision the meeting deferred also puts a question to the owner (at most 10 open per project; past that the outcome is returned without the question and listed in `notAsked`). The owner's answer is written back onto this meeting record and shown on the next stand-up agenda.", "returnOutcomes", ["recordId", "askOwner"], "`{ returned, pending, asked, notAsked }`.", "viewer"),
-  recordOp("sweep", "command", "Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call).", "sweep", ["projectId"], "`{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed }`.", "viewer"),
+  recordOp("sweep", "command", "Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call); writes the summary, with the narrator's overview when the host configured one, of an ended meeting waiting for its hand-back (at most 3 a call, once each); and ends as a decline the held decisions that nobody answered within meeting.decision.holdExpiryDays.", "sweep", ["projectId"], "`{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed, expired, narrated }`.", "viewer"),
   recordOp("get", "query", "A meeting record, if you may read it.", "record", ["recordId"], "`{ item }`.", "id", ["recordId"]),
   recordOp("of-meeting", "query", "The record of a meeting occurrence.", "recordFor", ["occurrenceId"], "`{ item }`.", "id", ["occurrenceId"]),
   recordOp("discussion", "query", "The full discussion in order, a page at a time.", "discussion", ["recordId", "fromSeq", "toSeq", "limit"], "`{ item: { entries, next? } }`.", "id", ["recordId"]),
@@ -1077,6 +1078,12 @@ export const OPERATIONS: readonly Operation[] = [
       only(a, ["kind", "outcome", "projectId", "after", "limit"]);
       const svc = c.records ?? unavailable("meeting records");
       return asJson({ item: await svc.decisionLog(c.principal, a as never) } as object);
+    } },
+  { name: "meeting.decisions.patterns", kind: "query", summary: "What the meeting decision log suggests (card M02h): for each project and kind of widening change (grant, budget raise), how many the owner agreed to, refused, how many went ahead on the policy's or the steward's leave and how many were not carried out, with a suggestion to let the class through only where the owner agreed to at least `minAgreed` (default 5) the policy asked about and never refused or lost one. Owner only (not a task-scoped credential). It never changes the policy; the owner accepts by setting it.", args: { "projectId?": "the project", "minAgreed?": "2 to 100, default 5" }, result: "`{ item: { patterns, scanned, scanLimited } }`.",
+    run: async (c, a) => {
+      only(a, ["projectId", "minAgreed"]);
+      const svc = c.records ?? unavailable("meeting records");
+      return asJson({ item: await svc.learnedPatterns(c.principal, a as never) } as object);
     } },
   { name: "meeting.decisions.waiting", kind: "query", summary: "The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out (`applying` of them already started, which an answer still finishes) and `applied` how many are done. `truncated: true` means more exist than were read.", args: { "limit?": "1 to 50, default 50" }, result: "`{ item: { items: [{ id, revision, projectId, since, left, applied, applying, text, topic? }], truncated } }`.",
     run: async (c, a) => {

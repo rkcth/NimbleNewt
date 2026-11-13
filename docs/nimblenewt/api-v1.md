@@ -1035,6 +1035,17 @@ Arguments:
 
 Result: `{ item: { entries, next?, scanLimited? } }`.
 
+#### `meeting.decisions.patterns`
+
+What the meeting decision log suggests (card M02h): for each project and kind of widening change (grant, budget raise), how many the owner agreed to, refused, how many went ahead on the policy's or the steward's leave and how many were not carried out, with a suggestion to let the class through only where the owner agreed to at least `minAgreed` (default 5) the policy asked about and never refused or lost one. Owner only (not a task-scoped credential). It never changes the policy; the owner accepts by setting it.
+
+Arguments:
+
+- `projectId` (optional): the project
+- `minAgreed` (optional): 2 to 100, default 5
+
+Result: `{ item: { patterns, scanned, scanLimited } }`.
+
 #### `meeting.decisions.waiting`
 
 The adopted meeting decisions that wait for the owner's answer (agree, decline or an alternative), in ID order, with the decision's wording and topic so one can be found without its ID; owner only (not a task-scoped credential). `left` is how many changes are still to carry out (`applying` of them already started, which an answer still finishes) and `applied` how many are done. `truncated: true` means more exist than were read.
@@ -4013,14 +4024,14 @@ Result: `{ returned, pending, asked, notAsked }`.
 
 #### `meeting.record.sweep`
 
-Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call).
+Closes votes past their time, breaks or fails ties, finishes abandoned meetings in a project and hands back, without a question to the owner, the outcomes of meetings that ended more than an hour ago (at most 5 meetings a call); writes the summary, with the narrator's overview when the host configured one, of an ended meeting waiting for its hand-back (at most 3 a call, once each); and ends as a decline the held decisions that nobody answered within meeting.decision.holdExpiryDays.
 
 Arguments:
 
 - `projectId`: the project
 - `commandId`: required
 
-Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed }`.
+Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed, expired, narrated }`.
 
 #### `meeting.attend.open-room`
 
