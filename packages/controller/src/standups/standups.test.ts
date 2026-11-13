@@ -5,6 +5,7 @@ import { ConfigurationService } from "../configuration/index.js";
 import { DeskService, HistoryService, RetrievalService } from "../context/index.js";
 import type { Availability } from "../conversations/index.js";
 import { AssignmentService } from "../domain/assignments.js";
+import { derivedId } from "../domain/ids.js";
 import { BlockerService } from "../domain/blockers.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { StatusService } from "../status/status.js";
@@ -1214,6 +1215,109 @@ for (const backend of backends) {
     const found = (await c.storage.getAggregate({ kind: "standup-index", id: project }))!;
     await new CommandRunner(c.storage, c.epoch, options).command("test.drop-index", { commandId: cid("drop"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: found, creates: false, changes: [{ type: "delete" as const, ref: { kind: "standup-index", id: project }, expectedRevision: found.revision }], detail: {} }) }));
   };
+
+  // ---- card M03h: the slot-usage review reads each task's own attempt record, not every dispatch record ---------------------------------------------
+
+  suite("the review's slot time is found from the tasks' own attempt records, with one scan only for older tasks that have none, and a full list that may have lost attempts says so", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    at("2026-10-20T12:00:00.000Z");
+    const pExport = await c.task("Ship the export", c.agentA, "in_progress");
+    const pcWork = await c.task("Faster lint", c.agentB, "in_progress");
+    await c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId: pcWork, expectedVersion: (await c.contracts.get(c.owner, pcWork))!.version, workClass: "PC" } as never);
+    const neverRan = await c.task("Not started", c.agentA, "ready");
+    const cancelled = await c.task("Dropped", c.agentB, "ready");
+    await c.projects.transitionTask({ commandId: cid("cx"), actor: c.owner.id, taskId: cancelled, expectedRevision: 2, to: "cancelled" });
+    const attempt = async (taskId: string, id: string, from: string, to: string, project = c.a): Promise<void> => {
+      await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId, projectId: project, state: "finished", startedAt: from, claimedAt: from, slotSpans: [{ from, to }], outcome: { status: "succeeded", summary: "done", at: to } });
+    };
+    const names = async (taskId: string, ids: string[]): Promise<void> => { await c.put("dispatch-task-attempts", taskId, { taskId, attempts: ids }); };
+    await attempt(pExport, "a-p", "2026-10-20T08:00:00.000Z", "2026-10-20T10:00:00.000Z"); await names(pExport, ["a-p"]);
+    await attempt(pcWork, "a-pc", "2026-10-20T12:00:00.000Z", "2026-10-20T13:00:00.000Z"); await names(pcWork, ["a-pc"]);
+    await attempt(cancelled, "a-cancelled", "2026-10-20T14:00:00.000Z", "2026-10-20T15:00:00.000Z"); await names(cancelled, ["a-cancelled"]);
+    // Another project's attempt named by this project's task is not counted; an attempt of a task nobody names is never looked at.
+    await attempt(pcWork, "a-else", "2026-10-20T08:00:00.000Z", "2026-10-20T20:00:00.000Z", "prj-elsewhere"); await names(neverRan, ["a-else"]);
+    await attempt(pExport, "a-unnamed", "2026-10-20T08:00:00.000Z", "2026-10-20T20:00:00.000Z");
+    at("2026-10-21T05:00:00.000Z");
+    const run = async (): Promise<{ text: string; listed: string[] }> => {
+      const { service, listed } = spied(c);
+      const text = (await service.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
+      return { text, listed };
+    };
+    // P 2 h; PC 1 h + 1 h of the cancelled task (a PC-less task counts as P): P 3 h, PC 1 h = 25%. The review lists no dispatch records, and the tasks that never ran are no reason to.
+    const first = await run();
+    assert.match(first.text, /actual PC share 25% \(worker-slot time of 3 attempts\)/);
+    assert.ok(!first.text.includes("may be low"));
+    assert.ok(!first.listed.includes("dispatch"), `no scan of the dispatch records (listed: ${first.listed.join(", ")})`);
+    // A task that has worked but has no attempt record (from before W08) is found by one scan, counted for that task alone, and nothing is counted twice.
+    const old = await c.task("Older work", c.agentB, "in_progress");
+    await c.put("dispatch", "att-old", { attemptId: "att-old", taskId: old, projectId: c.a, state: "finished", startedAt: "2026-10-20T09:00:00.000Z", claimedAt: "2026-10-20T09:00:00.000Z", outcome: { status: "succeeded", summary: "done", at: "2026-10-20T11:00:00.000Z" } });
+    const second = await run();
+    assert.match(second.text, /actual PC share 17% \(worker-slot time of 4 attempts\)/);
+    assert.ok(second.listed.includes("dispatch"), "the older task is found by a scan");
+    // A full list (20 names) whose oldest attempt began before the period lost nothing in it; one whose oldest began inside the period may have lost some, and the review says its figures may be low.
+    const full = await c.task("Many small runs", c.agentA, "in_progress");
+    const ids = Array.from({ length: 20 }, (_, i) => `a-many-${i}`);
+    await attempt(full, ids[0]!, "2026-10-19T16:00:00.000Z", "2026-10-19T16:01:00.000Z");
+    for (const id of ids.slice(1)) await attempt(full, id, "2026-10-20T16:00:00.000Z", "2026-10-20T16:01:00.000Z");
+    await names(full, ids);
+    assert.ok(!(await run()).text.includes("may be low"));
+    const ids2 = ids.map((i) => `${i}-b`);
+    const lost = await c.task("Many more runs", c.agentA, "in_progress");
+    for (const id of ids2) await attempt(lost, id, "2026-10-20T16:00:00.000Z", "2026-10-20T16:01:00.000Z");
+    await names(lost, ids2);
+    assert.match((await run()).text, /may be low/);
+  });
+
+  suite("the attempt-record path gives the same slot figures as the scan of every dispatch record on the same data, and a full list is judged at the period start exactly (card M03h review)", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    at("2026-10-20T12:00:00.000Z");
+    const pc = async (id: string): Promise<void> => { await c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId: id, expectedVersion: (await c.contracts.get(c.owner, id))!.version, workClass: "PC" } as never); };
+    const pTask = await c.task("Ship the export", c.agentA, "in_progress");
+    const pcTask = await c.task("Faster lint", c.agentB, "in_progress"); await pc(pcTask);
+    const doneTask = await c.task("Ship the report", c.agentA, "done");
+    const blockedPc = await c.task("Retire the old tool", c.agentB, "blocked"); await pc(blockedPc);
+    const named = new Map<string, string[]>();
+    const put = async (taskId: string, id: string, body: Record<string, unknown>, project = c.a): Promise<void> => {
+      await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId, projectId: project, claimedAt: body.startedAt, ...body });
+      named.set(taskId, [...(named.get(taskId) ?? []), id]);
+    };
+    // Spans across the period start and end, a still-open span on a running attempt, a span closed at a heartbeat, retries of one task, a cut record, legacy records with and without a park.
+    await put(pTask, "x-1", { state: "finished", startedAt: "2026-10-20T06:00:00.000Z", slotSpans: [{ from: "2026-10-20T06:00:00.000Z", to: "2026-10-20T08:00:00.000Z" }], outcome: { status: "failed", summary: "x", at: "2026-10-20T08:00:00.000Z" } });
+    await put(pTask, "x-2", { state: "finished", startedAt: "2026-10-20T09:00:00.000Z", slotSpans: [{ from: "2026-10-20T09:00:00.000Z", to: "2026-10-20T09:30:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-20T09:30:00.000Z" } });
+    await put(pTask, "x-3", { state: "running", startedAt: "2026-10-21T04:00:00.000Z", slotSpans: [{ from: "2026-10-21T04:00:00.000Z" }] });
+    await put(pcTask, "x-4", { state: "parked", startedAt: "2026-10-20T10:00:00.000Z", lastHeartbeatAt: "2026-10-20T11:15:00.000Z", slotSpans: [{ from: "2026-10-20T10:00:00.000Z" }] });
+    await put(pcTask, "x-5", { state: "running", startedAt: "2026-10-19T09:00:00.000Z", slotSpansCut: "2026-10-20T08:00:00.000Z", slotSpans: [{ from: "2026-10-20T12:00:00.000Z", to: "2026-10-20T13:00:00.000Z" }] });
+    await put(pcTask, "x-10", { state: "finished", startedAt: "2026-10-21T04:30:00.000Z", slotSpans: [{ from: "2026-10-21T04:30:00.000Z", to: "2026-10-21T06:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-21T06:00:00.000Z" } });
+    await put(doneTask, "x-6", { state: "finished", startedAt: "2026-10-20T14:00:00.000Z", outcome: { status: "succeeded", summary: "x", at: "2026-10-20T16:00:00.000Z" } });
+    await put(blockedPc, "x-7", { state: "finished", startedAt: "2026-10-20T08:00:00.000Z", requests: 2, outcome: { status: "succeeded", summary: "x", at: "2026-10-20T19:00:00.000Z" } });
+    await put(blockedPc, "x-8", { state: "finished", startedAt: "2026-10-19T08:00:00.000Z", slotSpans: [{ from: "2026-10-19T08:00:00.000Z", to: "2026-10-19T09:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-19T09:00:00.000Z" } });
+    await put(blockedPc, "x-9", { state: "finished", startedAt: "2026-10-20T07:00:00.000Z", slotSpans: [{ from: "2026-10-20T07:00:00.000Z", to: "2026-10-21T08:00:00.000Z" }], outcome: { status: "succeeded", summary: "x", at: "2026-10-21T08:00:00.000Z" } }, "prj-elsewhere");
+    at("2026-10-21T05:00:00.000Z");
+    const review = async (): Promise<{ text: string; listed: string[] }> => { const { service, listed } = spied(c); return { text: (await service.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n"), listed }; };
+    const scanned = await review();
+    assert.ok(scanned.listed.includes("dispatch"), "with no attempt records every attempt is found by the scan (the earlier method)");
+    // P: x-1 1 h (07:00-08:00) + x-2 0.5 h + x-3 1 h + x-6 2 h = 4.5 h; PC: x-4 1.25 h + x-5 1 h + x-10 0.5 h (cut at the period end, 05:00) = 2.75 h; x-7 is left out (parked legacy), x-8 is before the period,
+    // x-9 is another project's: 2.75 / 7.25 = 38%.
+    assert.match(scanned.text, /actual PC share 38% \(worker-slot time of 7 attempts; 1 older record that parked or was placed again is not counted, as its run time is not recorded; the earliest runs of 1 attempt are not on record\)/);
+    for (const [taskId, ids] of named) await c.put("dispatch-task-attempts", taskId, { taskId, attempts: ids });
+    const recorded = await review();
+    assert.ok(!recorded.listed.includes("dispatch"), "with every task's attempt record no dispatch record is listed");
+    const share = (t: string): string => /Allocation against use:[^\n]*/.exec(t)![0];
+    assert.equal(share(recorded.text), share(scanned.text), "the same figures by either method");
+    assert.ok(!recorded.text.includes("may be low"));
+    // A full list (20) whose oldest attempt started exactly at the period start lost nothing inside it; one whose oldest started a millisecond later may have.
+    const full = async (title: string, oldestAt: string): Promise<string> => {
+      at("2026-10-20T12:00:00.000Z");
+      const t = await c.task(title, c.agentA, "in_progress");
+      const ids = Array.from({ length: 20 }, (_, i) => `${title}-${i}`);
+      for (const [i, id] of ids.entries()) await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId: t, projectId: c.a, state: "finished", startedAt: i === 0 ? oldestAt : "2026-10-20T16:00:00.000Z", slotSpans: [], outcome: { status: "failed", summary: "x", at: "2026-10-20T16:00:00.000Z" } });
+      await c.put("dispatch-task-attempts", t, { taskId: t, attempts: ids });
+      at("2026-10-21T05:00:00.000Z");
+      return (await review()).text;
+    };
+    assert.ok(!(await full("edge", "2026-10-20T07:00:00.000Z")).includes("may be low"), "oldest at the period start: nothing lost");
+    assert.match(await full("inside", "2026-10-20T07:00:00.001Z"), /may be low/);
+  });
 
   suite("a project's stand-ups are found from its own index, so the lookups read no stand-up record of other projects (card M03h)", async (c) => {
     const daily = await c.schedule();

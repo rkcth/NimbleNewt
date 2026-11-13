@@ -10318,6 +10318,37 @@ Merged origin/main 6d2271d1 (H12i, H12p, flip audits; only this notes file confl
 - (d) log those connections in H12i's `net-conn` records with the A09 request ID as the grant.
 
 Mount application still needs a resource store first.
+## M03h last open item (Claude agent, Sonnet 5.5, 2026-11-13): the stand-up review's slot time no longer reads every dispatch record of the installation
+
+Built on origin/main c2c31305. Nothing was pushed, deployed or flipped; no model was called.
+
+**What was lacking.** Every acceptance clause of M03h was already met (earlier parts and finishes above). The one open item that could be done offline was the scan inside the P/PC review: to measure worker-slot time `#slotUsage` read every `dispatch` record of the installation (bounded at 5,000, then marked partial), for every project's review. The earlier note said a per-project index "means a change to the dispatcher's write path". Re-reading the code showed the dispatcher already writes one record per task naming its attempts (`dispatch-task-attempts`, card W08, written in the same commit as each claim, newest 20 kept), so no change to the hot path is needed.
+
+**What was built (`standups/standups.ts`, no dispatcher change).**
+- The review reads the attempts of each of the project's tasks through that record and fetches those attempts by ID. Cancelled tasks are included (their attempts held slots): `#facts` now also keeps their IDs (`facts.cancelled`). An attempt of another project named by a task is not counted.
+- A task that has worked (any state but `ready`) or was cancelled but has no attempt record (data from before W08) is found by one scan of the dispatch records, counted only for those tasks, so nothing is counted twice. A project with no such task reads no dispatch list at all.
+- The record keeps only the newest 20 attempts. When a task's list is full and its oldest attempt did not start before the period, older attempts may lie in the period, so the review is marked partial and says "the figures may be low" (the existing wording). A full list whose oldest attempt began before the period says nothing.
+- Same arithmetic as before for each record (spans, cuts, parked records); the existing P/PC tests pass unchanged through the fallback scan.
+
+**Test (fails without the change; four backends, `standups.test.ts`).** "the review's slot time is found from the tasks' own attempt records...": a spy on storage shows no `dispatch` listing; PC share 25% from three attempts including one of a cancelled task; an unnamed attempt and another project's attempt are not counted; an older task without a record is found by a scan and counted once (17%, 4 attempts); a full list beginning before the period says nothing, one beginning inside it says "may be low". Mutations made alone on the built file and restored (each fails the test): cancelled tasks dropped; older tasks without a record not scanned; the fallback scan counting every task; the project check removed; the full-list warning removed; the warning always on; the attempt record never read.
+
+**Not done, and why.**
+- `activeProjects()` (the 09:00 digest rule) still lists stand-up records installation-wide (bounded at 2,000, by nature the whole installation).
+- The brief facts (`#facts`) still scan the task, blocker, wait, inquiry, artifact and improvement records; those belong to other cards' record kinds.
+- A task with more than 20 attempts in one period is reported as possibly low, not exact (the attempt record's own bound).
+- No run against a real model has checked that natural wording leads to the stand-up chat commands: that needs a real model call (card U03b).
+- The whole-controller stand-up test still runs on SQLite and PostgreSQL only (the reference store and the worker-thread SQLite cannot start a whole controller).
+
+**ASSUMPTION:** a task in state `ready` with no attempt record has never run (the claim writes the record in the same commit since W08); a ready task that ran before W08 and was queued again is not counted. Reversible by dropping the `ready` exception (one scan more).
+**ASSUMPTION:** a full attempt list whose oldest attempt started at or before the period start has lost nothing inside the period (a task's attempts run one after another).
+**M03h acceptance** as the card text is written stays met.
+
+### M03h last open item review (Claude agent, Opus 5.5, clean-context review, 2026-11-13)
+
+- **Checked in the code.** The attempt record is written in the same `dispatch.claim` commit as the dispatch record (`dispatcher.ts` `#taskAttemptsChange`, the only place a dispatch record is created), so there is no crash window with a claim and no record. A task's project never changes (set only at creation) and `proposed` is entered only at creation, so the task scan holds every task that can have an attempt. The full-list rule's boundary is right: an attempt let go was claimed before the oldest kept one, so if that one started at or before the period start the older one ended by then and holds no time in the period (`hi > lo` is strict).
+- **Added test** (`standups.test.ts`, four backends): "the attempt-record path gives the same slot figures as the scan of every dispatch record on the same data...": ten attempts (spans across the period start and end, an open span to the review, one closed at a heartbeat, retries of one task, a cut record, legacy records with and without a park, one before the period, one of another project) give the same line (38%, 7 attempts, both notes) by the old scan and through the attempt records with no dispatch list read; a full list whose oldest attempt started exactly at the period start says nothing, one 1 ms later says "may be low".
+- **Mutations** (alone on the built file, restored; reference store): `<=` to `<` at the full-list boundary, the project check removed, the span not cut at the period start, the span not cut at the period end (survived the author's tests; caught by the added test), cancelled tasks dropped, `>=` to `>` for a full list, tasks without a record never scanned, the fallback counting every task, the newest attempt taken as the oldest: each fails. Survives, judged safe: removing the `counted` guard (no path reaches one dispatch record twice: one task per record, the dispatcher never names an attempt twice, the scan covers only tasks with no record).
+- **Left as it is (not wrong).** Reads per review: one attempt-record read per task of the project (done tasks of any age included) plus one read per named attempt (at most 20 a task), so 1,000 tasks cost at most 21,000 reads by ID, and the whole is bounded by the task scan (5,000 tasks). A task with attempts both before and after W08 is counted on its recorded attempts only; this can only lower a figure in the one period that spans the upgrade (as the `ready` ASSUMPTION). The "attempts run one after another" ASSUMPTION could fail only if a 21st-newest attempt still held a slot while 20 newer ones were claimed.
 
 ## H12i (finish): tasks get controlled network routes through the worker relay (Claude agent, Sonnet 5.5, 2026-11-13)
 
