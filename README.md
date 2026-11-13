@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **257 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **261 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -106,7 +106,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Part | Progress | Done |
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
-| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓░` 94% | 18 of 19 |
+| Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 34% | 8 of 23 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 26 of 29 |
@@ -114,8 +114,8 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓▓░░░░` 70% | 14 of 20 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 42 of 50 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓▓▓░░░` 75% | 15 of 20 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓░░░` 78% | 25 of 32 |
@@ -124,7 +124,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
-| Backup, updates and operations | `▓▓▓░░░░░░░░░` 27% | 5 of 18 |
+| Backup, updates and operations | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
 | Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
@@ -143,7 +143,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 </details>
 
 <details>
-<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 18 of 19</summary>
+<summary><strong>Foundation: storage, configuration and builds</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 19 of 19</summary>
 
 The controller's transactional storage (SQLite and PostgreSQL), versioned configuration, package boundaries, portable CI and the platform checks.
 
@@ -165,7 +165,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 - [x] **F04e** · P33 · Implement chat-controlled controller database transfer _(needs F04, K01, F06)_
 - [x] **F04l** · P34 · Read database transfer targets from configuration and check Pi conversation stores _(needs F04e, F02)_
 - [x] **F04m** · P34 · Finish database transfer hand-over: restart, chat message path, resumable copy and protected journal _(needs F04e)_
-- [ ] **F04n** · P35 · Make a failed fence take-back in a database rollback leave the new database startable _(needs F04m)_
+- [x] **F04n** · P35 · Make a failed fence take-back in a database rollback leave the new database startable _(needs F04m)_
 
 </details>
 
@@ -360,7 +360,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓░░░░ 14 of 20</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓▓░░░ 15 of 20</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -369,7 +369,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [x] **U11** · P26 · Implement owner notifications _(needs U02, S08, U10)_
 - [x] **U03d** · P27 · Let the owner reach the coordinator through the chat _(needs U01, U02, U03b)_
 - [x] **U03** · P28 · Implement owner chat command interpretation _(needs U01, U02, R02, U03b, U03d)_
-- [ ] **U03c** · P29 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
+- [x] **U03c** · P29 · Run the coordinator as a hosted agent with its own lifecycle (optional, after the first release) _(needs U03, H11, L01)_
 - [x] **U04** · P29 · Implement conversational policy editing _(needs U03, A02, A05, A07, U10)_
 - [x] **U05** · P29 · Implement chat status and blocker explanations _(needs U03, S08, H01)_
 - [x] **U03e** · P30 · Let the owner grant and revoke rights through the state API and the chat _(needs U03, L01b)_
@@ -388,7 +388,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 42 of 50</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 43 of 50</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -425,7 +425,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H12r** · P30 · Run the worker process under Seatbelt and Windows Sandbox _(needs H12b, A03b)_
 - [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
 - [x] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
-- [ ] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
+- [x] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_
 - [x] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
 - [x] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [x] **H12q** · P31 · Finish the quiesce: the landing path and the production workspace port _(needs H12d)_
@@ -605,14 +605,14 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 </details>
 
 <details>
-<summary><strong>Backup, updates and operations</strong> — ▓▓▓░░░░░░░░░ 5 of 18</summary>
+<summary><strong>Backup, updates and operations</strong> — ▓▓▓▓░░░░░░░░ 6 of 18</summary>
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
 - [x] **K01** · P32 · Implement consistent backup and restore _(needs S06, F04, L02, S05)_
 - [ ] **K01b** · P33 · Implement encrypted backups with passcode and recovery-file unlock _(needs K01, F09)_
 - [x] **K01e** · P33 · Finish backup: Pi state, maintenance barrier, owner restore, chat, off-tick nightly run _(needs K01)_
-- [ ] **K06** · P33 · Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
+- [x] **K06** · P33 · Implement retention, quotas, archive, export and deletion _(needs K01, S06, C02, C06b)_
 - [ ] **K01c** · P34 · Implement the full configurable backup system (before 1.0) _(needs K01b, K06, U11)_
 - [x] **K01f** · P34 · Finish backup: Pi state, maintenance barrier, owner restore, chat, non-blocking SQLite copy _(needs K01e)_
 - [ ] **K02** · P34 · Implement deterministic release staging and activation _(needs K01, F02, T02)_

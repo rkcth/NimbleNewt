@@ -240,6 +240,9 @@ describe("Windows launcher: pure rules", () => {
 });
 
 describe("Windows launcher: configuration (nothing is on by default)", () => {
+  test("H12i: the Windows backend does not claim a private network, so a recipe with a route is refused there until its own proof (card H12r)", () => {
+    assert.notEqual(windowsSandboxBackend(options(new SimHost())).privateNetwork, true);
+  });
   test("the default mode is the owner session; auto-login and lock exists only with the owner's explicit, exact opt-in", () => {
     const host = new SimHost();
     assert.equal(windowsSandboxBackend(options(host)).auditDetails!()["windowsMode"], "owner-session");

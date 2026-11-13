@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent and carrying no replay flag", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);

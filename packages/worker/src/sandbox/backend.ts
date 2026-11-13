@@ -35,6 +35,11 @@ export interface GuestView {
  */
 export interface SandboxBackend {
   readonly name: string;
+  /**
+   * Whether the sandbox has a network of its own (a private loopback no other process can reach), so that a recipe's route (card H12i: the proxy the worker process serves on its loopback) is reachable only by the sandboxed program. True for bubblewrap. A
+   * backend without it (Seatbelt shares the host's loopback; the Windows guest's networking is not proven private) refuses a recipe that has a route: another process on the machine could otherwise use the proxy of this task's grants.
+   */
+  readonly privateNetwork?: boolean;
   /** Proves, by really starting a confined probe, that this backend confines on this host right now. */
   health(): Promise<BackendHealth>;
   /** `runId` is the launch's own id (the launcher plans twice for one launch and passes the same id both times), for a mechanism that keeps per-launch state. */

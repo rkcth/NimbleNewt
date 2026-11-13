@@ -101,3 +101,27 @@ test("protected subpath names are plain names; a symbolic link in their place is
   const w2 = dir("pw2"); symlinkSync(dir("elsewhere"), join(w2, ".git"), process.platform === "win32" ? "junction" : "dir");
   refused({ ...base(), workdir: w2 }, [], /symbolic link/);
 });
+
+test("H12i: a route is part of the recipe and its revision; a recipe without one is unchanged; the proxy variables come from the route and from nothing else", () => {
+  const without = normalizeRecipe(base(), []);
+  assert.equal(without.route, undefined);
+  assert.deepEqual(Object.keys(without.env), [], "no proxy variable without a route");
+  const a = normalizeRecipe({ ...base(), route: { proxyPort: 3128 } }, []);
+  const b = normalizeRecipe({ ...base(), route: { proxyPort: 3129 } }, []);
+  assert.notEqual(a.revision, without.revision); assert.notEqual(a.revision, b.revision);
+  assert.deepEqual(a.route, { proxyPort: 3128 });
+  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) assert.equal(a.env[name], "http://127.0.0.1:3128", name);
+  assert.equal(a.env["NO_PROXY"], undefined, "no exception list: the loopback is not proxied around");
+  // A recipe that names a proxy setting itself is refused, with or without a route (it would point at something the controller does not control).
+  for (const name of ["HTTP_PROXY", "https_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy"]) {
+    refused({ ...base(), env: { [name]: "http://evil.example.com:3128" } }, [], /proxy setting/);
+    refused({ ...base(), route: { proxyPort: 3128 }, env: { [name]: "http://evil.example.com:3128" } }, [], /proxy setting/);
+  }
+});
+
+test("H12i: a route must be exactly a loopback port of the process; a trusted-host run takes none", () => {
+  for (const route of [{ proxyPort: 80 }, { proxyPort: 1023 }, { proxyPort: 65536 }, { proxyPort: 3128.5 }, { proxyPort: "3128" }, { proxyPort: NaN }, {}, { proxyPort: 3128, host: "10.0.0.1" }, null, [], "3128"]) refused({ ...base(), route }, [], /route/);
+  refused({ ...base(), mode: "trusted-host", route: { proxyPort: 3128 } }, [], /route/);
+  assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 1024 } }, []).route?.proxyPort, 1024);
+  assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 65535 } }, []).route?.proxyPort, 65535);
+});

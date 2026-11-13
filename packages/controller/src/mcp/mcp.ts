@@ -91,7 +91,8 @@ const names = (v: unknown, field: string, max: number): string[] => {
 };
 
 /** The 16 bytes of an IPv6 literal, or undefined if it is not one. */
-function ipv6Bytes(h: string): number[] | undefined {
+/** The 16 bytes of an IPv6 address written in any accepted form (also used by the network grants of card H12i), or undefined when it is not one. */
+export function ipv6Bytes(h: string): number[] | undefined {
   if (!/^[0-9a-f:.]+$/.test(h) || !h.includes(":")) return undefined;
   let tail: number[] = [];
   let text = h;

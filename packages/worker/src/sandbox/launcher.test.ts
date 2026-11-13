@@ -8,6 +8,7 @@ import type { SandboxBackend } from "./backend.js";
 import { SandboxError } from "./errors.js";
 import { groupKillSafe, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
 import type { SandboxRecipe } from "./recipe.js";
+import { seatbeltBackend } from "./seatbelt.js";
 import { bubblewrapBackend } from "./linux.js";
 
 // These tests start real confined processes. On a machine without bubblewrap they are skipped, unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in
@@ -25,6 +26,7 @@ const fakeHome = dir("fake-home");
 mkdirSync(join(fakeHome, ".ssh"));
 writeFileSync(join(fakeHome, ".ssh", "id_nimblenewt_test"), "PRIVATE-KEY-MATERIAL");
 
+const externalProbe = "192.0.2.1"; // a documentation address: nothing is there, and the sandbox has no interface to send to it
 let counter = 0;
 function recipe(extra: Partial<SandboxRecipe> = {}): SandboxRecipe {
   const n = ++counter;
@@ -301,6 +303,29 @@ describe("sandbox launcher (bubblewrap)", () => {
     rmSync(join(r.workdir, ".git"), { recursive: true });
     symlinkSync(secretDir, join(r.workdir, ".git"));
     assert.throws(() => bubblewrapBackend().plan(normalized, ["/bin/true"]), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /changed to point/.test(e.message));
+  });
+
+  test("H12i: a route is accepted only by a backend that gives the sandbox a network of its own, and a refused one launches nothing and writes no record", async () => {
+    const plain: SandboxBackend = { name: "shared-network", health: async () => ({ healthy: true, backend: "shared-network" }), plan: () => { throw new Error("must not be planned"); }, guestView: () => ({ workdir: "/w", home: "/h", scratch: "/s", tmp: "/t", inputs: [] }) };
+    const seen: LaunchRecord[] = [];
+    const l = await SandboxLauncher.create({ backend: plain, protectedPaths: [], audit: (r) => { seen.push(r); } });
+    await assert.rejects(l.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /route/.test(e.message));
+    assert.deepEqual(seen, []);
+    assert.equal(bubblewrapBackend().privateNetwork, true);
+    assert.notEqual(seatbeltBackend().privateNetwork, true, "macOS shares the host's loopback");
+  });
+
+  ifUsable("H12i: a sandbox with a route sees the proxy settings, the launch record names the route, and the sandbox still has no network of its own", async () => {
+    const before = records.length;
+    const r = recipe({ route: { proxyPort: 3999 } });
+    const result = await sh(`echo "$HTTP_PROXY $https_proxy $ALL_PROXY"; echo "$NO_PROXY"`, r);
+    assert.equal(result.stdout.split("\n")[0], "http://127.0.0.1:3999 http://127.0.0.1:3999 http://127.0.0.1:3999");
+    assert.equal(result.stdout.split("\n")[1], "", "no exception list");
+    assert.deepEqual(records.slice(before).at(-1)?.route, { proxyPort: 3999 });
+    assert.equal(records.slice(before).at(-1)?.recipeRevision, (await import("./recipe.js")).normalizeRecipe(r, [secretDir]).revision);
+    // Nothing listens on that port in the sandbox until its own program serves one, and nothing outside can be reached directly.
+    const probe = await sh(`( exec 3<>/dev/tcp/127.0.0.1/3999 ) 2>/dev/null && echo REACHED; ( exec 3<>/dev/tcp/${externalProbe}/80 ) 2>/dev/null && echo OUT; echo end`, r);
+    assert.equal(probe.stdout.trim(), "end");
   });
 
   ifUsable("a protected .git inside the checkout cannot be changed, removed or replaced", async () => {
