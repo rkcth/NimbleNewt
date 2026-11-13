@@ -273,6 +273,12 @@ for (const backend of backends) {
     assert.ok((await c.tick()).started.includes(first.attemptId!));
     const store = async (): Promise<{ ownerHostId: string; unused?: boolean; liveAttempt?: string }> => (await c.storage.getAggregate({ kind: "remote-store", id: ann.id }))!.body as never;
     assert.deepEqual([(await store()).ownerHostId, (await store()).unused], [a.id, true], "an offer claims the store, marked as not taken up");
+    // While that offer is live the claim is not up for grabs: a second attempt of the same agent is not started anywhere (not on b, which is listed and idle), and the claim stays a's.
+    const rival = await c.task("Water beans", ann);
+    const report = await c.tick();
+    assert.equal(report.started.includes(rival.attemptId!), false, JSON.stringify(report.skipped));
+    assert.equal(await c.remote.placement(c.owner, rival.attemptId!), undefined, "nothing was offered to b for the rival");
+    assert.deepEqual([(await store()).ownerHostId, (await store()).liveAttempt], [a.id, first.attemptId], "still a's, held by the first attempt");
     // The owner takes host:a out of the policy before it reads the offer: the offer is withdrawn, and the claim pins nothing.
     policy.hosts = ["host:b"];
     assert.deepEqual(await a.client.offers(), []);
