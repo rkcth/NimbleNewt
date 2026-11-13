@@ -162,6 +162,8 @@ export function streamTapFor(deps: StreamFeedDeps, attempt: StreamAttempt): Mode
       };
       const stream: ModelStreamCall = {
         ...(amend === undefined ? {} : { amend }),
+        batchMs,
+        batchChars,
         ...(setting.heldBufferBytes === undefined ? { heldBufferBytes: STREAM_VALUES.heldBufferBytes.default } : { heldBufferBytes: setting.heldBufferBytes }),
         events: (events: readonly ModelStreamEvent[]) => serial(async () => {
           let dangerous = false;

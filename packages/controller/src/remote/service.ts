@@ -1687,9 +1687,9 @@ export class RemoteWorkerService {
   /**
    * A remote worker is about to send a model request (card L05c): a generation is begun under the task's current context revision and the attempt's fence, exactly as for a local worker's call. The answer is one of
    * `{ recorded: false }` (not recorded: the owner's setting, a task the generation service does not know), `{ refused }` (no generation may begin: the task is held, waiting for a decision, fenced, done; the worker must not send
-   * the request) or `{ streamId, amend?, heldBufferBytes? }`.
+   * the request) or `{ streamId, amend?, heldBufferBytes?, batchMs?, batchChars? }`.
    */
-  async streamStart(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, call: { readonly requestChars?: unknown; readonly requestDigest?: unknown }, requestKey: string): Promise<{ readonly recorded: false } | { readonly refused: string } | { readonly streamId: string; readonly amend?: string; readonly heldBufferBytes?: number }> {
+  async streamStart(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, call: { readonly requestChars?: unknown; readonly requestDigest?: unknown }, requestKey: string): Promise<{ readonly recorded: false } | { readonly refused: string } | { readonly streamId: string; readonly amend?: string; readonly heldBufferBytes?: number; readonly batchMs?: number; readonly batchChars?: number }> {
     if (call === null || typeof call !== "object" || Array.isArray(call)) invalid("call", "must be an object");
     onlyKnown(call, ["requestChars", "requestDigest"]);
     if (typeof call.requestChars !== "number" || !Number.isSafeInteger(call.requestChars) || call.requestChars < 0) invalid("call.requestChars", "must be a whole number");
@@ -1736,7 +1736,7 @@ export class RemoteWorkerService {
       } catch { watch = undefined; }
     }
     this.#calls.set(streamId, { attemptId: b.attemptId, placement: b.placement, hostId: host.id, call: feed, ...(watch === undefined ? {} : { watch }) });
-    return { streamId, ...(feed.amend === undefined ? {} : { amend: feed.amend.slice(0, REMOTE_LIMITS.text) }), ...(feed.heldBufferBytes === undefined ? {} : { heldBufferBytes: feed.heldBufferBytes }) };
+    return { streamId, ...(feed.amend === undefined ? {} : { amend: feed.amend.slice(0, REMOTE_LIMITS.text) }), ...(feed.heldBufferBytes === undefined ? {} : { heldBufferBytes: feed.heldBufferBytes }), ...(feed.batchMs === undefined ? {} : { batchMs: feed.batchMs }), ...(feed.batchChars === undefined ? {} : { batchChars: feed.batchChars }) };
   }
 
   /** The decoded events of one piece of a reply, recorded in order. `held` says the generation was interrupted or superseded: the worker must not pass the reply on. A stale placement or session is fenced like any message. */

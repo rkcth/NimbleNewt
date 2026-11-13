@@ -9,7 +9,7 @@ import type { Grant } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
-import { launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
+import { bridgeCommandId, launchOf, ToolExecutionService, type BoundGateway, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 import { RUNNING_CALL_KIND, RunningCallStore } from "./running-store.js";
 
@@ -313,6 +313,62 @@ for (const backend of backends) {
     assert.equal(bad(out["broken"]!).code, "unavailable");
     // Only the calls that passed reached the state API: ok, none, oldUnchecked.
     assert.deepEqual(seen.map((r) => (r as { args: { title: string } }).args.title), ["call_ok", "call_none", "call_old"]);
+  });
+
+  suite("card L05d finish: a call ID of 118 characters (the longest the bridge takes) runs a write once and is answered from the ledger when asked again; the operation's command ID stays within 120 characters", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const seen: { commandId: string }[] = [];
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (_t: unknown, raw: unknown) => { seen.push(raw as never); return { v: 1, op: "x", ok: true, result: { done: true } } as never; } },
+      isLocalHost: () => false,
+    });
+    const out: Record<string, BridgeResponse> = {};
+    const long = "L".repeat(118);
+    const long2 = "L".repeat(117) + "M";
+    const { createHash } = await import("node:crypto");
+    const digest = createHash("sha256").update(long).digest("hex").slice(0, 40);
+    let attemptId = "";
+    c.worker.script = async ({ order, gateway }) => {
+      attemptId = order.attemptId;
+      const send = (op: string, args: JsonObject, callId: string) => svc.handle(order.credential, gateway, { op, callId, args });
+      out["first"] = await send("task.update", { expectedRevision: 1, title: "A" }, long);
+      out["same"] = await send("task.update", { expectedRevision: 1, title: "A" }, long);
+      out["other"] = await send("task.update", { expectedRevision: 1, title: "A" }, long2);
+      // Short call IDs that spell the digest of the long one in every way a hashed form could be written: none may be keyed as the long call is (a different operation would be taken for its replay).
+      for (const [i, id] of [`h-${digest}`, `h:${digest}`, digest, `${attemptId}:h-${digest}`].entries()) out[`short${i}`] = await send("task.update", { expectedRevision: 1, title: `S${i}` }, id);
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    good(out["first"]!); good(out["same"]!); good(out["other"]!);
+    for (let i = 0; i < 4; i++) good(out[`short${i}`]!);
+    assert.equal(seen.length, 7);
+    for (const r of seen) assert.ok(r.commandId.length <= 120 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(r.commandId), r.commandId);
+    assert.equal(seen[0]!.commandId, seen[1]!.commandId, "the same call has the same key");
+    assert.notEqual(seen[0]!.commandId, seen[2]!.commandId, "calls that differ in their last character have different keys");
+    assert.ok(!seen[0]!.commandId.includes(long));
+    // The short IDs keep the readable form byte for byte and none equals the long call's key (nor any other).
+    const shortIds = [`h-${digest}`, `h:${digest}`, digest, `${attemptId}:h-${digest}`];
+    for (const [i, id] of shortIds.entries()) assert.equal(seen[3 + i]!.commandId, `bridge:${attemptId}:${id}`);
+    assert.equal(new Set(seen.map((r) => r.commandId)).size, 6, "six different calls (one repeat) have six keys");
+  });
+
+  suite("card L05d finish: a short call ID keeps its readable command ID", async () => {
+    assert.equal(bridgeCommandId("bridge", "att-aaaaaaaaaaaaaaaaaaaa", "call_0"), "bridge:att-aaaaaaaaaaaaaaaaaaaa:call_0");
+    const a = bridgeCommandId("bridge-run", "att-aaaaaaaaaaaaaaaaaaaa", "x".repeat(120));
+    assert.ok(a.length <= 120 && a.startsWith("bridge-run-h:att-aaaaaaaaaaaaaaaaaaaa:"));
+    assert.equal(bridgeCommandId("bridge", "att-aaaaaaaaaaaaaaaaaaaa", "x".repeat(88)).length, 120, "88 characters still fit as they are");
+    // The threshold follows the real length of the attempt ID: a longer attempt ID moves it, and the form never exceeds 120.
+    for (const attempt of ["att-aaaaaaaaaaaaaaaaaaaa", "a".repeat(40)]) for (const prefix of ["bridge", "bridge-run"]) for (let len = 1; len <= 120; len++) {
+      const id = bridgeCommandId(prefix, attempt, "z".repeat(len));
+      assert.ok(id.length <= 120);
+      assert.equal(id === `${prefix}:${attempt}:${"z".repeat(len)}`, `${prefix}:${attempt}:${"z".repeat(len)}`.length <= 120);
+    }
+    // A digest form never equals a readable one: the readable form has a colon right after the prefix, the digest form a "-h".
+    const hashed = bridgeCommandId("bridge", "att-aaaaaaaaaaaaaaaaaaaa", "y".repeat(120));
+    assert.ok(hashed.startsWith("bridge-h:") && !hashed.startsWith("bridge:"));
+    assert.ok(bridgeCommandId("bridge-run", "att-aaaaaaaaaaaaaaaaaaaa", "y".repeat(120)).startsWith("bridge-run-h:"));
   });
 
   suite("card L05d: a recorded write is admitted as an effect and settled with the outcome; a generation still streaming is waited for; a refusal fails the effect and a crash leaves it uncertain; a repeat is answered from the ledger; reads and unrecorded calls are not admitted", async (c) => {
