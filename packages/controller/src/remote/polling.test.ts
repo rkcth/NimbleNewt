@@ -226,14 +226,19 @@ for (const backend of backends) {
   for (const delay of [0, 1, 3, 6, 12, 25]) {
     suite(`a poll started ${delay} ms into the making of an offer is answered by it, not after the whole wait (card H07)`, async (c) => {
       const h = await c.host("h1");
-      const made = offered(c, h);
+      // When the offer exists: the poll is judged against that, not against a fixed time from its own start, which counted the making of the offer against the poll (a few seconds on a
+      // slow CI runner's worker thread: 3921 ms > 2500, though the poll was answered before its wait was out; round 12). Its wait is far longer than making an offer can take.
+      let madeAt: number | undefined;
+      const made = offered(c, h).then((v) => { madeAt = Date.now(); return v; });
       made.catch(() => undefined);
       await sleepMs(delay);
       const t = Date.now();
-      const got = await h.client.offers({ waitMs: 4000 });
+      const got = await h.client.offers({ waitMs: 20_000 });
+      const answeredAt = Date.now();
       await made;
       assert.ok(got.length > 0 || (await h.client.offers()).length > 0, "the offer is there");
-      assert.ok(Date.now() - t < 2500, `${Date.now() - t} ms`);
+      assert.ok(answeredAt - t < 19_000, `the poll waited out its whole wait: ${answeredAt - t} ms`);
+      assert.ok(answeredAt - madeAt! < 1500, `the poll was answered ${answeredAt - madeAt!} ms after the offer was made, not by it`);
     });
   }
 

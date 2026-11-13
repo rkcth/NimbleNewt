@@ -259,10 +259,15 @@ for (const backend of backends) {
         socket.once("data", (d) => resolve({ code: Number(/^HTTP\/1\.1 (\d+)/.exec(d.toString())?.[1] ?? 0), close: () => socket.destroy() }));
         socket.once("error", reject);
       });
-      // The client's own kept-alive connection (if it still holds one) counts too, so the room left is what the count shows.
-      for (let i = 0; i < 100; i++) await new Promise((r) => setTimeout(r, 20));
-      const room = 2 - capped.connectionCounts().loggedIn;
-      assert.ok(room >= 1, "at least one connection is free to test");
+      // The clients' own kept-alive connections (Node's default agent) stay open until the controller ends them after 5 s idle, which a slow runner reached in the middle of the count below, so a
+      // place came free between counting the room and the request that should have been refused (CI repair round 12, Windows: 200 instead of 429). They are closed now, and once the listener
+      // counts no connection the room is exactly the host's allowance.
+      const { globalAgent: httpAgent } = await import("node:http");
+      const { globalAgent: httpsAgent } = await import("node:https");
+      (tls === undefined ? httpAgent : httpsAgent).destroy();
+      for (let i = 0; i < 300 && capped.connectionCounts().beforeLogin + capped.connectionCounts().loggedIn > 0; i++) await new Promise((r) => setTimeout(r, 20));
+      assert.deepEqual(capped.connectionCounts(), { beforeLogin: 0, loggedIn: 0 }, "no connection is left before the host's own are counted");
+      const room = 2;
       const kept: { code: number; close: () => void }[] = [];
       for (let i = 0; i < room; i++) kept.push(await status());
       assert.deepEqual(kept.map((k) => k.code), new Array(room).fill(200));
