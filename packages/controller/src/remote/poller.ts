@@ -85,27 +85,27 @@ export class HostPoller {
       const started = this.#now();
       try {
         if (this.#o.client.session === undefined) {
-          const session = await this.#o.client.connect(this.#o.capabilities as never);
+          const session = await this.#o.client.connect(this.#o.capabilities as never, undefined, signal);
           beat = Number.NEGATIVE_INFINITY;
           if (this.#o.held !== undefined && this.#o.client.reconcile !== undefined) this.#reconcileFor = session.sessionId;
         }
         // The handshake comes first in a new session: nothing the worker holds is taken up again before the controller has answered for it.
         if (this.#reconcileFor !== undefined && this.#reconcileFor === this.#o.client.session?.sessionId && !signal.aborted) {
           try {
-            const answer = await this.#o.client.reconcile!(this.#o.held!().slice(0, REMOTE_LIMITS.held));
+            const answer = await this.#o.client.reconcile!(this.#o.held!().slice(0, REMOTE_LIMITS.held), undefined, signal);
             await this.#o.onReconciled?.(answer);
             this.#reconcileFor = undefined;
           } catch (error) { await this.#trouble(error, "reconcile", signal); continue; }
         }
-        if (this.#now() - beat >= this.#o.heartbeatMs) { await this.#o.client.heartbeat(++this.#sequence); beat = this.#now(); }
+        if (this.#now() - beat >= this.#o.heartbeatMs) { await this.#o.client.heartbeat(++this.#sequence, undefined, signal); beat = this.#now(); }
         // A hold longer than the time to the next heartbeat would let the heartbeat go late.
         const hold = Math.max(0, Math.min(this.#o.waitMs, this.#o.heartbeatMs - (this.#now() - beat)));
-        const offers = await this.#o.client.offers({ waitMs: hold });
+        const offers = await this.#o.client.offers({ waitMs: hold, signal });
         if (offers.length > 0 && !signal.aborted) {
           try { await this.#o.onOffers(offers); } catch (error) { await this.#trouble(error, "offers", signal); continue; }
         }
         if (this.#o.onWorkspace !== undefined && (this.#o.client.workspaceRequests !== undefined || this.#o.client.workspaceList !== undefined) && !signal.aborted) {
-          try { const { requests, withdrawn } = this.#o.client.workspaceList !== undefined ? await this.#o.client.workspaceList() : { requests: await this.#o.client.workspaceRequests!(), withdrawn: [] as string[] }; if (requests.length > 0 || withdrawn.length > 0) this.#o.onWorkspace(requests, withdrawn); } catch (error) { await this.#trouble(error, "workspace", signal); continue; }
+          try { const { requests, withdrawn } = this.#o.client.workspaceList !== undefined ? await this.#o.client.workspaceList(signal) : { requests: await this.#o.client.workspaceRequests!(), withdrawn: [] as string[] }; if (requests.length > 0 || withdrawn.length > 0) this.#o.onWorkspace(requests, withdrawn); } catch (error) { await this.#trouble(error, "workspace", signal); continue; }
         }
         this.#failures = 0;
         const gap = this.#o.minGapMs - (this.#now() - started);
