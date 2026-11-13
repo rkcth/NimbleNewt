@@ -15,4 +15,4 @@ export { meetingNoticeSink, meetingWindowSink } from "./notice-sink.js";
 export { SAFE_LONG_RUNNING_SETTING, safeLongRunningOf, type SafeLongRunningJobs, type SafeLongRunningOptions } from "./safe-long-running.js";
 export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
 export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, WAKE_LIMITS, type WakeAttender, type WakeHostLifecycle, type WakePass } from "./wake-host.js";
-export { MeetingDeskReadService, type DeskReadBody } from "./desk-reads.js";
+export { MeetingDeskReadService, REFUSED_OPERATIONS, type DeskReadBody, type DeskAttemptBody, type DeskReadContent, type RefusedOperation } from "./desk-reads.js";
