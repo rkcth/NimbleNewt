@@ -223,7 +223,7 @@ export interface StateApiDeps {
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   /** The chair's recorded reads of absent members' desks (card M05b). */
   readonly deskReads?: Pick<MeetingDeskReadService, "reads" | "attempts">;
-  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "ownerPending">;
+  readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "learnedPatterns" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "wakes" | "stopWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
   readonly watchControl?: {

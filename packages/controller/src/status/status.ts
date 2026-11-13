@@ -265,6 +265,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
   meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
+  decision_patterns: { keys: ["projectId"], about: "what the meeting decision log suggests: kinds of grant or budget raise the owner has always agreed to, so the owner could stop being asked" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
   standups: { keys: ["projectId", "limit"], about: "a project's stand-ups themselves: each one's title, whether it is active, paused or ended, how often and at what time it is held, how long, who is on its roster, its next meeting and how its last one ended (planned meetings are the meetings kind, topics waiting are the agenda kind, what a stand-up prepared is the standup_briefs kind)" },
   explanations: { keys: ["taskId|taskTitle", "seq", "limit"], about: "why a task's steps were taken" },
@@ -357,6 +358,7 @@ export type StatusRequest =
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
   | { readonly kind: "agenda"; readonly projectId: string; readonly limit?: number }
+  | { readonly kind: "decision_patterns"; readonly projectId?: string }
   | { readonly kind: "decision_log"; readonly projectId?: string; readonly changeKind?: string; readonly outcome?: string; readonly after?: string; readonly limit?: number }
   | { readonly kind: "explanations"; readonly taskId: string; readonly seq?: number; readonly limit?: number }
   | { readonly kind: "replay"; readonly taskId: string; readonly seq?: number; readonly from?: number; readonly limit?: number; readonly lane?: string; readonly agent?: string; readonly stepKind?: string; readonly since?: string; readonly until?: string }
@@ -560,6 +562,7 @@ export interface StatusDeps {
   readonly critical?: { readonly holdsUp: () => Promise<HoldsUp | undefined>; readonly list: (by: Principal) => Promise<{ readonly revision: number; readonly marks: readonly { readonly kind: string; readonly id: string; readonly markedAt: string }[] }> };
   readonly heldResumes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { checkId: string; taskId: string; title: string; since: string; changes: readonly { kind: string; key: string; status: string }[]; /** Set when no second agent judged some of the changes (card L04d wiring): why, and how many of them. */ readonly notReviewed?: string; readonly notReviewedCount?: number }[]; truncated: boolean }>;
   /** The log of what happened to each change a meeting decided (card M02g). Owner only: for anyone else the view reads as missing. Absent: the view is not offered. */
+  readonly decisionPatterns?: (viewer: Principal, query: { projectId?: string }) => Promise<{ patterns: readonly { projectId: string; kind: string; widens: string; ownerAgreed: number; ownerRefused: number; delegatedApplied: number; notApplied: number; suggestion?: { text: string } }[]; scanned: number; scanLimited: boolean }>;
   readonly decisionLog?: (viewer: Principal, query: { kind?: string; outcome?: string; projectId?: string; after?: string; limit?: number }) => Promise<{ entries: readonly { id: string; revision: number; decisionId: string; projectId: string; kind: string; targetKind: string; outcome: string; code?: string; decidedBy: string; agreedBy?: string; widens?: string; setting?: string; changedAt: string }[]; next?: string; scanLimited?: true }>;
   /** The open agenda of a project (card M03f). Absent: the view is not offered. */
   readonly agenda?: { openAgenda(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; topic: string; question?: string; requestedOutcome?: string; urgency: string; intent: string; state: string; requestedBy: string; timeboxMinutes?: number }[]; next?: string } | undefined> };
@@ -774,6 +777,7 @@ export class StatusService {
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
       case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
+      case "decision_patterns": { onlyKnown(request, ["kind", "projectId"]); return this.decisionPatternLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
       case "explanations": { onlyKnown(request, ["kind", "taskId", "seq", "limit"]); return this.explanationLines(by, request); }
@@ -1859,6 +1863,19 @@ export class StatusService {
     }
     if (page.more === true) lines.push(line("There are more stand-ups than shown.", cite("project", projectId)));
     if (ended > 0) lines.push(line(`${ended} ended stand-up${ended === 1 ? "" : "s"} of this project ${ended === 1 ? "is" : "are"} left out.`, cite("project", projectId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** What the decision log suggests (card M02h), as plain lines: one per kind of widening change, and the suggestion where there is one. Owner only. */
+  async decisionPatternLines(by: Principal, request: { projectId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.decisionPatterns === undefined) return undefined;
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    const projectId = request.projectId === undefined ? undefined : checkProjectId(request.projectId);
+    const read = await this.#deps.decisionPatterns(by, projectId === undefined ? {} : { projectId });
+    const lines: Line[] = read.patterns.slice(0, 20).map((p) => line(
+      `${shown(p.kind)} (${p.widens === "spend" ? "spend" : "rights"}): you agreed to ${p.ownerAgreed}, refused ${p.ownerRefused}, ${p.delegatedApplied} went ahead on the policy's or steward's leave, ${p.notApplied} not carried out.${p.suggestion === undefined ? "" : ` Suggestion: ${shown(p.suggestion.text)}`}`, cite("project", p.projectId)));
+    if (lines.length === 0) lines.push(line(read.scanned === 0 ? "The decision log has nothing yet to learn from." : "No widening changes in the part of the log read."));
+    else if (read.scanLimited) lines.push(line("The log is longer than the part read, so the counts cover its first entries only."));
     return { observedAt: this.#runner.now(), lines };
   }
 

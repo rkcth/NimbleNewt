@@ -12,7 +12,7 @@ import { allows } from "../security/access.js";
 import { GrantService, PrincipalService, type Principal } from "../security/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { reassignWarningSink } from "./reassign-warning.js";
-import { MeetingRecordService, MeetingService, RECORD_LIMITS, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
+import { MeetingRecordService, MeetingService, RECORD_LIMITS, type RecordOptions, budgetRaiseApplier, grantApplier, taskUpdateApplier, taskReassignApplier, type ChangeApplier, type DecisionRecordBody, type MotionBody, type RecordBody, type SourceCite } from "./index.js";
 
 after(stopServer);
 
@@ -27,14 +27,16 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); check?.(error); return true; });
 };
 
+type Extra = Partial<Pick<RecordOptions, "appliers" | "shareable" | "widening" | "policyWideningLimit" | "policyWideningCap" | "steward" | "stewardEnabled" | "holdExpiryMinutes" | "stewardSeconds" | "narrateSeconds">>;
+
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; host: Principal; mgr: Principal; reader: Principal; outsider: Principal; eve: Principal;
     asA: Principal; asB: Principal; asC: Principal; asD: Principal; asE: Principal;
     pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
     meetings: MeetingService; records: MeetingRecordService; decisions: DecisionService; grants: GrantService; principals: PrincipalService; projects: ProjectService;
-    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; stuckMotions: Set<string>; stuckRecords: Set<string>; narrate: "ok" | "throw" };
-    reopen(extra?: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">; policyWideningLimit: (projectId: string) => Promise<number | undefined> }>): MeetingRecordService;
+    other: Map<string, Availability>; shared: Set<string>; calls: { applied: string[]; failOnce: boolean; failLog: boolean; failReturned: boolean; stuckMotions: Set<string>; stuckRecords: Set<string>; narrate: "ok" | "throw" | "hang" | "dirty" };
+    reopen(extra?: Extra): MeetingRecordService;
     task(title?: string): Promise<{ id: string; revision: number }>;
     grantUpdate(agent: string): Promise<{ id: string; revision: number }>;
     meet(o?: { roster?: string[]; chair?: string; paused?: string[]; item?: "delegated-decision" | "owner-instruction" }): Promise<{ occ: string; rec: string; item?: string }>;
@@ -68,7 +70,7 @@ for (const backend of backends) {
         const meetings = MeetingService.withEpoch(world.storage, epoch, {}, { availability: pauses.availability, ...options });
         const decisions = DecisionService.withEpoch(world.storage, epoch, {}, options);
         const shared = new Set<string>();
-        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, stuckMotions: new Set<string>(), stuckRecords: new Set<string>(), narrate: "ok" as "ok" | "throw" };
+        const calls = { applied: [] as string[], failOnce: false, failLog: false, failReturned: false, stuckMotions: new Set<string>(), stuckRecords: new Set<string>(), narrate: "ok" as "ok" | "throw" | "hang" | "dirty" };
         // The record service writes through this: with `failLog` set, the next write of a decision log line fails once (a lost log write).
         const flaky = new Proxy(world.storage, { get(target, name, receiver) {
           if (name !== "applyOperation") { const v = Reflect.get(target, name, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
@@ -93,9 +95,15 @@ for (const backend of backends) {
           const p = await principals.get(id);
           return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, clock());
         };
-        const make = (extra: Partial<{ appliers: Record<string, ChangeApplier>; shareable: (c: SourceCite) => Promise<boolean>; widening: (cls: "access-change" | "spend", projectId: string) => Promise<"allow" | "ask">; policyWideningLimit: (projectId: string) => Promise<number | undefined> }> = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
-          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }), ...(extra.policyWideningLimit === undefined ? {} : { policyWideningLimit: extra.policyWideningLimit }),
-          narrate: async ({ summary }) => { if (calls.narrate === "throw") throw new Error("the model is down"); return `A meeting with ${summary.decisions.length} decision(s).`; },
+        const make = (extra: Extra = {}) => MeetingRecordService.withEpoch(flaky, epoch, { meetings, decisions }, {
+          ...options, authority, appliers: extra.appliers ?? { "task.update": counting }, shareable: extra.shareable ?? (async (c) => shared.has(`${c.kind}:${c.id}`)), ...(extra.widening === undefined ? {} : { widening: extra.widening }), ...(extra.policyWideningLimit === undefined ? {} : { policyWideningLimit: extra.policyWideningLimit }), ...(extra.policyWideningCap === undefined ? {} : { policyWideningCap: extra.policyWideningCap }), ...(extra.steward === undefined ? {} : { steward: extra.steward }), ...(extra.stewardEnabled === undefined ? {} : { stewardEnabled: extra.stewardEnabled }), ...(extra.holdExpiryMinutes === undefined ? {} : { holdExpiryMinutes: extra.holdExpiryMinutes }), ...(extra.stewardSeconds === undefined ? {} : { stewardSeconds: extra.stewardSeconds }), ...(extra.narrateSeconds === undefined ? {} : { narrateSeconds: extra.narrateSeconds }),
+          narrate: async ({ summary }) => {
+            if (calls.narrate === "throw") throw new Error("the model is down");
+            if (calls.narrate === "hang") return new Promise<never>(() => undefined);
+            // Model output with terminal escapes, a bell and a text-direction override: kept as plain text without them.
+            if (calls.narrate === "dirty") return `A meeting\u001b[31m with\u0007 ${summary.decisions.length}\u202e decision(s).`;
+            return `A meeting with ${summary.decisions.length} decision(s).`;
+          },
         });
         const records = make();
         const host = await enroll("host", "h1", []);
@@ -1867,6 +1875,304 @@ for (const backend of backends) {
     assert.equal(await c.records.summary(c.outsider, rec), undefined);
   });
 
+
+  // ---- card M02h (finish): the cap across decisions, the steward agent, order, checks before the hold, expiry of holds, the pending index, the narrator ----
+
+  /** A decision of widening changes of the given kinds, adopted and applied under the options given; `widens` maps a kind to its class. */
+  const widenKinds = { "w-spend": "spend", "w-rights": "access-change" } as const;
+  /** The policy lets every class through while the decision is voted on and then, unless the test says otherwise, asks about rights when it is carried out: the case where the policy tightened after the vote. */
+  const decideWith = async (c: Ctx, extra: Extra, kinds: (keyof typeof widenKinds | "plain")[], opts: { skipApply?: boolean } = {}) => {
+    const base = taskUpdateApplier(c.projects);
+    const appliers: Record<string, ChangeApplier> = { "task.update": base };
+    for (const [k, cls] of Object.entries(widenKinds)) appliers[k] = { ...base, widens: cls };
+    const phase = { adopting: true };
+    const svc = c.reopen({ appliers, widening: async (cls) => (phase.adopting || cls === "spend" ? "allow" : "ask"), ...extra });
+    const ctx = { ...c, records: svc } as Ctx;
+    const tasks = await Promise.all(kinds.map((_, i) => c.task(`Wide ${i}`)));
+    const meeting = await c.meet({ chair: c.pD, item: "delegated-decision" });
+    const item = (await c.meetings.occurrence(c.owner, (await recordOf(c, meeting.rec)).occurrenceId))!.agenda.find((a) => a.intent === "delegated-decision")!.id;
+    const m = await adopt(ctx, meeting.rec, c.asB, { agendaItemId: item, changes: tasks.map((t, i) => ({ ...change(c, t, c.pA, `Wide ${i}, retitled`), ...(kinds[i] === "plain" ? {} : { kind: kinds[i] }) })) });
+    const d = await decisionOf(ctx, m);
+    phase.adopting = false;
+    const result = opts.skipApply === true ? undefined : await svc.apply(c.host, { decisionId: d.id });
+    return { svc, ctx, m, d, result, rec: meeting.rec, now: async () => decisionOf(ctx, m) };
+  };
+
+  suite("a project may have only so many widening changes started on a delegate's leave in a window, counted across decisions; the rest wait for the owner, whose agreement lifts it; the window renews; a cap that cannot be read holds everything (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const cap = (max: number, windowMinutes = 60) => ({ policyWideningCap: async () => ({ max, windowMinutes }) });
+    const first = await decideWith(c, cap(3), ["w-spend", "w-spend"]);
+    assert.deepEqual(first.result, { applied: 2, notApplied: 0, pending: 0 });
+    // A second decision in the same window gets the one place left: splitting a list over decisions does not get round the cap.
+    const second = await decideWith(c, cap(3), ["w-spend", "w-spend", "w-spend"]);
+    assert.deepEqual(second.result, { applied: 1, notApplied: 0, pending: 2, waitingFor: "owner" });
+    assert.deepEqual((await second.now()).changes.map((x) => [x.state, x.waiting]), [["applied", undefined], ["adopted", true], ["adopted", true]]);
+    assert.equal((await second.now()).held, true);
+    // The owner's agreement carries out the rest and is not counted against anything.
+    assert.equal((await second.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: second.d.id, response: "agree" })).applied, 3);
+    // Still the same window: a third decision gets nothing without the owner.
+    const third = await decideWith(c, cap(3), ["w-spend"]);
+    assert.deepEqual(third.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // The window renews after its minutes.
+    minutes(61);
+    const fourth = await decideWith(c, cap(3), ["w-spend", "w-spend", "w-spend", "w-spend"]);
+    assert.deepEqual(fourth.result, { applied: 3, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // A change that widens nothing is not counted.
+    const plain = await decideWith(c, cap(0), ["plain", "plain"]);
+    assert.deepEqual(plain.result, { applied: 2, notApplied: 0, pending: 0 });
+    // Cap 0 holds everything; no cap lets everything through; a failing read fails closed.
+    assert.deepEqual((await decideWith(c, cap(0), ["w-spend"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.deepEqual((await decideWith(c, {}, ["w-spend", "w-spend"])).result, { applied: 2, notApplied: 0, pending: 0 });
+    assert.deepEqual((await decideWith(c, { policyWideningCap: async () => { throw new Error("settings down"); } }, ["w-spend"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // The per-decision limit and the cap both apply: whichever is reached first holds.
+    minutes(61);
+    const both = await decideWith(c, { ...cap(10), policyWideningLimit: async () => 1 }, ["w-spend", "w-spend"]);
+    assert.deepEqual(both.result, { applied: 1, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // Two decisions applied at the same moment cannot both take the last place (the count is raised in the save that starts the change).
+    minutes(61);
+    const x = await decideWith(c, cap(1), ["w-spend"], { skipApply: true });
+    const y = await decideWith(c, cap(1), ["w-spend"], { skipApply: true });
+    const both2 = await Promise.all([x.svc.apply(c.host, { decisionId: x.d.id }), y.svc.apply(c.host, { decisionId: y.d.id })]);
+    assert.deepEqual(both2.map((r) => r.applied).sort(), [0, 1], "exactly one of two concurrent decisions got the place");
+  });
+
+  suite("the cap's window rolls: each start leaves it one window after it was made (no reset, so no burst of twice the cap at a boundary); a clock set back frees no place early; a new service on the same store keeps the count (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const cap = { policyWideningCap: async () => ({ max: 3, windowMinutes: 60 }) };
+    const waits = (applied: number, pending: number) => ({ applied, notApplied: 0, pending, ...(pending === 0 ? {} : { waitingFor: "owner" }) });
+    const starts = async () => ((await c.storage.getAggregate({ kind: "meeting-widening-window", id: c.project }))?.body as { starts?: string[] } | undefined)?.starts ?? [];
+    // 08:00 two, 08:30 one: full. (Each decideWith opens a new service on the same store, as after a restart.)
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(2, 0));
+    minutes(30);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(1, 1));
+    // 08:59: the 08:00 starts are still inside the hour.
+    minutes(29);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    // 09:00: the two 08:00 starts leave; the 08:30 one stays, so two places, not the three a window reset at 09:00 would give.
+    minutes(1);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend", "w-spend"])).result, waits(2, 1));
+    assert.equal((await starts()).length, 3, "only the starts inside the window are kept");
+    // The clock is set back 90 minutes (07:30): the starts stamped 08:30 and 09:00 still count, nothing is freed.
+    minutes(-90);
+    await c.grantUpdate(c.pA);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    // 09:29: all three are still less than an hour old; 09:30: the 08:30 one leaves, one place.
+    minutes(119);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend"])).result, waits(0, 1));
+    minutes(1);
+    assert.deepEqual((await decideWith(c, cap, ["w-spend", "w-spend"])).result, waits(1, 1));
+  });
+
+  suite("a widening change whose class the policy asks about does not hold up the ones that may go on, whatever their order in the decision (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const states = async (kinds: ("w-spend" | "w-rights")[]) => {
+      const d = await decideWith(c, {}, kinds);
+      return { result: d.result, changes: (await d.now()).changes.map((x) => [x.kind, x.state]) };
+    };
+    // Spend goes through on the policy's leave, rights are the owner's: the result is the same in either order.
+    const a = await states(["w-rights", "w-spend"]);
+    const b = await states(["w-spend", "w-rights"]);
+    assert.deepEqual(a.result, { applied: 1, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.deepEqual(b.result, a.result);
+    assert.deepEqual(a.changes.slice().sort(), [["w-rights", "adopted"], ["w-spend", "applied"]]);
+    assert.deepEqual(b.changes.slice().sort(), a.changes.slice().sort());
+    // Several rights and a spend at the end: the asked ones are all put aside, and the spend still goes through.
+    const many = await states(["w-rights", "w-rights", "w-spend"]);
+    assert.deepEqual(many.result, { applied: 1, notApplied: 0, pending: 2, waitingFor: "owner" });
+  });
+
+  suite("a change that would be refused whatever the owner says is refused, not put to the owner (card M02h)", async (c) => {
+    // The carrying agent's right is withdrawn after the vote, so even the owner's agreement could not carry the change out: refused, and the decision does not wait.
+    const grant = await c.grantUpdate(c.pA);
+    const gone = await decideWith(c, {}, ["w-rights"], { skipApply: true });
+    await c.grants.revoke(c.owner, { commandId: cid("rv"), grantId: grant.id, expectedRevision: grant.revision, reason: "the owner changed their mind" });
+    assert.deepEqual(await gone.svc.apply(c.host, { decisionId: gone.d.id }), { applied: 0, notApplied: 1, pending: 0 });
+    assert.equal((await gone.now()).ownerResponse, "not-asked");
+    assert.deepEqual((await gone.now()).changes.map((x) => [x.state, x.code]), [["not-applied", "unauthorized"]]);
+    await c.grantUpdate(c.pA);
+    // The same kind of change by an agent that can carry it out still waits for the owner.
+    const w = await decideWith(c, {}, ["w-rights"]);
+    assert.equal(w.result!.waitingFor, "owner");
+    assert.equal((await w.svc.ownerPending(c.owner)).items.some((i) => i.id === w.d.id), true);
+  });
+
+  suite("the steward agent may allow a widening change the policy leaves to the owner, only when the owner enabled it for the class; every other answer, a failure and a slow answer send it to the owner (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const seen: { kind: string; summary: string; patchHash: string; delegated: number }[] = [];
+    let mode: "allow" | "ask" | "throw" | "junk" | "hang" = "allow";
+    const steward = async (input: Parameters<NonNullable<RecordOptions["steward"]>>[0]) => {
+      seen.push({ kind: input.kind, summary: input.summary, patchHash: input.patchHash, delegated: input.delegatedInDecision });
+      if (mode === "throw") throw new Error("the model is down");
+      if (mode === "hang") return new Promise<never>(() => undefined);
+      if (mode === "junk") return { verdict: "maybe" } as never;
+      return { verdict: mode, reason: "a small raise within what the meeting decided" };
+    };
+    const on = { steward, stewardEnabled: async () => true };
+    const allowed = await decideWith(c, on, ["w-rights", "w-rights"]);
+    assert.deepEqual(allowed.result, { applied: 2, notApplied: 0, pending: 0 }, "rights the policy asks about went ahead on the steward's allow");
+    const done = await allowed.now();
+    assert.deepEqual(done.changes.map((x) => [x.state, x.agreedBy]), [["applied", "steward:access-change"], ["applied", "steward:access-change"]]);
+    assert.equal(done.changes[0]!.stewardReason, "a small raise within what the meeting decided");
+    const log = (await allowed.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === allowed.d.id);
+    assert.deepEqual(log.map((e) => [e.outcome, e.decidedBy, e.ownerResponse]), [["applied", "steward", "not-asked"], ["applied", "steward", "not-asked"]]);
+    assert.ok(seen.every((s) => s.kind === "w-rights" && /^[0-9a-f]{64}$/.test(s.patchHash)), "it is told the kind and a digest of the patch");
+    assert.deepEqual(seen.map((s) => s.delegated), [0, 1], "and how much was already allowed without the owner in this decision");
+    // The owner's per-decision limit holds for the steward too.
+    seen.length = 0;
+    const limited = await decideWith(c, { ...on, policyWideningLimit: async () => 1 }, ["w-rights", "w-rights", "w-rights"]);
+    assert.deepEqual(limited.result, { applied: 1, notApplied: 0, pending: 2, waitingFor: "owner" });
+    // So does the cap across decisions.
+    minutes(61);
+    const capped = await decideWith(c, { ...on, policyWideningCap: async () => ({ max: 1, windowMinutes: 60 }) }, ["w-rights", "w-rights"]);
+    assert.deepEqual(capped.result, { applied: 1, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // Ask, a failure and nonsense all go to the owner.
+    for (const m of ["ask", "throw", "junk"] as const) {
+      mode = m;
+      const r = await decideWith(c, on, ["w-rights"]);
+      assert.deepEqual(r.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" }, m);
+    }
+    // A steward that never answers is given up on after its time (a condition, not a pause: the timer is the steward's own limit).
+    mode = "hang";
+    const slow = await decideWith(c, { ...on, stewardSeconds: 0.01 }, ["w-rights"]);
+    assert.deepEqual(slow.result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    // Not enabled for the class, or no steward at all: it is not even asked.
+    mode = "allow";
+    seen.length = 0;
+    assert.deepEqual((await decideWith(c, { steward, stewardEnabled: async () => false }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.deepEqual((await decideWith(c, { steward, stewardEnabled: async (cls) => cls === "spend" }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    assert.deepEqual((await decideWith(c, { steward }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" }, "enabled by nothing: never asked");
+    assert.equal(seen.length, 0, "the steward was never asked where it was not enabled");
+    // Where the policy asks already at the vote, a class the steward may judge is not put to the owner then: the steward is asked when the change is carried out. Without a steward the decision waits at once.
+    mode = "allow";
+    assert.deepEqual((await decideWith(c, { widening: async () => "ask", ...on }, ["w-rights"])).result, { applied: 1, notApplied: 0, pending: 0 });
+    assert.deepEqual((await decideWith(c, { widening: async () => "ask" }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" });
+    mode = "ask";
+    assert.deepEqual((await decideWith(c, { widening: async () => "ask", ...on }, ["w-rights"])).result, { applied: 0, notApplied: 0, pending: 1, waitingFor: "owner" }, "and its ask puts the decision back to the owner");
+    mode = "allow";
+    // The owner's own agreement is never put to the steward.
+    const held = await decideWith(c, {}, ["w-rights"]);
+    const asked = seen.length;
+    await held.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: held.d.id, response: "agree" });
+    assert.equal(seen.length, asked);
+    // A steward never sees the agents' words beyond a short redacted summary, and a change that widens nothing is not its concern.
+    const before = seen.length;
+    const plain = await decideWith(c, on, ["plain"]);
+    assert.deepEqual(plain.result, { applied: 1, notApplied: 0, pending: 0 });
+    assert.equal(seen.length, before);
+  });
+
+  suite("a held decision nobody answers ends as a decline after the owner's time: what had not started is refused with the code expired, a started change finishes, and an answered or un-held decision is left alone (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const week = 7 * 1440;
+    const expiry = { holdExpiryMinutes: async () => week };
+    const held = await decideWith(c, { ...expiry, policyWideningLimit: async () => 1 }, ["w-spend", "w-spend", "w-spend"]);
+    assert.deepEqual(held.result, { applied: 1, notApplied: 0, pending: 2, waitingFor: "owner" });
+    assert.deepEqual(await held.svc.sweep(c.host, { projectId: c.project }).then((r) => r.expired), [], "not yet");
+    minutes(7 * 24 * 60 - 5);
+    assert.deepEqual((await held.svc.sweep(c.host, { projectId: c.project })).expired, [], "five minutes early");
+    minutes(10);
+    const swept = await held.svc.sweep(c.host, { projectId: c.project });
+    assert.deepEqual(swept.expired, [held.d.id]);
+    const after = await held.now();
+    assert.equal(after.ownerResponse, "declined");
+    assert.equal(after.held, undefined);
+    assert.ok(after.holdExpiredAt !== undefined);
+    assert.deepEqual(after.changes.map((x) => [x.state, x.code]), [["applied", undefined], ["not-applied", "expired"], ["not-applied", "expired"]]);
+    assert.deepEqual((await held.svc.decisionLog(c.owner)).entries.filter((e) => e.decisionId === held.d.id).map((e) => [e.outcome, e.code]).sort().map((x) => x.join(":")), ["applied:", "not-applied:expired", "not-applied:expired"]);
+    assert.equal((await held.svc.ownerPending(c.owner)).items.some((i) => i.id === held.d.id), false, "it no longer waits");
+    await refuses("invalid_command", () => held.svc.ownerRespond(c.owner, { commandId: cid("late"), decisionId: held.d.id, response: "agree" }), (e) => assert.match(e.message, /nobody answered this decision in time, so it ended as declined/, "the owner is not told they answered"));
+    assert.deepEqual((await held.svc.sweep(c.host, { projectId: c.project })).expired, [], "a repeat does nothing");
+    // The owner who answered in time is not overridden; a decision with no expiry set never expires.
+    const answered = await decideWith(c, { ...expiry, policyWideningLimit: async () => 0 }, ["w-spend"]);
+    await answered.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: answered.d.id, response: "agree" });
+    const never = await decideWith(c, { holdExpiryMinutes: async () => 0, policyWideningLimit: async () => 0 }, ["w-spend"]);
+    minutes(400 * 24 * 60);
+    assert.deepEqual((await never.svc.sweep(c.host, { projectId: c.project })).expired, [], "0 days: it waits until the owner answers");
+    const unset = await c.reopen({ policyWideningLimit: async () => 0 }).sweep(c.host, { projectId: c.project });
+    assert.deepEqual(unset.expired, [], "no setting: holds do not expire");
+    assert.equal((await never.now()).ownerResponse, "pending");
+    assert.equal((await answered.now()).ownerResponse, "agreed");
+    assert.deepEqual((await answered.svc.sweep(c.host, { projectId: c.project })).expired, [never.d.id], "the answered decision is left alone; the unanswered one ends once the setting says so");
+  });
+
+  suite("a change that had started when its hold expired is finished by a later sweep if the drive right after the expiry did not finish it (a stop between the two steps), whatever the expiry setting is by then (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const base = taskUpdateApplier(c.projects);
+    const down = { v: true };
+    // The spend's carry-out fails with an unexpected error (not a refusal): the change stays applying, as after a stop.
+    const flakySpend: ChangeApplier = { ...base, widens: "spend", apply: async (ch) => { if (down.v) throw new Error("the process stopped"); return base.apply(ch); } };
+    const appliers: Record<string, ChangeApplier> = { "task.update": base, "w-rights": { ...base, widens: "access-change" }, "w-spend": flakySpend };
+    const week = 7 * 1440;
+    const held = await decideWith(c, { appliers, holdExpiryMinutes: async () => week }, ["w-rights", "w-spend"], { skipApply: true });
+    await assert.rejects(() => held.svc.apply(c.host, { decisionId: held.d.id }), /the process stopped/);
+    assert.deepEqual((await held.now()).changes.map((x) => [x.kind, x.state, x.waiting]), [["w-rights", "adopted", true], ["w-spend", "applying", undefined]]);
+    assert.equal((await held.now()).held, true);
+    minutes(week + 1);
+    // The expiry is saved; the drive of the started change right after it fails again: the decision has expired and the spend is still applying.
+    assert.deepEqual((await held.svc.sweep(c.host, { projectId: c.project })).expired, [held.d.id]);
+    assert.deepEqual((await held.now()).changes.map((x) => [x.state, x.code]), [["not-applied", "expired"], ["applying", undefined]]);
+    // Later, with expiry switched off meanwhile, a sweep finishes it under the agreement it started with; the expired change stays refused.
+    down.v = false;
+    const later = c.reopen({ appliers, holdExpiryMinutes: async () => 0 });
+    assert.deepEqual((await later.sweep(c.host, { projectId: c.project })).expired, []);
+    const after = await held.now();
+    assert.deepEqual(after.changes.map((x) => [x.state, x.code, x.agreedBy]), [["not-applied", "expired", undefined], ["applied", undefined, "policy:spend"]]);
+    assert.equal(after.ownerResponse, "declined");
+    // Once finished and logged it leaves the index, and a further sweep has nothing to do.
+    const idx = ((await c.storage.getAggregate({ kind: "meeting-decision-unlogged", id: c.project }))?.body as { ids?: string[] } | undefined)?.ids ?? [];
+    assert.equal(idx.includes(held.d.id), false);
+  });
+
+  suite("the narrator's overview is plain text and has a time limit: control and text-direction characters are removed, and a narrator that never answers leaves the summary without an overview instead of holding up the sweep (card M02h)", async (c) => {
+    await manager(c);
+    c.calls.narrate = "dirty";
+    const first = await endedTabled(c);
+    assert.deepEqual((await c.records.sweep(c.host, { projectId: c.project })).narrated, [first.rec]);
+    const read = async (rec: string) => (await c.records.summary(c.owner, rec))!;
+    assert.match((await read(first.rec)).overview ?? "", /^A meeting\[31m with \d+ decision\(s\)\.$/);
+    assert.doesNotMatch((await read(first.rec)).overview ?? "", /[\u0000-\u001f\u202e]/);
+    c.calls.narrate = "hang";
+    const slow = c.reopen({ narrateSeconds: 0.05 });
+    const second = await endedTabled(c);
+    assert.deepEqual((await slow.sweep(c.host, { projectId: c.project })).narrated, [second.rec]);
+    const got = await read(second.rec);
+    assert.equal(got.overview, undefined);
+    assert.match(got.overviewFailed ?? "", /took too long/);
+    c.calls.narrate = "ok";
+  });
+
+  suite("the owner's waiting list and controls read the decisions that may still need something, not every decision ever made (card M02h)", async (c) => {
+    await c.grantUpdate(c.pA);
+    const old = await decideWith(c, {}, ["plain"]);
+    assert.deepEqual(old.result, { applied: 1, notApplied: 0, pending: 0 });
+    const held = await decideWith(c, { policyWideningLimit: async () => 0 }, ["w-spend"]);
+    const idx = async () => ((await c.storage.getAggregate({ kind: "meeting-decision-unlogged", id: c.project }))?.body as { ids?: string[] } | undefined)?.ids ?? [];
+    assert.deepEqual(await idx(), [held.d.id], "a finished and logged decision left the index; the one waiting for the owner is in it");
+    assert.deepEqual((await held.svc.ownerPending(c.owner)).items.map((i) => i.id), [held.d.id]);
+    assert.equal((await held.svc.ownerPending(c.owner)).truncated, false);
+    assert.deepEqual((await held.svc.ownerControls(c.owner)).unfinished, []);
+    await held.svc.ownerRespond(c.owner, { commandId: cid("or"), decisionId: held.d.id, response: "decline" });
+    assert.deepEqual((await held.svc.ownerPending(c.owner)).items, []);
+    assert.deepEqual(await idx(), [], "and leaves it once answered and logged");
+  });
+
+  suite("the narrator's overview is written once for an ended meeting with outcomes to hand back, by the sweep; a failing narrator leaves the summary without it (card M02h)", async (c) => {
+    await manager(c);
+    const { rec } = await endedTabled(c);
+    assert.deepEqual(await c.storage.listAggregates("meeting-summary", { limit: 10 }), [], "nothing is written before the sweep");
+    const swept = await c.records.sweep(c.host, { projectId: c.project });
+    assert.deepEqual(swept.narrated, [rec]);
+    const written = (await c.storage.getAggregate({ kind: "meeting-summary", id: (await c.storage.listAggregates("meeting-summary", { limit: 10 })).map((a) => a.id)[0]! }))!.body as { overview?: string; overviewFailed?: string };
+    assert.match(written.overview ?? "", /^A meeting with \d+ decision\(s\)\.$/);
+    assert.deepEqual((await c.records.sweep(c.host, { projectId: c.project })).narrated, [], "once");
+    // A narrator that throws: the summary is still written, marked, and the sweep does not ask again.
+    c.calls.narrate = "throw";
+    const other = await endedTabled(c);
+    assert.deepEqual((await c.records.sweep(c.host, { projectId: c.project })).narrated, [other.rec]);
+    const all = await c.storage.listAggregates("meeting-summary", { limit: 10 });
+    assert.equal(all.some((a) => (a.body as { overviewFailed?: string }).overviewFailed !== undefined), true);
+    assert.deepEqual((await c.records.sweep(c.host, { projectId: c.project })).narrated, []);
+  });
 }
 
 test("a reassignment decided in a meeting names one active agent and the assignment it observed, goes through the assignment service, and is repeatable (card M02e)", async () => {
