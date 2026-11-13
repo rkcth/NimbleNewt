@@ -66,6 +66,8 @@ export type FencedUpdate = UpdateTask & { readonly fence: Fence };
 
 const FINAL = new Set(["done", "cancelled"]);
 
+const invalidScan = (): never => { throw new DomainError("invalid_command", "attemptScan: must be a whole number of at least 1", { field: "attemptScan" }); };
+
 /** The most attempt records one `deferredCommand` lookup reads (there is no per-task index of attempts). */
 export const ATTEMPT_SCAN = 2000;
 
@@ -103,23 +105,28 @@ export interface DeferredCommandRecord {
 /** Options of the assignment service. `attemptGate` answers, for a task and the harness named (undefined when none was), why the attempt may not run (or undefined when it may). */
 export interface AssignmentOptions extends RunnerOptions {
   readonly attemptGate?: (taskId: string, harness: string | undefined) => Promise<string | undefined>;
+  /** The most attempt records one `deferredCommand` lookup reads (default `ATTEMPT_SCAN`; tests make it small). */
+  readonly attemptScan?: number;
 }
 
 export class AssignmentService {
   readonly #runner: CommandRunner;
   readonly #projects: ProjectService;
   readonly #gate: AssignmentOptions["attemptGate"];
+  readonly #attemptScan: number;
 
-  private constructor(runner: CommandRunner, projects: ProjectService, gate: AssignmentOptions["attemptGate"]) {
+  private constructor(runner: CommandRunner, projects: ProjectService, gate: AssignmentOptions["attemptGate"], attemptScan: number) {
     this.#runner = runner;
     this.#projects = projects;
     this.#gate = gate;
+    this.#attemptScan = attemptScan;
   }
 
   /** The service writes under `epoch` (the controller's one epoch, shared with `projects`). */
   static withEpoch(storage: ControllerStorage, epoch: number, projects: ProjectService, options: AssignmentOptions = {}): AssignmentService {
     if (projects.epoch !== epoch) throw new DomainError("invalid_command", "epoch: must be the epoch the project service writes under", { field: "epoch" });
-    return new AssignmentService(new CommandRunner(storage, epoch, options), projects, options.attemptGate);
+    const scan = options.attemptScan === undefined ? ATTEMPT_SCAN : Number.isSafeInteger(options.attemptScan) && options.attemptScan >= 1 ? options.attemptScan : invalidScan();
+    return new AssignmentService(new CommandRunner(storage, epoch, options), projects, options.attemptGate, scan);
   }
 
   get epoch(): number { return this.#runner.epoch; }
@@ -362,9 +369,10 @@ export class AssignmentService {
   /**
    * What is stored about a recorded `task.assign` or `task.transfer` (card U13 finish), found by its command ID: which task and generation it made, the assignment and task now, the latest attempt of that generation and
    * the state of the message that tells the owner's worker. Undefined when the ID names no such command (a refused command is not recorded). Attempt records have no per-task index, so a generation that is no longer the
-   * current one is looked up by reading attempt records in pages, at most `ATTEMPT_SCAN` of them; `attemptsPartial` says the scan ended before the end with nothing found.
+   * current one is looked up by reading attempt records in pages, at most `ATTEMPT_SCAN` of them; `attemptsPartial` says the scan ended before the end and what it found (nothing, or an attempt that may not be the
+   * generation's latest) cannot be relied on. `authorize`, when given, is called with the command's task before anything more than the command's own record is read (the caller's rights are checked before the scan).
    */
-  async deferredCommand(commandId: string): Promise<DeferredCommandRecord | undefined> {
+  async deferredCommand(commandId: string, authorize?: (taskId: string) => Promise<unknown>): Promise<DeferredCommandRecord | undefined> {
     const id = checkCommandId(commandId);
     const stored = await this.#runner.storage.getOperation(operationIdOf(id)).catch((error: unknown) => { throw mapStorageError(error); });
     if (stored === undefined) return undefined;
@@ -378,6 +386,7 @@ export class AssignmentService {
     const assignmentAggregate = await this.#runner.get("assignment", audit.subject.id);
     const taskId = (assignmentAggregate?.body as unknown as AssignmentBody | undefined)?.taskId ?? (audit.subject.id.startsWith("asg-") ? `task-${audit.subject.id.slice(4)}` : undefined);
     if (taskId === undefined) return undefined;
+    if (authorize !== undefined) await authorize(taskId);
     return this.#progress({ commandId: id, type: audit.type, taskId, generation, revision, recordedAt: audit.at }, assignmentAggregate);
   }
 
@@ -408,19 +417,22 @@ export class AssignmentService {
       const active = await this.#runner.get("attempt", assignment.activeAttemptId);
       if (active !== undefined) attempt = view<AttemptBody>(active);
     }
-    if (attempt === undefined && assignment !== undefined && (assignment.generation !== generation || assignment.attempts > 0)) {
+    // No attempt was ever admitted on the task (the count is over all generations): there is nothing to look for.
+    if (attempt === undefined && assignment !== undefined && assignment.attempts > 0) {
       let after: string | undefined;
       let seen = 0;
+      const pageSize = Math.min(200, this.#attemptScan);
       for (;;) {
-        const page = await this.#runner.list("attempt", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+        const page = await this.#runner.list("attempt", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
         for (const aggregate of page) {
           after = aggregate.id;
           seen += 1;
           const body = aggregate.body as unknown as AttemptBody;
           if (body.taskId === taskId && body.generation === generation && (attempt === undefined || body.number > attempt.number)) attempt = view<AttemptBody>(aggregate);
         }
-        if (page.length < 200) break;
-        if (seen >= ATTEMPT_SCAN) { attemptsPartial = attempt === undefined; break; }
+        if (page.length < pageSize) break;
+        // Cut short: a found attempt counts only when it is the task's last attempt of all (numbers rise over all generations, so no later attempt of its generation exists); otherwise nothing found can be relied on.
+        if (seen >= this.#attemptScan) { attemptsPartial = attempt === undefined || attempt.number !== assignment.attempts; break; }
       }
     }
     return {

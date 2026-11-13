@@ -62,11 +62,12 @@ export interface DeferredCommandFacts {
   readonly attempt: { readonly state: "active" | "succeeded" | "failed" | "abandoned" | "superseded" | "released" } | undefined;
   readonly taskState: string | undefined;
   readonly deliveryState: "pending" | "claimed" | "delivered" | undefined;
-  /** Attempt records were read only in part and none of this generation was found: nothing can be said about it. */
+  /** Attempt records were read only in part, and no attempt of this generation that is certainly its latest was found: nothing can be said about it (checked before the attempt). */
   readonly attemptsPartial?: boolean;
 }
 
 export function deferredCommandState(f: DeferredCommandFacts): { readonly state: CommandState; readonly reason: string } {
+  if (f.attemptsPartial === true) return { state: "outcome_unknown", reason: "the attempt records could not all be read, so what became of this generation is not known" };
   if (f.attempt !== undefined) {
     switch (f.attempt.state) {
       case "active": return { state: "running", reason: "the owner's worker has an attempt under way" };
@@ -78,7 +79,6 @@ export function deferredCommandState(f: DeferredCommandFacts): { readonly state:
       default: return { state: "outcome_unknown", reason: "the attempt is in a state this reader does not know" };
     }
   }
-  if (f.attemptsPartial === true) return { state: "outcome_unknown", reason: "the attempt records could not all be read, so what became of this generation is not known" };
   if (f.assignment === undefined) return { state: "outcome_unknown", reason: "the assignment record is missing" };
   if (f.assignment.generation > f.generation) return { state: "failed", reason: "ownership was replaced before any attempt began; this command's generation never took effect" };
   if (f.assignment.state === "released") return { state: "failed", reason: "the task was released before any attempt began" };

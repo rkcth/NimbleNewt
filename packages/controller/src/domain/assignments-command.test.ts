@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { deferredCommandState } from "../api/command-state.js";
 import { ASSIGNMENT_EVENTS, AssignmentService, DeliveryDispatcher, type Fence, type Owner } from "./index.js";
+import { derivedId } from "./ids.js";
 import { ProjectService } from "./service.js";
 import { backends, stopServer } from "./testing/backends.js";
 
@@ -123,5 +124,88 @@ for (const backend of backends) {
     // A release before an attempt began.
     await assign.releaseTask({ commandId: cid("rel"), actor: me, taskId, expectedRevision: (await assign.getAssignment(taskId))!.revision });
     assert.equal(await stateOf(assign, t2), "failed");
+  });
+  suite("completed means the attempt succeeded, not that the task finished; a release after success, a transfer to the same owner and a proposed task (card U13 finish review)", async ({ projects, assign }) => {
+    // The attempt failed, then the task was moved to done by hand: the command still reads failed.
+    const taskId = await readyTask(projects);
+    const id = cid("assign");
+    await assign.assignTask({ commandId: id, actor: me, taskId, owner: ann });
+    const a = await admit(assign, taskId, ann);
+    await assign.finishAttempt({ commandId: cid("fin"), actor: "ann", taskId, expectedRevision: a.rev, fence: a.fence, outcome: "failed" });
+    await projects.transitionTask({ commandId: cid("ip"), actor: me, taskId, expectedRevision: (await projects.getTask(taskId))!.revision, to: "in_progress" });
+    await projects.transitionTask({ commandId: cid("dn"), actor: me, taskId, expectedRevision: (await projects.getTask(taskId))!.revision, to: "done" });
+    assert.equal(await stateOf(assign, id), "failed", "a finished task does not make a failed attempt completed");
+    // Succeeded, then released: still completed (the attempt is found among the records of its generation).
+    const t2 = await readyTask(projects);
+    const id2 = cid("assign");
+    await assign.assignTask({ commandId: id2, actor: me, taskId: t2, owner: ann });
+    const b = await admit(assign, t2, ann);
+    await assign.finishAttempt({ commandId: cid("fin"), actor: "ann", taskId: t2, expectedRevision: b.rev, fence: b.fence, outcome: "succeeded" });
+    await assign.releaseTask({ commandId: cid("rel"), actor: me, taskId: t2, expectedRevision: b.rev + 1 });
+    assert.equal(await stateOf(assign, id2), "completed");
+    // Transferred to the same owner while an attempt was active: the old command is unknown, the new one starts again.
+    const t3 = await readyTask(projects);
+    const id3 = cid("assign");
+    await assign.assignTask({ commandId: id3, actor: me, taskId: t3, owner: ann });
+    const c3 = await admit(assign, t3, ann);
+    const same = cid("transfer");
+    await assign.transferTask({ commandId: same, actor: me, taskId: t3, expectedRevision: c3.rev, to: ann });
+    assert.deepEqual([await stateOf(assign, id3), await stateOf(assign, same)], ["outcome_unknown", "accepted"]);
+    // A proposed task (never made ready) can take no attempt yet: accepted, not running or completed.
+    const p = await projects.createProject({ commandId: cid("p"), actor: me, name: "Shed" });
+    const t4 = (await projects.createTask({ commandId: cid("t"), actor: me, projectId: p.id, title: "Paint" })).id;
+    const id4 = cid("assign");
+    await assign.assignTask({ commandId: id4, actor: me, taskId: t4, owner: ann });
+    assert.equal(await stateOf(assign, id4), "accepted");
+  });
+
+  suite("the attempt scan: rights are checked before it, a scan cut short says partial, and an earlier attempt never stands in for a later one (card U13 finish review)", async ({ projects, world, epoch }) => {
+    let lists = 0;
+    const counted = new Proxy(world.storage, { get(target, key) { const v = Reflect.get(target, key, target); if (key === "listAggregates") return (...args: unknown[]) => { lists += 1; return (v as (...a: unknown[]) => unknown).apply(target, args); }; return typeof v === "function" ? v.bind(target) : v; } });
+    const small = AssignmentService.withEpoch(counted, epoch, projects, { ...fast, attemptScan: 1 });
+    const full = AssignmentService.withEpoch(world.storage, epoch, projects, fast);
+    const taskId = await readyTask(projects);
+    // Choose admission command IDs so that attempt 1's ID sorts first: a scan of one record then finds attempt 1 only.
+    const ids: string[] = [];
+    for (let i = 0; ids.length < 3; i++) { const c = `adm-${i}-${n++}`; if (ids.length === 0 || derivedId("att", c) > derivedId("att", ids[ids.length - 1]!)) ids.push(c); }
+    const id = cid("assign");
+    await full.assignTask({ commandId: id, actor: me, taskId, owner: ann });
+    const step = async (commandId: string, owner: Owner, outcome?: "succeeded" | "failed"): Promise<void> => {
+      const a = (await full.getAssignment(taskId))!;
+      const r = await full.admitAttempt({ commandId, actor: me, taskId, expectedRevision: a.revision, generation: a.generation, owner });
+      assert.equal(r.id, derivedId("att", commandId));
+      if (outcome !== undefined) await full.finishAttempt({ commandId: cid("fin"), actor: owner.id, taskId, expectedRevision: a.revision + 1, fence: { generation: a.generation, attemptId: r.id }, outcome });
+    };
+    await step(ids[0]!, ann, "succeeded");
+    await step(ids[1]!, ann, "failed");
+    const t = cid("transfer");
+    await full.transferTask({ commandId: t, actor: me, taskId, expectedRevision: (await full.getAssignment(taskId))!.revision, to: bob });
+    await step(ids[2]!, bob);
+    assert.equal(await stateOf(full, id), "failed", "read in full: the generation's latest attempt failed");
+    const cut = (await small.deferredCommand(id))!;
+    assert.equal(cut.attempt?.number, 1, "the cut scan found only attempt 1");
+    assert.equal(cut.attemptsPartial, true);
+    assert.equal(await stateOf(small, id), "outcome_unknown", "attempt 1 succeeded, but it is not the generation's latest: never completed");
+    // Refused before the scan: a caller without the right costs no attempt read.
+    lists = 0;
+    await assert.rejects(() => small.deferredCommand(id, async () => { throw new Error("refused"); }), /refused/);
+    assert.equal(lists, 0);
+    // A command whose generation has no attempt in the part read is unknown too, never failed or accepted on a guess.
+    const step2 = async (task: string): Promise<void> => { const a = (await full.getAssignment(task))!; await full.admitAttempt({ commandId: cid("adm"), actor: me, taskId: task, expectedRevision: a.revision, generation: a.generation, owner: bob }); };
+    const other = await readyTask(projects);
+    const quiet = cid("assign");
+    await full.assignTask({ commandId: quiet, actor: me, taskId: other, owner: ann });
+    const q = (await full.getAssignment(other))!;
+    await full.transferTask({ commandId: cid("transfer"), actor: me, taskId: other, expectedRevision: q.revision, to: bob });
+    lists = 0;
+    assert.deepEqual([await stateOf(full, quiet), await stateOf(small, quiet), lists], ["failed", "failed", 0], "the task never had an attempt: nothing to scan");
+    await step2(other);
+    assert.equal(await stateOf(small, quiet), "outcome_unknown", "now it has one (of another generation) and the cut scan cannot rule one out");
+    assert.equal(await stateOf(full, quiet), "failed");
+    // The current generation's active attempt is read directly, not by the scan.
+    lists = 0;
+    assert.equal(await stateOf(small, t), "running");
+    assert.equal(lists, 0);
+    assert.throws(() => AssignmentService.withEpoch(world.storage, epoch, projects, { attemptScan: 0 }), /attemptScan/);
   });
 }

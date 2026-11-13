@@ -1606,11 +1606,6 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
-  /**
-   * How each attempt of a task ended (card W08), newest first, at most `ATTEMPT_ENDINGS_LIMITS.attempts`: two lines each from its dispatch record (see `attemptEndingLines`), then the blockers of cards W03, W05 and W10 open on the task,
-   * each with its summary (the controller's text, which quotes the agent's last words once). The attempts are found through the task's attempt record (written with each claim) and, for attempts claimed before it existed, the
-   * W10 report record and the W03 count. Who may read it: as for the work report, whoever may see who works on the task. The report's text itself is in the `work_report` view, not repeated here.
-   */
   /** What became of the task's latest assignment or transfer, in the shared command words (card U13 finish). What the caller may not read reads as missing. */
   async commandStateLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const taskId = checkTaskId(taskIdValue);
@@ -1626,6 +1621,11 @@ export class StatusService {
     return { observedAt: at, lines: [line(`${what} of ${shown(body.title)} (generation ${record.generation}) is ${verdict.state.replace("_", " ")}: ${verdict.reason}.`, cite("assignment", assignmentIdOf(taskId), record.assignment?.revision))] };
   }
 
+  /**
+   * How each attempt of a task ended (card W08), newest first, at most `ATTEMPT_ENDINGS_LIMITS.attempts`: two lines each from its dispatch record (see `attemptEndingLines`), then the blockers of cards W03, W05 and W10 open on the task,
+   * each with its summary (the controller's text, which quotes the agent's last words once). The attempts are found through the task's attempt record (written with each claim) and, for attempts claimed before it existed, the
+   * W10 report record and the W03 count. Who may read it: as for the work report, whoever may see who works on the task. The report's text itself is in the `work_report` view, not repeated here.
+   */
   async attemptEndingLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const taskId = checkTaskId(taskIdValue);
     const task = await this.#runner.get("task", taskId);

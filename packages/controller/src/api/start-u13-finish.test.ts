@@ -9,6 +9,7 @@ import { startController } from "./index.js";
 import { COMMAND_STATES, jobCommandState, stopCommandState } from "./command-state.js";
 import { JOB_STATES } from "../jobs/jobs.js";
 import { PI } from "../dispatch/testing/world.js";
+import { ModelInterpreter } from "../chat/model-interpreter.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -261,5 +262,82 @@ test("command.state follows task.assign and task.transfer through the shared wor
     // Nothing secret or long in the text.
     const text = JSON.stringify((await call(boot.token, "command.state", { command: "as1" })).result);
     assert.ok(text.length < 1200 && !/token|secret|password/i.test(text));
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("command.state: a sender without the right to read the assignment, and a read-only client, are told nothing, in the same words as for a missing command (card U13 finish review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-u13cr-"));
+  const c = await open(join(d, "c.sqlite"));
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const call = async (tok: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(tok, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(boot.token, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+    await call(boot.token, "task.transition", { taskId: task, to: "ready", expectedRevision: 1 }, "t1r");
+    // cal may assign and read tasks, but not read who owns them.
+    await c.services.principals.enroll(rob, { commandId: "e-cal", kind: "agent", name: "cal", grants: [{ action: "assignment.manage", project }, { action: "task.read", project }] });
+    const cal = (await c.services.principals.issueCredential(rob, "agent:cal")).token;
+    const sent = await call(cal, "task.assign", { taskId: task, owner: { kind: "agent", id: "ann" } }, "cal-as");
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    const refused = await call(cal, "command.state", { command: "cal-as" });
+    const missing = await call(cal, "command.state", { command: "cal-none" });
+    assert.equal(refused.ok, false);
+    assert.deepEqual(refused.error, { ...missing.error }, "a refusal reads exactly like a missing command");
+    assert.ok(!JSON.stringify(refused).includes(task) && !JSON.stringify(refused).includes(project), "nothing names the task or its project");
+    // A reader of the project (it may read tasks and who owns them) sent nothing, so it finds nothing, the owner's command included. (A client may hold only conversation rights, so there is no reading client.)
+    await c.services.principals.enroll(rob, { commandId: "e-view", kind: "agent", name: "viewer", grants: [{ action: "task.read", project }, { action: "assignment.read", project }] });
+    const viewer = (await c.services.principals.issueCredential(rob, "agent:viewer")).token;
+    assert.equal((await call(boot.token, "task.assign", { taskId: (await call(boot.token, "task.create", { projectId: project, title: "water" }, "t2")).result.id, owner: { kind: "agent", id: "ann" } }, "own-as")).ok, true);
+    assert.deepEqual((await call(viewer, "command.state", { command: "own-as" })).error.code, "forbidden");
+    assert.deepEqual((await call(viewer, "command.state", { command: "cal-as" })).error.code, "forbidden");
+    // The owner reads its own; another sender's ID means nothing to it either (IDs are per sender).
+    assert.equal((await call(boot.token, "command.state", { command: "own-as" })).result.item.state, "accepted");
+    assert.equal((await call(boot.token, "command.state", { command: "cal-as" })).error.code, "not_found");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("the owner asks in free words what became of a task's assignment, through the model interpreter: the task is named by its title in the project in focus, a title that fits two tasks is asked about, another project's title is not found (card U13 finish review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-u13ch-"));
+  const seen: { system: string }[] = [];
+  const model = {
+    complete: async (_route: string, request: { system: string; user: string }): Promise<string> => {
+      seen.push(request);
+      const kinds = /request\.kind is one of \(with its keys; `a\|b` means either\): (.*)$/m.exec(request.system)?.[1] ?? "";
+      const kind = kinds.split("; ").find((k) => /what became of the latest assignment or transfer of a task/.test(k))?.split("(")[0];
+      const words = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(request.user)?.[1] ?? "";
+      const found = /assignment of (Fix the parser|Prune|Paint the shed)/.exec(words);
+      if (kind === undefined || found === null) return JSON.stringify([{ kind: "none", reason: "no view fits" }]);
+      return JSON.stringify([{ kind: "status", request: { kind, taskTitle: found[1] }, evidence: found[0], basis: "owner" }]);
+    },
+  };
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], chat: { interpreter: new ModelInterpreter(model, () => ["localp/chat"]) } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await c.services.principals.authenticate(boot.token);
+    const s = c.services;
+    const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const elsewhere = (await s.projects.createProject({ commandId: "p2", actor: rob.id, name: "House" })).id;
+    const ready = async (id: string, projectId: string, title: string): Promise<string> => { const t = (await s.projects.createTask({ commandId: id, actor: rob.id, projectId, title })).id; await s.projects.transitionTask({ commandId: `${id}r`, actor: rob.id, taskId: t, expectedRevision: 1, to: "ready" }); return t; };
+    const fix = await ready("t1", project, "Fix the parser");
+    await ready("t2", project, "Prune");
+    await ready("t3", project, "Prune");
+    await ready("t4", elsewhere, "Paint the shed");
+    await s.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId: fix, owner: { kind: "agent", id: "ann" } });
+    await c.chat!.setFocus(boot.token, { commandId: "f1", projectId: project });
+    const ask = async (messageId: string, text: string) => (await c.chat!.submit(boot.token, { messageId, text })).outcomes[0] as unknown as { status: string; lines?: readonly { text: string }[] };
+    const said = await ask("m1", "what became of the assignment of Fix the parser?");
+    assert.equal(said.status, "answered", JSON.stringify(said));
+    assert.match(seen[0]!.system, /command_state\(taskId\|taskTitle\) - what became of the latest assignment or transfer of a task/);
+    assert.match(said.lines!.map((l) => l.text).join(" "), /The latest assignment of Fix the parser \(generation 1\) is accepted/);
+    const viewed = (await c.api.handle(boot.token, { v: 1, op: "status.ask", args: { request: { kind: "command_state", taskId: fix } } } as never)) as any;
+    assert.deepEqual(viewed.result.item.lines.map((l: { text: string }) => l.text), said.lines!.map((l) => l.text), "the state API says the same");
+    const two = await ask("m2", "did the assignment of Prune get anywhere?");
+    assert.notEqual(two.status, "answered", JSON.stringify(two));
+    assert.match(JSON.stringify(two), /More than one task is called/);
+    const other = await ask("m3", "what happened with the assignment of Paint the shed?");
+    assert.notEqual(other.status, "answered", JSON.stringify(other));
+    assert.match(JSON.stringify(other), /no task called/);
+    assert.ok(!JSON.stringify(other).includes(elsewhere), "another project's task is not named");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

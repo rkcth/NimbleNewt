@@ -133,9 +133,9 @@ export class SecureApi {
   deferredCommand(commandId: string): Promise<DeferredCommandRecord> {
     return this.#run(async () => {
       // Command IDs are kept per caller (as when the command was sent), so a caller follows its own commands.
-      const found = await this.#d.assignments.deferredCommand(scopedCommandId(this.#p.id, commandId));
+      // The rights on the command's task are checked before its attempts are looked up, so a refused caller costs no scan.
+      const found = await this.#d.assignments.deferredCommand(scopedCommandId(this.#p.id, commandId), (taskId) => this.#requireOnTask("assignment.read", taskId));
       if (found === undefined) return this.#hide();
-      await this.#requireOnTask("assignment.read", found.taskId);
       return found;
     });
   }
