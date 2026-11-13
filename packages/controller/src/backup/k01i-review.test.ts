@@ -10,7 +10,7 @@ import { SqliteStorage } from "../storage/index.js";
 import { LIVE_LOCK_CLASS, PostgresStorage, liveLockKey, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { withControllerApplication } from "../storage/postgres/storage.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
-import { liveLockCount, terminateLiveLockHolders, terminateSharedLiveLockHolders } from "../storage/postgres/testing/live-lock.js";
+import { liveLockCount, liveLockHolderPids, terminateLiveLockHolders, terminateSharedLiveLockHolders } from "../storage/postgres/testing/live-lock.js";
 import { BackupService, MaintenanceBarrier, StagedRestore } from "./index.js";
 import { PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
 
@@ -266,11 +266,20 @@ test("a controller whose lock connection is lost takes the live lock again by it
     const running = await PostgresStorage.open({ connectionString: url, schema: s.live });
     try {
       assert.equal(running.holdsLiveLock, true);
+      const before = await liveLockHolderPids(url, s.live);
+      assert.equal(before.length, 1, "one session holds the lock");
       assert.equal(await terminateLiveLockHolders(url, s.live), 1);
+      // The storage takes the lock again at once, on a new connection: on a fast machine within a few milliseconds, so a look at its own flag could miss the moment it was lost (CI repair round 10,
+      // macOS). The loss shows on the server instead: the lock is then held by another session than before, and the storage says it holds it. Waited for, bounded.
       const until = Date.now() + 10_000;
-      while (running.holdsLiveLock && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
-      assert.equal(running.holdsLiveLock, false, "the loss is noticed");
-      while (!running.holdsLiveLock && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      let after: number[] = [];
+      for (;;) {
+        after = await liveLockHolderPids(url, s.live);
+        if ((after.length === 1 && after[0] !== before[0] && running.holdsLiveLock) || Date.now() > until) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(after.length, 1, `one session holds the lock again: ${JSON.stringify(after)}`);
+      assert.notEqual(after[0], before[0], "the loss is noticed: the lock is held by a new session, not the ended one");
       assert.equal(running.holdsLiveLock, true, "taken again");
       await assert.rejects(postgresRestorePort(url).swap(s), /a controller has the schema/);
     } finally { await running.close(); }
