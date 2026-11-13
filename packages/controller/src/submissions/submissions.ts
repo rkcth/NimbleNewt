@@ -87,6 +87,11 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
   /** Scan limits for `list`, injectable so a test can shrink them (as `logScan` does for meetings). Defaults: 200 rows a page, 10 pages a call. */
   readonly listScan?: { readonly pageSize: number; readonly reads: number };
+  /**
+   * How many refresh rounds the task's author has made, as the controller counted them (card H12p, `WorkspaceOpService.refreshRounds`). When given, a code submission carries THAT number: the agent cannot state its own,
+   * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
+   */
+  readonly refreshRounds?: (taskId: string) => Promise<number>;
   /** Told once a submission is recorded (card U09b), so the task's activity shows it and its replay can link to the diff or the review comment. Best effort and repeatable (keyed by the submission); a failure changes nothing. */
   readonly onRecorded?: (event: { readonly submissionId: string; readonly taskId: string; readonly kind: SubmissionKind; readonly role: string; readonly submittedBy: string; readonly verdict?: string; readonly decision?: string }) => Promise<void>;
 }
@@ -139,11 +144,12 @@ export class SubmissionService {
   readonly #reviewers: SubmissionOptions["reviewersAvailableIn"];
   readonly #assigned: SubmissionOptions["reviewAssignments"];
   readonly #onRecorded: SubmissionOptions["onRecorded"];
+  readonly #rounds: SubmissionOptions["refreshRounds"];
   readonly #scan: { readonly pageSize: number; readonly reads: number };
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
-    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded;
+    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
   }
 
@@ -222,7 +228,13 @@ export class SubmissionService {
 
     const evidence = this.#evidence(command.evidence);
     const subject = command.subject === undefined ? undefined : await this.#subject(command.subject, taskId);
-    const fields = this.#fields(by, kind, command, subject);
+    let fields = this.#fields(by, kind, command, subject);
+    // The refresh round is the controller's count, never the agent's word (card H12p review).
+    if (kind === "code" && this.#rounds !== undefined) {
+      const counted = await this.#rounds(taskId);
+      if (command.refreshRound !== undefined && command.refreshRound !== counted) bad("refreshRound", `is counted by the controller (${counted} for this task so far); leave it out`);
+      fields = { ...fields, refreshRound: counted };
+    }
     // Evidence belongs to one exact tree or artifact version; evidence for another is refused, not ignored.
     const bound = fields.tree ?? fields.artifactDigest;
     for (const e of evidence) if (e.boundTo !== bound) throw new DomainError("invalid_command", `evidence: ${e.check} is bound to ${e.boundTo}, not to the submitted ${fields.artifactDigest === undefined ? "tree" : "artifact"} ${String(bound)}`, { field: "evidence" });
