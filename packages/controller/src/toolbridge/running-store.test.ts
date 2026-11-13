@@ -88,4 +88,23 @@ for (const backend of backends) {
       assert.throws(() => RunningCallStore.withEpoch(w.storage, epoch, { pages: 11 }), RangeError);
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: T02d finish: a sweep reaches leftovers on later pages, not only on the first page, and keeps live records`, async () => {
+    const w = await backend.open();
+    try {
+      let now = Date.parse("2026-11-12T10:00:00.000Z");
+      const clock = () => new Date(now).toISOString();
+      const epoch = (await w.storage.acquireEpoch({ holder: "a", at: clock() })).epoch;
+      const a = RunningCallStore.withEpoch(w.storage, epoch, { clock, graceMs: 0, page: 2, pages: 5 });
+      const b = RunningCallStore.withEpoch(w.storage, epoch, { clock, graceMs: 0, page: 2, pages: 5 });
+      const short = ["s1", "s2", "s3", "s4"], long = ["l1", "l2", "l3"];
+      for (const c of short) assert.ok(await a.begin(entry(c, { seconds: 5 })));
+      for (const c of long) assert.ok(await a.begin(entry(c, { seconds: 600 })));
+      now += 10_000;
+      assert.equal(await b.sweep(), 4, "all four expired leftovers, wherever they sit in the ordering of the records (page size 2)");
+      const left = await w.storage.listAggregates(RUNNING_CALL_KIND, { limit: 20 });
+      assert.equal(left.length, 3, "only the live records remain");
+      assert.equal(await b.sweep(), 0);
+    } finally { await w.close(); }
+  });
 }

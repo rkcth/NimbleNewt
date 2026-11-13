@@ -107,12 +107,18 @@ export class RunningCallStore implements RunningCallRecords {
     let removed = 0;
     try {
       const now = Date.parse(this.#runner.now());
-      const pages = await this.#runner.list(RUNNING_CALL_KIND, { limit: this.#page });
-      for (const a of pages) {
-        if (removed >= RUNNING_CALL_LIMITS.sweep) break;
-        // A record that cannot be read names no time, so it can never be listed; it is removed too.
-        if (isBody(a.body) && Date.parse(a.body.until) > now) continue;
-        try { await this.#remove(a.id, a.revision, "tool.run.expire"); removed += 1; } catch { /* changed meanwhile or this process lost the epoch: left for the next sweep */ }
+      // Looks through the same bounded number of pages as the listing (a leftover on a later page was never swept: only the first page was read), and removes at most `RUNNING_CALL_LIMITS.sweep` per run.
+      let afterId: string | undefined;
+      for (let i = 0; i < this.#pages && removed < RUNNING_CALL_LIMITS.sweep; i++) {
+        const page = await this.#runner.list(RUNNING_CALL_KIND, { ...(afterId === undefined ? {} : { afterId }), limit: this.#page });
+        for (const a of page) {
+          if (removed >= RUNNING_CALL_LIMITS.sweep) break;
+          // A record that cannot be read names no time, so it can never be listed; it is removed too.
+          if (isBody(a.body) && Date.parse(a.body.until) > now) continue;
+          try { await this.#remove(a.id, a.revision, "tool.run.expire"); removed += 1; } catch { /* changed meanwhile or this process lost the epoch: left for the next sweep */ }
+        }
+        if (page.length < this.#page) break;
+        afterId = page[page.length - 1]!.id;
       }
     } catch { /* the store cannot be read now */ }
     return removed;

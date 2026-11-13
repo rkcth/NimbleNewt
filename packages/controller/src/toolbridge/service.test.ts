@@ -942,6 +942,47 @@ for (const backend of backends) {
         const cutRecords = { begin: async () => undefined, end: async () => undefined, elsewhere: async () => ({ calls: [away], total: 1, incomplete: true as const }), sweep: async () => 0 };
         const cut = deps(cutRecords, async () => ({ text: '{"ok":true}' }));
         try { seen["cutList"] = await cut.runningEverywhere(name, "1.0.0"); } finally { cut.dispose(); }
+        // Finish: a starting call also sweeps leftovers, at most once per interval, never waited for; off at 0 and at the default interval within a fresh service.
+        let sweeps = 0;
+        const counting = { begin: async () => undefined, end: async () => undefined, elsewhere: async () => ({ calls: [], total: 0 }), sweep: async () => { sweeps += 1; return 0; } };
+        const swept = (ms: number | undefined) => new ToolExecutionService({
+          principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) }, assignments: c.assignments,
+          catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks: c.desks, facts: async () => hostFacts, isLocalHost: () => true, revocationWatchMs: 0, runRecords: counting, ...(ms === undefined ? {} : { runRecordSweepMs: ms }), runner: { run: async () => ({ text: '{"ok":true}' }) },
+        });
+        const callWith = async (svc: ToolExecutionService, id: string) => { await c.clear(s, args, id); return svc.handle(s.token, s.gateway, { op: "tool.invoke", callId: id, args }); };
+        const def = swept(undefined), off = swept(0), often = swept(1);
+        try {
+          await callWith(def, "sw-default"); await callWith(off, "sw-off");
+          seen["sweepsDefaultOff"] = sweeps;
+          await new Promise((r) => setTimeout(r, 15));
+          await callWith(often, "sw-1"); await until(async () => sweeps >= 1);
+          seen["sweepsOften"] = sweeps;
+          const before = sweeps;
+          await callWith(often, "sw-2");
+          await new Promise((r) => setTimeout(r, 15));
+          await callWith(often, "sw-3"); await until(async () => sweeps > before);
+          seen["sweepsAgain"] = sweeps > before;
+          // Review: NaN and a negative interval turn it off (NaN used to sweep on every call).
+          const nan = swept(Number.NaN), neg = swept(-5);
+          try {
+            const atBad = sweeps;
+            await callWith(nan, "sw-nan-1"); await callWith(neg, "sw-neg-1");
+            await new Promise((r) => setTimeout(r, 15));
+            await callWith(nan, "sw-nan-2"); await callWith(neg, "sw-neg-2");
+            await new Promise((r) => setTimeout(r, 15));
+            seen["sweepsBad"] = sweeps - atBad;
+          } finally { nan.dispose(); neg.dispose(); }
+          // Review: a clock set back (the service was built while the clock read 30 minutes later) does not stop the sweep until the clock catches up again.
+          const realNow = Date.now;
+          let ahead: ToolExecutionService;
+          Date.now = () => realNow() + 1_800_000;
+          try { ahead = swept(600_000); } finally { Date.now = realNow; }
+          try {
+            const atBack = sweeps;
+            await callWith(ahead, "sw-back"); await until(async () => sweeps > atBack);
+            seen["sweepsClockBack"] = sweeps - atBack;
+          } finally { ahead.dispose(); }
+        } finally { def.dispose(); off.dispose(); often.dispose(); }
       });
       await c.tick();
       const there1 = seen["there"] as { calls: Record<string, unknown>[]; total: number };
@@ -957,6 +998,11 @@ for (const backend of backends) {
       assert.equal(seen["records"], 0);
       assert.equal(good(out["fragile"]!)["state"], "confirmed", "a record that cannot be written does not stop the call");
       assert.deepEqual(seen["fragileList"], { calls: [], total: 0, elsewhereUnknown: true });
+      assert.equal(seen["sweepsDefaultOff"], 0, "the default interval (10 minutes) has not passed for a fresh service, and 0 turns the sweep off");
+      assert.equal(seen["sweepsOften"], 1, "a call that starts after the interval sweeps once");
+      assert.equal(seen["sweepsAgain"], true, "and again after the interval has passed again");
+      assert.equal(seen["sweepsBad"], 0, "NaN and a negative interval turn the sweep off");
+      assert.equal(seen["sweepsClockBack"], 1, "a clock set back counts as due: one sweep, not none until the clock catches up");
       assert.equal(seen["swept"], 0, "a sweep that cannot reach the store answers 0, never throws");
       assert.deepEqual(seen["cutList"], { calls: [{ attemptId: "att-away", callId: "call-away", taskId: "tsk-away", agentId: ann.id, elsewhere: true }], total: 1, elsewhereUnknown: true }, "a cut record is listed as far as it was read and said to be incomplete");
     } finally { here.dispose(); there.dispose(); fragile.dispose(); }
