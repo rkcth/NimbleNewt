@@ -39,7 +39,11 @@ for (const backend of backends) {
         ...standupLoops({ prepare: (async () => undefined) as never, deliverOutcomes: serve("standups") as never }, noOccurrences, all, live).filter((l) => l.name === "standups.deliverOutcomes"),
         ...responsibilityLoops({ generate: async (_by, id) => serve("checks")(by, id) }, { escalate: async () => undefined, untold: async () => [], markNotified: async () => undefined }, live),
         ...responsibilityRunLoops({ runner: { run: async (_by, id) => serve("runner")(by, id) } }, live),
-        ...leaseExpiryLoops({ expiredUntold: async (_by, id) => { await serve("lease")(by, id); return []; }, markExpiryTold: async () => undefined }, live, async () => undefined),
+        ...leaseExpiryLoops({
+          untold: async () => ({ expired: [...waiting].filter(([, n]) => n > 0).map(([id]) => ({ leaseId: `l-${id}`, resourceId: `r-${id}`, projectId: id, responsibilityId: "x", holderId: "h", expiredAt: "2026-01-01T00:00:00.000Z", generation: 1, blockedCount: 0 })), waiting: [] }),
+          markExpiryTold: async () => undefined,
+          markWaitTold: async () => undefined,
+        }, { expired: async (l) => { await serve("lease")(by, l.projectId); }, waiting: async () => undefined }, undefined, live),
       ];
       const settled: string[] = [];
       const settle = recordLoops({ sweep: async (_by, c) => { settled.push(c.projectId === w.project ? "first" : "second"); return {} as never; } }, all);

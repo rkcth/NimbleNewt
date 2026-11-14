@@ -421,7 +421,15 @@ test("card P06 (reviews fence): the real tick leaves an archived project's waiti
     watch(StandupService, "deliverOutcomes", "standups");
     watch(ResponsibilityChecks, "generate", "checks");
     watch(CheckRunService, "run", "runner");
-    watch(MaintenanceLeaseService, "expiredUntold", "lease");
+    // P04h reads every lease once per tick; the loop then leaves out the archived project's notices. One expired lease per project is supplied, and the told mark is recorded instead of written.
+    {
+      const proto = MaintenanceLeaseService.prototype as unknown as Record<string, unknown>;
+      const realUntold = proto["untold"], realMark = proto["markExpiryTold"];
+      undo.push(() => { proto["untold"] = realUntold; proto["markExpiryTold"] = realMark; });
+      const row = (p: string) => ({ leaseId: `lease-${p}`, resourceId: p, projectId: p, responsibilityId: "resp", holderId: "holder", expiredAt: "2026-01-01T00:00:00.000Z", generation: 1, blockedCount: 0 });
+      proto["untold"] = async () => ({ expired: [row(held), row(live)], waiting: [] });
+      proto["markExpiryTold"] = async (_by: unknown, resourceId: string) => { calls.push(`lease:${resourceId === held ? "held" : "live"}`); };
+    }
     spy(s.records, "sweep", "records");
     const seen = async (): Promise<string[]> => { calls.length = 0; const t = await c.dispatch!.dispatcher.tick(); assert.deepEqual(t.loops.filter((l) => !l.ok), [], "no loop failed"); return [...new Set(calls)].sort(); };
     const fenced = ["checks", "decisions", "improvements", "lease", "reviews", "runner", "standups", "untold"];

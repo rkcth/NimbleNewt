@@ -37,6 +37,25 @@ export const GAP_KEEP_DAYS = 180;
 const HEARTBEAT_EVERY_MS = 60_000;
 const GC_PER_TICK = 25;
 
+/**
+ * Whether a gap is about this responsibility (card P04h). `controller-down` is about all. `provider-outage`: only a responsibility that has an answering agent (one with nobody is recorded as not taken without asking any model, so
+ * a route being down changes nothing for it). `event-source-outage` and `events-missed` of a source (key `source:<name>`): only a responsibility that names that source (`<name>`, or `<name>:<kind>`) in its event sources; one with
+ * no event sources is not affected by an outage of an event source. A name without `:` may be an event kind (kinds never hold `:`, and a kind matches events of any source), so it is about every source's outage: listing a
+ * gap too many is safe, hiding one is not. A key cut at its 160-character limit matches by its prefix. A gap kept by one responsibility's own look (key `events:<id>:...`, retention cut) is about that responsibility only. Any
+ * other key stays about everything, because a gap that cannot be narrowed must not be hidden.
+ */
+export function gapAppliesTo(gap: { readonly reason: GapReason; readonly key: string }, duty: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[] }): boolean {
+  if (gap.reason === "provider-outage") return duty.ownerId !== undefined;
+  if (gap.reason === "event-source-outage" || gap.reason === "events-missed") {
+    if (gap.key.startsWith("source:")) {
+      const name = gap.key.slice("source:".length); const cut = gap.key.length >= 160;
+      return duty.eventSources.some((n) => !n.includes(":") || n === name || n.startsWith(`${name}:`) || (cut && n.startsWith(name)));
+    }
+    if (gap.key.startsWith("events:")) return gap.key.startsWith(`events:${duty.id}:`);
+  }
+  return true;
+}
+
 const GAP = "coverage-gap";
 const SLOT = "coverage-gap-slot";
 const LIVE = { kind: "coverage-liveness", id: "installation" } as const;
@@ -170,11 +189,11 @@ export class CoverageGapService {
     return { items: all.slice(0, limit).map(({ revision: _r, createdAt: _c, updatedAt: _u, ...rest }) => { void _r; void _c; void _u; return rest as GapBody & { id: string; open: boolean }; }), truncated: all.length > limit };
   }
 
-  /** Whether any gap of the installation or the project overlaps the time span: the check that "no recent observation" is explained by a gap, not by neglect. */
-  async covering(by: Principal, projectIdValue: string, from: string, to: string): Promise<{ id: string; reason: GapReason; start: string; end?: string }[]> {
+  /** Whether any gap of the installation or the project overlaps the time span (only those about the responsibility `about`, when given: `gapAppliesTo`): the check that "no recent observation" is explained by a gap, not by neglect. */
+  async covering(by: Principal, projectIdValue: string, from: string, to: string, about?: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[] }): Promise<{ id: string; reason: GapReason; start: string; end?: string }[]> {
     const listed = await this.list(by, projectIdValue, { limit: GAP_LIMITS.listed });
     const a = Date.parse(from); const b = Date.parse(to);
-    return (listed?.items ?? []).filter((g) => Date.parse(g.start) <= b && (g.end === undefined || Date.parse(g.end) >= a)).map((g) => ({ id: g.id, reason: g.reason, start: g.start, ...(g.end === undefined ? {} : { end: g.end }) }));
+    return (listed?.items ?? []).filter((g) => Date.parse(g.start) <= b && (g.end === undefined || Date.parse(g.end) >= a) && (about === undefined || gapAppliesTo(g, about))).map((g) => ({ id: g.id, reason: g.reason, start: g.start, ...(g.end === undefined ? {} : { end: g.end }) }));
   }
 
   async #gc(by: Principal, now: string): Promise<void> {

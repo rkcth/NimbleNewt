@@ -301,6 +301,16 @@ export class ResponsibilityService {
     return (await scanAll(this.#runner, RESPONSIBILITY, this.#scanLimit, (a) => { const b = a.body as unknown as ResponsibilityBody; return b.projectId === id && (filter.state === undefined || b.state === filter.state); })).map((a) => view<ResponsibilityBody>(a));
   }
 
+  /**
+   * The responsibilities an agent answers for, in every project (card P04h), or all that have an answering agent when `agentId` is not given: the ones a Suspend or Stop of that agent leaves unwatched. Not retired ones.
+   * Controller only (the owner or the controller's own service); the scan fails closed above the scan limit.
+   */
+  async answeredBy(by: Principal, agentId?: string): Promise<View<ResponsibilityBody>[]> {
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "list who answers for responsibilities");
+    const mine = agentId === undefined ? undefined : new Set([agentId, `agent:${agentId}`]);
+    return (await scanAll(this.#runner, RESPONSIBILITY, this.#scanLimit, (a) => { const b = a.body as unknown as ResponsibilityBody; return b.state !== "retired" && b.ownerId !== undefined && (mine === undefined || mine.has(b.ownerId)); })).map((a) => view<ResponsibilityBody>(a)).sort((a, b) => (a.id < b.id ? -1 : 1));
+  }
+
   /** History entries after `afterSeq` (0 for the start), oldest first, at most `limit` (1 to 100). `next` is the last sequence number when more may follow. */
   async history(by: Principal, responsibilityId: string, page: { afterSeq?: number; limit: number }): Promise<{ items: View<ObservationBody>[]; next?: number } | undefined> {
     const id = responsibilityIdOf(responsibilityId);
