@@ -5,7 +5,7 @@ export { OBSERVATION_KINDS, OUTCOMES, RESPONSIBILITY_STATES, ResponsibilityServi
 export { ResponsibilityChecks, type CheckBody, type CheckRun, type CheckTrigger } from "./checks.js";
 export { COVERAGE_PERIOD, CoverageService, CoverageSettingsService, type CoverageGap, type CoverageNotice, type CoverageReport, type CoverageSettings } from "./coverage.js";
 export { IncidentService, incidentSlotId, type IncidentBody, type ResponsibilityObservedState } from "./incidents.js";
-export { MaintenanceLeaseService, LEASE_DEFAULT_MINUTES, LEASE_MAX_MINUTES, type AcquireResult, type LeaseBlock, type LeaseBody, type LeaseRelease, type LeaseView, type ReleaseResult } from "./leases.js";
+export { MaintenanceLeaseService, LEASE_DEFAULT_MINUTES, LEASE_MAX_MINUTES, type AcquireResult, type ExpiredLease, type LeaseBlock, type LeaseBody, type LeaseRelease, type LeaseView, type ReleaseResult } from "./leases.js";
 export { ResponsibilityEventChecks, EVENT_CHECK_BATCH, type EventCheckDeps } from "./event-checks.js";
 export { CoverageGapService, DOWNTIME_MINUTES, GAP_KEEP_DAYS, GAP_LIMITS, GAP_REASONS, type GapBody, type GapReason } from "./coverage-gaps.js";
 export { CHECK_RUN_LIMITS, CheckRunService, CheckRunSettingsService, type CheckPassResult, type CheckProbe, type CheckRunDeps, type CheckRunSettings, type CheckProbeResult } from "./check-runner.js";

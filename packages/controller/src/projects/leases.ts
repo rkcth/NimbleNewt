@@ -51,7 +51,12 @@ export interface LeaseBody {
   /** The command that last granted or renewed the lease (a hash), so a caller can tell a grant from a block after the fact. */
   readonly grantKey?: string;
   readonly lastRelease?: LeaseRelease;
+  /** The holding (generation) whose running out unreleased the owner was told about (card P04 expiry notice); a new holding starts without it. */
+  readonly expiryToldGeneration?: number;
 }
+
+/** A lease that ran out with nobody releasing it and that the owner has not yet been told about. */
+export interface ExpiredLease { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiredAt: string; readonly generation: number; readonly blockedCount: number }
 
 export interface LeaseView extends LeaseBody {
   readonly id: string;
@@ -197,6 +202,39 @@ export class MaintenanceLeaseService {
     if ((await this.#duties.list(by, projectId)) === undefined) return undefined;
     const found = await scanAll(this.#runner, LEASE, 50_000, (a) => { const b = a.body as unknown as LeaseBody; return b.projectId === projectId && (filter.resourceId === undefined || b.resourceId === filter.resourceId); });
     return found.map((a) => this.#viewOf(a)).sort((a, b) => (a.resourceId < b.resourceId ? -1 : 1));
+  }
+
+  /**
+   * Leases that ran out unreleased in a project and were not yet told: the holder vanished or forgot, and the resource stays unavailable to the others until someone takes it over. A lease released or taken over is not listed.
+   * `undefined` for a project the caller may not read.
+   */
+  async expiredUntold(by: Principal, projectId: string): Promise<ExpiredLease[] | undefined> {
+    const all = await this.list(by, projectId);
+    if (all === undefined) return undefined;
+    return all.filter((l) => l.status === "expired" && l.expiryToldGeneration !== l.generation && l.holderId !== undefined && l.expiresAt !== undefined)
+      .map((l) => ({ leaseId: l.id, resourceId: l.resourceId, projectId: l.projectId, responsibilityId: l.responsibilityId, holderId: l.holderId!, expiredAt: l.expiresAt!, generation: l.generation, blockedCount: l.blockedCount }));
+  }
+
+  /** Marks the expiry of one holding as told, once the notice was sent. A lease that moved on (taken over, released) or was marked already is left alone and answers false. */
+  async markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<boolean> {
+    // The controller's own sweep marks a notice it sent (it runs as the owner); an agent or a task credential never marks one, or it could keep the owner from being told.
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "mark a lease expiry as told");
+    const ref: AggregateRef = { kind: LEASE, id: leaseIdOf(resourceId) };
+    try {
+      const result = await this.#runner.command("responsibility.lease.expiry-told", { commandId: `mlx-${hash(ref.id, String(generation))}`, actor: by.id }, async () => ({
+        payload: { resourceId, generation },
+        build: async (): Promise<Built> => {
+          const found = await this.#runner.get(LEASE, ref.id);
+          const before = found?.body as unknown as LeaseBody | undefined;
+          if (found === undefined || before === undefined || before.state !== "held" || before.generation !== generation) throw new DomainError("not_found", "that holding is over");
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: { ...before, expiryToldGeneration: generation } as unknown as JsonObject }], detail: { resourceId, generation } };
+        },
+      }));
+      return !result.replayed;
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "not_found" || error.code === "stale_revision")) return false;
+      throw error;
+    }
   }
 
   async #read(resourceId: string): Promise<LeaseView | undefined> {
