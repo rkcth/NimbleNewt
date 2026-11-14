@@ -1,0 +1,1 @@
+{"name": "digest", "firstRound": "blind", "rounds": 2, "transcriptMode": "digest", "digestWords": 180, "promptOrder": "shared-first", "chairQuestions": 2, "chairQuestionCheck": "structural", "deskCheck": true, "tokenLimit": 220, "objectionCheck": true, "maxObjectionReruns": 2, "parallel": 3, "allowTabling": true, "directQuestions": true, "deskRead": true}
