@@ -1,4 +1,5 @@
 import { type WatchdogSource } from "./watchdog.js";
+import { agentIdleFrom, type AgentWork } from "./work-source.js";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -27,6 +28,8 @@ export interface WorkSource {
    */
   agentOf?(taskId: string): Promise<string | undefined>;
   agentIdle?(agentId: string, except: string): Promise<boolean | undefined>;
+  /** The same view read once per agent (its live tasks and which are held), so a sweep with several items of one agent reads that agent's work once; when present it is used instead of `agentIdle`. */
+  agentWork?(agentId: string): Promise<AgentWork | undefined>;
 }
 
 /** What the critical-path trigger needs (card U11d, "U11f"): the owner's marks turned into "does this task hold up the path" for one pass (`CriticalPathService.holdsUp`); `undefined`: nothing is marked. A throw means "not known" and decides nothing. */
@@ -178,6 +181,7 @@ export class UrgentWatch {
     this.#stopCursor = page.next;
     const idle = new Map<string, boolean | undefined>();
     const agentIdle = new Map<string, boolean | undefined>();
+    const agentWork = new Map<string, AgentWork | undefined>();
     let failure: unknown; let made = 0;
     for (const item of page.items) {
       try {
@@ -208,9 +212,16 @@ export class UrgentWatch {
           try {
             agent = await within(this.#o.work.agentOf(item.taskId), this.#stepMs, "reading who the task is assigned to");
             if (agent !== undefined) {
-              const memo = `${agent}|${item.taskId}`;
-              if (!agentIdle.has(memo)) agentIdle.set(memo, await within(this.#o.work.agentIdle(agent, item.taskId), this.#stepMs, "reading the agent's work"));
-              a = agentIdle.get(memo);
+              const work = this.#o.work.agentWork;
+              if (work !== undefined) {
+                // Read once per agent and sweep, whatever number of its items wait.
+                if (!agentWork.has(agent)) agentWork.set(agent, await within(work.call(this.#o.work, agent), this.#stepMs, "reading the agent's work").catch(() => undefined));
+                a = agentIdleFrom(agentWork.get(agent), item.taskId);
+              } else {
+                const memo = `${agent}|${item.taskId}`;
+                if (!agentIdle.has(memo)) agentIdle.set(memo, await within(this.#o.work.agentIdle(agent, item.taskId), this.#stepMs, "reading the agent's work"));
+                a = agentIdle.get(memo);
+              }
             }
           } catch { a = undefined; }
           if (agent === undefined) { /* nobody to say it: the project half decides */ }

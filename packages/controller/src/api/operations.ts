@@ -425,6 +425,10 @@ async function answerNeed(c: Context, a: Args, commandId: string): Promise<unkno
       const which = choice(["approve", "decline"] as const);
       if (taskId === undefined) invalid("taskId", "is needed for a held resume (the item names its task)");
       const resumes = resumesOf(c);
+      // The item is the task's resume check the owner saw (its ID is the check's): a check started over or replaced since is another item, and is not approved or declined under this one's name.
+      const forTask = resumes.forTask ?? unavailable("answering a held resume");
+      const current = await forTask.call(resumes, c.principal, taskId!);
+      if (current === undefined || current.id !== id) throw new DomainError("invalid_transition", `the resume check ${id} is no longer the one of task ${taskId}; look at the Needs-you list again`);
       const item = which === "approve" ? await resumes.approve(c.principal, { commandId, taskId: taskId! }) : await resumes.decline(c.principal, { commandId, taskId: taskId! });
       return { kind, id, answer: which, item };
     }

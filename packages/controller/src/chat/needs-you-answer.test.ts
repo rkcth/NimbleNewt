@@ -42,17 +42,22 @@ for (const backend of backends) {
         const reviews = ReviewService.withEpoch(storage, epoch, options);
         const meetings = MeetingService.withEpoch(storage, epoch, {}, { availability: async () => "available", ...options });
         const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: built.assignments }, { availability: async () => "available", ...options });
-        extra = { blockers, reviews, meetings };
+        extra = { blockers, reviews, meetings, resumeCalls: [], current: { id: "rck-aaaaaaaaaaaaaaaaaaaa" } };
+        const resumes = {
+          forTask: async (_by: unknown, _taskId: string) => (extra.current === undefined ? undefined : { id: extra.current.id, phase: "ready" }),
+          approve: async (_by: unknown, c: { taskId: string }) => { extra.resumeCalls.push(`approve:${c.taskId}`); return { id: extra.current?.id, phase: "done" }; },
+          decline: async (_by: unknown, c: { taskId: string }) => { extra.resumeCalls.push(`decline:${c.taskId}`); return { id: extra.current?.id, phase: "cancelled" }; },
+        };
         const status = StatusService.withEpoch(storage, epoch, {
           assignments: built.assignments, waits: WaitService.withEpoch(storage, epoch, built.assignments, options), blockers, contracts: built.contracts,
           reviews: { ownerPending: (owner, limit) => reviews.ownerPending(owner, limit) },
           meetingQuestions: async (by, limit) => { const r = await meetings.openOwnerQuestions(by, limit); return { truncated: r.truncated, items: r.items.map((q) => ({ id: q.id, revision: q.revision, projectId: q.projectId, topic: q.topic, question: q.question, askedAt: q.askedAt })) }; },
         }, options);
-        return { status, standups, needsYouAnswers: { reviews, blockers } };
+        return { status, standups, needsYouAnswers: { reviews, blockers }, resumes: resumes as never };
       });
       try { await body(w, script, extra); } finally { await w.close(); }
     });
-  interface Extra { blockers: BlockerService; reviews: ReviewService; meetings: MeetingService }
+  interface Extra { blockers: BlockerService; reviews: ReviewService; meetings: MeetingService; resumeCalls: string[]; current: { id: string } | undefined }
   const say = (w: World, chat: ChatService, text: string, messageId = cid("m")) => chat.submit(w.ownerToken, { messageId, text });
   const only = (outcomes: readonly Outcome[]): Outcome => { assert.equal(outcomes.length, 1, JSON.stringify(outcomes)); return outcomes[0]!; };
   const list = async (w: World): Promise<{ kind: string; id: string; text: string; answer: { kind: string; choices?: string[] } }[]> => {
@@ -150,6 +155,27 @@ for (const backend of backends) {
     const once = cid("once");
     assert.ok((await call(w.ownerToken, { kind: "blocker", id: f.blocker, answer: "done" }, once)).ok);
     assert.ok((await call(w.ownerToken, { kind: "blocker", id: f.blocker, answer: "done" }, once)).ok);
+  });
+
+  suite("a held resume is answered only as the check the owner saw: a check started over or replaced since, or none, is refused and nothing is approved or declined; an agent cannot answer one", async (w, _script, x) => {
+    const f = await furnish(w, x);
+    const call = (token: string, args: Record<string, unknown>) => w.api.handle(token, { v: API_VERSION, op: "needs-you.answer", commandId: cid("n"), args } as never);
+    const seen = "rck-aaaaaaaaaaaaaaaaaaaa";
+    const r0 = await call(f.ann.token, { kind: "held-resume", id: seen, taskId: f.task, answer: "approve" });
+    assert.ok(!r0.ok && r0.error.code === "forbidden", JSON.stringify(r0));
+    x.current = { id: "rck-bbbbbbbbbbbbbbbbbbbb" };
+    for (const answer of ["approve", "decline"]) {
+      const r = await call(w.ownerToken, { kind: "held-resume", id: seen, taskId: f.task, answer });
+      assert.ok(!r.ok && r.error.code === "invalid_transition", JSON.stringify(r));
+    }
+    x.current = undefined;
+    const gone = await call(w.ownerToken, { kind: "held-resume", id: seen, taskId: f.task, answer: "approve" });
+    assert.ok(!gone.ok && gone.error.code === "invalid_transition", JSON.stringify(gone));
+    assert.deepEqual(x.resumeCalls, [], "nothing was approved or declined");
+    x.current = { id: seen };
+    const ok = await call(w.ownerToken, { kind: "held-resume", id: seen, taskId: f.task, answer: "approve" });
+    assert.ok(ok.ok, JSON.stringify(ok));
+    assert.deepEqual(x.resumeCalls, [`approve:${f.task}`]);
   });
 
   suite("two items that fit the owner's words are asked about, and the owner's pick answers that one; words that fit no item, or a choice no item offers, answer nothing", async (w, script, x) => {

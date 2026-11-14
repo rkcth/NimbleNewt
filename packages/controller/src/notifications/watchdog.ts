@@ -91,13 +91,29 @@ export function heartbeatProbe(file: string, o: { readonly staleMs?: number; rea
 function status(method: "GET" | "POST", url: string, timeoutMs: number, body?: string): Promise<number> {
   return new Promise((resolve, reject) => {
     let u: URL;
-    try { u = new URL(url); } catch (error) { reject(error as Error); return; }
+    // The address may carry the owner's secret (a webhook token in its path): an error says that it was not an address, never what it was.
+    try { u = new URL(url); } catch { reject(new Error("the address is not a valid URL")); return; }
     if (u.protocol !== "http:" && u.protocol !== "https:") { reject(new Error("only http and https addresses are used")); return; }
-    const req = (u.protocol === "https:" ? httpsRequest : httpRequest)(u, { method, timeout: timeoutMs, headers: body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); });
+    // One limit for the whole exchange, not only for a silent socket: an answer that trickles in never holds a look longer than this.
+    let settled = false;
+    const finish = (f: () => void): void => { if (!settled) { settled = true; clearTimeout(timer); f(); } };
+    const req = (u.protocol === "https:" ? httpsRequest : httpRequest)(u, { method, timeout: timeoutMs, headers: body === undefined ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, (res) => { const code = res.statusCode ?? 0; res.destroy(); finish(() => resolve(code)); });
+    const timer = setTimeout(() => req.destroy(new Error("no answer in time")), timeoutMs);
     req.on("timeout", () => req.destroy(new Error("no answer in time")));
-    req.on("error", reject);
+    req.on("error", (error) => finish(() => reject(error)));
     req.end(body);
   });
+}
+
+/** Whether an address names this machine only (plain http is accepted there, nowhere else, for an address that carries a secret). */
+const LOOPBACK = (host: string): boolean => host === "localhost" || host === "[::1]" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+
+/** Checks a webhook address before it is used: http or https, https unless it is this machine (the address usually holds the channel's secret, which must not cross a network in clear text), no user name or password in it. */
+export function checkWebhookAddress(url: string): void {
+  let u: URL;
+  try { u = new URL(url); } catch { throw new Error("the webhook address is not a valid URL"); }
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && LOOPBACK(u.hostname))) throw new Error("the webhook address must use https (plain http only to this machine)");
+  if (u.username !== "" || u.password !== "") throw new Error("the webhook address must not hold a user name or password");
 }
 
 /** A probe from an address that answers while the controller is up (any HTTP answer below 500 counts as up; no answer within the timeout, or a 5xx, is down). */
@@ -107,6 +123,7 @@ export function httpProbe(url: string, o: { readonly timeoutMs?: number } = {}):
 
 /** A way to tell the owner that does not go through the controller: POSTs `{ "text": ... }` as JSON to an address the owner gave (their chat bridge's own incoming address). A non-2xx answer or no answer is a failure. */
 export function webhookTell(url: string, o: { readonly timeoutMs?: number } = {}): (text: string) => Promise<void> {
+  checkWebhookAddress(url);
   return async (text) => {
     const code = await status("POST", url, o.timeoutMs ?? WATCHDOG_LIMITS.tellTimeoutMs, JSON.stringify({ text }));
     if (code < 200 || code >= 300) throw new Error(`the channel answered ${code}`);
@@ -131,6 +148,8 @@ const clamp = (v: number | undefined, b: { readonly min: number; readonly max: n
 export class DownWatchdog {
   readonly #o: DownWatchdogOptions;
   #bad = 0;
+  #failedTells = 0;
+  #retryAt = 0;
   constructor(options: DownWatchdogOptions) { this.#o = options; }
   #now(): number { return (this.#o.now ?? Date.now)(); }
   #iso(): string { return new Date(this.#now()).toISOString(); }
@@ -155,8 +174,9 @@ export class DownWatchdog {
       const remind = this.#o.remindEveryMs === null ? null : clamp(this.#o.remindEveryMs, WATCHDOG_LIMITS.remindEveryMs);
       const maxTells = clamp(this.#o.maxTells, WATCHDOG_LIMITS.maxTells);
       const due = current.tells === 0 || (remind !== null && current.tells < maxTells && current.lastToldAt !== undefined && this.#now() - Date.parse(current.lastToldAt) >= remind);
-      if (record === undefined || record.returnedAt !== undefined) await writeWatchdogRecord(this.#o.file, current);
-      if (due) {
+      if (record === undefined || record.returnedAt !== undefined) { await writeWatchdogRecord(this.#o.file, current); this.#failedTells = 0; this.#retryAt = 0; }
+      // A channel that refused is tried again after a growing pause (1, 2, 4 ... minutes, never longer than the reminder gap or an hour), not at every look.
+      if (due && this.#now() >= this.#retryAt) {
         const minutes = Math.max(0, Math.round((this.#now() - Date.parse(current.downSince)) / 60_000));
         const text = current.tells === 0
           ? `URGENT, the NimbleNewt controller is not answering (since ${current.downSince}). Nothing is being dispatched or watched until it is started again.`
@@ -164,8 +184,12 @@ export class DownWatchdog {
         try {
           await this.#o.tell(text);
           current = { ...current, tells: current.tells + 1, lastToldAt: this.#iso() };
-          told = true;
-        } catch (error) { this.#o.onError?.(error); }
+          told = true; this.#failedTells = 0; this.#retryAt = 0;
+        } catch (error) {
+          this.#failedTells = Math.min(this.#failedTells + 1, 20);
+          this.#retryAt = this.#now() + Math.min(60_000 * 2 ** (this.#failedTells - 1), remind ?? 3_600_000, 3_600_000);
+          this.#o.onError?.(error);
+        }
         await writeWatchdogRecord(this.#o.file, current);
       }
       return { state: "down", told };
@@ -188,7 +212,8 @@ export function watchdogSource(file: string, now: () => number = Date.now): Watc
     async pending() {
       const record = await readWatchdogRecord(file, now);
       if (record === undefined) return undefined;
-      const done = await readFile(mine, "utf8").then((t) => t.trim(), () => undefined);
+      // The controller's own note, read as strictly as the record: a link or anything longer than one time is not a note (and so the outage is raised, once, under its command ID).
+      const done = await lstat(mine).then((st) => (st.isFile() && st.size <= 64 ? readFile(mine, "utf8").then((t) => t.trim()) : undefined), () => undefined);
       return done === record.downSince ? undefined : record;
     },
     async raised(downSince) { await writeAtomic(mine, downSince); },

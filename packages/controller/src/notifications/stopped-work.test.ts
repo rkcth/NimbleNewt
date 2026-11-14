@@ -413,6 +413,26 @@ for (const backend of backends) {
     assert.equal(c.sent.length, 1, "putting it back sends nothing");
   });
 
+  suite("several decisions waiting on one agent read that agent's work once per sweep, and each is judged without its own task (card U11d review, per-agent half)", async (c) => {
+    const first = await c.held(); const second = await c.held();
+    await c.report(first.blockerId); await c.report(second.blockerId);
+    c.work.idle.set(c.projectA, false);
+    let reads = 0;
+    // The agent's live work is the two waiting tasks, both held by their blockers: idle whichever item is judged.
+    const source: WorkSource = {
+      idle: async (p) => c.work.idle.get(p),
+      agentOf: async () => "agent:ann",
+      agentIdle: async () => { throw new Error("the per-agent read is used instead"); },
+      agentWork: async () => { reads++; return { mine: [first.taskId, second.taskId], held: new Set([first.taskId, second.taskId]), complete: true }; },
+    };
+    const watch = new UrgentWatch({ notifications: c.svc, work: source, clock: iso });
+    now += 31 * MIN; await watch.sweep(c.owner);
+    assert.equal(reads, 1, "two items of one agent: one read");
+    now += 31 * MIN; const swept = await watch.sweep(c.owner);
+    assert.equal(reads, 2);
+    assert.equal(swept.raised.length, 2, JSON.stringify(swept));
+  });
+
   suite("without a view of the agent, or with an item about no task or an unassigned one, only the project half applies (card U11d, per-agent half)", async (c) => {
     const { blockerId, taskId } = await c.held();
     await c.report(blockerId);

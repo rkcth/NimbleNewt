@@ -160,6 +160,19 @@ test("backups are wired for production: on by default in <data>/backups, movable
   assert.throws(() => controllerSettings({ data }, { ...launcherEnv, NIMBLENEWT_BACKUP_DIR: "b" }), /NIMBLENEWT_BACKUP_DIR is the relative path/);
 });
 
+test("the outside watchdog's record is wired from the flag or the variable, absolute only; without it the controller runs no watchdog check (card U11d)", () => {
+  const rec = resolve(tmpdir(), "wd-record.json");
+  const viaFlag = controllerSettings(parseControllerArgs(["--data", "/d", "--watchdog-record", rec]), {});
+  assert.equal(viaFlag.watchdogRecord, rec);
+  assert.deepEqual(controllerStartOptions(viaFlag, { controller: {} }, () => undefined).watchdog, { file: rec });
+  assert.equal(controllerSettings({ data: "/d" }, { NIMBLENEWT_WATCHDOG_RECORD: rec }).watchdogRecord, rec);
+  assert.throws(() => controllerSettings({ data: "/d", "watchdog-record": "wd.json" }, {}), /watchdog record .* must be an absolute file path/);
+  assert.throws(() => controllerSettings({ data: "/d" }, { NIMBLENEWT_WATCHDOG_RECORD: "rel/wd.json" }), /must be an absolute file path/);
+  const none = controllerSettings({ data: "/d" }, {});
+  assert.equal(none.watchdogRecord, undefined);
+  assert.equal(controllerStartOptions(none, { controller: {} }, () => undefined).watchdog, undefined);
+});
+
 test("secrets: the store first, the environment for a name the store lacks, never the owner's credential from the environment, set writes the store only (entry)", async () => {
   const held = new Map([["db", "from-store"]]);
   const wrote = [];

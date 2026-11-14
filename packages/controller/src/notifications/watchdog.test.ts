@@ -48,7 +48,9 @@ test("the watchdog tells the owner once per outage over a real loopback channel,
     assert.equal(ch.got.length, 2); assert.match(ch.got[1]!, /still not answering/);
     // The channel failing is not an outage of its own: nothing is counted as told, the next due look tries again.
     ch.set(500); t += 61 * MIN; assert.equal((await dog.tick()).told, false);
-    ch.set(200); assert.equal((await dog.tick()).told, true);
+    ch.set(200); assert.equal((await dog.tick()).told, false, "a refused message is not tried again at the very next look");
+    assert.equal(ch.got.length, 3, "the channel saw the one refused attempt only");
+    t += MIN; assert.equal((await dog.tick()).told, true);
     assert.equal((await readWatchdogRecord(file, () => t))!.tells, 3);
     state = "alive"; await dog.tick();
     assert.ok((await readWatchdogRecord(file, () => t))!.returnedAt !== undefined);
@@ -117,6 +119,14 @@ for (const backend of backends) {
       await svc.configure(owner, { commandId: "cfg-wd2", expectedRevision: (await svc.settings(owner)).revision, controllerDownNotice: true } as never);
       assert.deepEqual((await watch.sweep(owner)).raised, [], "an outage seen while the notice was off is not raised later");
       assert.equal(await readFile(`${file}.raised`, "utf8"), "2026-11-14T12:00:00.000Z");
+      // Two controllers over one database that both read the record at once raise ONE item (the command ID is the outage's), and a note of the controller's that is not a plain time is no note.
+      await writeFile(file, JSON.stringify({ v: 1, downSince: "2026-11-14T13:00:00.000Z", tells: 1, lastToldAt: "2026-11-14T13:01:00.000Z" })); t = Date.parse("2026-11-14T13:30:00.000Z");
+      await writeFile(`${file}.raised`, "x".repeat(100));
+      const other = new UrgentWatch({ notifications: svc, watchdog: watchdogSource(file, () => t), clock });
+      await Promise.all([watch.sweep(owner), other.sweep(owner)]);
+      assert.equal((await open()).length, 2, "the first outage and this one, each once");
+      assert.equal(await readFile(`${file}.raised`, "utf8"), "2026-11-14T13:00:00.000Z");
+      assert.deepEqual((await build().sweep(owner)).raised, []);
     } finally { await world.close(); await rm(d, { recursive: true, force: true }); }
   });
 }
