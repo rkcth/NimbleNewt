@@ -842,6 +842,12 @@ export class ChatService {
     const args: Record<string, unknown> = { ...intent.args };
     // Backup encryption takes only a switch and one of two scopes (card K01b3): any other value is refused before a proposal is made, so text the model put there (a passcode, say) is never stored or shown.
     if (intent.op === "backup.encryption.set" && ((args["enabled"] !== undefined && typeof args["enabled"] !== "boolean") || (args["scope"] !== undefined && args["scope"] !== "everything" && args["scope"] !== "secrets"))) return refuse("invalid_command", "backup encryption is set with enabled (true or false) and scope (everything or secrets) only");
+    // Backup targets and purges (card K01c): a credential is only ever the NAME of a stored secret, an address never carries a user name or password, and the purge takes names, never patterns: anything else is refused before a proposal is made, so text the model put there (a password, say) is never stored or shown.
+    if (intent.op === "backup.target.add") {
+      if (args["credential"] !== undefined && (typeof args["credential"] !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(args["credential"]))) return refuse("invalid_command", "credential is the name of a stored secret (letters, digits, dots, dashes, underscores), never the secret itself");
+      if (typeof args["location"] === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*@/.test(args["location"])) return refuse("invalid_command", "the address must not hold a user name or password: name a stored credential instead");
+    }
+    if (intent.op === "backup.purge" && ((args["confirm"] !== undefined && typeof args["confirm"] !== "boolean") || (args["dryRun"] !== undefined && typeof args["dryRun"] !== "boolean") || !Array.isArray(args["names"]) || (args["names"] as unknown[]).some((n) => typeof n !== "string"))) return refuse("invalid_command", "backup.purge takes the names of the backups (a list of names), and confirm or dryRun as true or false only");
     if (intent.op === "backup.signing.rotate" && args["revokePrevious"] !== undefined && typeof args["revokePrevious"] !== "boolean") return refuse("invalid_command", "revokePrevious is true or false");
     if (intent.op === "decision.record" && args["category"] === "gate") args["topic"] = GATE_TOPIC;
     // Cancelling a release test applies at once: it names an attempt ID the owner said, or a candidate (also in the owner's words) with exactly one test running.

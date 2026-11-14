@@ -75,7 +75,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
   // The coverage-lapse alert is off by default and only tells the owner; turning it on or off, or changing its period, is reversible and applies at once (provisional, see the notes).
   // Retention (card K06): settings are shown first (they decide what may be deleted and how much room is kept back); a deletion, a run, an archive and a restore always are. Reading and checking is not a command.
-  "retention.settings.set": { verb: "Change the retention, quota and reserve settings (how many days to keep each kind of old record, such as summaries, model replies, finished checks, stall concerns, stall progress records and speeds, saved full texts of cut notes of finished tasks, an agent's private scratch of finished tasks (archive first, then remove), the owner's words in old chat turns, how long stored model thinking is kept and whether it is removed by itself, retired responsibilities' history and incidents, whether retention runs by itself, backup counts, storage quotas)", mode: "propose", revision: "retention" },
+  "retention.settings.set": { verb: "Change the retention, quota and reserve settings (how many days to keep each kind of old record, such as summaries, model replies, finished checks, stall concerns, stall progress records and speeds, saved full texts of cut notes of finished tasks, an agent's private scratch of finished tasks (archive first, then remove), the owner's words in old chat turns, how long stored model thinking is kept and whether it is removed by itself, retired responsibilities' history and incidents, whether retention runs by itself, backup counts and the age limit in days after which a backup is deleted, storage quotas)", mode: "propose", revision: "retention" },
   "retention.run": { verb: "Run retention (by default only a preview of what the rules would remove; with dryRun false it deletes what they expire, and the chat fills in the digest of a preview it makes just now)", mode: "propose" },
   "retention.delete": { verb: "Delete a record and what was made from it (a record that only a finished task's replay cites is deleted too when the owner says to release the replay hold)", mode: "propose" },
   "retention.archive": { verb: "Archive a finished task's records", mode: "propose" },
@@ -137,6 +137,13 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "reconnect.settings.set": { verb: "Change whether reconnected workers take their attempts up again by themselves", mode: "propose" },
   "reconnect.reaccept": { verb: "Decide on a reconnected worker's attempt", mode: "propose" },
   // Proving a backup unlock method still works reads a secret file on the host and changes nothing but the record of the proof; it carries no secret in the chat (card K01b).
+  // The configurable backup system (card K01c). Reading and testing change nothing that matters and apply at once. A new schedule, a new place copies go to (an authority: backups leave the main folder) and any deletion of a backup are always shown first.
+  "backup.config.set": { verb: "Change the backup schedule (how often, at which hour UTC, how often a backup is test-restored)", mode: "propose" },
+  "backup.target.add": { verb: "Add a place backups are also copied to (a folder, another disk or an off-machine store; a credential is named, never given)", mode: "propose" },
+  "backup.target.test": { verb: "Test a backup target (can it be reached and written to)", mode: "apply" },
+  "backup.target.remove": { verb: "Stop copying backups to a target (copies already there stay)", mode: "propose" },
+  "backup.purge": { verb: "Delete named backups from every target before they expire (the last good backup needs a separate yes)", mode: "propose" },
+  "backup.verify.run": { verb: "Test-restore a backup now to prove it can be used", mode: "apply" },
   "backup.encryption.verify": { verb: "Check that a backup unlock method still works", mode: "apply" },
   // Approving a new backup key decides who can read every later backup: always a proposal, shown first in every profile.
   "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },

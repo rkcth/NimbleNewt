@@ -62,7 +62,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupEncryption, BackupEncryptionSettingService, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
+import type { BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupSystem, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
@@ -249,6 +249,9 @@ export interface StateApiDeps {
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
   readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set" | "text">;
   readonly backupSigning?: Pick<BackupSigningService, "status" | "rotate">;
+  /** The configurable backup system (card K01c): targets, schedule, purge, test restore. */
+  readonly backupSystem?: Pick<BackupSystem, "status" | "addTarget" | "testTarget" | "purge" | "verifyNow">;
+  readonly backupConfig?: Pick<BackupConfigService, "get" | "setSchedule" | "removeTarget">;
   readonly backupRestore?: Context["backupRestore"];
   readonly databaseTransfer?: Context["databaseTransfer"];
   /** While it says true (the maintenance barrier is up, card K01h) every command except the restore's own and the owner's reads is refused as unavailable. */
@@ -436,6 +439,8 @@ export class StateApi {
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
         ...(this.#deps.backupEncryptionSetting === undefined ? {} : { backupEncryptionSetting: this.#deps.backupEncryptionSetting }),
         ...(this.#deps.backupSigning === undefined ? {} : { backupSigning: this.#deps.backupSigning }),
+        ...(this.#deps.backupSystem === undefined ? {} : { backupSystem: this.#deps.backupSystem }),
+        ...(this.#deps.backupConfig === undefined ? {} : { backupConfig: this.#deps.backupConfig }),
         ...(this.#deps.backupRestore === undefined ? {} : { backupRestore: this.#deps.backupRestore }),
         ...(this.#deps.databaseTransfer === undefined ? {} : { databaseTransfer: this.#deps.databaseTransfer }),
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),

@@ -1337,6 +1337,16 @@ Arguments:
 
 Result: `{ item: { items, next? } }`.
 
+#### `backup.config.status`
+
+Owner only: the whole backup configuration in plain words: the schedule (how often, the hour, how often a backup is test-restored), the retention rules (daily and weekly counts and the age limit in days, said in `rules.text` with which one decides when they disagree), the main backups folder and every extra target (a folder, another disk or an off-machine store) with whether it can be reached now, how many backups it holds, its last copy, its last problem, its last test and how long a backup stays on it, the last test restore, and any purge that is not finished on a target. The counts and the age limit are changed with retention.settings.set (backupDaily, backupWeekly, backupMaxAgeDays); the schedule with backup.config.set; targets with backup.target.add, backup.target.test and backup.target.remove.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, schedule: { everyHours, hourUtc, verifyEveryDays, text }, rules: { daily, weekly, maxAgeDays, overrides, text }, main, targets: [{ id, name, kind, location, reachable, count, newest?, staysUpToDays, lastCopyAt?, lastError?, lastTest? }], lastTestRestore?, pendingPurges, recentPurges } }`.
+
 #### `backup.encryption.status`
 
 Owner only: whether backups are encrypted (off unless the host set it up), the key ID and its fingerprint (the SHA-256 of the backup public key, which the installation pins), what is pinned and what the owner approved for the next start, how many unlock methods the key has by kind, the key generation, the last proof and the last proof that worked (kept across restarts) with whether a new proof is due (every three months: `proofDue`; ask the owner to put the passcode or recovery file in place and run backup.encryption.verify), and warnings (a recovery file left on the host, a proof overdue). It never holds a passcode, a recovery key or any key material. Whether new backups are encrypted and for what (`setting`: on or off, scope `everything` or `secrets`, said in `setting.text`) is changed by the owner with backup.encryption.set. The key itself is made, an extra passcode added, and a passcode removed or replaced (which rotates to a new key, a new recovery file or printable recovery code) on the host with `backup encryption-setup`, `encryption-add-passcode` and `encryption-rotate`, because they need the passcode and recovery file, which never travel through chat; tell the owner those commands when they ask.
@@ -4687,6 +4697,92 @@ Arguments:
 
 Result: `{ item: { name, createdAt, kind, schemaVersion, epoch, rows } }`.
 
+#### `backup.config.set`
+
+Owner only, recorded: the backup schedule. `everyHours` (1 to 720) is how often a scheduled backup is made (24 is daily); `hourUtc` (0 to 23, or null for any hour) makes a daily or longer schedule run in that hour of the day (UTC: say so to the owner, and give their local time when you know it), with a catch-up when the machine was off; `verifyEveryDays` (1 to 365, or null for never) is how often a backup is test-restored to prove it can be used (default 7). Counts and the age limit are retention.settings.set. Give `expectedRevision` from backup.config.status.
+
+Arguments:
+
+- `everyHours` (optional): 1 to 720
+- `hourUtc` (optional): 0 to 23, or null
+- `verifyEveryDays` (optional): 1 to 365, or null
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision, changed, text }`; `text` says the schedule in plain words.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.target.add`
+
+Owner only, recorded: adds a place every backup is also copied to, after testing it (nothing is added when the test fails). `kind` is `folder` (a folder on this machine), `disk` (a folder on another disk: the test warns when it is on the same disk as the main folder) or `offsite` (an https address of an off-machine store; plain http is allowed only for this machine). `location` is an absolute folder path or the address, copied exactly. An off-machine target that needs a credential names it in `credential` (the name of a stored secret, never the secret itself: never ask for or repeat a password or token in chat). `keepDays` makes this target keep a backup for at most that many days, `daily` and `weekly` give it its own counts (otherwise the installation's). The backups that exist are then copied there. Up to 8 targets.
+
+Arguments:
+
+- `name`: 1 to 60 letters, digits, spaces, dots, dashes, underscores
+- `kind`: `folder`, `disk` or `offsite`
+- `location`: an absolute folder or an https address
+- `credential` (optional): the name of the stored credential (off-machine only)
+- `keepDays` (optional): 1 to 3650
+- `daily` (optional): 1 to 365
+- `weekly` (optional): 0 to 520
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision, target, text, test? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.target.test`
+
+Owner only: tests a backup target now (can it be reached, accepted and written to) and records the answer. Changes no backup.
+
+Arguments:
+
+- `id`: the target's ID or name
+
+Result: `{ target, ok, detail, warning? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.target.remove`
+
+Owner only, recorded: stops copying backups to a target. The copies already on it are NOT deleted (say so to the owner; to delete them too, purge the backups by name first with backup.purge, while the target is still listed).
+
+Arguments:
+
+- `id`: the target's ID or name
+- `expectedRevision` (optional): the revision you read
+
+Result: `{ revision, text }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.purge`
+
+Owner only, recorded: deletes named backups sooner than their retention would, from EVERY target (the main folder, another disk and off-machine) and reports each target's result. Give the backups' names (as backup.list shows them). It refuses to delete the last good backup there is unless `confirm` is true (say so to the owner and ask first; never set it without their yes). A target that cannot be reached is listed as not yet purged and the purge is retried until it answers (the owner is told while it waits). `dryRun` true only shows what would be deleted. Deleting a record or project never alters backups: this is the only way to remove a backup early. Existing backups hold deleted text until they expire or are purged.
+
+Arguments:
+
+- `names`: list of 1 to 50 backup names
+- `confirm` (optional): true, only after the owner agreed to delete the last good backup
+- `dryRun` (optional): true to preview
+
+Result: `{ status: purged | pending | needs-confirmation | preview, purgeId?, names, plan, warning?, results?, text }`; `results` says per target and name: removed, absent or pending.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `backup.verify.run`
+
+Owner only: runs a test restore now: the newest backup (or the named one) of the main folder or of a target is checked against its manifest and restored into a scratch store that is thrown away, to prove it can be used. A backup sealed for everything cannot be opened without the passcode or recovery file in place on the host and is then only checked for presence (said in the answer). A failure is reported to the owner as Urgent.
+
+Arguments:
+
+- `name` (optional): a backup's name
+- `target` (optional): a target's ID or name (default: the main folder)
+
+Result: `{ ok, name, target, method: restore | checksums | presence, detail }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `backup.encryption.rekey`
 
 Owner only: approves a new backup key by its fingerprint (as `backup encryption-setup` printed it, 64 hexadecimal characters), or withdraws the approval with null. The installation pins the backup key it first used and refuses to start with a different one; this is the owner's word that the change is meant; the approval is announced to the owner's inbox, and so is the switch when the new key takes over at the next start. Do it while the controller runs with the old keyring, then replace the keyring file and restart. It never changes the pin itself, and old backups stay readable only with the old key's passcode or recovery file.
@@ -6207,7 +6303,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `retention.settings.set`
 
-Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `contextRouteDays` (1 to 3650) removes the records of a task's move to another model route (the text cut from its context, and the decisions) that many days after their last change (off unless set: they are kept); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `checkRecordDays` (7 to 3650) removes finished responsibility checks (never one still owed) that many days after their slot (off unless set: they are kept); `concernDays` (7 to 3650) removes stall concerns that are over that many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once their task is done or cancelled or has been assigned again since (never a suspected one, a dismissal still in force or a concern with a recovery step half made; off unless set: they are kept); `stallEvidenceDays` (7 to 3650) removes the progress evidence of a task that is done, cancelled or gone that many days after its last report or last change (never one with a suspected concern or a recovery step half made; off unless set); `stallSpeedDays` (7 to 3650) removes a route's measured speed not updated for that many days (it is measured again; one a request in flight names is kept; off unless set); `responsibilityHistoryDays` (7 to 3650) removes the history entries and incident counters of a responsibility that was retired that many days ago (the responsibility, its log, incidents and check records stay; a counter whose incident is still open stays; off unless set); `noteArchiveDays` (7 to 3650) removes the whole text of a cut note (the archive its marker names) that many days after it was written, only once its task is done, cancelled or gone (a task that can still run keeps its archives; the note's marker stays and then reads as no longer kept; off unless set); `deliveryLogDays` (7 to 3650) removes the record of each message sent to the owner that was delivered (it holds the message's full text) that many days after its delivery (a message still waiting or failed, and the inbox notices themselves, stay; off unless set); `scratchArchiveDays` (7 to 3650) archives an agent's private scratch of a task that is done or cancelled that many days after its last change (the text moves into an archive and `retention.restore` puts it back exactly; off unless set); `scratchPurgeDays` (30 to 3650) removes that scratch for good that many days after it was archived (or after its last change when it is not archived first), with what was made from it, as a deletion at the owner's request does (a record a resumable task needs or a replay cites stays; off unless set); `transcriptDays` (30 to 3650) removes the owner's words from old chat turns that many days after the turn was completed (the turn stays as a stub; one a decision, an agenda item, an open proposal or a held command names stays; off unless set); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done, before the controller's copy and the model's own copy in the conversation stores are removed; `thinkingAuto` (default on) lets the dispatcher remove stored thinking at that time even while `autoRun` is off; `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `preRestoreMaxAgeDays` (1 to 3650, null for no limit, the default) removes those snapshots when older than that (they never take a scheduled daily or weekly slot); `dataLockStaleMinutes` (1 to 10080, default 10, null for never) is how long a start waits for the data directory lock's refresh before taking it over when the holder's process cannot be looked for (another host name, a container; never sooner than twice the refresh period plus 30 seconds, and hosts whose clocks differ by more need a larger value); `restoreChangeMargin` (0 to 1000000, default 200, null for no check; counted in audit rows, which are several per operation) refuses a restore, asking for a new preview, when more than that many recorded changes were made between the preview and the apply; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has a call pinned to (in any state: parked, approved, running or ended) or lists as a dependency, or that is in the skill library of an agent's active environment or of an environment revision a resumable task's attempt is pinned to, stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites and that no unrevoked version also uses is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
+Owner only: changes retention values; only the fields given change, `null` clears an optional one and "default" returns a field to the installation default. `derivedDays` (7 to 3650) expires derived summaries (off unless set); `contextRouteDays` (1 to 3650) removes the records of a task's move to another model route (the text cut from its context, and the decisions) that many days after their last change (off unless set: they are kept); `generationRunDays` (1 to 3650) removes recorded model replies (generation runs, which may hold personal data) that are over, that many days after their last change (off unless set: they are kept); `checkRecordDays` (7 to 3650) removes finished responsibility checks (never one still owed) that many days after their slot (off unless set: they are kept); `concernDays` (7 to 3650) removes stall concerns that are over that many days after their last change: cleared, confirmed, or dismissed with the dismissal run out, and only once their task is done or cancelled or has been assigned again since (never a suspected one, a dismissal still in force or a concern with a recovery step half made; off unless set: they are kept); `stallEvidenceDays` (7 to 3650) removes the progress evidence of a task that is done, cancelled or gone that many days after its last report or last change (never one with a suspected concern or a recovery step half made; off unless set); `stallSpeedDays` (7 to 3650) removes a route's measured speed not updated for that many days (it is measured again; one a request in flight names is kept; off unless set); `responsibilityHistoryDays` (7 to 3650) removes the history entries and incident counters of a responsibility that was retired that many days ago (the responsibility, its log, incidents and check records stay; a counter whose incident is still open stays; off unless set); `noteArchiveDays` (7 to 3650) removes the whole text of a cut note (the archive its marker names) that many days after it was written, only once its task is done, cancelled or gone (a task that can still run keeps its archives; the note's marker stays and then reads as no longer kept; off unless set); `deliveryLogDays` (7 to 3650) removes the record of each message sent to the owner that was delivered (it holds the message's full text) that many days after its delivery (a message still waiting or failed, and the inbox notices themselves, stay; off unless set); `scratchArchiveDays` (7 to 3650) archives an agent's private scratch of a task that is done or cancelled that many days after its last change (the text moves into an archive and `retention.restore` puts it back exactly; off unless set); `scratchPurgeDays` (30 to 3650) removes that scratch for good that many days after it was archived (or after its last change when it is not archived first), with what was made from it, as a deletion at the owner's request does (a record a resumable task needs or a replay cites stays; off unless set); `transcriptDays` (30 to 3650) removes the owner's words from old chat turns that many days after the turn was completed (the turn stays as a stub; one a decision, an agenda item, an open proposal or a held command names stays; off unless set); `autoRun` lets the dispatcher run it by itself; `thinkingDays` (default 14) is how long stored model thinking is kept after a task is done, before the controller's copy and the model's own copy in the conversation stores are removed; `thinkingAuto` (default on) lets the dispatcher remove stored thinking at that time even while `autoRun` is off; `backupDaily` and `backupWeekly` are the backup counts kept (7 and 4); `backupMaxAgeDays` (1 to 3650, default 35, null for no age limit) deletes a backup older than that even when a count would keep it (never the newest good backup, the newest verified complete one or a pre-upgrade snapshot): when a count and the age limit disagree the answer says which one decides, so repeat that to the owner; `preRestoreKept` (1 to 1000, null keeps all, the default) keeps only that many of the newest snapshots taken before a restore; `preRestoreMaxAgeDays` (1 to 3650, null for no limit, the default) removes those snapshots when older than that (they never take a scheduled daily or weekly slot); `dataLockStaleMinutes` (1 to 10080, default 10, null for never) is how long a start waits for the data directory lock's refresh before taking it over when the holder's process cannot be looked for (another host name, a container; never sooner than twice the refresh period plus 30 seconds, and hosts whose clocks differ by more need a larger value); `restoreChangeMargin` (0 to 1000000, default 200, null for no check; counted in audit rows, which are several per operation) refuses a restore, asking for a new preview, when more than that many recorded changes were made between the preview and the apply; `restoreConfirmMinutes` (1 to 10080, default 30, null for no expiry) is how long the owner's approval of a restore stays good; `incidentArchiveDays` and `incidentPurgeDays` archive and then remove old resolved incidents (off); `catalogVersionsKept` (1 to 500, off) keeps only that many of the newest versions of each catalogue tool: the latest, the one a tool resolves to now, the newest unrevoked one, revoked ones and any a resumable task ran, has a call pinned to (in any state: parked, approved, running or ended) or lists as a dependency, or that is in the skill library of an agent's active environment or of an environment revision a resumable task's attempt is pinned to, stay, older ones are dropped by the runner (by hand always; by the automatic pass only when `catalogAutoDrop` is true, default false); `revokedBytesBlank` (true or false, default false) is the switch for blanking the executable text of revoked versions, and `revokedBytesDays` (7 to 3650, default 90, null keeps them) is how long after the revocation, applied only while the switch is on; only a record whose text is still exactly what was registered and that no resumable task, dependency or checkpoint cites and that no unrevoked version also uses is blanked (the record, digest and revocation stay); `quotaProjectBytes` and `quotaAgentBytes` are optional storage quotas (off), warned at `quotaWarnPercent` (80); `reserveBytes` is the room kept for shutdown and recovery records (16 MiB; 0 for none). The answer names each old and new value. This is the form the chat uses.
 
 Arguments:
 
@@ -6236,6 +6332,7 @@ Arguments:
 - `revokedBytesBlank` (optional): true or false (default false): switch for blanking revoked executable text
 - `revokedBytesDays` (optional): 7 to 3650, or null (default 90)
 - `preRestoreKept` (optional): 1 to 1000, or null
+- `backupMaxAgeDays` (optional): 1 to 3650, or null for no age limit (default 35)
 - `preRestoreMaxAgeDays` (optional): 1 to 3650, or null (default)
 - `dataLockStaleMinutes` (optional): 1 to 10080, or null (default 10)
 - `restoreChangeMargin` (optional): 0 to 1000000, or null (default 200)

@@ -1,3 +1,4 @@
+import { staysUpToDays as stays } from "../backup/retention.js";
 import { createHash } from "node:crypto";
 import { assignmentIdOf } from "../domain/assignment-model.js";
 import { incidentSlotId } from "../projects/incidents.js";
@@ -40,8 +41,8 @@ const NOT_STORED = { indexes: "none exist: search reads the live records with th
 export interface BackupPort {
   list(): Promise<readonly { readonly path: string; readonly at: string; readonly trusted: boolean; readonly manifest: { readonly name: string; readonly kind: string } }[]>;
   /** What the rule would delete (`preview`) or deletes now, under the given counts. */
-  preview(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
-  prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null }): Promise<string[]>;
+  preview(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null; maxAgeDays?: number | null }): Promise<string[]>;
+  prune(retention: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null; maxAgeDays?: number | null }): Promise<string[]>;
 }
 /** What one class of scope (project or agent) holds against its quota (card K06d). */
 export interface QuotaClassUsage { readonly quota: number; readonly scopes: number; readonly totalBytes: number; readonly top: readonly { readonly id: string; readonly used: number }[] }
@@ -78,6 +79,8 @@ export interface RetentionDeps {
   readonly catalog?: CatalogRetentionPort;
   readonly settings: Pick<RetentionSettingsService, "effective">;
   readonly backups?: BackupPort;
+  /** How long a backup stays on each extra target (card K01c): a deletion's confirmation says it by target when targets keep backups for different times. */
+  readonly backupTargets?: () => Promise<readonly { readonly name: string; readonly staysUpToDays: number }[]>;
   readonly incidents?: IncidentPort;
   readonly projects?: () => Promise<readonly string[]>;
   /** Tells the owner (a controller-set notice). The command ID makes it once per period. */
@@ -150,7 +153,7 @@ export interface RunReport {
   readonly partial: boolean;
   /** Present on a preview: pass it back as `confirm` to run exactly what was shown. */
   readonly digest?: string;
-  readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null } };
+  readonly backups?: { kept: number; wouldDelete?: string[]; deleted?: string[]; counts: { daily: number; weekly: number; preRestoreKept?: number | null; preRestoreMaxAgeDays?: number | null; maxAgeDays?: number | null } };
   readonly incidents?: { archiveDays: number | null; purgeDays: number | null; archived?: number; purged?: number; wouldArchive?: number; wouldPurge?: number; more?: boolean };
   /** The old-versions rule for the tool catalogue (off unless `catalogVersionsKept` is set; in the automatic pass also `catalogAutoDrop`): what it would drop (or dropped), and the versions kept because something still needs them (with the reasons). */
   readonly catalogVersions?: { keep: number; candidates: { name: string; version: string; ageDays: number }[]; retained: { name: string; version: string; reasons: string[] }[]; removed: number; partial: boolean };
@@ -164,7 +167,7 @@ export interface DeletionReport {
   readonly recordId: string;
   readonly retained?: { kind: string; id: string; reasons: string[] }[];
   readonly derived: { copies: string[]; summaries: string[]; compactions: string[]; archives: string[]; others: string[]; indexes: string; cachedReplies: string };
-  readonly backups: { handling: string; holding: number; staysUpToDays: number | null; note: string };
+  readonly backups: { handling: string; holding: number; staysUpToDays: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string };
   readonly deletionId?: string;
   /** Records a replay cites that the owner released in this request (`releaseReplay`): the replay steps now point at a removed record. */
   readonly replayReleased?: { kind: string; id: string; reasons: string[] }[];
@@ -511,7 +514,7 @@ export class RetentionService {
       revoked = { items: found.items.filter((r) => material.why("desk-record", r.recordId) === undefined), partial: found.partial };
       if (revoked.partial) partial = true;
     }
-    const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept, preRestoreMaxAgeDays: values.preRestoreMaxAgeDays };
+    const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept, preRestoreMaxAgeDays: values.preRestoreMaxAgeDays, maxAgeDays: values.backupMaxAgeDays };
     const backupsPort = options.thinkingOnly === true ? undefined : this.#deps.backups;
     const wouldDelete = backupsPort === undefined ? undefined : await backupsPort.preview(counts);
     // The incidents a run would archive and remove (card T02c: what the owner confirms includes them): counted in the preview and part of the digest, so a run refuses when they changed.
@@ -1061,12 +1064,14 @@ export class RetentionService {
   }
 
   /** How the backups are handled for a deletion: left alone, and for how long they hold the text. */
-  async #backupHandling(since: string, values: RetentionValues): Promise<{ handling: string; holding: number; staysUpToDays: number | null; note: string }> {
+  async #backupHandling(since: string, values: RetentionValues): Promise<{ handling: string; holding: number; staysUpToDays: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string }> {
     const port = this.#deps.backups;
     if (port === undefined) return { handling: "no backups are configured", holding: 0, staysUpToDays: null, note: "No backup folder is configured, so there is no backup copy to expire." };
     const holding = (await port.list()).filter((b) => b.at >= since.slice(0, 19)).length;
-    const staysUpToDays = Math.max(values.backupDaily, values.backupWeekly * 7 + 6);
-    return { handling: "left to expire", holding, staysUpToDays, note: `Existing backups are not altered. ${holding} of them hold the text and drop it as they fall outside the backup rule (${values.backupDaily} daily, ${values.backupWeekly} weekly), at the latest in ${staysUpToDays} days; a pre-upgrade snapshot is kept until its rollback period ends. A backup made now no longer contains it.` };
+    const staysUpToDays = stays({ daily: values.backupDaily, weekly: values.backupWeekly, maxAgeDays: values.backupMaxAgeDays });
+    const byTarget = this.#deps.backupTargets === undefined ? [] : await this.#deps.backupTargets().catch(() => []);
+    const theTargets = byTarget.length === 0 ? "" : ` On the other targets: ${byTarget.map((t) => `${t.name} at the latest in ${t.staysUpToDays} days`).join("; ")}.`;
+    return { handling: "left to expire", holding, staysUpToDays, ...(byTarget.length === 0 ? {} : { byTarget }), note: `Existing backups are not altered. ${holding} of them hold the text and drop it as they fall outside the backup rule (${values.backupDaily} daily, ${values.backupWeekly} weekly${values.backupMaxAgeDays === null ? "" : `, ${values.backupMaxAgeDays} days at most`}), at the latest in ${staysUpToDays} days in the main backups folder;${theTargets} a pre-upgrade snapshot is kept until its rollback period ends. A backup made now no longer contains it.` };
   }
 
   // ---- archive and restore --------------------------------------------------------------------------------------------------

@@ -13,7 +13,10 @@ export interface GenerationReport { readonly generations: readonly GenerationUse
 
 const ARCHIVE = /\.generation-([0-9]{1,6})$/;
 
-export async function generationReport(keyringFile: string, backupsFolder: string): Promise<GenerationReport> {
+/** Backups held somewhere else (the other targets, card K01c): their key IDs count as uses, and `unreadable` (a target that could not be listed) blocks every removal, like an unreadable folder. */
+export interface ExtraKeyUse { readonly keyIds: Iterable<string>; readonly unreadable?: number }
+
+export async function generationReport(keyringFile: string, backupsFolder: string, extra?: ExtraKeyUse): Promise<GenerationReport> {
   const dir = dirname(resolve(keyringFile)); const base = basename(keyringFile);
   const archives: { generation: number; keyId: string; file: string }[] = [];
   for (const name of await readdir(dir).catch(() => [] as string[])) {
@@ -42,12 +45,14 @@ export async function generationReport(keyringFile: string, backupsFolder: strin
       if (typeof id === "string") uses.set(id, (uses.get(id) ?? 0) + 1);
     } catch { unreadable += 1; }
   }
+  for (const id of extra?.keyIds ?? []) uses.set(id, (uses.get(id) ?? 0) + 1);
+  unreadable += extra?.unreadable ?? 0;
   return { generations: archives.sort((a, b) => a.generation - b.generation).map((a) => ({ ...a, backups: uses.get(a.keyId) ?? 0, removable: unreadable === 0 && folderUnconfirmed === undefined && (uses.get(a.keyId) ?? 0) === 0 })), unreadable, ...(folderUnconfirmed === undefined ? {} : { folderUnconfirmed }) };
 }
 
 /** Removes the archived keyrings no backup uses any more (nothing else: never the current keyring, never one still in use) and returns what it removed and why the rest stayed. */
-export async function pruneGenerations(keyringFile: string, backupsFolder: string): Promise<{ removed: readonly GenerationUse[]; kept: readonly GenerationUse[]; unreadable: number; folderUnconfirmed?: string }> {
-  const report = await generationReport(keyringFile, backupsFolder);
+export async function pruneGenerations(keyringFile: string, backupsFolder: string, extra?: ExtraKeyUse): Promise<{ removed: readonly GenerationUse[]; kept: readonly GenerationUse[]; unreadable: number; folderUnconfirmed?: string }> {
+  const report = await generationReport(keyringFile, backupsFolder, extra);
   const removed: GenerationUse[] = []; const kept: GenerationUse[] = [];
   for (const g of report.generations) {
     if (g.removable) { await rm(g.file, { force: true }); removed.push(g); } else kept.push(g);
