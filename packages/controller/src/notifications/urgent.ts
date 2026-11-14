@@ -213,7 +213,8 @@ export class UrgentWatch {
               a = agentIdle.get(memo);
             }
           } catch { a = undefined; }
-          if (agent === undefined || a === undefined) agentKnown = false;
+          if (agent === undefined) { /* nobody to say it: the project half decides */ }
+          else if (a === undefined) agentKnown = false;
           else if (a === false) this.#idleSince.delete(`agent:${agent}`);
           else {
             scope = "agent"; clock = `agent:${agent}`;
