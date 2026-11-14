@@ -454,6 +454,11 @@ export class MeetingService {
     return { created, missed, blocked, skipped: skippedSlots, ...(more && after !== undefined ? { next: after } : {}), ...(nextDue === undefined || more ? {} : { nextDueAt: new Date(nextDue).toISOString() }) };
   }
 
+  /** Whether the project is archived now (a project that cannot be found is not). Read fresh each time: no cache, so an archive or restore by another controller counts at once. */
+  async #archived(projectId: string): Promise<boolean> {
+    return ((await this.#runner.get("project", projectId))?.body as { state?: unknown } | undefined)?.state === "archived";
+  }
+
   async #readLead(): Promise<number> {
     try {
       const v = await this.#leadSetting?.();
@@ -475,6 +480,8 @@ export class MeetingService {
       if (found === undefined) return { skippedSlots: [] };
       const schedule = found.body as unknown as ScheduleBody;
       if (schedule.state !== "active") return { skippedSlots: [] };
+      // Card P06: a schedule of an archived project makes nothing and moves nothing (its cursor stays, so it goes on from the restore). Read fresh at every look: a restore counts at the next tick.
+      if (await this.#archived(schedule.projectId)) return { skippedSlots: [] };
       const plan = this.#plan(schedule, ms(this.#runner.now()));
       const slot = plan.live[plan.live.length - 1] ?? plan.stale[plan.stale.length - 1];
       if (slot === undefined) return { skippedSlots: [], ...(schedule.nextPrepareAt === undefined ? {} : { nextPrepareAt: schedule.nextPrepareAt }) };
@@ -669,6 +676,8 @@ export class MeetingService {
       const found = await this.#runner.get("meeting-occurrence", id);
       const body = found?.body as unknown as OccurrenceBody | undefined;
       if (found === undefined || body === undefined) throw new DomainError("not_found", `meeting ${id} does not exist`);
+      // Card P06: nobody is invited to a meeting of an archived project (nothing is marked as sent, so the invitations go out after a restore if the meeting has not ended by then).
+      if (await this.#archived(body.projectId)) return { invited: [], withheld: [] };
       if (body.state !== "planned" || body.mode !== "live" || ms(this.#runner.now()) >= ms(body.endsAt)) return { invited: [], withheld: body.participants.filter((p) => p.status !== "eligible" && p.status !== "owner-invited").map((p) => p.id) };
       const decided: ParticipantRecord[] = [];
       const todo: ParticipantRecord[] = [];

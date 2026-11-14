@@ -1892,6 +1892,9 @@ export class StatusService {
     if (page === undefined) return undefined;
     const ended = page.ended === undefined ? 0 : page.ended;
     const lines: Line[] = [];
+    // Card P06: the schedules of an archived project make no meetings and send no invitations; say so once, in plain words.
+    const archived = ((await this.#runner.get("project", projectId))?.body as { state?: unknown } | undefined)?.state === "archived";
+    if (archived && page.items.some((s) => s.state !== "ended")) lines.push(line("This project is archived, so its stand-ups are on hold: no meetings are made and no invitations are sent. Nothing is lost; they carry on when the project is restored.", cite("project", projectId)));
     for (const s of page.items) {
       const cites = [cite("meeting-schedule", s.scheduleId, s.revision), cite("project", projectId)];
       const listed = s.roster.slice(0, STANDUP_ROSTER_LISTED).map((a) => shown(a));

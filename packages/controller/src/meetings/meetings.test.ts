@@ -761,4 +761,60 @@ for (const backend of backends) {
     assert.deepEqual((await c.meetings.planned(dispatcher, c.a))!.items.map((i) => i.id), [made]);
     assert.equal(await c.meetings.planned(recovery, c.a), undefined, "another service reads like a missing project");
   });
+
+  const setProject = async (c: Ctx, projectId: string, state: "active" | "archived"): Promise<void> => {
+    const cur = (await c.projects.getProject(projectId))!;
+    await c.projects.updateProject({ commandId: cid("st"), actor: c.owner.id, projectId, expectedRevision: cur.revision, state } as never);
+  };
+
+  suite("card P06: the schedules of an archived project make no occurrence and send no invitation, lose nothing, and carry on after the restore", async (c) => {
+    const id = await c.schedule({ recurrence: { kind: "daily" } });
+    const other = (await c.meetings.createSchedule(c.eve, { commandId: cid("sc"), projectId: c.b, title: "Other stand-up", roster: [c.pA], time: "09:00", timeZone: "Europe/Berlin", recurrence: { kind: "daily" } } as never)).id;
+    const before = (await c.meetings.schedule(c.owner, id))!;
+    await setProject(c, c.a, "archived");
+
+    // Due time of the first slot (09:00 Berlin is 07:00 UTC) has come: the archived project's schedule makes nothing, the other project's does.
+    at("2026-10-21T07:30:00.000Z");
+    const archivedTick = await c.tickAll();
+    assert.deepEqual(archivedTick.created.map((m) => m.scheduleId), [other], "only the project that is not archived makes a meeting");
+    assert.equal(archivedTick.skipped.length, 0, "an archived schedule is not reported as skipped slots: nothing is dropped");
+    assert.deepEqual(await c.meetings.planned(c.owner, c.a).then((p) => p?.items.length), 0);
+    const held = (await c.meetings.schedule(c.owner, id))!;
+    assert.deepEqual([held.revision, held.occurrences, held.cursor, held.state], [before.revision, 0, before.cursor, "active"], "the schedule is exactly as it was: same revision, cursor and state");
+    assert.equal(c.sink.sent.filter((i) => i.projectId === c.a).length, 0);
+
+    // Days pass while archived: still nothing, and the cursor has not moved.
+    at("2026-10-24T07:30:00.000Z");
+    assert.deepEqual((await c.tickAll()).created.map((m) => m.scheduleId).filter((s) => s === id), []);
+    assert.equal((await c.meetings.schedule(c.owner, id))!.cursor, before.cursor);
+
+    // Restore: the next tick makes the occurrence (one for the latest due slot, the others counted as skipped, as after any downtime).
+    await setProject(c, c.a, "active");
+    const resumed = (await c.tickAll()).created.filter((m) => m.scheduleId === id);
+    assert.equal(resumed.length, 1, "the schedule carries on after the restore");
+    assert.equal((await c.meetings.schedule(c.owner, id))!.occurrences, 1);
+
+    // An occurrence that already exists when the project is archived gets no invitations while archived, and gets them after the restore.
+    at("2026-10-25T08:05:00.000Z");
+    const made = (await c.tickAll()).created.find((m) => m.scheduleId === id)!.occurrenceId;
+    await setProject(c, c.a, "archived");
+    const sentBefore = c.sink.sent.length;
+    assert.deepEqual(await c.meetings.dispatchInvitations(c.host, made), { invited: [], withheld: [] });
+    assert.equal(c.sink.sent.length, sentBefore, "nothing is sent while the project is archived");
+    assert.equal((await occurrenceOf(c, made)).participants.every((p) => p.invitedAt === undefined), true, "nothing is marked as sent either");
+    await setProject(c, c.a, "active");
+    const after = await c.meetings.dispatchInvitations(c.host, made);
+    assert.deepEqual(after.invited.sort(), [c.pA, c.pB].sort(), "after the restore the invitations go out");
+    assert.equal(c.sink.sent.length, sentBefore + 2);
+  });
+
+  suite("card P06: archived and restored projects tick through paging and a paused schedule stays paused", async (c) => {
+    const paused = await c.schedule({ recurrence: { kind: "daily" } });
+    await c.meetings.updateSchedule(c.mgr, { commandId: cid("up"), scheduleId: paused, expectedRevision: (await c.meetings.schedule(c.owner, paused))!.revision, state: "paused" } as never);
+    await setProject(c, c.a, "archived");
+    await setProject(c, c.a, "active");
+    at("2026-10-22T07:30:00.000Z");
+    assert.equal((await c.tickAll()).created.length, 0, "restoring does not resume a schedule the owner paused");
+    assert.equal((await c.meetings.schedule(c.owner, paused))!.state, "paused");
+  });
 }
