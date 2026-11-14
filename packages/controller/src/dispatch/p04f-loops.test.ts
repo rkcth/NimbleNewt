@@ -67,17 +67,30 @@ test("review: the source gap hook opens an outage for a failed poll, closes it o
 });
 
 import { leaseExpiryLoops } from "./loops.js";
+import { DomainError } from "../domain/errors.js";
 
-test("the lease-expiry loop tells each ran-out lease once, marks it only after the notice, counts an already-sent notice as sent, and one failure does not skip the rest (card P04g)", async () => {
+test("the lease loop tells each ran-out lease once, marks it only after the notice, counts an already-sent notice as sent, and one failure does not skip the rest (cards P04g, P04h)", async () => {
   const mk = (resourceId: string, generation: number, projectId = "p") => ({ leaseId: `l-${resourceId}`, resourceId, projectId, responsibilityId: "r", holderId: "agent:a", expiredAt: "2026-11-14T10:00:00.000Z", generation, blockedCount: 0 });
   const log: string[] = [];
-  const untold: Record<string, ReturnType<typeof mk>[]> = { p: [mk("a", 1), mk("b", 2), mk("c", 1)], q: [mk("d", 1, "q")] };
+  const expired = [mk("a", 1), mk("b", 2), mk("c", 1), mk("d", 1, "q")];
   const [loop] = leaseExpiryLoops(
-    { expiredUntold: async (_b, p) => untold[p] ?? [], markExpiryTold: async (_b, r, g) => { log.push(`mark:${r}:${g}`); } },
-    async () => ["p", "q"],
-    async (l) => { log.push(`tell:${l.resourceId}`); if (l.resourceId === "a") throw new Error("notices busy"); if (l.resourceId === "b") throw Object.assign(new (await import("../domain/errors.js")).DomainError("command_conflict", "already sent"), {}); },
+    { untold: async () => ({ expired, waiting: [] }), markExpiryTold: async (_b, r, g) => { log.push(`mark:${r}:${g}`); }, markWaitTold: async () => undefined },
+    { expired: async (l) => { log.push(`tell:${l.resourceId}`); if (l.resourceId === "a") throw new Error("notices busy"); if (l.resourceId === "b") throw new DomainError("command_conflict", "already sent"); }, waiting: async () => undefined },
   );
   assert.equal(loop!.name, "responsibilities.lease-expiry");
   await assert.rejects(loop!.run(by), /notices busy/);
-  assert.deepEqual(log, ["tell:a", "tell:b", "mark:b:2", "tell:c", "mark:c:1", "tell:d", "mark:d:1"], "a failed notice is not marked (it is offered again next tick); the others and the next project go on");
+  assert.deepEqual(log, ["tell:a", "tell:b", "mark:b:2", "tell:c", "mark:c:1", "tell:d", "mark:d:1"], "a failed notice is not marked (it is offered again next tick); the others go on");
+});
+
+test("the lease loop tells a long wait once per holding, and closes a notice only by where its lease stands, never by the told mark (card P04h)", async () => {
+  const log: string[] = [];
+  const wait = { leaseId: "l-w", resourceId: "w", projectId: "p", responsibilityId: "r", holderId: "agent:a", expiresAt: "2026-11-14T12:00:00.000Z", generation: 4, blockedCount: 2, waitingSince: "2026-11-14T10:00:00.000Z", rivals: ["agent:b"] };
+  const standing: Record<string, { projectId: string; status: "held" | "expired" | "free" }> = { "l-exp-open": { projectId: "p", status: "expired" }, "l-exp-moved": { projectId: "p", status: "held" }, "l-exp-freed": { projectId: "q", status: "free" }, "l-wait-live": { projectId: "p", status: "held" }, "l-wait-done": { projectId: "p", status: "free" }, "l-wait-expired": { projectId: "p", status: "expired" } };
+  const [loop] = leaseExpiryLoops(
+    { untold: async () => ({ expired: [], waiting: [wait] }), markExpiryTold: async () => undefined, markWaitTold: async (_b, r, g) => { log.push(`wmark:${r}:${g}`); }, standing: async (_b, id) => { if (id === "l-broken") throw new Error("read failed"); return standing[id]; } },
+    { expired: async () => undefined, waiting: async (l) => { log.push(`wtell:${l.resourceId}`); } },
+    { open: async () => ({ expiry: ["l-exp-open", "l-exp-moved", "l-broken", "l-exp-freed", "l-unknown"], waiting: ["l-wait-live", "l-wait-done", "l-wait-expired"] }), close: async (which, id, project) => { log.push(`close:${which}:${id}:${project}`); } },
+  );
+  await assert.rejects(loop!.run(by), /read failed/);
+  assert.deepEqual(log, ["close:expiry:l-exp-moved:p", "close:expiry:l-exp-freed:q", "close:waiting:l-wait-done:p", "close:waiting:l-wait-expired:p", "wtell:w", "wmark:w:4"], "an open expiry notice stays while the lease is expired; a waiting notice stays while it is held; one unreadable lease does not stop the rest");
 });

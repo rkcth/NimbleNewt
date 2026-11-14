@@ -3,7 +3,7 @@ import { DomainError } from "../domain/errors.js";
 import { projectId as checkProjectId, type View } from "../domain/model.js";
 import { CommandRunner, view, type Built, type RunnerOptions } from "../domain/runner.js";
 import type { Principal } from "../security/principals.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { hidden, may, scanAll } from "./common.js";
 import type { ResponsibilityService } from "./responsibilities.js";
 
@@ -33,6 +33,22 @@ export interface CheckTrigger { readonly kind: "event"; readonly source: string;
 export interface CheckRun { readonly how: "observation" | "task" | "coalesced" | "no-agent"; readonly at: string; /** Which try this is: 1, then one more each time the task ended with no check entry recorded (at most 3). */ readonly attempt?: number; readonly taskId?: string; readonly outcome?: "ok" | "attention" | "failed"; readonly summary: string }
 
 const KIND = "responsibility-check";
+/**
+ * The per-project index of owed checks (card P04h): one record per project listing the checks that may still be owed, so `pending` reads those and not every check of the installation. `complete` says the list holds every
+ * check of the project that can still be owed; an index written by `generate` alone (a project that had checks before this record existed) is not complete until `pending` has scanned once and written it, so nothing is lost
+ * and an old installation needs no migration. A list past `INDEX_MAX` is not kept (the scan is used, as before). Finished checks are dropped from it by `pending` when the controller reads (never by a reader).
+ */
+const INDEX = "responsibility-check-index";
+export const INDEX_MAX = 5000;
+interface IndexBody { readonly projectId: string; readonly ids: readonly string[]; readonly complete: boolean }
+const indexIdOf = (projectId: string): string => `rckx-${createHash("sha256").update(projectId).digest("hex").slice(0, 24)}`;
+const INDEX_CHANGED = "the check index changed meanwhile; try again";
+const raced = (error: unknown): boolean => error instanceof DomainError && error.code === "stale_revision" && error.message === INDEX_CHANGED;
+async function retryRaced<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try { return await run(); } catch (error) { if (!raced(error) || attempt >= 8) throw error; }
+  }
+}
 const idOf = (responsibilityId: string, slotStart: string): string => `rck-${createHash("sha256").update(`${responsibilityId}\0${slotStart}`).digest("hex").slice(0, 24)}`;
 
 /**
@@ -71,13 +87,13 @@ export class ResponsibilityChecks {
         ...(missed >= 1 ? { gap: { start: new Date(due + every).toISOString(), end: new Date(due + missed * every + every).toISOString(), missedChecks: missed, reason: "not-generated" as const } } : {}),
       };
       const id = idOf(r.id, body.slotStart);
-      const result = await this.#runner.command("responsibility.check.generate", { commandId: id, actor: by.id }, async () => ({
+      const result = await retryRaced(() => this.#runner.command("responsibility.check.generate", { commandId: id, actor: by.id }, async () => ({
         payload: { id },
         build: async (): Promise<Built> => {
           const ref: AggregateRef = { kind: KIND, id };
-          return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { responsibilityId: r.id, slotStart: body.slotStart } };
+          return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, await this.#indexAdd(projectId, id)], detail: { responsibilityId: r.id, slotStart: body.slotStart }, contention: async () => new DomainError("stale_revision", INDEX_CHANGED) };
         },
-      }));
+      })));
       if (!result.replayed) made.push(id);
     }
     return made;
@@ -92,13 +108,13 @@ export class ResponsibilityChecks {
     const body: CheckBody = { responsibilityId, projectId, slotStart, scheduledAt: status.asOf, inMaintenanceWindow: status.inMaintenanceWindow, trigger };
     // Keyed by the look's starting position when given (the event sweep does), so a look repeated from the same position after a crash is the same check even if more events came in meanwhile.
     const id = idOf(responsibilityId, lookFrom === undefined ? `event:${trigger.firstSeq}-${trigger.lastSeq}` : `event-from:${lookFrom}`);
-    const result = await this.#runner.command("responsibility.check.generate", { commandId: id, actor: by.id }, async () => ({
+    const result = await retryRaced(() => this.#runner.command("responsibility.check.generate", { commandId: id, actor: by.id }, async () => ({
       payload: { id },
       build: async (): Promise<Built> => {
         const ref: AggregateRef = { kind: KIND, id };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }], detail: { responsibilityId, firstSeq: trigger.firstSeq, lastSeq: trigger.lastSeq } };
+        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, await this.#indexAdd(projectId, id)], detail: { responsibilityId, firstSeq: trigger.firstSeq, lastSeq: trigger.lastSeq }, contention: async () => new DomainError("stale_revision", INDEX_CHANGED) };
       },
-    }));
+    })));
     return !result.replayed;
   }
 
@@ -142,8 +158,51 @@ export class ResponsibilityChecks {
     if (list.length === 0) return [];
     const last = new Map<string, number | undefined>();
     for (const r of list) { const lastAt = (await this.#responsibilities.status(by, r.id))?.lastCheckAt; last.set(r.id, lastAt === undefined ? undefined : Date.parse(lastAt)); }
-    const found = await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).projectId === projectId);
-    return found.map((a) => view<CheckBody>(a)).filter((c) => last.has(c.responsibilityId) && (last.get(c.responsibilityId) === undefined || Date.parse(c.slotStart) > last.get(c.responsibilityId)!)).sort((a, b) => (a.slotStart < b.slotStart ? -1 : a.slotStart > b.slotStart ? 1 : a.id < b.id ? -1 : 1));
+    const owed = (c: View<CheckBody>): boolean => last.has(c.responsibilityId) && (last.get(c.responsibilityId) === undefined || Date.parse(c.slotStart) > last.get(c.responsibilityId)!);
+    const found = await this.#candidates(by, projectId, owed);
+    return found.filter(owed).sort((a, b) => (a.slotStart < b.slotStart ? -1 : a.slotStart > b.slotStart ? 1 : a.id < b.id ? -1 : 1));
+  }
+
+  /** The index change that records a new check (a create, or an update against the revision just read; a race is retried by the caller). Past `INDEX_MAX` the list is dropped and marked incomplete (the scan is used). */
+  async #indexAdd(projectId: string, checkId: string): Promise<Change> {
+    const ref: AggregateRef = { kind: INDEX, id: indexIdOf(projectId) };
+    const found = await this.#runner.get(INDEX, ref.id);
+    const before = found?.body as unknown as IndexBody | undefined;
+    if (found === undefined || before === undefined) return { type: "create", ref, body: { projectId, ids: [checkId], complete: false } as unknown as JsonObject };
+    const ids = before.ids.includes(checkId) ? before.ids : [...before.ids, checkId];
+    const body: IndexBody = ids.length > INDEX_MAX ? { projectId, ids: [], complete: false } : { projectId, ids, complete: before.complete };
+    return { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject };
+  }
+
+  /**
+   * The checks that may still be owed in a project: from the index when it is complete, otherwise from a scan of all checks, after which the controller writes the index (so the next tick does not scan). The index is a hint
+   * that is only ever too wide (a finished check may still be listed), never too narrow: the caller keeps the owed ones. When the controller reads it also drops the ones that are finished or gone.
+   */
+  async #candidates(by: Principal, projectId: string, owed: (c: View<CheckBody>) => boolean): Promise<View<CheckBody>[]> {
+    const ref: AggregateRef = { kind: INDEX, id: indexIdOf(projectId) };
+    const index = await this.#runner.get(INDEX, ref.id);
+    const body = index?.body as unknown as IndexBody | undefined;
+    const controller = by.kind === "owner" || by.kind === "service";
+    if (index !== undefined && body !== undefined && body.complete) {
+      const views: View<CheckBody>[] = [];
+      for (const id of body.ids) { const a = await this.#runner.get(KIND, id); if (a !== undefined) views.push(view<CheckBody>(a)); }
+      const keep = views.filter(owed).map((c) => c.id);
+      if (controller && keep.length < body.ids.length) await this.#writeIndex(ref, index.revision, { projectId, ids: keep, complete: true });
+      return views;
+    }
+    const views = (await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).projectId === projectId)).map((a) => view<CheckBody>(a));
+    const keep = views.filter(owed).map((c) => c.id);
+    if (controller && keep.length <= INDEX_MAX) await this.#writeIndex(ref, index?.revision, { projectId, ids: keep, complete: true });
+    return views;
+  }
+
+  /** Writes the index against the revision that was read; a change meanwhile means something newer was recorded, so nothing is written and the next read tries again. */
+  async #writeIndex(ref: AggregateRef, revision: number | undefined, body: IndexBody): Promise<void> {
+    try {
+      await this.#runner.command("responsibility.check.index", { commandId: `rckx-w-${createHash("sha256").update(`${ref.id}\0${revision ?? 0}\0${body.ids.length}\0${body.complete}`).digest("hex").slice(0, 24)}`, actor: "service:checks" }, async () => ({
+        payload: { id: ref.id, count: body.ids.length },
+        build: async (): Promise<Built> => ({ ref, creates: revision === undefined, changes: [revision === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: revision, body: body as unknown as JsonObject }], detail: { count: body.ids.length }, contention: async () => new DomainError("stale_revision", INDEX_CHANGED) }),
+      }));
+    } catch (error) { if (!(error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict"))) throw error; }
   }
 }
-

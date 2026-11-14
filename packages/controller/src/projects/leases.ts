@@ -53,7 +53,18 @@ export interface LeaseBody {
   readonly lastRelease?: LeaseRelease;
   /** The holding (generation) whose running out unreleased the owner was told about (card P04 expiry notice); a new holding starts without it. */
   readonly expiryToldGeneration?: number;
+  /** The holding (generation) whose long blocking of other agents the owner was told about (card P04h); a new holding starts without it. */
+  readonly waitToldGeneration?: number;
 }
+
+/** A lease still in time that has kept other agents waiting for at least `LEASE_WAIT_MINUTES` in this holding, and that the owner has not been told about. */
+export interface WaitingLease { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiresAt: string; readonly generation: number; readonly blockedCount: number; readonly waitingSince: string; readonly rivals: readonly string[] }
+
+/** What the owner has not yet been told about leases, found in one pass over all of them. */
+export interface LeaseAttention { readonly expired: ExpiredLease[]; readonly waiting: WaitingLease[] }
+
+/** Where a lease stands, for closing a notice that no longer holds. */
+export interface LeaseStanding { readonly projectId: string; readonly status: "held" | "expired" | "free"; readonly generation: number; readonly expiryTold: boolean; readonly waitTold: boolean }
 
 /** A lease that ran out with nobody releasing it and that the owner has not yet been told about. */
 export interface ExpiredLease { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiredAt: string; readonly generation: number; readonly blockedCount: number }
@@ -67,6 +78,8 @@ export interface LeaseView extends LeaseBody {
 
 export const LEASE_DEFAULT_MINUTES = 60;
 export const LEASE_MAX_MINUTES = 1440;
+/** A lease still in time that has blocked another agent for this long is told to the owner (provisional, not owner-settable). */
+export const LEASE_WAIT_MINUTES = 30;
 const LEASE = "maintenance-lease";
 const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24);
 const leaseIdOf = (resourceId: string): string => `mlease-${hash(resourceId)}`;
@@ -215,19 +228,60 @@ export class MaintenanceLeaseService {
       .map((l) => ({ leaseId: l.id, resourceId: l.resourceId, projectId: l.projectId, responsibilityId: l.responsibilityId, holderId: l.holderId!, expiredAt: l.expiresAt!, generation: l.generation, blockedCount: l.blockedCount }));
   }
 
+  /**
+   * Everything about leases the owner has not been told, from ONE pass over the installation's leases (card P04h; the earlier sweep scanned them all once per project). `expired`: ran out unreleased (as `expiredUntold`).
+   * `waiting`: still in time, but another agent has met the lease for at least `LEASE_WAIT_MINUTES` in this holding (the oldest block still kept; only the last 10 blocks are kept, so a very busy lease is told a little later,
+   * never earlier). Only the owner or the controller's own service (the sweep); each list is ordered by lease.
+   */
+  async untold(by: Principal): Promise<LeaseAttention> {
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "list the leases the owner was not told about");
+    const found = await scanAll(this.#runner, LEASE, 50_000, (a) => (a.body as unknown as LeaseBody).state === "held");
+    const now = Date.parse(this.#runner.now());
+    const expired: ExpiredLease[] = []; const waiting: WaitingLease[] = [];
+    for (const a of found.sort((x, y) => (x.id < y.id ? -1 : 1))) {
+      const l = this.#viewOf(a);
+      if (l.holderId === undefined || l.expiresAt === undefined) continue;
+      if (l.status === "expired") {
+        if (l.expiryToldGeneration !== l.generation) expired.push({ leaseId: l.id, resourceId: l.resourceId, projectId: l.projectId, responsibilityId: l.responsibilityId, holderId: l.holderId, expiredAt: l.expiresAt, generation: l.generation, blockedCount: l.blockedCount });
+      } else if (l.status === "held" && l.waitToldGeneration !== l.generation) {
+        const since = Date.parse(l.acquiredAt ?? "");
+        const mine = l.blocked.filter((b) => !(Date.parse(b.at) < since));
+        if (mine.length === 0) continue;
+        const first = mine.reduce((m, b) => (Date.parse(b.at) < Date.parse(m.at) ? b : m));
+        if (now - Date.parse(first.at) >= LEASE_WAIT_MINUTES * 60_000) waiting.push({ leaseId: l.id, resourceId: l.resourceId, projectId: l.projectId, responsibilityId: l.responsibilityId, holderId: l.holderId, expiresAt: l.expiresAt, generation: l.generation, blockedCount: mine.length, waitingSince: first.at, rivals: [...new Set(mine.map((b) => b.by))].slice(0, 5) });
+      }
+    }
+    return { expired, waiting };
+  }
+
+  /** Where one lease stands now, for the controller's sweep (it closes a notice whose lease moved on). `undefined` for no such lease. Owner or service only. */
+  async standing(by: Principal, leaseId: string): Promise<LeaseStanding | undefined> {
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "read where a lease stands");
+    const a = await this.#runner.get(LEASE, leaseId);
+    if (a === undefined) return undefined;
+    const l = this.#viewOf(a);
+    return { projectId: l.projectId, status: l.status, generation: l.generation, expiryTold: l.expiryToldGeneration === l.generation, waitTold: l.waitToldGeneration === l.generation };
+  }
+
   /** Marks the expiry of one holding as told, once the notice was sent. A lease that moved on (taken over, released) or was marked already is left alone and answers false. */
-  async markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<boolean> {
+  async markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<boolean> { return this.#markTold(by, resourceId, generation, "expiry"); }
+
+  /** Marks the long blocking of one holding as told (card P04h), under the same rules as `markExpiryTold`. */
+  async markWaitTold(by: Principal, resourceId: string, generation: number): Promise<boolean> { return this.#markTold(by, resourceId, generation, "wait"); }
+
+  async #markTold(by: Principal, resourceId: string, generation: number, which: "expiry" | "wait"): Promise<boolean> {
     // The controller's own sweep marks a notice it sent (it runs as the owner); an agent or a task credential never marks one, or it could keep the owner from being told.
-    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "mark a lease expiry as told");
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "mark a lease notice as told");
     const ref: AggregateRef = { kind: LEASE, id: leaseIdOf(resourceId) };
     try {
-      const result = await this.#runner.command("responsibility.lease.expiry-told", { commandId: `mlx-${hash(ref.id, String(generation))}`, actor: by.id }, async () => ({
+      const result = await this.#runner.command(which === "expiry" ? "responsibility.lease.expiry-told" : "responsibility.lease.wait-told", { commandId: `${which === "expiry" ? "mlx" : "mlw"}-${hash(ref.id, String(generation))}`, actor: by.id }, async () => ({
         payload: { resourceId, generation },
         build: async (): Promise<Built> => {
           const found = await this.#runner.get(LEASE, ref.id);
           const before = found?.body as unknown as LeaseBody | undefined;
           if (found === undefined || before === undefined || before.state !== "held" || before.generation !== generation) throw new DomainError("not_found", "that holding is over");
-          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: { ...before, expiryToldGeneration: generation } as unknown as JsonObject }], detail: { resourceId, generation } };
+          const mark = which === "expiry" ? { expiryToldGeneration: generation } : { waitToldGeneration: generation };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: { ...before, ...mark } as unknown as JsonObject }], detail: { resourceId, generation } };
         },
       }));
       return !result.replayed;

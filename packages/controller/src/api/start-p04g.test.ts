@@ -62,14 +62,14 @@ test("through the running controller: a lease that ran out unreleased reaches th
     // A check is missing and a gap overlaps the time since the responsibility began: it is listed next to the state, which stays unknown.
     const before = (await call("responsibility.observed", { responsibilityId: duty })).result.item;
     assert.deepEqual([before.observed, before.coverageGaps], ["unknown", []]);
-    await CoverageGapService.withEpoch(c.storage, c.epoch).open(owner, { key: "provider:model:m1", reason: "provider-outage", start: new Date(Date.now() - 5 * 60_000).toISOString(), detail: "model route down" } as never);
+    await CoverageGapService.withEpoch(c.storage, c.epoch).open(owner, { key: "controller", reason: "controller-down", start: new Date(Date.now() - 5 * 60_000).toISOString(), detail: "model route down" } as never);
     const during = (await call("responsibility.observed", { responsibilityId: duty })).result.item;
     assert.equal(during.observed, "unknown", "a gap never makes it healthy");
-    assert.deepEqual(during.coverageGaps.map((g: any) => [g.reason, g.end]), [["provider-outage", undefined]]);
+    assert.deepEqual(during.coverageGaps.map((g: any) => [g.reason, g.end]), [["controller-down", undefined]]);
     // A gap already over still explains the missing check (it overlaps the time since the responsibility began).
     const began = (await call("responsibility.get", { responsibilityId: duty })).result.item.createdAt as string;
-    await CoverageGapService.withEpoch(c.storage, c.epoch).record(owner, { key: "events:old", reason: "events-missed", start: began, end: new Date(Date.parse(began) + 1).toISOString(), detail: "events lost" } as never);
+    await CoverageGapService.withEpoch(c.storage, c.epoch).record(owner, { key: `events:${duty}:old`, reason: "events-missed", start: began, end: new Date(Date.parse(began) + 1).toISOString(), detail: "events lost" } as never);
     const after = (await call("responsibility.observed", { responsibilityId: duty })).result.item;
-    assert.deepEqual(after.coverageGaps.map((g: any) => g.reason).sort(), ["events-missed", "provider-outage"]);
+    assert.deepEqual(after.coverageGaps.map((g: any) => g.reason).sort(), ["controller-down", "events-missed"]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

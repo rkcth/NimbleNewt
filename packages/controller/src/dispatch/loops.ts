@@ -368,24 +368,48 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
 
 /** A lease that ran out unreleased, as far as the notice needs it. */
 export interface ExpiredLeaseLike { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiredAt: string; readonly generation: number; readonly blockedCount: number }
+/** A lease still in time that keeps other agents waiting, as far as the notice needs it (card P04h). */
+export interface WaitingLeaseLike { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiresAt: string; readonly generation: number; readonly blockedCount: number; readonly waitingSince: string; readonly rivals: readonly string[] }
 
 /**
- * P04g: a maintenance lease that ran out with nobody releasing it is told once (per holding), because it keeps the resource from the other agents until one takes it over. A notice is marked told only after it was sent (an
- * already-sent id counts as sent), so a failure is offered again next tick. One lease or project failing does not skip the others; the first error is raised after all were tried.
+ * P04g/P04h: maintenance leases and the owner. One pass over the leases per tick (not one per project):
+ * 1. a notice whose lease moved on is closed (an expiry notice once the lease is released or taken over, a waiting notice once the lease is no longer held in time), so it leaves the owner's inbox;
+ * 2. a lease that ran out with nobody releasing it is told once (per holding), because it keeps the resource from the other agents until one takes it over;
+ * 3. a lease still in time that has kept another agent waiting for a long while is told once (per holding).
+ * A notice is marked told only after it was sent (an already-sent id counts as sent), so a failure is offered again next tick. A closing never depends on the "told" mark (a failed mark must not close the notice just sent): it
+ * follows the lease's own status. One lease failing does not skip the others; the first error is raised after all were tried.
  */
-export function leaseExpiryLoops(leases: { expiredUntold(by: Principal, projectId: string): Promise<readonly ExpiredLeaseLike[] | undefined>; markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<unknown> }, projects: () => Promise<readonly string[]>, notify: (expired: ExpiredLeaseLike) => Promise<void>): DispatcherLoop[] {
+export function leaseExpiryLoops(leases: {
+  untold(by: Principal): Promise<{ readonly expired: readonly ExpiredLeaseLike[]; readonly waiting: readonly WaitingLeaseLike[] }>;
+  markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<unknown>;
+  markWaitTold(by: Principal, resourceId: string, generation: number): Promise<unknown>;
+  standing?(by: Principal, leaseId: string): Promise<{ readonly projectId: string; readonly status: "held" | "expired" | "free" } | undefined>;
+}, notify: { expired(lease: ExpiredLeaseLike): Promise<void>; waiting(lease: WaitingLeaseLike): Promise<void> }, closing?: { open(): Promise<{ readonly expiry: readonly string[]; readonly waiting: readonly string[] }>; close(which: "expiry" | "waiting", leaseId: string, projectId: string): Promise<unknown> }): DispatcherLoop[] {
+  const sent = async (tell: () => Promise<void>): Promise<void> => { try { await tell(); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* already told under this id */ } };
   return [{ name: "responsibilities.lease-expiry", run: async (by) => {
     let failure: unknown;
-    for (const projectId of await projects()) {
+    if (closing !== undefined && leases.standing !== undefined) {
       try {
-        for (const l of (await leases.expiredUntold(by, projectId)) ?? []) {
-          try {
-            try { await notify(l); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* already told under this id */ }
-            await leases.markExpiryTold(by, l.resourceId, l.generation);
-          } catch (error) { failure ??= error; }
+        const open = await closing.open();
+        for (const which of ["expiry", "waiting"] as const) {
+          for (const leaseId of which === "expiry" ? open.expiry : open.waiting) {
+            try {
+              const at = await leases.standing(by, leaseId);
+              if (at !== undefined && at.status !== (which === "expiry" ? "expired" : "held")) await closing.close(which, leaseId, at.projectId);
+            } catch (error) { failure ??= error; }
+          }
         }
       } catch (error) { failure ??= error; }
     }
+    try {
+      const found = await leases.untold(by);
+      for (const l of found.expired) {
+        try { await sent(() => notify.expired(l)); await leases.markExpiryTold(by, l.resourceId, l.generation); } catch (error) { failure ??= error; }
+      }
+      for (const l of found.waiting) {
+        try { await sent(() => notify.waiting(l)); await leases.markWaitTold(by, l.resourceId, l.generation); } catch (error) { failure ??= error; }
+      }
+    } catch (error) { failure ??= error; }
     if (failure !== undefined) throw failure;
   } }];
 }
