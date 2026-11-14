@@ -727,7 +727,10 @@ function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): st
 export function manifestSummary(m: Readonly<Record<string, unknown>>): string {
   const cells = Array.isArray(m["matrix"]) ? (m["matrix"] as unknown[]).map((c) => { const o = c !== null && typeof c === "object" ? (c as Record<string, unknown>) : {}; return `${short(o["os"])} ${short(o["arch"])}${o["osVersion"] === undefined ? "" : ` ${short(o["osVersion"])}`}`; }) : [];
   const count = (v: unknown): number => (v !== null && typeof v === "object" ? Object.keys(v).length : 0);
-  return `must pass on ${cells.length === 0 ? "no platform" : cells.join(" and ")}; commit ${short(m["sourceCommit"])}, suite ${short(m["suiteRevision"])}, ${count(m["artifacts"])} artifact hash(es), ${count(m["dependencyLocks"])} lock hash(es)`;
+  // The installations it may go to and a migration plan bind what may later be staged, so they are on the line too when the candidate names them.
+  const targets = Array.isArray(m["targets"]) ? `; only for ${(m["targets"] as unknown[]).map(short).join(", ")}` : "";
+  const plan = m["migrationPlan"] === undefined ? "" : `; migration plan ${short(m["migrationPlan"])}`;
+  return `must pass on ${cells.length === 0 ? "no platform" : cells.join(" and ")}; commit ${short(m["sourceCommit"])}, suite ${short(m["suiteRevision"])}, ${count(m["artifacts"])} artifact hash(es), ${count(m["dependencyLocks"])} lock hash(es)${targets}${plan}`;
 }
 
 /**

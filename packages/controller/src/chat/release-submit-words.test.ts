@@ -71,6 +71,13 @@ for (const backend of backends) {
       const applied = await turn("s8", "yes, go ahead with that one", [{ kind: "apply_proposal", proposalId: again[0]!.proposalId, evidence: "go ahead with that one", basis: "owner" }]);
       assert.equal(applied[0]!.status, "applied", JSON.stringify(applied[0]));
       assert.equal((await listed()).length, 1, "the same manifest is the same candidate");
+
+      // The installations it may go to and a migration plan bind what may later be staged: when the owner names them they are on the line too (card X09b finish review).
+      const H3 = "3".repeat(64);
+      const targeted = `Once more (6). ${words} Only for prod-eu, migration plan ${H3}.`;
+      const withTargets = await turn("s9", targeted, [cmd({ manifest: manifest({ targets: ["prod-eu"], migrationPlan: H3 }) }, targeted)]);
+      assert.equal(withTargets[0]!.status, "proposed", JSON.stringify(withTargets[0]));
+      assert.match(JSON.stringify(withTargets[0]), /only for prod-eu; migration plan 3{64}/);
     } finally { await w.close(); }
   });
 }

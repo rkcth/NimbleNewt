@@ -16,6 +16,8 @@ export interface ReleaseHostConfig {
   readonly controllerUrl: string;
   readonly ca?: string;
   readonly token: string;
+  /** The environment variable the credential was read from (absent when it came from `tokenFile`): the program removes it from its own environment before any test runs. */
+  readonly tokenEnv?: string;
   readonly concurrency?: number;
   readonly intervalSeconds?: number;
   readonly suite: CommandSuiteConfig;
@@ -56,7 +58,7 @@ export async function readReleaseHostConfig(source: string, file: string, env: R
   const intervalSeconds = num(c["intervalSeconds"], "intervalSeconds", 1, 3600);
   const maxOutputBytes = num(so["maxOutputBytes"], "suite.maxOutputBytes", 1, 1024 * 1024 * 1024);
   return {
-    controllerUrl: url, token, ...(ca === undefined ? {} : { ca }), ...(concurrency === undefined ? {} : { concurrency }), ...(intervalSeconds === undefined ? {} : { intervalSeconds }),
+    controllerUrl: url, token, ...(c["tokenFile"] === undefined ? { tokenEnv: name } : {}), ...(ca === undefined ? {} : { ca }), ...(concurrency === undefined ? {} : { concurrency }), ...(intervalSeconds === undefined ? {} : { intervalSeconds }),
     suite: { command: resolvedCommand, args, ...(so["cwd"] === undefined ? {} : { cwd: path(so["cwd"], "suite.cwd") }), ...(senv === undefined ? {} : { env: senv as Record<string, string> }), ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }) },
   };
 }

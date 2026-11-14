@@ -29,6 +29,7 @@ const COMMIT = "a".repeat(40);
 /** The operator's suite for these tests: a small Node program that reads the job on standard input and writes its answer where it was told. `SUITE_MODE` says what it does. */
 const SUITE = `
 import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 const job = JSON.parse(readFileSync(0, "utf8"));
 const mode = process.env.SUITE_MODE ?? "pass";
 const answer = (counts, summary, extra = {}) => writeFileSync(process.env.NIMBLENEWT_RELEASE_RESULT, JSON.stringify({ tested: { sourceCommit: job.sourceCommit, suiteRevision: job.suiteRevision, artifactHashes: job.artifacts, dependencyLockHashes: job.dependencyLocks }, counts, summary, ...extra }));
@@ -42,6 +43,14 @@ else if (mode === "badshape") { writeFileSync(process.env.NIMBLENEWT_RELEASE_RES
 else if (mode === "noisy") { for (let i = 0; i < 2000; i++) console.log("x".repeat(100)); answer({ passed: 1, failed: 0, skipped: 0 }, "noisy"); }
 else if (mode === "env") { answer({ passed: 1, failed: 0, skipped: 0 }, JSON.stringify({ secret: process.env.NN_TEST_SECRET ?? null, token: process.env.NIMBLENEWT_HOST_TOKEN ?? null, commit: process.env.NIMBLENEWT_RELEASE_COMMIT, attempt: process.env.NIMBLENEWT_RELEASE_ATTEMPT, memory: process.env.NIMBLENEWT_RELEASE_MEMORY_MB, timeout: process.env.NIMBLENEWT_RELEASE_TIMEOUT_SECONDS, operator: process.env.OPERATOR_SETTING ?? null, rev: job.suiteRevision })); }
 else if (mode === "hang") { setInterval(() => {}, 1000); }
+else if (mode === "bigresult") { writeFileSync(process.env.NIMBLENEWT_RELEASE_RESULT, JSON.stringify({ pad: "x".repeat(2 * 1024 * 1024) })); }
+// A program that starts a helper (it writes its process ID to SUITE_MARK): "tree" then hangs; "leftover" answers and exits, leaving the helper running; "held" leaves a helper in its own process group that keeps the output open.
+else if (mode === "tree" || mode === "leftover" || mode === "held") {
+  const helper = spawn(process.execPath, ["-e", "require('node:fs').appendFileSync(process.env.SUITE_MARK, 'helper ' + process.pid + ' '); setInterval(() => {}, 1000);"], { stdio: mode === "held" ? "inherit" : "ignore", detached: mode === "held" });
+  await new Promise((r) => { const t = setInterval(() => { if (readFileSync(process.env.SUITE_MARK, "utf8").includes("helper ")) { clearInterval(t); r(); } }, 20); });
+  if (mode === "tree") setInterval(() => {}, 1000);
+  else { answer({ passed: 1, failed: 0, skipped: 0 }, "done"); process.exit(0); }
+}
 `;
 
 const within = async <T>(p: Promise<T>, what: string, ms = 20_000): Promise<T> => {
@@ -83,7 +92,9 @@ test("the command suite hands the job to the operator's program and reads only i
 test("the command suite is a failed test, never a pass, when the program exits badly, writes nothing usable, prints too much or cannot start (card X09b finish)", async () => {
   const f = folder();
   try {
-    await assert.rejects(suiteWith(f.script, "exit3")(job(), live), /exited with code 3: boom at the end/);
+    // The failure line goes to the controller as the summary, so nothing the program printed is in it (only the log's digest leaves the machine).
+    await assert.rejects(suiteWith(f.script, "exit3")(job(), live), (e: Error) => /exited with code 3$/.test(e.message) && !e.message.includes("boom"));
+    await assert.rejects(suiteWith(f.script, "bigresult")(job(), live), /result file is larger than 1048576 bytes/);
     await assert.rejects(suiteWith(f.script, "noresult")(job(), live), /wrote no result file/);
     await assert.rejects(suiteWith(f.script, "badjson")(job(), live), /not JSON/);
     await assert.rejects(suiteWith(f.script, "badshape")(job(), live), /does not say what it tested/);
@@ -113,6 +124,47 @@ test("an abort (cancel, time limit, host stopping) ends the running program and 
   } finally { f.done(); }
 });
 
+const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const helperOf = (mark: string): number => Number(/helper (\d+)/.exec(readFileSync(mark, "utf8"))![1]);
+
+test("what the suite program started ends with the test: on an abort (all systems), and after the program exits by itself (its process group, POSIX) (card X09b finish review)", async () => {
+  const f = folder();
+  const helpers: number[] = [];
+  try {
+    const markA = join(f.dir, "tree.txt");
+    writeFileSync(markA, "");
+    const ac = new AbortController();
+    const run = suiteWith(f.script, "tree", { SUITE_MARK: markA })(job(), ac.signal).then(() => "resolved", (e: Error) => e.message);
+    await until(() => readFileSync(markA, "utf8").includes("helper "), "the helper started");
+    helpers.push(helperOf(markA));
+    ac.abort();
+    assert.match(await within(run, "the aborted suite"), /ended while the suite ran/);
+    await until(() => !alive(helpers[0]!), "the helper the program started was ended by the abort");
+
+    if (process.platform !== "win32") {
+      const markB = join(f.dir, "leftover.txt");
+      writeFileSync(markB, "");
+      const ok = await within(suiteWith(f.script, "leftover", { SUITE_MARK: markB })(job(), live), "the suite that leaves a helper");
+      assert.equal(ok.summary, "done");
+      helpers.push(helperOf(markB));
+      await until(() => !alive(helpers[1]!), "the helper left running after the program exited was ended");
+    }
+  } finally { for (const p of helpers) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } f.done(); }
+});
+
+test("a process that keeps the suite's output open after the program exited fails the test within a short grace instead of holding the host until the time limit (card X09b finish review)", async () => {
+  const f = folder();
+  const mark = join(f.dir, "held.txt");
+  writeFileSync(mark, "");
+  let helper: number | undefined;
+  try {
+    const run = suiteWith(f.script, "held", { SUITE_MARK: mark })(job(), live).then(() => "resolved", (e: Error) => e.message);
+    await until(() => readFileSync(mark, "utf8").includes("helper "), "the helper started");
+    helper = helperOf(mark);
+    assert.match(await within(run, "the suite with its output held open", 30_000), /left a process running that kept its output open/);
+  } finally { if (helper !== undefined) { try { process.kill(helper, "SIGKILL"); } catch { /* gone */ } } f.done(); }
+});
+
 test("the host's configuration is read strictly: a credential never sits in the file, unknown settings and bad values are refused, paths are relative to the file (card X09b finish)", async () => {
   const f = folder();
   const file = join(f.dir, "host.json");
@@ -126,7 +178,9 @@ test("the host's configuration is read strictly: a credential never sits in the 
     assert.equal((await read({ ...ok, suite: { ...ok.suite, command: "node" } })).suite.command, "node", "a bare name is looked up on the PATH");
     writeFileSync(join(f.dir, "tok.txt"), " from-file \n");
     assert.equal((await read({ ...ok, tokenFile: "tok.txt" }, {})).token, "from-file");
-    assert.equal((await read({ ...ok, tokenEnv: "MY_TOKEN" }, { MY_TOKEN: "t2" })).token, "t2");
+    const named = await read({ ...ok, tokenEnv: "MY_TOKEN" }, { MY_TOKEN: "t2" });
+    assert.deepEqual([named.token, named.tokenEnv], ["t2", "MY_TOKEN"], "the variable the credential came from is named, so the program can remove it");
+    assert.equal((await read(ok)).tokenEnv, "NIMBLENEWT_HOST_TOKEN");
     await assert.rejects(read({ ...ok, token: "written-in-the-file" }), /must not be written in the configuration/);
     await assert.rejects(read(ok, {}), /no credential/);
     await assert.rejects(read({ ...ok, surprise: 1 }), /unknown setting "surprise"/);

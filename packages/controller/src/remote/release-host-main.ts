@@ -12,6 +12,7 @@ try {
   if (file === undefined) throw new Error("usage: release-host-main <config.json>");
   const config = await readReleaseHostConfig(await readFile(file, "utf8"), file);
   delete process.env["NIMBLENEWT_HOST_TOKEN"];
+  if (config.tokenEnv !== undefined) delete process.env[config.tokenEnv];
   const client = new RemoteWorkerClient({ url: config.controllerUrl, token: config.token, workerVersion: "release-host", ...(config.ca === undefined ? {} : { ca: config.ca }) });
   const stop = new AbortController();
   for (const s of ["SIGINT", "SIGTERM"] as const) process.once(s, () => stop.abort());

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReleaseSuiteJob, ReleaseSuiteResult } from "./release-runner.js";
@@ -9,9 +9,12 @@ import type { ReleaseSuiteJob, ReleaseSuiteResult } from "./release-runner.js";
  * The operator's suite as a program on this machine (card X09b finish). The host's configuration names one executable and its arguments; the job payload never chooses or changes them. The program is told
  * what to test through environment variables and the job on its standard input, and answers by writing one JSON file at the path it is given in `NIMBLENEWT_RELEASE_RESULT`:
  * `{ "tested": { sourceCommit, suiteRevision, artifactHashes, dependencyLockHashes }, "counts": { passed, failed, skipped }, "summary": "...", "osVersion": "..." }`.
- * Everything it prints (output and errors, in the order they arrive) is digested as the log; only the digest leaves the machine, and a bounded tail is kept for the failure line. A program that exits with a failure
- * code, writes no answer, writes one that is not shaped as above, prints more than the limit or runs out of the job's time is a failed test: this adapter throws and the runner reports `fail`, never a pass.
- * No shell is involved (the command and arguments are passed as they are), the program gets only a small environment plus what the operator listed, and an abort (a cancel, the time limit, the host stopping) ends it.
+ * Everything it prints (output and errors, in the order they arrive) is digested as the log; only the digest leaves the machine (no line of the output is put in the failure line either, as the summary is sent to
+ * the controller). A program that exits with a failure code, writes no answer, writes one that is not shaped as above or larger than `RESULT_MAX_BYTES`, prints more than the limit or runs out of the job's time is a
+ * failed test: this adapter throws and the runner reports `fail`, never a pass. No shell is involved (the command and arguments are passed as they are), the program gets only a small environment plus what the
+ * operator listed, and an abort (a cancel, the time limit, the host stopping) ends it and what it started. On POSIX the program runs in its own process group, which is also ended when the program exits by itself,
+ * so a background process it left behind does not outlive the test; one that holds the program's output open after it exited (it left the group) fails the test after `CLOSE_GRACE_MS` instead of holding the host
+ * until the time limit. On Windows what the program started is ended on an abort (`taskkill /T`); what it left running after exiting by itself is not found there (Windows keeps no tree for an exited parent).
  */
 export interface CommandSuiteConfig {
   /** The executable (a path, or a name found on this machine's PATH). Not run through a shell. */
@@ -26,7 +29,10 @@ export interface CommandSuiteConfig {
 }
 
 const DEFAULT_OUTPUT = 64 * 1024 * 1024;
-const TAIL = 2000;
+/** The largest result file read (the answer is a few counts, hashes and a short summary). */
+export const RESULT_MAX_BYTES = 1024 * 1024;
+/** How long the output may stay open after the program exited before the test is failed (something it started still holds it). */
+const CLOSE_GRACE_MS = 5000;
 /** Variables a test program may need to find its tools. Nothing else of the host's environment is handed on (no credential of the host is ever among them). */
 const INHERITED = ["PATH", "Path", "PATHEXT", "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"];
 const isMap = (v: unknown): v is Record<string, string> => typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => typeof x === "string");
@@ -60,6 +66,24 @@ function killTree(child: ChildProcess): void {
   } catch { /* already gone */ }
 }
 
+/** After the program exited by itself: its process group (POSIX) still holds whatever it left running; that is ended too. Never throws. */
+function killLeftovers(child: ChildProcess): void {
+  if (process.platform === "win32" || child.pid === undefined) return;
+  try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is empty */ }
+}
+
+/** Reads the answer, refusing a file larger than `RESULT_MAX_BYTES` without reading it whole. */
+async function readAnswerFile(path: string): Promise<string> {
+  let handle;
+  try { handle = await open(path, "r"); } catch { throw new Error("the suite wrote no result file"); }
+  try {
+    const buffer = Buffer.alloc(RESULT_MAX_BYTES + 1);
+    let filled = 0;
+    for (;;) { const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, null); if (bytesRead === 0) break; filled += bytesRead; if (filled > RESULT_MAX_BYTES) throw new Error(`the suite's result file is larger than ${RESULT_MAX_BYTES} bytes`); }
+    return buffer.subarray(0, filled).toString("utf8");
+  } finally { await handle.close().catch(() => undefined); }
+}
+
 export function commandReleaseSuite(config: CommandSuiteConfig): (job: ReleaseSuiteJob, signal: AbortSignal) => Promise<ReleaseSuiteResult> {
   if (typeof config.command !== "string" || config.command.length === 0 || /[\0\r\n]/.test(config.command)) throw new Error("the suite needs a command");
   const limit = Number.isSafeInteger(config.maxOutputBytes) && (config.maxOutputBytes as number) > 0 ? (config.maxOutputBytes as number) : DEFAULT_OUTPUT;
@@ -77,20 +101,25 @@ export function commandReleaseSuite(config: CommandSuiteConfig): (job: ReleaseSu
       });
       const hash = createHash("sha256");
       let bytes = 0;
-      let tail = "";
       let tooMuch = false;
       const child = spawn(config.command, [...(config.args ?? [])], { cwd: config.cwd, env, shell: false, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
       const take = (d: Buffer): void => {
         bytes += d.length;
         if (bytes > limit) { if (!tooMuch) { tooMuch = true; killTree(child); } return; }
         hash.update(d);
-        tail = (tail + d.toString("utf8")).slice(-TAIL);
       };
       child.stdout.on("data", take);
       child.stderr.on("data", take);
+      // The program's own exit ends its process group (what it left running); the output is then read to its end, but a process outside the group that still holds it open fails the test after a short grace.
+      let held = false;
       const exit = new Promise<{ code: number | null; error?: Error }>((resolve) => {
-        child.once("error", (error) => resolve({ code: null, error }));
-        child.once("close", (code) => resolve({ code }));
+        let grace: NodeJS.Timeout | undefined;
+        child.once("error", (error) => { clearTimeout(grace); resolve({ code: null, error }); });
+        child.once("close", (code) => { clearTimeout(grace); resolve({ code }); });
+        child.once("exit", (code) => {
+          killLeftovers(child);
+          grace = setTimeout(() => { held = true; child.stdout.destroy(); child.stderr.destroy(); resolve({ code }); }, CLOSE_GRACE_MS);
+        });
       });
       const stop = (): void => { killTree(child); };
       signal.addEventListener("abort", stop, { once: true });
@@ -99,14 +128,12 @@ export function commandReleaseSuite(config: CommandSuiteConfig): (job: ReleaseSu
       child.stdin.end(JSON.stringify({ attemptId: job.attemptId, candidateId: job.candidateId, sourceCommit: job.sourceCommit, suiteRevision: job.suiteRevision, artifacts: job.artifacts, dependencyLocks: job.dependencyLocks, timeoutSeconds: job.timeoutSeconds, memoryMb: job.memoryMb }));
       const ended = await exit;
       signal.removeEventListener("abort", stop);
-      const last = tail.replace(/\s+/g, " ").trim().slice(-200);
       if (ended.error !== undefined) throw new Error(`the suite could not be started: ${ended.error.message.slice(0, 200)}`);
       if (signal.aborted) throw new Error("the attempt was ended while the suite ran");
       if (tooMuch) throw new Error(`the suite printed more than ${limit} bytes and was ended`);
-      if (ended.code !== 0) throw new Error(`the suite exited with code ${String(ended.code)}${last === "" ? "" : `: ${last}`}`);
-      let text: string;
-      try { text = await readFile(resultPath, "utf8"); } catch { throw new Error("the suite wrote no result file"); }
-      const answer = readSuiteAnswer(text);
+      if (ended.code !== 0) throw new Error(`the suite exited with code ${String(ended.code)}`);
+      if (held) throw new Error("the suite left a process running that kept its output open");
+      const answer = readSuiteAnswer(await readAnswerFile(resultPath));
       return { ...answer, log: { sha256: hash.digest("hex") } };
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
