@@ -21,6 +21,15 @@ const load = (dir, name) => JSON.parse(readFileSync(join(here, dir, `${name}.jso
 const scenario = load("scenarios", args.scenario ?? "tool-adoption");
 const variant = load("variants", args.variant ?? "open-two-rounds");
 const kind = args.provider ?? (args.chair ? "mixed" : "fake");
+// A run against the local server first reads its slot state, so it never evicts someone else's cached conversation (M00, G10).
+// It runs before any provider is built and before the budget file is touched, so a refusal changes nothing.
+if (args["check-slots"]) {
+  const { checkSlots } = await import("./lib/local-slots.mjs");
+  const need = Number(args["slots-needed"] ?? variant.parallel ?? 1);
+  const verdict = await checkSlots(args["check-slots"], need);
+  console.log(`Slot check: ${verdict.ok ? "free" : "REFUSED"} (${verdict.why})`);
+  if (!verdict.ok) process.exit(3);
+}
 
 let provider;
 if (kind === "mixed") provider = undefined;
@@ -54,14 +63,6 @@ const prior = budgetFile && existsSync(budgetFile) ? JSON.parse(readFileSync(bud
 ledger.tokens = prior.tokens; ledger.spent = prior.usd;
 const saveBudget = () => { if (budgetFile) writeFileSync(budgetFile, JSON.stringify({ tokens: ledger.tokens, usd: ledger.spent, runs: prior.runs + 1, capTokens: ledger.capTokens, capUsd: ledger.capUsd }, null, 1)); };
 process.on("exit", saveBudget);
-// A run against the local server first reads its slot state, so it never evicts someone else's cached conversation (M00, G10).
-if (args["check-slots"]) {
-  const { checkSlots } = await import("./lib/local-slots.mjs");
-  const need = Number(args["slots-needed"] ?? variant.parallel ?? 1);
-  const verdict = await checkSlots(args["check-slots"], need);
-  console.log(`Slot check: ${verdict.ok ? "free" : "REFUSED"} (${verdict.why})`);
-  if (!verdict.ok) process.exit(3);
-}
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const outDir = join(here, "runs", `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);

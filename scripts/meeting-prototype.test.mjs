@@ -1,7 +1,8 @@
 // Offline tests of the throwaway meeting prototype (card M00): the rules are checked against a scripted provider, no model, no network.
 import assert from "node:assert/strict";
-import { createServer, get as httpGet } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { createServer, request as httpRequest } from "node:http";
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -19,10 +20,13 @@ const variant = (n) => readJson(`variants/${n}.json`);
 const dirs = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "nn-m00-")); dirs.push(d); return join(d, "run"); };
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
-// The offline guard replaces global fetch, so the slot check is given a plain loopback HTTP client.
-const loopbackFetch = (url, { signal } = {}) => new Promise((resolve, reject) => {
-  const req = httpGet(url, { signal }, (res) => { const chunks = []; res.on("data", (c) => chunks.push(c)); res.on("end", () => { const text = Buffer.concat(chunks).toString(); resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: async () => JSON.parse(text) }); }); });
+// The offline guard replaces global fetch, so the slot check is given a plain loopback HTTP client. It sends the method the
+// caller asked for (so the server below sees exactly what the slot check would send) and, like fetch with redirect "manual",
+// does not follow redirects.
+const loopbackFetch = (url, { method = "GET", signal } = {}) => new Promise((resolve, reject) => {
+  const req = httpRequest(url, { method, signal }, (res) => { const chunks = []; res.on("data", (c) => chunks.push(c)); res.on("end", () => { const text = Buffer.concat(chunks).toString(); resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: async () => JSON.parse(text) }); }); });
   req.on("error", reject);
+  req.end();
 });
 
 // A scripted provider: every statement carries the speaker's name, every ballot reason carries a mark, and every prompt is kept.
@@ -255,6 +259,15 @@ test("slot state: free only when enough slots are idle and empty; anything unrea
   assert.equal(slotsFree("nope", 1).ok, false);
   assert.equal(slotsFree([null], 1).ok, false);
   assert.equal(slotsFree([idle], 2).ok, false, "fewer free slots than the run needs");
+  assert.equal(slotsFree([{ id: 0, is_processing: false }], 1).ok, false, "idle but no cache count: whether it holds a conversation is unknown, so busy");
+  assert.equal(slotsFree([{ id: 0, is_processing: false, n_past: "many" }], 1).ok, false, "a malformed cache count is busy, not zero");
+  assert.equal(slotsFree([{ id: 0, is_processing: false, n_past: Number.NaN }], 1).ok, false);
+  assert.equal(slotsFree([{ id: 0, is_processing: false, n_past: 0, next_token: { n_past: 40 } }], 1).ok, false, "any cache count above zero");
+  assert.equal(slotsFree([{ id: 0, is_processing: "false", n_past: 0 }], 1).ok, false, "a processing flag that is not a plain false is busy");
+  assert.equal(slotsFree([{ id: 0, state: 0, n_past: 0 }], 1).ok, true, "an older server's idle state with an empty cache");
+  assert.equal(slotsFree([{ id: 0, state: 1, n_past: 0 }], 1).ok, false);
+  assert.equal(slotsFree([{ id: 0, is_processing: false, prompt: "" }], 1).ok, true, "an empty prompt is a stated empty cache");
+  for (const n of [0, -1, 1.5, Number.NaN]) assert.equal(slotsFree([idle, idle], n).ok, false, `needing ${n} slots is not a valid request`);
 });
 
 test("the slot check reads a loopback server's /slots, refuses a busy or broken one, and sends nothing but a GET of /slots", async () => {
@@ -272,6 +285,8 @@ test("the slot check reads a loopback server's /slots, refuses a busy or broken 
     assert.match((await checkSlots(base, 1, { fetchImpl: loopbackFetch })).why, /500/);
     reply = { status: 200, body: "not json" };
     assert.equal((await checkSlots(base, 1, { fetchImpl: loopbackFetch })).ok, false);
+    reply = { status: 302, body: [{ id: 0, is_processing: false, n_past: 0 }] };
+    assert.equal((await checkSlots(base, 1, { fetchImpl: loopbackFetch })).ok, false, "a redirect is a refusal, not followed");
     assert.deepEqual([...new Set(seen)], ["GET /slots"]);
   } finally { await new Promise((r) => server.close(r)); }
   const gone = await checkSlots(base, 1, { fetchImpl: loopbackFetch, timeoutMs: 2000 });
@@ -289,4 +304,35 @@ test("a clear majority needs no casting vote, and a chair question to an absent 
   const r = await meet(ab, variant("m00-full"), { "chair-questions": () => JSON.stringify({ questions: [q] }) });
   assert.equal(r.summary.stats.chairQuestions.length, 0);
   assert.ok(r.summary.stats.skippedAbsent.includes(`chair question to ${ab.absent[0]}`));
+});
+
+test("the runner's slot check refuses a busy server before anything else: exit code 3, no provider, the budget file untouched", async () => {
+  const seen = [];
+  const server = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); res.setHeader("content-type", "application/json"); res.end(JSON.stringify([{ id: 0, is_processing: true, n_past: 900 }])); });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const dir = mkdtempSync(join(tmpdir(), "nn-m00-")); dirs.push(dir);
+  const budget = join(dir, "budget.json");
+  const before = JSON.stringify({ tokens: 123, usd: 0.5, runs: 7 });
+  writeFileSync(budget, before);
+  const runner = fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url));
+  try {
+    // The provider points at a closed loopback port and sends nothing when built; the refusal must come before any call and before the budget is written.
+    const { code, stdout } = await new Promise((resolve) => execFile(process.execPath, [runner, "--variant", "m00-full", "--provider", "openai", "--model", "m", "--base-url", "http://127.0.0.1:9", "--no-auth", "--check-slots", `http://127.0.0.1:${server.address().port}`, "--budget", budget], { timeout: 120000 }, (err, stdout) => resolve({ code: err ? err.code : 0, stdout })));
+    assert.equal(code, 3, stdout);
+    assert.match(stdout, /Slot check: REFUSED/);
+    assert.equal(readFileSync(budget, "utf8"), before, "a refused run leaves the owner's budget record as it was");
+    assert.ok(seen.every((s) => s === "GET /slots"), seen.join(", "));
+  } finally { await new Promise((r) => server.close(r)); }
+});
+
+test("in digest mode the chair still reads the full text for its later calls, while members read the digest", async () => {
+  const sc = { ...scenario("tool-adoption"), agents: scenario("tool-adoption").agents.slice(0, 4) };
+  sc.agents.forEach((a, i) => { a.lean = i % 2 ? "against" : "for"; });
+  const { provider, summary } = await meet(sc, { ...variant("digest"), chairQuestions: 0 }, { digest: () => "DIGESTTEXT short", casting: () => "CASTING: yes\nREASON: tie" });
+  assert.equal(summary.result.outcome, "passed (casting vote)");
+  const casting = provider.prompts.find((p) => p.task === "casting");
+  assert.ok(!/DIGEST of/.test(casting.user), "the chair's casting call is not given the digest in place of the text");
+  assert.match(casting.user, new RegExp(`STMT_${sc.agents[0].name} says`), "the chair reads the round 1 statements in full");
+  const ballot = provider.prompts.find((p) => p.task === "ballot");
+  assert.match(ballot.user, /DIGEST of #1 to #/, "members vote with the digest");
 });
