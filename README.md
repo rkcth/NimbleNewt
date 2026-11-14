@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **270 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **271 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -124,7 +124,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
-| Backup, updates and operations | `▓▓▓▓▓▓░░░░░░` 50% | 9 of 18 |
+| Backup, updates and operations | `▓▓▓▓▓▓░░░░░░` 55% | 10 of 18 |
 | Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
 | Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
 
@@ -605,7 +605,7 @@ Observations, versioned lessons, bounded experiments, scoped adoption and option
 </details>
 
 <details>
-<summary><strong>Backup, updates and operations</strong> — ▓▓▓▓▓▓░░░░░░ 9 of 18</summary>
+<summary><strong>Backup, updates and operations</strong> — ▓▓▓▓▓▓░░░░░░ 10 of 18</summary>
 
 Backup and restore, release staging, migration recovery, maintenance windows and update orchestration.
 
