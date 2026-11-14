@@ -118,7 +118,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 27 of 32 |
+| Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
 | Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 38% | 7 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -477,7 +477,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 27 of 32</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 28 of 32</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -508,7 +508,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M02g** · P35 · Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log _(needs M02f)_
 - [x] **M03f** · P35 · Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat _(needs M03e)_
 - [x] **M04f** · P35 · Stopped-agent meeting exception in chat, and the host wake path _(needs M04e)_
-- [ ] **M02h** · P36 · Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap _(needs M02g)_
+- [x] **M02h** · P36 · Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap _(needs M02g)_
 - [x] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
 - [x] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
 - [x] **M03h** · P37 · Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up _(needs M03g)_
