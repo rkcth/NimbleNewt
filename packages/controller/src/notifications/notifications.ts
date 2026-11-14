@@ -996,7 +996,7 @@ export class NotificationService {
    * alone (`false`). The message is an Urgent trigger of the controller like the U11c ones: sent at once, also in quiet hours unless the owner chose otherwise, inside the hourly Urgent limit and the minimum gap
    * for that record (otherwise the item is Urgent in the inbox only). Only the kind, the label (IDs) and the project's ID leave the installation. Never replays: the command ID holds the item and the time it was first seen.
    */
-  async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+  async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number; /** Which half of "nothing else to do" held: the whole project (default) or the agent the task is assigned to. */ readonly scope?: "project" | "agent" }): Promise<boolean> {
     return this.#raiseTrigger(itemId, "stoppedAt", why);
   }
 
@@ -1009,7 +1009,7 @@ export class NotificationService {
     return this.#raiseTrigger(itemId, "criticalAt", why);
   }
 
-  async #raiseTrigger(itemId: string, field: "stoppedAt" | "criticalAt", why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+  async #raiseTrigger(itemId: string, field: "stoppedAt" | "criticalAt", why: { readonly minutes: number; readonly limit: number; readonly scope?: "project" | "agent" }): Promise<boolean> {
     const settings = await this.#settings();
     const now = this.#runner.now();
     const interrupts = settings.urgentInterruptsQuietHours !== false;
@@ -1027,10 +1027,10 @@ export class NotificationService {
       let held: ItemBody["held"];
       if (sendNow) { held = await this.#holdReason(settings, now, base); if (held !== undefined) sendNow = false; }
       const detail = stopped
-        ? `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`
+        ? (why.scope === "agent" ? `The agent working on this has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).` : `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`)
         : `This waits for you and holds up the critical path you marked in project ${old.projectId ?? "-"} (for ${why.minutes} minutes; limit ${why.limit}).`;
       const text = stopped
-        ? `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`
+        ? (why.scope === "agent" ? `URGENT, work is stopped: the agent has nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}` : `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`)
         : `URGENT, the critical path is blocked in project ${old.projectId ?? "-"} by ${old.kind}: ${old.label}`;
       const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, text.slice(0, 400), now, `${itemId}|${old.firstAt}|${stopped ? "stopped" : "critical"}|${now}`, true) : undefined;
       try {
