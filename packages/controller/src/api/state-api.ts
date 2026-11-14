@@ -180,7 +180,7 @@ export interface StateApiDeps {
   readonly quietHosts?: Pick<QuietHostService, "moveWork">;
   readonly coverage?: Pick<CoverageService, "report">;
   readonly coverageSettings?: Pick<CoverageSettingsService, "get" | "set">;
-  readonly coverageGaps?: Pick<CoverageGapService, "list">;
+  readonly coverageGaps?: Pick<CoverageGapService, "list" | "covering">;
   readonly checkSettings?: Pick<CheckRunSettingsService, "get" | "set">;
   readonly leases?: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly retention?: Pick<RetentionService, "status" | "check" | "run" | "delete" | "archive" | "restore" | "export">;
