@@ -13,3 +13,5 @@ export { WorkspaceResponder } from "./responder.js";
 export { PiStateHost, PiStateTransfers, REMOTE_STORE_PREFIX, RemotePiRestore, RemotePiState, RemoteThinkingStores, combinedPiState, isRemoteStoreId, localOnly, newPiId, parseRemoteStoreId, remoteStoreId, type PiStateHostOptions, type RemotePiRestoreOptions, type RemoteThinkingStoresOptions, type RemotePiRestoreState, type RemotePiStateOptions } from "./pi-state.js";
 export { CONTRACT_FORMAT, CONTRACT_FEATURES, checkContract, contractDigest, contractProblems, enforcementFor, requiresOf, sealContract, type ContractEnforcement, type WorkerAbilities } from "./contract.js";
 export { RELEASE_RUNNER_LIMITS, ReleaseHostRunner, type ReleaseHostRunnerOptions, type ReleaseSuiteJob, type ReleaseSuiteResult, type ReleaseTested } from "./release-runner.js";
+export { commandReleaseSuite, readSuiteAnswer, type CommandSuiteConfig } from "./release-command-suite.js";
+export { readReleaseHostConfig, runReleaseHost, type ReleaseHostConfig, type RunReleaseHostOptions } from "./release-host.js";

@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -656,6 +656,14 @@ export class ChatService {
       // ("its MAC address is on the sticker") name nothing (card X09b part 2 review 3, item D3). Naming no platform of a kind is a question, naming another one is refused, and naming two of the same kind
       // is refused too, because the chat cannot tell which one the machine is. Withdrawing a host (`active: false`) picks no platform for a machine — it takes one off the list — so it asks for neither
       // os nor arch, and the interpreter's os and arch are dropped from it unless the owner's own words name them (item D4): sent as they are they would rewrite the platform on the record.
+      // A candidate's platforms decide what approval requires, and `os` and `arch` are fixed choices the words check lets through, so each platform the model lists must be one the owner's own words name
+      // (any spelling: linux-x64, my mac, windows, aarch64). One the owner never named is refused rather than tested for (or silently left out): the owner is asked which platforms they meant.
+      if (intent.op === "release.submit") {
+        const m = intent.args["manifest"];
+        const matrix = m !== null && typeof m === "object" && Array.isArray((m as Record<string, unknown>)["matrix"]) ? ((m as Record<string, unknown>)["matrix"] as unknown[]) : [];
+        const stray = matrix.flatMap((c) => (["os", "arch"] as const).map((key) => ({ key, value: c !== null && typeof c === "object" ? (c as Record<string, unknown>)[key] : undefined }))).find((x) => typeof x.value === "string" && !saysPlatform(words, x.key, x.value));
+        if (stray !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `The ${stray.key} ${quotedText(String(stray.value), 30)} is not in your message, so the candidate was not drawn up. Which platforms (${platformChoices("os").join(", ")} on ${platformChoices("arch").join(", ")}) must it pass on?` }); continue; }
+      }
       if (intent.op === "release.host") {
         const withdrawing = intent.args["active"] === false;
         const host = typeof intent.args["hostId"] === "string" ? quotedText(intent.args["hostId"] as string, 80) : "that host";

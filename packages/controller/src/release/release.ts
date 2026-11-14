@@ -648,21 +648,22 @@ export class ReleaseService {
    * Ends every open attempt that has run past its timeout plus a grace (the controller's own clock: a host that withdrew, crashed or ignores the limit never leaves a platform "issued" for ever). The attempt becomes
    * `timed_out`, which is never a pass and frees the platform for a retry. The controller's loop calls this; a host's fetch also does for its own jobs.
    */
-  async expire(): Promise<{ expired: number }> {
+  async expire(): Promise<{ expired: number; ended: { attemptId: string; hostId: string; candidateId: string; cell: Cell }[] }> {
+    const ended: { attemptId: string; hostId: string; candidateId: string; cell: Cell }[] = [];
     let expired = 0;
     let after: string | undefined;
     for (;;) {
       const page = await this.#runner.list(HOST, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const h of page) { try { expired += await this.#expireHost((h.body as unknown as HostAuthBody).hostId); } catch (e) { if (!(e instanceof DomainError)) throw e; } }
-      if (page.length < 200) return { expired };
+      for (const h of page) { try { const got = await this.#expireHost((h.body as unknown as HostAuthBody).hostId); expired += got.length; ended.push(...got); } catch (e) { if (!(e instanceof DomainError)) throw e; } }
+      if (page.length < 200) return { expired, ended };
       after = page[page.length - 1]!.id;
     }
   }
 
-  async #expireHost(hostId: string): Promise<number> {
+  async #expireHost(hostId: string): Promise<{ attemptId: string; hostId: string; candidateId: string; cell: Cell }[]> {
     const idx = (await this.#runner.get(HOSTIDX, hostIdxId(hostId)))?.body as unknown as HostIndexBody | undefined;
-    if (idx === undefined || idx.open.length === 0) return 0;
-    let ended = 0;
+    if (idx === undefined || idx.open.length === 0) return [];
+    const ended: { attemptId: string; hostId: string; candidateId: string; cell: Cell }[] = [];
     for (const id of idx.open) {
       const before = (await this.#runner.get(ATTEMPT, id))?.body as unknown as AttemptBody | undefined;
       if (before === undefined || before.state !== "issued" || !this.#overdue(before)) continue;
@@ -678,7 +679,9 @@ export class ReleaseService {
           return { ref, creates: false, changes: await this.#endChanges(attempt.hostId, [{ found, attempt }], "timed_out", undefined, reason), detail: { attemptId: id, timedOut: true }, contention: async () => new DomainError("stale_revision", "the attempt changed at the same moment") };
         },
       }));
-      ended++;
+      // Only an attempt this call really ended is told (a sweep that found it already ended by another, or no longer overdue, does not).
+      const after = (await this.#runner.get(ATTEMPT, id))?.body as unknown as AttemptBody | undefined;
+      if (after?.state === "timed_out" && before.state === "issued") ended.push({ attemptId: id, hostId, candidateId: before.candidateId, cell: before.cell });
     }
     return ended;
   }
