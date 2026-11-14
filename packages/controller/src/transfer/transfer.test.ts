@@ -1091,9 +1091,45 @@ test("the same command sent again after the move is answered with what was recor
   } finally { await finish(f); }
 });
 
+test("the host's refusal to restart is written down even when the state lock cannot be taken for a moment, and is reported, not dropped, when it never can be (CI repair round 13)", async () => {
+  const waitFor = async (what: string, ok: () => Promise<boolean> | boolean, ms = 30_000): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 20)); } };
+  // A moment: the lock folder is in the way (a file where the folder should be) when the refusal comes, and clear again 300 ms later: the refusal is written once the lock can be taken.
+  const k = await fixture();
+  try {
+    const target = await sqlTarget(k, "dest.sqlite");
+    const lockFolder = join(st(k), ".transfer-lock");
+    const errors: string[] = [];
+    const refusing = await service(k, [target], { onError: (e) => errors.push(String((e as Error).message)), restart: { delayMs: 10, run: () => {
+      rmSync(lockFolder, { recursive: true, force: true }); writeFileSync(lockFolder, "in the way");
+      setTimeout(() => { rmSync(lockFolder, { force: true }); }, 300);
+      throw new Error("no supervisor to restart me");
+    } } });
+    await refusing.apply("sqlite2", (await refusing.preview("sqlite2")).token);
+    await waitFor("the refusal to be written down", async () => (await readJournal(st(k)))?.restart?.state === "failed");
+    assert.match((await readJournal(st(k)))?.restart?.reason ?? "", /no supervisor/);
+    assert.deepEqual(errors, [], "nothing to report: it was written");
+  } finally { await finish(k); }
+  // For good: the lock folder stays in the way; after its tries the refusal is reported to the controller's error report, and the journal is left as it was.
+  const m = await fixture();
+  try {
+    const target = await sqlTarget(m, "dest.sqlite");
+    const lockFolder = join(st(m), ".transfer-lock");
+    const errors: string[] = [];
+    const refusing = await service(m, [target], { onError: (e) => errors.push(String((e as Error).message)), restart: { delayMs: 10, run: () => {
+      rmSync(lockFolder, { recursive: true, force: true }); writeFileSync(lockFolder, "in the way");
+      throw new Error("no supervisor to restart me");
+    } } });
+    await refusing.apply("sqlite2", (await refusing.preview("sqlite2")).token);
+    await waitFor("the failure to be reported", () => errors.length > 0);
+    assert.match(errors[0]!, /refused to restart the controller \(no supervisor to restart me\), and that could not be written/);
+    assert.equal((await readJournal(st(m)))?.restart?.state, "requested");
+    rmSync(lockFolder, { force: true });
+  } finally { await finish(m); }
+});
+
 test("the host's restart: asked once after the answer when it opted in and the owner has not turned it off; a refusal by the host is written down; without an opt-in nothing is scheduled (card F04m)", async () => {
   // The restart is asked a moment after the answer and its outcome is written then: a fixed sleep was too short on a slow CI runner (round 8), so the test waits for what it checks (bounded).
-  const waitFor = async (what: string, ok: () => Promise<boolean> | boolean): Promise<void> => { const end = Date.now() + 10_000; while (!(await ok())) { if (Date.now() > end) assert.fail(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 10)); } };
+  const waitFor = async (what: string, ok: () => Promise<boolean> | boolean): Promise<void> => { const end = Date.now() + 30_000; while (!(await ok())) { if (Date.now() > end) assert.fail(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 10)); } };
   const f = await fixture();
   try {
     const events: Array<{ reason: string; transferId: string; to: string }> = [];

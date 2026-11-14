@@ -136,6 +136,8 @@ export interface TransferOptions {
    */
   readonly restart?: { readonly run: (event: RestartEvent) => void | Promise<void>; readonly delayMs?: number };
   readonly restartEnabled?: () => Promise<boolean>;
+  /** Told when something the owner relies on could not be recorded (the host's refusal to restart, after its tries); nothing else changes. */
+  readonly onError?: (error: unknown) => void;
   /** The owner's settings of this feature, read and written through the configuration. */
   readonly settings?: TransferSettingsPort;
 }
@@ -484,6 +486,9 @@ export interface WipePlan { readonly token: string; readonly target: { readonly 
 interface CopyStats { rows: Record<string, number>; digests: Record<string, string> }
 interface ScanReport { digests: Record<string, string>; rows: Record<string, number>; bytes: number; findings: TransferFinding[]; uncertain: number; intended: number; claims: number }
 
+/** How many times the host's refusal to restart is tried to be written to the journal (pauses of 0.2 s doubling to 2 s between, about 9 s in all). */
+const RESTART_RECORD_TRIES = 8;
+
 export class DatabaseTransferService {
   readonly #o: TransferOptions;
   #running = false;
@@ -773,10 +778,23 @@ export class DatabaseTransferService {
       void (async () => {
         try { await restart.run(event); } catch (error) {
           const reason = (error instanceof Error ? error.message : "the host could not restart the controller").slice(0, 300);
-          await withStateLock(this.#o.stateDirectory, async () => {
-            const journal = await readJournal(this.#o.stateDirectory);
-            if (journal?.id === event.transferId) await this.#journal(journal, { restart: { requestedAt: journal.restart?.requestedAt ?? this.#now(), state: "failed", reason } });
-          }, { wait: true }).catch(() => undefined);
+          // Written down with a few tries: the state lock can fail for a moment for another reason than a holder (on Windows a lock file just let go can still be in deletion), and a refusal
+          // that is not written leaves the owner told that a restart is coming (CI repair round 13: the journal kept "requested"). A refusal that still cannot be written is reported, not dropped.
+          for (let attempt = 1; ; attempt++) {
+            try {
+              await withStateLock(this.#o.stateDirectory, async () => {
+                const journal = await readJournal(this.#o.stateDirectory);
+                if (journal?.id === event.transferId) await this.#journal(journal, { restart: { requestedAt: journal.restart?.requestedAt ?? this.#now(), state: "failed", reason } });
+              }, { wait: true });
+              break;
+            } catch (writeError) {
+              if (attempt >= RESTART_RECORD_TRIES) {
+                try { this.#o.onError?.(new Error(`the host refused to restart the controller (${reason}), and that could not be written to the transfer journal: ${writeError instanceof Error ? writeError.message.slice(0, 200) : "unknown error"}`)); } catch { /* the report is best effort */ }
+                break;
+              }
+              await new Promise((r) => setTimeout(r, Math.min(2000, 100 * 2 ** attempt)));
+            }
+          }
         }
       })();
     }, restart.delayMs ?? 1500);

@@ -231,9 +231,12 @@ for (const backend of backends) {
     const held = new Promise<void>((r) => { release = r; });
     // Only the first call waits (a second one, which must not happen, answers at once so the test fails rather than hangs).
     const slow: Pick<WipBackupPort, "restore"> = { restore: async (call) => { asked.push(call); if (asked.length === 1) await held; return { ok: true, summary: "Restored 3 file(s)", detail: { where: "into a new folder", commitId: COMMIT_A, files: 3, baseFound: true } }; } };
+    // The restore writes its claim before it asks the host; on a slow backend (a worker thread, PostgreSQL on a slow runner) that takes longer than a count of event-loop turns, so the test
+    // waits for the host to be asked, bounded in time (CI repair round 13: 1 !== 2 after 2000 turns on Windows).
+    const asks = async (n: number): Promise<void> => { const end = Date.now() + 30_000; while (asked.length < n && Date.now() < end) await new Promise((r) => setTimeout(r, 5)); };
     const first = svc.restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow);
     try {
-      for (let i = 0; i < 2000 && asked.length === 0; i++) await new Promise((r) => setImmediate(r));
+      await asks(1);
       assert.equal(asked.length, 1, "the first ask reached the host");
       const second = await refuses("unavailable", () => svc.restore(owner, { commandId: "overlap", projectId: project, taskId: "task-one" }, slow));
       assert.match(second.message, /already under way/);
@@ -245,8 +248,9 @@ for (const backend of backends) {
     assert.equal(asked.length, 1, "the host was asked once for the command");
     // A controller that stopped while the host was restoring (the host never answered): after the restart the same command is refused in words, and the host is not asked again.
     const never: Pick<WipBackupPort, "restore"> = { restore: async (call) => { asked.push(call); return new Promise<never>(() => undefined); } };
-    void svc.restore(owner, { commandId: "cut-short", projectId: project, taskId: "task-one" }, never);
-    for (let i = 0; i < 2000 && asked.length === 1; i++) await new Promise((r) => setImmediate(r));
+    // Never answered; when the test ends, its storage is closed under it, and that error is the test's own.
+    svc.restore(owner, { commandId: "cut-short", projectId: project, taskId: "task-one" }, never).catch(() => undefined);
+    await asks(2);
     assert.equal(asked.length, 2);
     const after = await refuses("unavailable", () => restarted().restore(owner, { commandId: "cut-short", projectId: project, taskId: "task-one" }, h.port));
     assert.match(after.message, /interrupted by a restart/);
