@@ -19,22 +19,29 @@ test("a started controller carries secret values only in encrypted backups, foll
     const { keyring, recoveryFile } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
     const keyringFile = join(d, "keyring.json"); const rf = join(d, "recovery");
     writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 }); writeFileSync(rf, JSON.stringify(recoveryFile), { mode: 0o600 });
-    const values = new Map([["models.providers.openai.credential", VALUE], [SIGNING_SECRET_NAME, "SIGNING-KEY-NEVER-CARRIED"]]);
+    const values = new Map([["models.providers.openai.credential", VALUE], [SIGNING_SECRET_NAME, "placeholder"]]);
+    values.delete(SIGNING_SECRET_NAME); // the server makes its own signing key in the store at start
     const store = { resolve: async (n: string) => values.get(n), set: async (n: string, v: string) => { values.set(n, v); } };
     let clock = Date.parse("2026-11-12T10:00:00.000Z");
     const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
-      backup: { directory: join(d, "backups"), now: () => new Date(clock), encryption: { keyringFile, recoveryFile: rf }, secrets: { store, names: () => ["models.providers.openai.credential", SIGNING_SECRET_NAME] } } });
+      backup: { directory: join(d, "backups"), now: () => new Date(clock), signing: { store }, encryption: { keyringFile, recoveryFile: rf }, secrets: { store, names: () => ["models.providers.openai.credential", SIGNING_SECRET_NAME] } } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
       const backup = async (id: string) => { clock += 60_000; const r = await call("backup.now", {}, id); assert.ok(r.ok, JSON.stringify(r)); const name = readdirSync(join(d, "backups")).filter((n) => n.startsWith("backup-")).sort().at(-1)!; const dir = join(d, "backups", name); return { dir, manifest: JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")), files: readdirSync(dir) }; };
-      const hasValue = (dir: string, files: string[]) => files.some((f) => readFileSync(join(dir, f)).includes(VALUE) || readFileSync(join(dir, f)).includes("SIGNING-KEY-NEVER-CARRIED"));
+      const hasValue = (dir: string, files: string[]) => files.some((f) => readFileSync(join(dir, f)).includes(VALUE) || readFileSync(join(dir, f)).includes(values.get(SIGNING_SECRET_NAME)!));
 
       const all = await backup("b1");
-      assert.equal(all.manifest.encryption.scope, "everything");
+      assert.equal(all.manifest.encryption.scope, "secrets", "the default when encryption is first on and the host supplies the secret store");
+      assert.ok(all.files.includes("state.jsonl"), "secrets only: the tables stay plain");
       assert.equal(all.manifest.secrets.count, 1, "the credential is carried, the signing key is not");
       assert.equal(hasValue(all.dir, all.files), false);
 
+      // Everything is the owner's choice (by chat too); secrets only is the default.
+      assert.ok((await call("backup.encryption.set", { scope: "everything" }, "s0")).ok);
+      const wide = await backup("b1b");
+      assert.equal(wide.manifest.encryption.scope, "everything");
+      assert.ok(!wide.files.includes("state.jsonl"), "everything: the tables are sealed too");
       const set1 = await call("backup.encryption.set", { scope: "secrets" }, "s1");
       assert.ok(set1.ok, JSON.stringify(set1));
       assert.match(set1.result.text, /secret values in a new backup are sealed.*rest of the backup stays plain/);

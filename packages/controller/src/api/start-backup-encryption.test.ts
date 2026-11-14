@@ -9,6 +9,8 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "./index.js";
 
+/** A secret store in memory for the backup-signing key (signing is not optional where backups are encrypted). */
+const memorySecrets = () => { const m = new Map<string, string>(); return { resolve: async (n: string) => m.get(n), set: async (n: string, v: string) => { m.set(n, v); } }; };
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const PASS = "correct horse battery staple";
@@ -28,8 +30,8 @@ test("encrypted backups through the state API: unattended backups are sealed, th
     const start = (extra: object) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
       backup: { directory: join(d, "backups"), now: () => new Date(clock), ...extra } });
     // A keyring that cannot be read stops the controller: it never falls back to plain backups.
-    await assert.rejects(start({ encryption: { keyringFile: join(d, "missing.json") } }), /no backup is made without it/);
-    const c = await start({ encryption: { keyringFile, passcodeFile: pf, recoveryFile: rf } });
+    await assert.rejects(start({ signing: { store: memorySecrets() }, encryption: { keyringFile: join(d, "missing.json") } }), /no backup is made without it/);
+    const c = await start({ signing: { store: memorySecrets() }, encryption: { keyringFile, passcodeFile: pf, recoveryFile: rf } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       const rob = await c.services.principals.authenticate(boot.token);
@@ -51,7 +53,7 @@ test("encrypted backups through the state API: unattended backups are sealed, th
       assert.ok(made.ok, JSON.stringify(made));
       const manifest = JSON.parse(readFileSync(join(d, "backups", readdirSync(join(d, "backups"))[0]!, "manifest.json"), "utf8"));
       assert.equal(manifest.encryption.keyId, keyring.keyId);
-      assert.ok(readdirSync(join(d, "backups", manifest.name)).every((f) => f === "manifest.json" || f.endsWith(".enc")));
+      assert.ok(readdirSync(join(d, "backups", manifest.name)).every((f) => f === "manifest.json" || f === "signature.json" || f.endsWith(".enc")));
       await unlockWithPasscode(manifest.encryption.keyring, PASS);
 
       const ok = await call(boot.token, "backup.encryption.verify", { method: "passcode" }, "v1");
@@ -78,9 +80,9 @@ test("encrypted backups through the state API: unattended backups are sealed, th
       assert.ok(CHAT_OPS["backup.encryption.rekey"] !== undefined && CHAT_OPS["backup.encryption.rekey"].mode === "propose", "the chat proposes it");
     } finally { await c.close(); }
     // A restart with another keyring file is refused (the pinned key is the one in use), the controller does not start, and no backup is made with it.
-    await assert.rejects(start({ encryption: { keyringFile: otherFile } }), /backup\.encryption\.rekey/);
+    await assert.rejects(start({ signing: { store: memorySecrets() }, encryption: { keyringFile: otherFile } }), /backup\.encryption\.rekey/);
     // The owner approves the new fingerprint while the old key runs; the next start with the new keyring is accepted, once.
-    const again = await start({ encryption: { keyringFile } });
+    const again = await start({ signing: { store: memorySecrets() }, encryption: { keyringFile } });
     try {
       const rob = await again.services.principals.authenticate(token!);
       assert.equal(rob.kind, "owner");
@@ -90,11 +92,11 @@ test("encrypted backups through the state API: unattended backups are sealed, th
       assert.equal(status.result.item.approvedNext.fingerprint, otherFp);
       assert.equal(status.result.item.pinned.fingerprint, keyringFingerprint(keyring), "the approval alone changes nothing");
     } finally { await again.close(); }
-    const moved = await start({ encryption: { keyringFile: otherFile } });
+    const moved = await start({ signing: { store: memorySecrets() }, encryption: { keyringFile: otherFile } });
     try {
       const status = (await moved.api.handle(token!, { v: 1, op: "backup.encryption.status", args: {} } as never)) as any;
       assert.deepEqual([status.result.item.pinned.fingerprint, status.result.item.approvedNext], [otherFp, undefined]);
     } finally { await moved.close(); }
-    await assert.rejects(start({ encryption: { keyringFile } }), /backup\.encryption\.rekey/, "the approval was used once; the old key is now the unapproved one");
+    await assert.rejects(start({ signing: { store: memorySecrets() }, encryption: { keyringFile } }), /backup\.encryption\.rekey/, "the approval was used once; the old key is now the unapproved one");
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

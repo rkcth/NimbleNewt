@@ -10,7 +10,7 @@ export type EncryptionScope = "everything" | "secrets";
 export const ENCRYPTION_SCOPES: readonly EncryptionScope[] = ["everything", "secrets"];
 
 export interface EncryptionSettingBody {
-  /** Whether new backups are encrypted (the keyring is still there; switching on again needs no new key). Absent record: on. */
+  /** Whether new backups are encrypted (the keyring is still there; switching on again needs no new key). Absent record: on, with the default scope (secrets only when the host gives the backups the secret store). */
   readonly enabled: boolean;
   /** `everything`: every file of a backup is sealed. `secrets`: only secret values are sealed (card K01b: the rest of the backup stays plaintext). No secret values are in a backup yet, so nothing is sealed under it. */
   readonly scope: EncryptionScope;
@@ -25,7 +25,8 @@ export interface EncryptionChange {
   readonly weaker: boolean;
 }
 
-const DEFAULT: Pick<EncryptionSettingBody, "enabled" | "scope"> = { enabled: true, scope: "everything" };
+/** What a new installation gets when encryption is first switched on (card K01b): "secrets only" when the backups carry the secret values, otherwise "everything" (secrets only would seal nothing without the secret store). */
+const defaultFor = (carriesSecrets: boolean): Pick<EncryptionSettingBody, "enabled" | "scope"> => ({ enabled: true, scope: carriesSecrets ? "secrets" : "everything" });
 
 /** How much of a backup the setting protects: nothing (off), secrets only, everything. A change is weaker when this goes down. */
 const protection = (s: Pick<EncryptionSettingBody, "enabled" | "scope">): number => (!s.enabled ? 0 : s.scope === "secrets" ? 1 : 2);
@@ -50,6 +51,22 @@ export class BackupEncryptionSettingService {
   readonly #enableProof: (() => string | undefined) | undefined;
   private constructor(runner: CommandRunner, keyringConfigured: boolean, carriesSecrets: boolean, enableProof: (() => string | undefined) | undefined) { this.#runner = runner; this.#keyringConfigured = keyringConfigured; this.#carriesSecrets = carriesSecrets; this.#enableProof = enableProof; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { keyringConfigured?: boolean; carriesSecrets?: boolean; enableProof?: () => string | undefined } = {}): BackupEncryptionSettingService { const { keyringConfigured, carriesSecrets, enableProof, ...runnerOptions } = options; return new BackupEncryptionSettingService(new CommandRunner(storage, epoch, runnerOptions), keyringConfigured ?? true, carriesSecrets ?? false, enableProof); }
+  /**
+   * Controller side, at start, when a keyring is configured: records the setting the first time so the default never changes later under an installation (the secret store being added or removed must not
+   * move the scope). An installation that already made encrypted backups before any setting was recorded keeps "everything" (never silently narrowed); a new one gets the default scope. A record that exists is left alone.
+   */
+  async initialize(madeEncryptedBackups: boolean): Promise<{ created: boolean; scope: EncryptionScope }> {
+    const c = await this.#current();
+    if (c !== undefined) return { created: false, scope: (await this.effective()).scope };
+    const scope: EncryptionScope = madeEncryptedBackups ? "everything" : defaultFor(this.#carriesSecrets).scope;
+    const body: EncryptionSettingBody = { enabled: true, scope, changedAt: this.#runner.now(), changedBy: "controller" };
+    await this.#runner.command("backup.encryption.initialize", { commandId: "backup-encryption-setting-initial", actor: "controller" }, async () => ({
+      payload: { scope },
+      build: async () => ({ ref: REF, creates: true, changes: [{ type: "create" as const, ref: REF, body: body as unknown as JsonObject }], detail: { scope, madeEncryptedBackups } }),
+    }));
+    return { created: true, scope };
+  }
+
   /** The setting in plain words, as this installation applies it. */
   text(s: Pick<EncryptionSettingBody, "enabled" | "scope">): string { return describeSetting(s, this.#keyringConfigured, this.#carriesSecrets); }
 
@@ -63,7 +80,7 @@ export class BackupEncryptionSettingService {
   /** Controller side: what the writer and the start check use. A record that cannot be read leaves encryption ON (never plain by accident). */
   async effective(): Promise<Pick<EncryptionSettingBody, "enabled" | "scope">> {
     const c = await this.#current();
-    if (c === undefined) return DEFAULT;
+    if (c === undefined) return defaultFor(this.#carriesSecrets);
     const b = c.body;
     return { enabled: b.enabled !== false, scope: ENCRYPTION_SCOPES.includes(b.scope) ? b.scope : "everything" };
   }

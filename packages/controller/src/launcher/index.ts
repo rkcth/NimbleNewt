@@ -1,2 +1,2 @@
-export { DEFAULT_CONTEXT_TOKENS, OWNER_SECRET, ensureOwner, ownerSecretName, launch, type LaunchOptions, type Launched, type LocalHostBuilder, type LocalHostContext, type LocalHostPlan, type LauncherConfig, type LauncherProvider, type LauncherSecrets } from "./launcher.js";
+export { BACKUP_KEYRING_FILE, BACKUP_PASSCODE_FILE, BACKUP_RECOVERY_FILE, DEFAULT_CONTEXT_TOKENS, OWNER_SECRET, ensureOwner, ownerSecretName, launch, type LaunchOptions, type Launched, type LocalHostBuilder, type LocalHostContext, type LocalHostPlan, type LauncherConfig, type LauncherProvider, type LauncherSecrets } from "./launcher.js";
 export { runTerminalChat, setupGreeting, type TerminalChatOptions } from "./terminal-chat.js";

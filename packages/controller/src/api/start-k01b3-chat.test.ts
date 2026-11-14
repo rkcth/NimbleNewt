@@ -9,6 +9,8 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { SNAPSHOT_TABLES } from "../storage/index.js";
 import { startController } from "./index.js";
 
+/** A secret store in memory for the backup-signing key (signing is not optional where backups are encrypted). */
+const memorySecrets = () => { const m = new Map<string, string>(); return { resolve: async (n: string) => m.get(n), set: async (n: string, v: string) => { m.set(n, v); } }; };
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const PASS = "correct horse battery staple";
@@ -37,7 +39,7 @@ test("the owner switches backup encryption off and on by free wording through th
     writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 }); writeFileSync(recoveryPath, JSON.stringify(recoveryFile), { mode: 0o600 });
     let clock = Date.parse("2026-11-01T10:00:00.000Z");
     const dir = join(d, "backups");
-    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: dir, now: () => new Date(clock), encryption: { keyringFile, recoveryFile: recoveryPath } } });
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: dir, now: () => new Date(clock), signing: { store: memorySecrets() }, encryption: { keyringFile, recoveryFile: recoveryPath } } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       let m = 0;
@@ -68,7 +70,7 @@ test("review: a value the model puts in backup.encryption.set that is not a swit
     const { keyring } = await createKeyring({ passcode: PASS, scrypt: { N: 2 ** 16, r: 8, p: 1 } });
     const keyringFile = join(d, "keyring.json");
     writeFileSync(keyringFile, JSON.stringify(keyring), { mode: 0o600 });
-    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: join(d, "backups"), encryption: { keyringFile } } });
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: join(d, "backups"), signing: { store: memorySecrets() }, encryption: { keyringFile } } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       // A value that is not in the owner's words is refused by the chat's general check ...
