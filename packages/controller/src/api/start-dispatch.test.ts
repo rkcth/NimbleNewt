@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { DecisionService } from "../decisions/index.js";
+import { ImprovementService } from "../standups/improvements.js";
+import { StandupService } from "../standups/standups.js";
+import { ResponsibilityChecks } from "../projects/checks.js";
+import { CheckRunService } from "../projects/check-runner.js";
+import { MaintenanceLeaseService } from "../projects/leases.js";
 import { ContextEnforcementService } from "../context/index.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -372,4 +377,59 @@ test("start hands the configured limits for local agents to the host builder, an
   }
   assert.equal(seen.length, 2, "a refused start builds nothing");
   cleanup(d);
+});
+
+test("card P06 (reviews fence): the real tick leaves an archived project's waiting reviews and corrections alone, still settles its meeting records, and serves it again at the first tick after the restore", async () => {
+  const d = dir();
+  let restoreResume = (): void => undefined;
+  const c = await open(join(d, "c.sqlite"), { harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+    const live = (await s.projects.createProject({ commandId: "pf-a", actor: owner.id, name: "Live" })).id;
+    const held = (await s.projects.createProject({ commandId: "pf-b", actor: owner.id, name: "Held" })).id;
+    const flip = async (projectId: string, state: "archived" | "active"): Promise<void> => {
+      const cur = (await s.projects.getProject(projectId))!;
+      await s.projects.updateProject({ commandId: `pf-${state}-${cur.revision}`, actor: owner.id, projectId, expectedRevision: cur.revision, state } as never);
+    };
+    const calls: string[] = [];
+    const spy = (target: object, method: string, name: string): void => {
+      const original = (target as Record<string, (...a: unknown[]) => unknown>)[method]!.bind(target);
+      (target as Record<string, unknown>)[method] = (by: unknown, command: { projectId?: string }, ...rest: unknown[]) => {
+        calls.push(`${name}:${command.projectId === held ? "held" : command.projectId === live ? "live" : "?"}`);
+        return original(by, command, ...rest);
+      };
+    };
+    spy(s.reviews, "sweep", "reviews");
+    // Services that are built inside the controller are watched at their class, with every patch put back in the end.
+    const undo: (() => void)[] = [];
+    restoreResume = () => { for (const u of undo) u(); };
+    const watch = (cls: { prototype: object }, method: string, name: string): void => {
+      const proto = cls.prototype as unknown as Record<string, (this: unknown, ...a: unknown[]) => unknown>;
+      const real = proto[method]!;
+      undo.push(() => { proto[method] = real; });
+      proto[method] = function (this: unknown, by: unknown, c: unknown, ...rest: unknown[]) {
+        const id = typeof c === "string" ? c : (c as { projectId?: string }).projectId;
+        calls.push(`${name}:${id === held ? "held" : id === live ? "live" : "?"}`);
+        return real.call(this, by, c, ...rest);
+      };
+    };
+    watch(DecisionService, "resume", "decisions");
+    watch(ImprovementService, "deliverOutcomes", "improvements");
+    watch(ImprovementService, "untold", "untold");
+    watch(StandupService, "deliverOutcomes", "standups");
+    watch(ResponsibilityChecks, "generate", "checks");
+    watch(CheckRunService, "run", "runner");
+    watch(MaintenanceLeaseService, "expiredUntold", "lease");
+    spy(s.records, "sweep", "records");
+    const seen = async (): Promise<string[]> => { calls.length = 0; const t = await c.dispatch!.dispatcher.tick(); assert.deepEqual(t.loops.filter((l) => !l.ok), [], "no loop failed"); return [...new Set(calls)].sort(); };
+    const fenced = ["checks", "decisions", "improvements", "lease", "reviews", "runner", "standups", "untold"];
+    const expected = (projects: readonly string[], recordsFor: readonly string[]): string[] => [...fenced.flatMap((n) => projects.map((p) => `${n}:${p}`)), ...recordsFor.map((p) => `records:${p}`)].sort();
+    assert.deepEqual(await seen(), expected(["held", "live"], ["held", "live"]));
+    await flip(held, "archived");
+    assert.deepEqual(await seen(), expected(["live"], ["held", "live"]), "an archived project gets no review sweep, correction pass, outcome delivery, notice or responsibility work; record settling still reaches it");
+    await flip(held, "active");
+    assert.deepEqual(await seen(), expected(["held", "live"], ["held", "live"]), "the very next tick after the restore serves it again");
+  } finally { restoreResume(); await c.close(); cleanup(d); }
 });
