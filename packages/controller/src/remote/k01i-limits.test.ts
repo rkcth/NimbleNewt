@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { copyPiState, type PiStateSource } from "../backup/pi-state.js";
+import { BackupService, SCHEDULED_FREE_MARGIN } from "../backup/service.js";
+import { PENDING_FILE } from "../backup/staged-restore.js";
+import { MemoryStorage } from "../storage/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PiStateHost, PiStateTransfers, RemotePiRestore, RemotePiState, newPiId, pruneAsides, splitDashStamp } from "./pi-state.js";
 import type { WorkspaceAsk } from "./protocol.js";
@@ -89,6 +92,8 @@ test("pruning touches only real folders that carry a stamp, only the older ones 
       if (linked) assert.ok(existsSync(outside), "a link is not followed");
       assert.equal(await pruneAsides(d, 2, splitDashStamp), 0, "run again: nothing more");
       assert.equal(await pruneAsides(join(d, "missing"), 2, splitDashStamp), 0, "a folder that is not there is nothing to do");
+      assert.equal(await pruneAsides(d, 0, splitDashStamp), 1, "keep 0 is taken as 1 (review): the newest copy of each store always stays");
+      assert.ok(readdirSync(d).includes("rh.h1.att-x-20261103T120000Z") && readdirSync(d).includes("rh.h1.att-y-20261101T120000Z"));
     } finally { rmSync(outside, { recursive: true, force: true }); }
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
@@ -110,6 +115,71 @@ test("the controller keeps the newest three delivered and superseded copies of e
     assert.ok(kept.some((n) => n.includes("20261109T120000")), "the copy just delivered is kept");
     assert.ok(!kept.includes(stamp(1)) && !kept.includes(stamp(2)));
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a clock set back never makes a host remove the aside a restore just made, and at least one aside is always kept (review)", async () => {
+  const r = await hostRig(0);
+  try {
+    for (const day of [5, 6]) await r.restoreWith(`c ${day}\n`, day);
+    assert.deepEqual(readdirSync(r.home).sort(), ["pi", `pi.before-restore-${stampAt(6)}`], "keep 0 is taken as 1");
+    await r.restoreWith("c 2\n", 2);
+    assert.deepEqual(readdirSync(r.home).sort(), ["pi", `pi.before-restore-${stampAt(2)}`], "the aside just made (stamped earlier by a clock set back) is the one kept");
+    assert.equal(readFileSync(join(r.home, `pi.before-restore-${stampAt(2)}`, "log.jsonl"), "utf8"), "c 6\n", "it holds what the last restore replaced");
+  } finally { r.close(); }
+});
+
+test("the controller keeps the copy it just delivered when its clock is behind the older copies, and prunes nothing while a restore is recorded (review)", async () => {
+  const d = tmp();
+  try {
+    const delivered = join(d, "restored-pi-state-delivered");
+    const stamp = (n: number): string => `rh.h1.${A1}-${stampAt(n).replace("T120000000Z", "T120000Z")}`;
+    for (const n of [11, 12, 13, 14]) mkdirSync(join(delivered, stamp(n)), { recursive: true });
+    const put = (): void => { mkdirSync(join(d, "restored-pi-state", `rh.h1.${A1}`), { recursive: true }); writeFileSync(join(d, "restored-pi-state", `rh.h1.${A1}`, "log.jsonl"), "x"); };
+    // A restore recorded (its marker waits for the start): nothing is delivered and nothing is pruned.
+    writeFileSync(join(d, PENDING_FILE), "{}");
+    put();
+    const deliver = new RemotePiRestore({ dataDirectory: d, transfers: new PiStateTransfers({ directory: join(d, "in") }), ask: async () => ({ ok: true, summary: "restored" }), now: () => new Date(Date.UTC(2026, 10, 1, 12)) });
+    await deliver.sweep();
+    assert.equal(readdirSync(delivered).length, 4, "nothing pruned while a restore is recorded");
+    rmSync(join(d, PENDING_FILE));
+    // A restore being prepared while the sweep delivers (the hold starts during the host's answer): the sweep delivers what it had asked for and prunes nothing.
+    let held = false;
+    const during = new RemotePiRestore({ dataDirectory: d, transfers: new PiStateTransfers({ directory: join(d, "in") }), held: () => held, ask: async () => { held = true; return { ok: true, summary: "restored" }; }, now: () => new Date(Date.UTC(2026, 10, 1, 11)) });
+    await during.sweep();
+    assert.equal(readdirSync(delivered).length, 5, "delivered, and nothing pruned once the hold began");
+    held = false;
+    put();
+    await deliver.sweep();
+    const kept = readdirSync(delivered).sort();
+    assert.equal(kept.length, 3);
+    assert.ok(kept.some((n) => n.includes("20261101T120000")), "the copy just delivered stays although its stamp is the oldest");
+    assert.ok(!kept.some((n) => n.includes("20261101T110000")), "the one delivered during the hold is older and goes");
+    assert.ok(kept.includes(stamp(14)) && kept.includes(stamp(13)) && !kept.includes(stamp(12)) && !kept.includes(stamp(11)));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a scheduled backup is not made when the disk has less room than the newest backup and a margin; the owner's own backup still is (review)", async () => {
+  const root = tmp();
+  try {
+    const store = new MemoryStorage();
+    let free = 10 * 1024 ** 3;
+    let clock = Date.UTC(2026, 10, 1, 3);
+    const service = new BackupService(store, { root, version: "t", now: () => new Date(clock), freeBytes: async () => free });
+    assert.equal(await service.runScheduled(), true, "room: made");
+    clock += 25 * 3_600_000;
+    free = SCHEDULED_FREE_MARGIN - 1;
+    assert.equal(await service.runScheduled(), false, "short of room: not made");
+    assert.match((await service.status()).lastError?.message ?? "", /not enough|was not made: the disk has \d+ MiB free/);
+    assert.equal((await service.list()).length, 1);
+    await service.backUpNow("manual");
+    assert.equal((await service.list()).length, 2, "asked for by the owner: made");
+    clock += 25 * 3_600_000;
+    free = 10 * 1024 ** 3;
+    assert.equal(await service.runScheduled(), true, "room again (and the retry wait over): made");
+    clock += 25 * 3_600_000;
+    free = undefined as unknown as number;
+    assert.equal(await service.runScheduled(), true, "a disk that cannot be asked does not stop the backup");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 /** A host's machine for a backup: its attempts' homes and the handler that answers the controller, polled like the real poller. */
@@ -136,6 +206,8 @@ for (const backend of backends) {
       const transfers = new PiStateTransfers({ directory: join(dir, "in") });
       c.remote.attachPiTransfers(transfers);
       const m1 = machine(r1, join(dir, "m1")), m2 = machine(r2, join(dir, "m2"));
+      // The hosts' polling loops are stopped whatever fails (review: a failed assertion used to leave them running, and the test file never ended).
+      try {
       m1.put(A1, "big.bin", Buffer.alloc(60_000, "a")); m2.put(A1, "big.bin", Buffer.alloc(60_000, "b"));
       const source = new RemotePiState({
         directory: join(dir, "in"), transfers, waitMs: 5000, maxBytes: 100_000,
@@ -155,7 +227,7 @@ for (const backend of backends) {
       await source.release();
       assert.equal(transfers.openCount, 0);
       assert.deepEqual(readdirSync(join(dir, "in")), []);
-      await m1.stop(); await m2.stop();
+      } finally { await m1.stop(); await m2.stop(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -166,6 +238,7 @@ for (const backend of backends) {
       const transfers = new PiStateTransfers({ directory: join(dir, "in") });
       c.remote.attachPiTransfers(transfers);
       const m1 = machine(r1, join(dir, "m1")), m2 = machine(r2, join(dir, "m2"));
+      try {
       m1.put(A1, "big.bin", Buffer.alloc(60_000, "a")); m2.put(A1, "big.bin", Buffer.alloc(60_000, "b"));
       const source = new RemotePiState({
         directory: join(dir, "in"), transfers, waitMs: 5000, maxBytes: 120_000,
@@ -173,7 +246,7 @@ for (const backend of backends) {
         ask: (hostId, operation, requestId, transferId, wait) => c.remote.askPiState(c.dispatcherPrincipal, hostId, operation, requestId, transferId, { waitMs: wait }),
       });
       try { assert.equal((await source.list()).length, 2); assert.deepEqual(source.problems(), []); } finally { await source.release(); }
-      await m1.stop(); await m2.stop();
+      } finally { await m1.stop(); await m2.stop(); }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }

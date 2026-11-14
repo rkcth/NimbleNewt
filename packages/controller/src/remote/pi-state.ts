@@ -352,8 +352,10 @@ const DASH_STAMP = new RegExp(`^(.+)-(${STAMP})$`);
 /**
  * Keeps the newest `keep` copies of each store among the folders in `folder` that `split` names as `{ base, stamp }` (the stamp is the compact UTC time a copy was set aside) and removes the older ones. Only real folders are
  * considered (a link is left alone), only inside `folder`, and a name `split` does not recognise is never removed. Returns how many were removed (card K01i).
+ * At least one copy of each store is always kept, and the names in `protect` (the copies the caller has just made) are never removed and count among those kept: a clock set back must not make the copy just set aside look
+ * like the oldest one and remove the only copy of what a restore replaced (review).
  */
-export async function pruneAsides(folder: string, keep: number, split: (name: string) => { readonly base: string; readonly stamp: string } | undefined): Promise<number> {
+export async function pruneAsides(folder: string, keep: number, split: (name: string) => { readonly base: string; readonly stamp: string } | undefined, protect: ReadonlySet<string> = new Set()): Promise<number> {
   const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
   const groups = new Map<string, { name: string; stamp: string }[]>();
   for (const e of entries) {
@@ -363,7 +365,9 @@ export async function pruneAsides(folder: string, keep: number, split: (name: st
   let removed = 0;
   for (const list of groups.values()) {
     list.sort((a, b) => (a.stamp === b.stamp ? (a.name < b.name ? 1 : -1) : a.stamp < b.stamp ? 1 : -1));
-    for (const old of list.slice(Math.max(0, keep))) { await rm(join(folder, old.name), { recursive: true, force: true }); removed += 1; }
+    const kept = list.filter((c) => protect.has(c.name));
+    for (const c of list) if (!protect.has(c.name) && kept.length < Math.max(1, keep)) kept.push(c);
+    for (const old of list) if (!kept.includes(old)) { await rm(join(folder, old.name), { recursive: true, force: true }); removed += 1; }
   }
   return removed;
 }
@@ -425,6 +429,7 @@ export class RemotePiRestore {
 
   async #sweep(): Promise<RemotePiRestoreState> {
     if (this.#o.held?.() === true || await this.#restoreRecorded()) return this.state();
+    const made = new Set<string>();
     for (const [hostId, ids] of await this.#waiting()) {
       if (this.#o.held?.() === true) break;
       const transferId = newPiId("pst");
@@ -440,7 +445,7 @@ export class RemotePiRestore {
         // Delivered: the host has them in place (its own aside keeps what they replaced). The copies here are moved, not deleted.
         const stamp = (this.#o.now?.() ?? new Date()).toISOString().replace(/[-:.]/g, "");
         await mkdir(join(this.#o.dataDirectory, DELIVERED), { recursive: true, mode: 0o700 });
-        for (const id of ids) await rename(join(this.#o.dataDirectory, RESTORED, id), join(this.#o.dataDirectory, DELIVERED, `${id}-${stamp}`));
+        for (const id of ids) { await rename(join(this.#o.dataDirectory, RESTORED, id), join(this.#o.dataDirectory, DELIVERED, `${id}-${stamp}`)); made.add(`${id}-${stamp}`); }
         this.#delivered += ids.length;
         this.#reasons.delete(hostId);
       } catch (error) {
@@ -450,14 +455,15 @@ export class RemotePiRestore {
         await rm(stage, { recursive: true, force: true }).catch(() => undefined);
       }
     }
-    await this.#prune();
+    // Not while a restore is being prepared or applied (it moves folders into the superseded copies), and never the copies this sweep just made.
+    if (this.#o.held?.() !== true && !await this.#restoreRecorded()) await this.#prune(made);
     return this.state();
   }
 
   /** The copies a restore replaced are kept (newest few per store) and older ones are removed, so the data directory does not grow with every restore. */
-  async #prune(): Promise<void> {
+  async #prune(made: ReadonlySet<string>): Promise<void> {
     const keep = this.#o.keepCopies ?? KEEP_RESTORED_COPIES;
-    for (const f of [DELIVERED, "restored-pi-state-superseded"]) await pruneAsides(join(this.#o.dataDirectory, f), keep, splitDashStamp).catch(() => undefined);
+    for (const f of [DELIVERED, "restored-pi-state-superseded"]) await pruneAsides(join(this.#o.dataDirectory, f), keep, splitDashStamp, made).catch(() => undefined);
   }
 }
 
@@ -630,7 +636,7 @@ export class PiStateHost {
       // The old asides pile up (one per restore): only the newest few stay beside each store. A failure to remove one never fails a restore that is done.
       for (const s of staged) {
         const prefix = `${basename(s.target)}.before-restore-`;
-        await pruneAsides(dirname(s.target), this.#o.keepAsides ?? 2, (n) => (n.startsWith(prefix) && new RegExp(`^${STAMP}$`).test(n.slice(prefix.length)) ? { base: prefix, stamp: n.slice(prefix.length) } : undefined)).catch(() => undefined);
+        await pruneAsides(dirname(s.target), this.#o.keepAsides ?? 2, (n) => (n.startsWith(prefix) && new RegExp(`^${STAMP}$`).test(n.slice(prefix.length)) ? { base: prefix, stamp: n.slice(prefix.length) } : undefined), new Set([`${prefix}${stamp}`])).catch(() => undefined);
       }
       return { ok: true, summary: "restored", detail: { stores: stores.length, files: parsed.lines.length } };
     } finally {

@@ -83,20 +83,25 @@ export function controllerSettings(flags, env) {
   if (running !== undefined) {
     // Under the launcher the process runs in the release directory, so a relative path would name a folder inside the release (a new, empty installation for every release); and the launcher's own root and
     // pointer kind must be the ones used, or this start could never be confirmed. Both are refused rather than guessed.
-    for (const [what, v] of [["--data", flags.data], ["NIMBLENEWT_DATA", flags.data === undefined ? env.NIMBLENEWT_DATA || undefined : undefined], ["--config", flags.config], ["the release root", rootGiven]]) {
+    for (const [what, v] of [["--data", flags.data], ["NIMBLENEWT_DATA", flags.data === undefined ? env.NIMBLENEWT_DATA || undefined : undefined], ["--config", flags.config], ["the release root", rootGiven], ["--backup-dir", flags["backup-dir"]], ["NIMBLENEWT_BACKUP_DIR", flags["backup-dir"] === undefined ? env.NIMBLENEWT_BACKUP_DIR || undefined : undefined]]) {
       if (v !== undefined && !isAbsolute(v)) throw new Error(`${what} is the relative path ${JSON.stringify(v)}; under the launcher this process runs in the release directory, so give an absolute path`);
     }
     for (const [flag, name] of [["release-root", "NIMBLENEWT_RELEASE_ROOT"], ["release-switcher", "NIMBLENEWT_RELEASE_SWITCHER"]]) {
       if (flags[flag] !== undefined && env[name] && (flag === "release-root" ? resolve(flags[flag]) !== resolve(env[name]) : flags[flag] !== env[name])) throw new Error(`--${flag} differs from the launcher's ${name}; the launcher's setting must be used`);
     }
   }
+  // Backups (card K01i review): the switch is read strictly (a value that is not understood is an error, not "on"), and a folder given together with "no backups" is refused rather than silently ignored.
+  const noBackupsEnv = typeof env.NIMBLENEWT_NO_BACKUPS === "string" ? env.NIMBLENEWT_NO_BACKUPS.trim().toLowerCase() : "";
+  if (!["", "0", "false", "off", "1", "true", "on"].includes(noBackupsEnv)) throw new Error("NIMBLENEWT_NO_BACKUPS must be 1, true, on, 0, false or off");
+  const noBackups = flags["no-backups"] === true || ["1", "true", "on"].includes(noBackupsEnv);
+  if (noBackups && (flags["backup-dir"] !== undefined || env.NIMBLENEWT_BACKUP_DIR)) throw new Error("backups are switched off (--no-backups or NIMBLENEWT_NO_BACKUPS) and a backup folder is given too (--backup-dir or NIMBLENEWT_BACKUP_DIR); give one or the other");
   return {
     dataDir, configFile,
     ...(rootGiven === undefined ? {} : { release: { root: resolve(rootGiven), ...(kind === undefined ? {} : { switcher: kind }), ...(running === undefined ? {} : { runningRelease: running }) } }),
     environments: environmentsRequested(flags["local-host-environments"], env.NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS),
     serve: flags.serve === true,
     // Backups (card K01i): on by default, in <data>/backups; --backup-dir (or NIMBLENEWT_BACKUP_DIR) moves them, --no-backups (or NIMBLENEWT_NO_BACKUPS=1) turns the controller's own backup service off.
-    backups: flags["no-backups"] === true || env.NIMBLENEWT_NO_BACKUPS === "1" ? undefined : { directory: resolve(flags["backup-dir"] ?? (env.NIMBLENEWT_BACKUP_DIR || join(dataDir, "backups"))) },
+    backups: noBackups ? undefined : { directory: resolve(flags["backup-dir"] ?? (env.NIMBLENEWT_BACKUP_DIR || join(dataDir, "backups"))) },
     allowUnsupported: flags["allow-unsupported-environment"] === true,
   };
 }

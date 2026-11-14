@@ -149,6 +149,15 @@ test("backups are wired for production: on by default in <data>/backups, movable
   assert.deepEqual(why, ["a staged backup restore"]);
   assert.deepEqual(parseControllerArgs(["--no-backups", "--backup-dir", "x"]), { "no-backups": true, "backup-dir": "x" });
   assert.throws(() => parseControllerArgs(["--no-backups=1"]), /takes no value/);
+  // Review: a switch value that is not understood, or "no backups" together with a folder, is refused; under the launcher a relative backup folder (it would be inside the release directory) is refused.
+  assert.equal(controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "true" }).backups, undefined);
+  assert.equal(controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "0" }).backups.directory, join(data, "backups"));
+  assert.throws(() => controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "yes please" }), /NIMBLENEWT_NO_BACKUPS must be/);
+  assert.throws(() => controllerSettings({ data, "no-backups": true, "backup-dir": join(data, "b") }, {}), /give one or the other/);
+  assert.throws(() => controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "1", NIMBLENEWT_BACKUP_DIR: join(data, "b") }), /give one or the other/);
+  const launcherEnv = { NIMBLENEWT_RELEASE_ROOT: resolve("/r"), NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+  assert.throws(() => controllerSettings({ data, "backup-dir": "backups" }, launcherEnv), /--backup-dir is the relative path/);
+  assert.throws(() => controllerSettings({ data }, { ...launcherEnv, NIMBLENEWT_BACKUP_DIR: "b" }), /NIMBLENEWT_BACKUP_DIR is the relative path/);
 });
 
 test("secrets: the store first, the environment for a name the store lacks, never the owner's credential from the environment, set writes the store only (entry)", async () => {
@@ -280,23 +289,31 @@ test("production wiring of backups: a backup is made in <data>/backups, a restor
     const env = { NIMBLENEWT_RELEASE_ROOT: join(inst.base, "rel"), NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE };
     const c = capture();
     let seen;
-    const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, ready: (handle) => { seen = handle; } });
-    await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
-    const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
-    const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
-    assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
-    const made = await call("backup.now", {}, "b1");
-    assert.equal(made.ok, true, JSON.stringify(made));
-    assert.equal(existsSync(join(inst.dataDir, "backups")), true, "the backup is in <data>/backups");
-    assert.equal((await call("project.create", { name: "Late" }, "p2")).ok, true);
-    const preview = await call("backup.restore.preview", { name: made.result.item.name });
-    assert.equal(preview.ok, true, JSON.stringify(preview));
-    assert.match(JSON.stringify(preview.result), /restart/i);
-    const applied = await call("backup.restore.apply", { name: made.result.item.name, confirm: preview.result.item.token }, "r1");
-    assert.equal(applied.ok, true, JSON.stringify(applied));
-    assert.equal(applied.result.item.restart.automatic, true, "the controller restarts itself under the launcher");
-    let giveUp;
-    try { assert.equal(await Promise.race([done, new Promise((r) => { giveUp = setTimeout(() => r("still running"), 30_000); })]), 75, c.text); } finally { clearTimeout(giveUp); }
+    // The test's own stop (review): the entry installs no process signal handlers in the test process, and whatever fails below, the controller is stopped and waited for, so none is left running.
+    const ac = new AbortController();
+    let ended = false;
+    const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; } });
+    done.then(() => { ended = true; }, () => { ended = true; });
+    try {
+      await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+      const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+      const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+      assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
+      const made = await call("backup.now", {}, "b1");
+      assert.equal(made.ok, true, JSON.stringify(made));
+      assert.equal(existsSync(join(inst.dataDir, "backups")), true, "the backup is in <data>/backups");
+      assert.equal((await call("project.create", { name: "Late" }, "p2")).ok, true);
+      const preview = await call("backup.restore.preview", { name: made.result.item.name });
+      assert.equal(preview.ok, true, JSON.stringify(preview));
+      assert.match(JSON.stringify(preview.result), /restart/i);
+      const applied = await call("backup.restore.apply", { name: made.result.item.name, confirm: preview.result.item.token }, "r1");
+      assert.equal(applied.ok, true, JSON.stringify(applied));
+      assert.equal(applied.result.item.restart.automatic, true, "the controller restarts itself under the launcher");
+      let giveUp;
+      try { assert.equal(await Promise.race([done, new Promise((r) => { giveUp = setTimeout(() => r("still running"), 30_000); })]), 75, c.text); } finally { clearTimeout(giveUp); }
+    } finally {
+      if (!ended) { ac.abort(); let cap; await Promise.race([done.catch(() => undefined), new Promise((r) => { cap = setTimeout(r, 60_000); })]); clearTimeout(cap); }
+    }
     const after = await runEntry(["--data", inst.dataDir], env, async ({ controller }) => {
       const t = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
       const list = JSON.stringify(await controller.api.handle(t, { v: 1, op: "project.list", args: {} }));
