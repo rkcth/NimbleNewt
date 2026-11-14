@@ -454,6 +454,11 @@ export class MeetingService {
     return { created, missed, blocked, skipped: skippedSlots, ...(more && after !== undefined ? { next: after } : {}), ...(nextDue === undefined || more ? {} : { nextDueAt: new Date(nextDue).toISOString() }) };
   }
 
+  /** Whether the project is archived now (a project that cannot be found is not). Read fresh each time: no cache, so an archive or restore by another controller counts at once. */
+  async #archived(projectId: string): Promise<boolean> {
+    return ((await this.#runner.get("project", projectId))?.body as { state?: unknown } | undefined)?.state === "archived";
+  }
+
   async #readLead(): Promise<number> {
     try {
       const v = await this.#leadSetting?.();
@@ -478,6 +483,9 @@ export class MeetingService {
       const plan = this.#plan(schedule, ms(this.#runner.now()));
       const slot = plan.live[plan.live.length - 1] ?? plan.stale[plan.stale.length - 1];
       if (slot === undefined) return { skippedSlots: [], ...(schedule.nextPrepareAt === undefined ? {} : { nextPrepareAt: schedule.nextPrepareAt }) };
+      // Card P06: a schedule of an archived project makes nothing and moves nothing (its cursor stays, so it goes on from the restore). Read fresh at every look, and only when a slot is due
+      // (one read of the project per due schedule, none for the schedules with nothing due): a restore counts at the next tick.
+      if (await this.#archived(schedule.projectId)) return { skippedSlots: [] };
       const occurrenceId = derivedId("mto", `${scheduleId}\0${slot.key}`);
       const notes: TickSkip[] = [];
       try {
@@ -503,6 +511,8 @@ export class MeetingService {
     const found = await this.#runner.get("meeting-schedule", scheduleId);
     const schedule = found?.body as unknown as ScheduleBody | undefined;
     if (found === undefined || schedule === undefined || schedule.state !== "active") throw new DomainError("stale_revision", `schedule ${scheduleId} changed`);
+    // Card P06: looked at again inside the write, so an archive between the tick's look and the write is seen here (the caller looks again and makes nothing).
+    if (await this.#archived(schedule.projectId)) throw new DomainError("stale_revision", `the project of schedule ${scheduleId} was archived`);
     const nowIso = this.#runner.now();
     const nowMs = ms(nowIso);
     const plan = this.#plan(schedule, nowMs);
@@ -603,6 +613,8 @@ export class MeetingService {
     const result = await this.#retrying(() => this.#runner.command("meeting.urgent", { commandId: scoped, actor: by.id }, async () => ({
       payload: { projectId, title, reason, roster, durationMinutes },
       build: async () => {
+        // Card P06: an archived project holds its meetings (no invitations go out for it), so an urgent meeting is refused with a plain reason instead of being made and never sent.
+        if (await this.#archived(projectId)) throw new DomainError("invalid_command", `project ${projectId} is archived; restore it to call a meeting`, { field: "projectId" });
         const nowIso = this.#runner.now();
         const open = await this.#open(projectId);
         this.#checkOpenRoom(open);
@@ -669,6 +681,8 @@ export class MeetingService {
       const found = await this.#runner.get("meeting-occurrence", id);
       const body = found?.body as unknown as OccurrenceBody | undefined;
       if (found === undefined || body === undefined) throw new DomainError("not_found", `meeting ${id} does not exist`);
+      // Card P06: nobody is invited to a meeting of an archived project (nothing is marked as sent, so the invitations go out after a restore if the meeting has not ended by then).
+      if (await this.#archived(body.projectId)) return { invited: [], withheld: [] };
       if (body.state !== "planned" || body.mode !== "live" || ms(this.#runner.now()) >= ms(body.endsAt)) return { invited: [], withheld: body.participants.filter((p) => p.status !== "eligible" && p.status !== "owner-invited").map((p) => p.id) };
       const decided: ParticipantRecord[] = [];
       const todo: ParticipantRecord[] = [];

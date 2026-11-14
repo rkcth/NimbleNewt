@@ -573,7 +573,9 @@ export class StandupService {
       const notified: Record<string, string> = { ...(prep?.notified ?? {}) };
       const withheld: string[] = [];
       const sent: string[] = [];
-      const live = occurrence.mode === "live" && occurrence.state === "planned" && Date.parse(nowIso) < Date.parse(occurrence.endsAt);
+      // Card P06: no advance notice for a meeting of an archived project (its invitations are held too); nobody is recorded as told, so the notices go out after a restore if the meeting has not ended.
+      const held = occurrence.mode === "live" && occurrence.state === "planned" && ((await this.#runner.get("project", occurrence.projectId))?.body as { state?: unknown } | undefined)?.state === "archived";
+      const live = occurrence.mode === "live" && occurrence.state === "planned" && Date.parse(nowIso) < Date.parse(occurrence.endsAt) && !held;
       for (const p of occurrence.participants) {
         const availability = await this.#reach(p.id);
         const reachable = availability === "available" || (p.status === "owner-invited" && availability === "paused");

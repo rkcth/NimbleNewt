@@ -1646,6 +1646,25 @@ for (const backend of backends) {
     assert.equal(await status.ask(c.owner, { kind: "standups", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }), undefined, "a project that is not there reads as nothing to show");
   });
 
+  suite("card P06: the stand-ups answer of an archived project says the stand-ups are on hold, once, and says nothing of the kind before the archive or after the restore", async (c) => {
+    const running = { scheduleId: "msc-aaaaaaaaaaaaaaaaaaaa1", revision: 1, title: "Daily stand-up", state: "active", time: "09:00", timeZone: "UTC", recurrence: "daily", durationMinutes: 30, roster: [], occurrences: 0 };
+    const ended = { ...running, scheduleId: "msc-aaaaaaaaaaaaaaaaaaaa2", state: "ended" };
+    const status = c.rebuild({}, { standups: { recent: async () => ({ items: [], more: false }), overview: async (by: Principal) => (by.kind === "owner" ? { items: [running, running], more: false, ended: 0 } : undefined) } });
+    const onlyEnded = c.rebuild({}, { standups: { recent: async () => ({ items: [], more: false }), overview: async (by: Principal) => (by.kind === "owner" ? { items: [ended], more: false, ended: 0 } : undefined) } });
+    const hold = /archived, so its stand-ups are on hold: no meetings are made and no invitations are sent\. Nothing is lost; they carry on when the project is restored\./;
+    const held = async (s: StatusService): Promise<number> => (await s.ask(c.owner, { kind: "standups", projectId: c.project }))!.lines.filter((l) => hold.test(l.text)).length;
+    const flip = async (state: "archived" | "active") => c.projects.updateProject({ commandId: cid("st"), actor: c.owner.id, projectId: c.project, expectedRevision: (await c.projects.getProject(c.project))!.revision, state } as never);
+    assert.equal(await held(status), 0, "an active project says nothing of the kind");
+    await flip("archived");
+    assert.equal(await held(status), 1, "told once, however many stand-ups");
+    const lines = (await status.ask(c.owner, { kind: "standups", projectId: c.project }))!.lines;
+    assert.match(lines[0]!.text, hold, "the note comes first");
+    assert.equal(lines[0]!.cites[0]!.kind, "project");
+    assert.equal(await held(onlyEnded), 0, "an ended stand-up is not on hold, it is over");
+    await flip("active");
+    assert.equal(await held(status), 0, "after the restore the note is gone");
+  });
+
   suite("the hand-off going on for a task is told: who to whom, why, how far, what the package lacks, what holds it up and when a temporary one returns (card L03f)", async (c) => {
     const t = await c.projects.createTask({ commandId: cid("t"), actor: c.owner.id, projectId: c.project, title: "Build" });
     let going: Record<string, unknown> | undefined = { id: "hnd-1", revision: 3, taskId: t.id, from: { kind: "agent", id: "agt-a" }, to: { kind: "agent", id: "agt-b" }, phase: "blocked", mode: "prepared", reason: "Ann is leaving", requestedBy: "owner:rob", requestedAt: "2026-10-22T09:00:00.000Z", returnAt: "2026-11-01T00:00:00.000Z", package: { missing: ["next action"], ready: false }, blocked: { reason: "the task is still running a tool.", choices: ["wait", "cancel"] } };
