@@ -69,6 +69,20 @@ export async function projectIds(projects: Pick<ProjectService, "listProjects">)
   }
 }
 
+/**
+ * Card P06 (reviews fence): the IDs of the projects that are NOT archived, read fresh from storage on every call (no cache), so an archive or a restore by another controller counts at the next tick. The loops that start new
+ * work for an agent or send something to people use this list; the loops that only settle records that already exist keep using `projectIds`. Nothing is changed for an archived project: its waiting work stays as it is and
+ * is picked up by the first pass after the restore.
+ */
+export async function liveProjectIds(projects: Pick<ProjectService, "listProjects">): Promise<string[]> {
+  const out: string[] = [];
+  for (let after: string | undefined; ;) {
+    const page = await projects.listProjects({ ...(after === undefined ? {} : { afterId: after }), limit: PAGE });
+    for (const p of page) { after = p.id; if (p.state !== "archived") out.push(p.id); }
+    if (page.length < PAGE) return out;
+  }
+}
+
 /** The principal IDs of the active agents, a page at a time (the recipients whose held messages `release` retries). */
 export async function activeAgents(storage: Pick<ControllerStorage, "listAggregates">): Promise<string[]> {
   const out: string[] = [];
@@ -122,7 +136,7 @@ export function untoldImprovementLoops(improvements: { untold(by: Principal, pro
 }
 
 /** M03: for each project, the preparation of every planned occurrence (briefs, notices) and the delivery of agenda outcomes to the conversations they came from. */
-export function standupLoops(standups: Pick<StandupService, "prepare" | "deliverOutcomes">, meetings: Pick<MeetingService, "planned">, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+export function standupLoops(standups: Pick<StandupService, "prepare" | "deliverOutcomes">, meetings: Pick<MeetingService, "planned">, projects: () => Promise<readonly string[]>, outcomeProjects: () => Promise<readonly string[]> = projects): DispatcherLoop[] {
   return [
     {
       name: "standups.prepare",
@@ -138,7 +152,7 @@ export function standupLoops(standups: Pick<StandupService, "prepare" | "deliver
         }
       },
     },
-    { name: "standups.deliverOutcomes", run: async (by) => { for (const projectId of await projects()) await standups.deliverOutcomes(by, projectId); } },
+    { name: "standups.deliverOutcomes", run: async (by) => { for (const projectId of await outcomeProjects()) await standups.deliverOutcomes(by, projectId); } },
   ];
 }
 
