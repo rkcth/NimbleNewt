@@ -1,3 +1,4 @@
+import { type WatchdogSource } from "./watchdog.js";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -37,6 +38,8 @@ export interface UrgentWatchOptions {
   readonly critical?: CriticalSource;
   readonly backups?: BackupSource;
   readonly hosts?: HostSource;
+  /** The outage record of the outside watchdog (card U11d): what the controller raises, once, when it is running again. Absent: no watchdog is set up. */
+  readonly watchdog?: WatchdogSource;
   /** Test clock; the production clock is the system's. */
   readonly clock?: () => string;
   /** The longest one read from the backup folder or the host list may take before that check is given up for this sweep (default 20 seconds). */
@@ -138,8 +141,27 @@ export class UrgentWatch {
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.critical !== undefined) await this.#criticalCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.work !== undefined) await this.#stoppedCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
+    try { if (this.#o.watchdog !== undefined) await this.#watchdogCheck(settings, raised); } catch (error) { failure ??= error; }
     if (failure !== undefined) { this.#nextSweepAt = 0; throw failure; }
     return { raised, cleared };
+  }
+
+  /**
+   * The controller was down (card U11d): the outside watchdog noticed and told the owner on its own channel; now that this controller is running again it raises the outage ONCE as an Urgent item (every channel,
+   * quiet hours included unless the owner chose otherwise) and remembers that it did, so a restart does not raise it again. Times and the watchdog's count of messages only. The owner's `controllerDownNotice: false`
+   * keeps the item back (the outage is still remembered as seen). A record that cannot be read decides nothing.
+   */
+  async #watchdogCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[]): Promise<void> {
+    const source = this.#o.watchdog!;
+    const record = await within(source.pending(), this.#stepMs, "reading the watchdog's record");
+    if (record === undefined) return;
+    if (settings.controllerDownNotice !== false) {
+      const ref = { kind: "controller", id: `down-${record.downSince.replace(/[^0-9]/g, "").slice(0, 20)}` };
+      const told = record.tells === 0 ? "the watchdog could not tell you while it was down" : `the watchdog told you ${record.tells} time${record.tells === 1 ? "" : "s"} on the external channel`;
+      await this.#n.emitFromController({ commandId: `urg-controller-down:${record.downSince}`, kind: "maintenance", interrupt: true, ref, label: `Urgent: the controller was down from ${record.downSince}`, detail: `The controller was not answering from ${record.downSince}; ${told}. It is running again.`.slice(0, 190) });
+      raised.push("controller-down");
+    }
+    await source.raised(record.downSince);
   }
 
   /**

@@ -10812,3 +10812,44 @@ Branch `l04d-finish2` on origin/main `a3dccc4f` (already current; no merge neede
 - **Checked, not changed.** Every 2xx path of the trust commands writes the copy, and a replayed command writes it again, so the owner can retry an `unavailable` answer. A start whose copy write fails stays silent. A failed write after a change was already reported, and a crash between a change and its write is repaired by the next start's write. `announceRelease` (library) does not read the copy. The program only reaches it through `stage`, which checks first.
 - **Left, and accurate.** The implementer's list stands: same-uid edits or deletion of `trust-root.json` (the copy is not signed), real macOS and Windows runs, K07 maintenance windows, G11, and key distribution and rotation. One staleness window is added to it. Two controllers with SEPARATE release roots on different machines share one database, but each writes only its own machine's copy. A change made on one machine reaches the other machine's updater only at that controller's next trust change or start. Closing it needs a change feed or a periodic refresh. Nothing else in the card can be finished offline; the card is not flipped.
 - **Runs (Linux, merged with origin/main c32fe407, `npx tsc --build --force` clean, no stale dist tests, `api:docs:write` changed only the three summaries, `check:deps` ok; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, `/tmp/nn-slot.sh`, `--test-timeout=600000`):** `release/k02-finish` 56 of 56. Controller shard 1/3 4,320 of 4,320. Shard 2/3 4,884 of 4,885: the K01b encryption-manage command-line test hit its own 120 s limit with load average 63 on 32 cores. This is the known flake; it failed again alone under the same load and passed alone at 81 s once the load fell. Shard 3/3 4,617 of 4,617. worker 480 (2 skipped), pi-adapter 252, contracts 19, config 52 (24 skipped), ui 34, registry 15, integration 177 (10 skipped), `scripts/*.test.mjs` 155 (1 skipped). No failures besides the flake.
+
+## U11d (finish slice 3) (2026-11-14, branch u11d-finish3)
+
+Done in this slice (each with tests on all four storage backends where storage is touched):
+
+- **Answer a Needs-you item in place.** New owner-only op `needs-you.answer` (not from a task credential) routes by item kind: question,
+  review approval (allow/deny), meeting decision (agree/decline), held-resume (approve/decline), meeting question and blocker. The
+  `needs_you` status now returns structured `items` (kind, id, project, answer type) next to its lines. In chat it is a "propose" op
+  (shown first, applied on agreement), resolved from the owner's words against the live Needs-you list; several matches ask which.
+  The interpreter prompt describes it. Not built: web-door buttons (the view's own rendering).
+- **Deferred meeting items (M03)** appear in Needs you as meeting-question items (`meetings.openOwnerQuestions`, owner only, bounded).
+- **Per-agent "nothing else to do".** `WorkSource.agentOf/agentIdle` (assignments plus ready/running tasks across projects, minus tasks held by an
+  open blocker, bounded; unknown past the bounds or on a failing read). The stopped-work trigger now raises when the project OR the
+  agent the waiting task is assigned to has nothing else, with its own text and its own idle clock.
+- **Refusal counting** on the approved-call path (a call the owner approved but the agent no longer holds the grant for) and on the state API's own
+  `forbidden` answers to an agent credential.
+- **Integrity hooks.** A generic hook at the API door reports an `integrity` failure from any op once (covers staged restore, manifest,
+  maintenance settings reads through the API); swarm limits and context route settings are also wrapped (`watchIntegrity`).
+- **Watchdog outside the controller.** `notifications/watchdog.ts` and `scripts/nimblenewt-watchdog.mjs`: a separate process (no database, no
+  controller credential) probes the controller (heartbeat file or HTTP address), after N bad looks records the outage in a small file and tells
+  the owner through a webhook on its own channel (reminders on a schedule, bounded, restart-safe). When the controller runs again, `UrgentWatch`
+  raises that outage ONCE as an Urgent item (remembered in `<record>.raised`). Owner switch `controllerDownNotice` through
+  `notifications.configure` (free-form chat; false is shown first; prompt line added). Product option `watchdog: { file }` on `start`.
+
+Already satisfied (checked, nothing built): `scripts/local-host.mjs` passes `security` to LocalWorkspaces; `scripts/remote-host.mjs` wires `client.reportSecurity`.
+
+NOT done, exactly:
+- **Sandbox-escape signal.** No runtime observation tells an escape from a failed launch; only the swap-race tamper flag exists. Nothing invented.
+- **Integrity errors raised outside the API door** (the maintenance applier's caught error, startup restore recovery) are not reported.
+- **Watchdog, what offline cannot show:** a real external channel (only a loopback fake HTTP server was used), a real separate host or service
+  unit running the watchdog (printing a unit for it was not added), and the controller-down detection by a real killed process. The heartbeat
+  probe was tested with a fake clock and files, not a real hang. The default probe/tell use plain HTTP(S) through node:http.
+- Web-door buttons for answering in place; persistence of agent-idle clocks (memory only: a restart delays a page, never fires early).
+
+ASSUMPTION: the generic API-door integrity hook reports any `integrity` error once per normalised message (IDs and digits stripped).
+ASSUMPTION: only `forbidden` answers to an agent credential count as refusals (owner, host and bad-credential answers do not).
+ASSUMPTION: a no-grant refusal of an owner-approved call counts once, only when the call was still open.
+ASSUMPTION: `needs-you.answer` is "propose" in chat; a blocker is answerable only when its resolver is the owner.
+ASSUMPTION: meeting questions are listed in Needs you (rank after decisions).
+ASSUMPTION: an agent is idle if it has no other assigned ready/running task, in any project, free of an open blocker; an unreadable view decides nothing.
+ASSUMPTION: an outage seen while `controllerDownNotice` is false is marked seen and not raised later; the watchdog itself (outside) still tells.

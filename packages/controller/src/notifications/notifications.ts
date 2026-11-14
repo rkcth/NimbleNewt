@@ -61,6 +61,8 @@ export interface NotificationSettings {
   readonly securityReportsPerHour?: number | null;
   /** Whether the controller's own security detectors (a credential of another task, a host naming an attempt it never held, and the hooks of its workers) report at all (card U11d). Default true; false stops the reports, not the refusals. */
   readonly securityDetectors?: boolean;
+  /** Whether the controller raises an Urgent item for an outage the outside watchdog recorded, once it is running again (card U11d); default true. */
+  readonly controllerDownNotice?: boolean;
   /** Minutes a decision may wait while its project has nothing else to do before the controller raises it to Urgent (card U11d, stopped work); default 30, `null` turns it off and puts what it raised back to Needs you. */
   readonly stoppedWorkAfterMinutes?: number | null;
   /** Minutes a decision waiting for the owner may hold up a task on the critical path the owner marked before the controller raises it to Urgent, and the minutes it must have stopped doing so before it is put back (card U11d, "U11f"); default 5, `null` turns it off and puts what it raised back to Needs you. */
@@ -262,9 +264,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; criticalBlockedAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; controllerDownNotice?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; criticalBlockedAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "criticalBlockedAfterMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "controllerDownNotice", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "criticalBlockedAfterMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -306,6 +308,10 @@ export class NotificationService {
     if (command.urgentInterruptsQuietHours !== undefined) {
       if (typeof command.urgentInterruptsQuietHours !== "boolean") invalid("urgentInterruptsQuietHours", "must be true or false");
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
+    }
+    if (command.controllerDownNotice !== undefined) {
+      if (typeof command.controllerDownNotice !== "boolean") invalid("controllerDownNotice", "must be true or false");
+      next = { ...next, controllerDownNotice: command.controllerDownNotice };
     }
     if (command.securityDetectors !== undefined) {
       if (typeof command.securityDetectors !== "boolean") invalid("securityDetectors", "must be true or false");

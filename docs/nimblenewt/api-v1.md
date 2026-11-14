@@ -5179,6 +5179,7 @@ Arguments:
 - `sweepEverySeconds` (optional): seconds (5 to 3600) between two full sweeps by the dispatcher, also of the Urgent watch (default 60)
 - `urgentMinGapMinutes` (optional): whole minutes (1 to 1440) before the same record (a host that keeps going down and up) is sent again as Urgent (default 30; the item is still raised in the inbox); null turns it off
 - `securityReportsPerHour` (optional): whole number (1 to 1000) of security reports one host or service may raise as separate Urgent items per hour (default 20); the rest of that reporter's burst is collected in ONE item; null turns the limit off
+- `controllerDownNotice` (optional): true (default) or false: whether, when the controller is running again after an outage the outside watchdog noticed (it tells you on its own channel while the controller is down), the controller raises that outage as an Urgent item too; false keeps it back (the outage stays in the watchdog's record)
 - `securityDetectors` (optional): true (default) or false: whether the controller's own security detectors report (a task credential used on another task, a host naming an attempt it never held, the signs its local worker sees such as a Git folder planted in a checkout); false stops the reports, not the refusals; the same hourly allowance (securityReportsPerHour) bounds them
 - `deniedAlertsPerHour` (optional): how many agents' repeated refusals (1 to 1000) may send an Urgent message per hour (default 5; the rest are raised in the inbox only); null turns it off
 - `sendTimeoutSeconds` (optional): seconds (1 to 120) one channel send may take before it is retried later (default 10)
@@ -5187,7 +5188,7 @@ Arguments:
 - `hostDownAfterMinutes` (optional): whole minutes (1 to 1440) a host may stay silent before the controller raises an Urgent item (default 10); null turns it off
 - `deniedThreshold` (optional): refusals of one agent (2 to 10000) within deniedWindowMinutes that raise an Urgent item; not set or null: off
 - `deniedWindowMinutes` (optional): whole minutes (1 to 1440) the refusals are counted in (default 60)
-- `stoppedWorkAfterMinutes` (optional): whole minutes (1 to 10080) a decision waiting for you may hold up a project that has nothing else to do before the controller raises it to Urgent (default 30); null turns it off and puts what it raised back to Needs you
+- `stoppedWorkAfterMinutes` (optional): whole minutes (1 to 10080) a decision waiting for you may hold up a project, or the one agent whose task it is, with nothing else to do before the controller raises it to Urgent (default 30); null turns it off and puts what it raised back to Needs you
 - `criticalBlockedAfterMinutes` (optional): whole minutes (1 to 10080) a decision waiting for you may hold up a task on the critical path you marked before the controller raises it to Urgent, and the minutes it must have stopped doing so before it is put back to Needs you without a message (default 5); null turns it off and puts what it raised back to Needs you
 - `expectedRevision` (optional): the settings revision you read (0 or absent when none were set yet)
 
