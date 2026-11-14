@@ -2,3 +2,4 @@ export { NOTIFICATION_KINDS, levelOf, DEFAULT_STOPPED_WORK_AFTER_MINUTES, DEFAUL
 export { UrgentWatch, URGENT_LIMITS, type SecurityEvent, type UrgentWatchOptions, type BackupSource, type HostSource, type WorkSource, type CriticalSource } from "./urgent.js";
 export { SecurityDetectors, DETECT_LIMITS, type DetectedSecurity, type SecurityDetectorsOptions } from "./security-detect.js";
 export { workSource, WORK_LIMITS } from "./work-source.js";
+export { DownWatchdog, WATCHDOG_LIMITS, heartbeatProbe, httpProbe, webhookTell, readWatchdogRecord, writeWatchdogRecord, watchdogSource, type WatchdogRecord, type WatchdogSource, type Probe, type DownWatchdogOptions } from "./watchdog.js";

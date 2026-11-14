@@ -1,4 +1,5 @@
 import { DomainError, isDomainError } from "../domain/errors.js";
+import { TOLD_INTEGRITY, integrityKey } from "../notifications/security-detect.js";
 import { isStorageError } from "../storage/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { ProjectService } from "../domain/service.js";
@@ -279,6 +280,10 @@ export interface StateApiDeps {
   readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
+  /** The reviews and blockers `needs-you.answer` reaches (card U11d). */
+  readonly needsYouAnswers?: Context["needsYouAnswers"];
+  /** Told when the API answers `forbidden` to an agent (card U11d, refusal counting): the agent's ID and, for a task credential, its project. Never throws into the answer; what it returns is not waited for. */
+  readonly onDenied?: (denial: { readonly agentId: string; readonly projectId?: string }) => unknown;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
   readonly onInternalError?: (error: unknown) => void;
 }
@@ -306,10 +311,13 @@ export class StateApi {
 
   async handle(token: unknown, raw: unknown): Promise<ApiResponse> {
     const op = typeof raw === "object" && raw !== null && typeof (raw as { op?: unknown }).op === "string" ? (raw as { op: string }).op.slice(0, 60) : "";
+    let who: Principal | undefined;
     try {
       const principal = this.#deps.taskCredentials !== undefined && typeof token === "string" && token.startsWith("tcr-") ? await this.#deps.taskCredentials.authenticate(token) : await this.#deps.principals.authenticate(token);
+      who = principal;
       return await this.#perform(principal, raw, op);
     } catch (error) {
+      this.#refused(who, error); this.#damaged(op, error);
       return { v: API_VERSION, op, ok: false, error: this.#error(error) };
     }
   }
@@ -317,7 +325,25 @@ export class StateApi {
   /** The same request as an already authenticated principal (card T09b: a typed command runs the operation as the one who typed it). Never throws; an error is the answer. */
   async handleAs(principal: Principal, raw: unknown): Promise<ApiResponse> {
     const op = typeof raw === "object" && raw !== null && typeof (raw as { op?: unknown }).op === "string" ? (raw as { op: string }).op.slice(0, 60) : "";
-    try { return await this.#perform(principal, raw, op); } catch (error) { return { v: API_VERSION, op, ok: false, error: this.#error(error) }; }
+    try { return await this.#perform(principal, raw, op); } catch (error) { this.#refused(principal, error); this.#damaged(op, error); return { v: API_VERSION, op, ok: false, error: this.#error(error) }; }
+  }
+
+  /**
+   * A stored record that fails its own integrity check (a staged restore that does not verify, a malformed artifact manifest, a damaged maintenance, swarm or route setting, and every other `integrity` error of the stores) is told to the
+   * security detectors (card U11d, source `integrity`) when an operation meets it: the answer to the caller is unchanged. The key is the operation and a digest of the message with its IDs and numbers taken out, so the same damage met
+   * again is one event, and the operation's name is the subject, so a burst of different messages from one operation is bounded. Never throws, never waits.
+   */
+  #damaged(op: string, error: unknown): void {
+    if (this.#deps.detect === undefined || !isDomainError(error) || (error as DomainError).code !== "integrity" || TOLD_INTEGRITY.has(error)) return;
+    try {
+      this.#deps.detect("integrity", { kind: "integrity-check-failed", key: integrityKey(`api:${op}`, (error as DomainError).message), subject: `op:${op.slice(0, 60)}` });
+    } catch { /* telling the owner never changes the answer */ }
+  }
+
+  /** An agent that was answered `forbidden` is a refusal like a tool call refused by the approval policy: it goes to the denial count in the background (never waited for, never thrown). */
+  #refused(principal: Principal | undefined, error: unknown): void {
+    if (principal === undefined || principal.kind !== "agent" || this.#deps.onDenied === undefined || !isDomainError(error) || (error as DomainError).code !== "forbidden") return;
+    try { void Promise.resolve(this.#deps.onDenied({ agentId: principal.id, ...(principal.taskScope === undefined ? {} : { projectId: principal.taskScope.projectId }) })).catch(() => undefined); } catch { /* the owner not being told never changes the answer */ }
   }
 
   async #perform(principal: Principal, raw: unknown, _op: string): Promise<ApiResponse> {
@@ -436,6 +462,7 @@ export class StateApi {
         ...(this.#deps.critical === undefined ? {} : { critical: this.#deps.critical }),
         ...(this.#deps.security === undefined ? {} : { security: this.#deps.security }),
         ...(this.#deps.detect === undefined ? {} : { detect: this.#deps.detect }),
+        ...(this.#deps.needsYouAnswers === undefined ? {} : { needsYouAnswers: this.#deps.needsYouAnswers }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
         ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),

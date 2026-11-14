@@ -1,3 +1,5 @@
+import { type WatchdogSource } from "./watchdog.js";
+import { agentIdleFrom, type AgentWork } from "./work-source.js";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -18,7 +20,17 @@ export interface HostSource {
  * What the stopped-work trigger needs to know about a project (card U11d, H12's view of available work): whether it has nothing else to do. `true`: no task of the project can go on; `false`: some can;
  * `undefined`: not known (too much to read, a failing read), which decides nothing. Reads only; never throws on purpose.
  */
-export interface WorkSource { idle(projectId: string): Promise<boolean | undefined> }
+export interface WorkSource {
+  idle(projectId: string): Promise<boolean | undefined>;
+  /**
+   * The per-agent half of the same view: the agent a task is assigned to (`undefined`: nobody, or not known), and whether that agent has nothing else to do anywhere: no other task assigned to it, in any project, that
+   * is ready or in progress and not held by an open blocker (`except` is the task the waiting item is about, which is not "else"). `undefined`: not known (too much to read, a failing read), which decides nothing.
+   */
+  agentOf?(taskId: string): Promise<string | undefined>;
+  agentIdle?(agentId: string, except: string): Promise<boolean | undefined>;
+  /** The same view read once per agent (its live tasks and which are held), so a sweep with several items of one agent reads that agent's work once; when present it is used instead of `agentIdle`. */
+  agentWork?(agentId: string): Promise<AgentWork | undefined>;
+}
 
 /** What the critical-path trigger needs (card U11d, "U11f"): the owner's marks turned into "does this task hold up the path" for one pass (`CriticalPathService.holdsUp`); `undefined`: nothing is marked. A throw means "not known" and decides nothing. */
 export interface CriticalSource { holdsUp(): Promise<HoldsUp | undefined> }
@@ -29,6 +41,8 @@ export interface UrgentWatchOptions {
   readonly critical?: CriticalSource;
   readonly backups?: BackupSource;
   readonly hosts?: HostSource;
+  /** The outage record of the outside watchdog (card U11d): what the controller raises, once, when it is running again. Absent: no watchdog is set up. */
+  readonly watchdog?: WatchdogSource;
   /** Test clock; the production clock is the system's. */
   readonly clock?: () => string;
   /** The longest one read from the backup folder or the host list may take before that check is given up for this sweep (default 20 seconds). */
@@ -130,8 +144,27 @@ export class UrgentWatch {
     try { if (this.#o.hosts !== undefined) failure ??= await this.#hostCheck(by, settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.critical !== undefined) await this.#criticalCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
     try { if (this.#o.work !== undefined) await this.#stoppedCheck(settings, raised, cleared); } catch (error) { failure ??= error; }
+    try { if (this.#o.watchdog !== undefined) await this.#watchdogCheck(settings, raised); } catch (error) { failure ??= error; }
     if (failure !== undefined) { this.#nextSweepAt = 0; throw failure; }
     return { raised, cleared };
+  }
+
+  /**
+   * The controller was down (card U11d): the outside watchdog noticed and told the owner on its own channel; now that this controller is running again it raises the outage ONCE as an Urgent item (every channel,
+   * quiet hours included unless the owner chose otherwise) and remembers that it did, so a restart does not raise it again. Times and the watchdog's count of messages only. The owner's `controllerDownNotice: false`
+   * keeps the item back (the outage is still remembered as seen). A record that cannot be read decides nothing.
+   */
+  async #watchdogCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[]): Promise<void> {
+    const source = this.#o.watchdog!;
+    const record = await within(source.pending(), this.#stepMs, "reading the watchdog's record");
+    if (record === undefined) return;
+    if (settings.controllerDownNotice !== false) {
+      const ref = { kind: "controller", id: `down-${record.downSince.replace(/[^0-9]/g, "").slice(0, 20)}` };
+      const told = record.tells === 0 ? "the watchdog could not tell you while it was down" : `the watchdog told you ${record.tells} time${record.tells === 1 ? "" : "s"} on the external channel`;
+      await this.#n.emitFromController({ commandId: `urg-controller-down:${record.downSince}`, kind: "maintenance", interrupt: true, ref, label: `Urgent: the controller was down from ${record.downSince}`, detail: `The controller was not answering from ${record.downSince}; ${told}. It is running again.`.slice(0, 190) });
+      raised.push("controller-down");
+    }
+    await source.raised(record.downSince);
   }
 
   /**
@@ -144,9 +177,11 @@ export class UrgentWatch {
   async #stoppedCheck(settings: Awaited<ReturnType<NotificationService["controllerSettings"]>>, raised: string[], cleared: string[]): Promise<void> {
     const limitM = settings.stoppedWorkAfterMinutes === undefined ? DEFAULT_STOPPED_WORK_AFTER_MINUTES : settings.stoppedWorkAfterMinutes;
     const nowMs = Date.parse(this.#now());
-    const page = await this.#n.waitingOnOwner({ ...(this.#stopCursor === undefined ? {} : { after: this.#stopCursor }), limit: URGENT_LIMITS.waitingPerSweep });
+    const page = await this.#n.waitingOnOwner({ ...(this.#stopCursor === undefined ? {} : { after: this.#stopCursor }), limit: URGENT_LIMITS.waitingPerSweep, withTask: true });
     this.#stopCursor = page.next;
     const idle = new Map<string, boolean | undefined>();
+    const agentIdle = new Map<string, boolean | undefined>();
+    const agentWork = new Map<string, AgentWork | undefined>();
     let failure: unknown; let made = 0;
     for (const item of page.items) {
       try {
@@ -168,12 +203,47 @@ export class UrgentWatch {
           }
         }
         const v = idle.get(item.projectId);
-        if (v === undefined) continue;
-        if (!v) { if (item.stopped && (await this.#n.lowerStopped(item.id))) cleared.push(`work:${item.id}`); continue; }
+        // Two halves of "nothing else to do": the whole project has none, or the agent the waiting task is assigned to has none anywhere (card U11d). The agent's view is read only for an item that has waited the limit
+        // (or was raised that way), so the extra reads are bounded by the items that matter.
+        let scope: "project" | "agent" | undefined; let clock: string | undefined; let agentKnown = true;
+        if (v === true) { scope = "project"; clock = item.projectId; }
+        else if (item.taskId !== undefined && this.#o.work?.agentOf !== undefined && this.#o.work.agentIdle !== undefined && (item.stopped || nowMs - Date.parse(item.firstAt) >= limitM * 60_000)) {
+          let agent: string | undefined; let a: boolean | undefined;
+          try {
+            agent = await within(this.#o.work.agentOf(item.taskId), this.#stepMs, "reading who the task is assigned to");
+            if (agent !== undefined) {
+              const work = this.#o.work.agentWork;
+              if (work !== undefined) {
+                // Read once per agent and sweep, whatever number of its items wait.
+                if (!agentWork.has(agent)) agentWork.set(agent, await within(work.call(this.#o.work, agent), this.#stepMs, "reading the agent's work").catch(() => undefined));
+                a = agentIdleFrom(agentWork.get(agent), item.taskId);
+              } else {
+                const memo = `${agent}|${item.taskId}`;
+                if (!agentIdle.has(memo)) agentIdle.set(memo, await within(this.#o.work.agentIdle(agent, item.taskId), this.#stepMs, "reading the agent's work"));
+                a = agentIdle.get(memo);
+              }
+            }
+          } catch { a = undefined; }
+          if (agent === undefined) { /* nobody to say it: the project half decides */ }
+          else if (a === undefined) agentKnown = false;
+          else if (a === false) this.#idleSince.delete(`agent:${agent}`);
+          else {
+            scope = "agent"; clock = `agent:${agent}`;
+            if (!this.#idleSince.has(clock)) {
+              this.#idleSince.set(clock, nowMs);
+              while (this.#idleSince.size > URGENT_LIMITS.projectsCounted) this.#idleSince.delete(this.#idleSince.keys().next().value as string);
+            }
+          }
+        }
+        if (scope === undefined || clock === undefined) {
+          // Nothing known to say it has nothing else to do: an item the watch raised is put back, when both halves were read and say work is there; a half that is not known decides nothing.
+          if (v !== undefined && agentKnown && item.stopped && (await this.#n.lowerStopped(item.id))) cleared.push(`work:${item.id}`);
+          continue;
+        }
         if (item.stopped || made >= URGENT_LIMITS.raisesPerSweep) continue;
-        const since = Math.max(Date.parse(item.firstAt), this.#idleSince.get(item.projectId) ?? nowMs);
+        const since = Math.max(Date.parse(item.firstAt), this.#idleSince.get(clock) ?? nowMs);
         if (!Number.isFinite(since) || nowMs - since < limitM * 60_000) continue;
-        if (await this.#n.raiseStopped(item.id, { minutes: Math.floor((nowMs - since) / 60_000), limit: limitM })) { made++; raised.push(`work:${item.id}`); }
+        if (await this.#n.raiseStopped(item.id, { minutes: Math.floor((nowMs - since) / 60_000), limit: limitM, scope })) { made++; raised.push(`work:${item.id}`); }
       } catch (error) { failure ??= error; }
     }
     if (failure !== undefined) throw failure;

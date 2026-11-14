@@ -12,6 +12,7 @@
 //   running release        NIMBLENEWT_RUNNING_RELEASE only (the launcher sets it) -> StartOptions.releases.runningRelease; it needs the release root
 //   liveness heartbeat     NIMBLENEWT_HEARTBEAT_FILE / _TOKEN / _INTERVAL_MS (the launcher sets them; startController reads them from the environment given here)
 //   environment changes    --local-host-environments or NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1; OFF by default (card A09b)
+//   watchdog record        --watchdog-record FILE or NIMBLENEWT_WATCHDOG_RECORD (absolute): the record of the outside watchdog (scripts/nimblenewt-watchdog.mjs); an outage it noted is raised once (card U11d)
 //   backups (card K01i)    on by default in DATA/backups; --backup-dir or NIMBLENEWT_BACKUP_DIR moves them; --no-backups or NIMBLENEWT_NO_BACKUPS=1 turns the backup service off
 // Secrets: provider keys and the database address are looked up by their configured NAME in the operating system's secret store (the owner's credential only there), and for a name the store does not
 // hold in the environment as NIMBLENEWT_SECRET_<NAME> (a service manager's way). Nothing secret is printed or put in an argument.
@@ -37,6 +38,7 @@ const HELP = `NimbleNewt controller entry
   --serve                        Also listen for the conversation on this computer (loopback only).
   --allow-unsupported-environment   Start on a system the start-up check does not support (recorded and printed at every start).
   --backup-dir DIR               Where the controller keeps its backups (or NIMBLENEWT_BACKUP_DIR; default DATA/backups).
+  --watchdog-record FILE         The record file of the outside watchdog (or NIMBLENEWT_WATCHDOG_RECORD; absolute): an outage it noted is raised once as Urgent when the controller runs again.
   --no-backups                   Do not run the controller's own backup service (or NIMBLENEWT_NO_BACKUPS=1).
   --local-host-environments      Let the worker host install approved package changes into agents' environments (or NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1). Off by default.
   --release-root DIR             The release root (or NIMBLENEWT_RELEASE_ROOT, which the launcher sets): turns on release staging and activation.
@@ -46,7 +48,7 @@ Exit codes: 0 stopped on purpose, 75 restart me, 1 could not start. Stops on SIG
 `;
 
 const BOOLEAN = new Set(["serve", "allow-unsupported-environment", "local-host-environments", "no-backups", "help"]);
-const VALUE = new Set(["data", "config", "release-root", "release-switcher", "backup-dir"]);
+const VALUE = new Set(["data", "config", "release-root", "release-switcher", "backup-dir", "watchdog-record"]);
 
 /** Strict arguments: an unknown flag, a flag without its value or a flag given twice is an error (a supervised program must not run with a setting it silently ignored). */
 export function parseControllerArgs(argv) {
@@ -95,6 +97,9 @@ export function controllerSettings(flags, env) {
   if (!["", "0", "false", "off", "1", "true", "on"].includes(noBackupsEnv)) throw new Error("NIMBLENEWT_NO_BACKUPS must be 1, true, on, 0, false or off");
   const noBackups = flags["no-backups"] === true || ["1", "true", "on"].includes(noBackupsEnv);
   if (noBackups && (flags["backup-dir"] !== undefined || env.NIMBLENEWT_BACKUP_DIR)) throw new Error("backups are switched off (--no-backups or NIMBLENEWT_NO_BACKUPS) and a backup folder is given too (--backup-dir or NIMBLENEWT_BACKUP_DIR); give one or the other");
+  // The outside watchdog's record (card U11d): absolute only (the watchdog and this process must name the same file, whatever folder each runs in).
+  const watchdogRecord = flags["watchdog-record"] ?? (env.NIMBLENEWT_WATCHDOG_RECORD || undefined);
+  if (watchdogRecord !== undefined && !isAbsolute(watchdogRecord)) throw new Error("the watchdog record (--watchdog-record or NIMBLENEWT_WATCHDOG_RECORD) must be an absolute file path");
   return {
     dataDir, configFile,
     ...(rootGiven === undefined ? {} : { release: { root: resolve(rootGiven), ...(kind === undefined ? {} : { switcher: kind }), ...(running === undefined ? {} : { runningRelease: running }) } }),
@@ -103,6 +108,7 @@ export function controllerSettings(flags, env) {
     // Backups (card K01i): on by default, in <data>/backups; --backup-dir (or NIMBLENEWT_BACKUP_DIR) moves them, --no-backups (or NIMBLENEWT_NO_BACKUPS=1) turns the controller's own backup service off.
     backups: noBackups ? undefined : { directory: resolve(flags["backup-dir"] ?? (env.NIMBLENEWT_BACKUP_DIR || join(dataDir, "backups"))) },
     allowUnsupported: flags["allow-unsupported-environment"] === true,
+    ...(watchdogRecord === undefined ? {} : { watchdogRecord }),
   };
 }
 
@@ -132,6 +138,7 @@ export function controllerStartOptions(settings, config, requestRestart) {
   return {
     ...(settings.backups === undefined ? {} : { backup: { directory: settings.backups.directory, ...(underLauncher ? { version: settings.release.runningRelease } : {}), restore: { restart } } }),
     ...(settings.release === undefined ? {} : { releases: settings.release }),
+    ...(settings.watchdogRecord === undefined ? {} : { watchdog: { file: settings.watchdogRecord } }),
     // Only under the launcher: without a supervisor nothing would start the process again, and the owner is told to restart by hand (the controller's own default).
     ...(restartable ? { transfer: { restart: { run: () => requestRestart("the database move or rollback") } } } : {}),
   };

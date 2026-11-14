@@ -61,6 +61,8 @@ export interface NotificationSettings {
   readonly securityReportsPerHour?: number | null;
   /** Whether the controller's own security detectors (a credential of another task, a host naming an attempt it never held, and the hooks of its workers) report at all (card U11d). Default true; false stops the reports, not the refusals. */
   readonly securityDetectors?: boolean;
+  /** Whether the controller raises an Urgent item for an outage the outside watchdog recorded, once it is running again (card U11d); default true. */
+  readonly controllerDownNotice?: boolean;
   /** Minutes a decision may wait while its project has nothing else to do before the controller raises it to Urgent (card U11d, stopped work); default 30, `null` turns it off and puts what it raised back to Needs you. */
   readonly stoppedWorkAfterMinutes?: number | null;
   /** Minutes a decision waiting for the owner may hold up a task on the critical path the owner marked before the controller raises it to Urgent, and the minutes it must have stopped doing so before it is put back (card U11d, "U11f"); default 5, `null` turns it off and puts what it raised back to Needs you. */
@@ -262,9 +264,9 @@ export class NotificationService {
   }
 
   /** The owner sets how notifications reach them (owner only; counts from the next notification). */
-  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; criticalBlockedAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
+  async configure(owner: Principal, command: NoActor & { expectedRevision?: number; channel?: "inbox" | "external"; channelName?: string; digestTimes?: readonly string[]; quietHours?: { start: string; end: string } | null; escalateAfterHours?: number | null; noticeRetentionDays?: number; escalationsPerHour?: number | null; sweepEverySeconds?: number; sendTimeoutSeconds?: number; urgentInterruptsQuietHours?: boolean; urgentMinGapMinutes?: number | null; deniedAlertsPerHour?: number | null; securityReportsPerHour?: number | null; securityDetectors?: boolean; controllerDownNotice?: boolean; backupMaxAgeHours?: number | null; hostDownAfterMinutes?: number | null; deniedThreshold?: number | null; deniedWindowMinutes?: number; stoppedWorkAfterMinutes?: number | null; criticalBlockedAfterMinutes?: number | null; levelByKind?: Readonly<Record<string, NotificationLevel | null>> }): Promise<{ revision: number }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner sets how notifications reach them`);
-    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "criticalBlockedAfterMinutes", "levelByKind"]);
+    onlyKnown(command, ["commandId", "expectedRevision", "channel", "channelName", "digestTimes", "quietHours", "escalateAfterHours", "noticeRetentionDays", "escalationsPerHour", "sweepEverySeconds", "sendTimeoutSeconds", "urgentInterruptsQuietHours", "urgentMinGapMinutes", "deniedAlertsPerHour", "securityReportsPerHour", "securityDetectors", "controllerDownNotice", "backupMaxAgeHours", "hostDownAfterMinutes", "deniedThreshold", "deniedWindowMinutes", "stoppedWorkAfterMinutes", "criticalBlockedAfterMinutes", "levelByKind"]);
     const current = await this.#runner.get("notification-settings", "installation");
     if ((command.expectedRevision ?? 0) !== (current?.revision ?? 0)) throw new DomainError("stale_revision", `notification settings are at revision ${current?.revision ?? 0}, not ${command.expectedRevision ?? 0}`, ...(current === undefined ? [] : [{ currentRevision: current.revision }]));
     const old = (current?.body as unknown as NotificationSettings | undefined) ?? DEFAULTS;
@@ -306,6 +308,10 @@ export class NotificationService {
     if (command.urgentInterruptsQuietHours !== undefined) {
       if (typeof command.urgentInterruptsQuietHours !== "boolean") invalid("urgentInterruptsQuietHours", "must be true or false");
       next = { ...next, urgentInterruptsQuietHours: command.urgentInterruptsQuietHours };
+    }
+    if (command.controllerDownNotice !== undefined) {
+      if (typeof command.controllerDownNotice !== "boolean") invalid("controllerDownNotice", "must be true or false");
+      next = { ...next, controllerDownNotice: command.controllerDownNotice };
     }
     if (command.securityDetectors !== undefined) {
       if (typeof command.securityDetectors !== "boolean") invalid("securityDetectors", "must be true or false");
@@ -996,7 +1002,7 @@ export class NotificationService {
    * alone (`false`). The message is an Urgent trigger of the controller like the U11c ones: sent at once, also in quiet hours unless the owner chose otherwise, inside the hourly Urgent limit and the minimum gap
    * for that record (otherwise the item is Urgent in the inbox only). Only the kind, the label (IDs) and the project's ID leave the installation. Never replays: the command ID holds the item and the time it was first seen.
    */
-  async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+  async raiseStopped(itemId: string, why: { readonly minutes: number; readonly limit: number; /** Which half of "nothing else to do" held: the whole project (default) or the agent the task is assigned to. */ readonly scope?: "project" | "agent" }): Promise<boolean> {
     return this.#raiseTrigger(itemId, "stoppedAt", why);
   }
 
@@ -1009,7 +1015,7 @@ export class NotificationService {
     return this.#raiseTrigger(itemId, "criticalAt", why);
   }
 
-  async #raiseTrigger(itemId: string, field: "stoppedAt" | "criticalAt", why: { readonly minutes: number; readonly limit: number }): Promise<boolean> {
+  async #raiseTrigger(itemId: string, field: "stoppedAt" | "criticalAt", why: { readonly minutes: number; readonly limit: number; readonly scope?: "project" | "agent" }): Promise<boolean> {
     const settings = await this.#settings();
     const now = this.#runner.now();
     const interrupts = settings.urgentInterruptsQuietHours !== false;
@@ -1027,10 +1033,10 @@ export class NotificationService {
       let held: ItemBody["held"];
       if (sendNow) { held = await this.#holdReason(settings, now, base); if (held !== undefined) sendNow = false; }
       const detail = stopped
-        ? `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`
+        ? (why.scope === "agent" ? `The agent working on this has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).` : `Project ${old.projectId ?? "-"} has had nothing else to do for ${why.minutes} minutes while this waits (limit ${why.limit}).`)
         : `This waits for you and holds up the critical path you marked in project ${old.projectId ?? "-"} (for ${why.minutes} minutes; limit ${why.limit}).`;
       const text = stopped
-        ? `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`
+        ? (why.scope === "agent" ? `URGENT, work is stopped: the agent has nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}` : `URGENT, work is stopped: nothing else to do in project ${old.projectId ?? "-"} while ${old.kind}: ${old.label}`)
         : `URGENT, the critical path is blocked in project ${old.projectId ?? "-"} by ${old.kind}: ${old.label}`;
       const delivery = sendNow ? this.#delivery(settings, { kind: "item", id: itemId }, text.slice(0, 400), now, `${itemId}|${old.firstAt}|${stopped ? "stopped" : "critical"}|${now}`, true) : undefined;
       try {

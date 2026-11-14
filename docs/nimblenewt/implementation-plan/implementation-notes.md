@@ -10860,3 +10860,61 @@ Independent review of `k01b-finish3` e3c5e4d0 (already on origin/main 8c2723d7; 
 - **Changed: the launcher integration test now runs on Windows.** It skipped there, so the launcher's wiring had no Windows coverage. On Windows the product's store is DPAPI (PowerShell), not unavailable; the test uses an in-memory store with the same calls there and the protected-file store elsewhere.
 - **Checked, not changed.** Upgrade: under the launcher signing is always given, so the new "encryption without signing" refusal cannot happen there; a direct host that passed encryption without signing gets one clear error before anything is opened. Older unsigned backups stay restorable (`since` in the signing record). A pinned installation whose keyring file disappeared is refused with K01b3's message; under the launcher that is a slowed crash loop that gives up with the owner told. Scope: a recorded setting is never changed by a start; only the owner narrows it, announced as weaker. Access: rekey, set and status are owner-only (task credentials refused); notices go to the owner's inbox. No passcode, recovery code or key material is in any notice, print or error; notices carry 16-character fingerprint prefixes. The composite secret store lets `NIMBLENEWT_SECRET_BACKUP__DASH__SIGNING__DASH__KEY` supply the signing key when the store has none (the operator's own environment; a later change shows as a new signing generation with a warning).
 - **Left.** Two controllers starting at the same moment on one PostgreSQL database with different secret-store settings could both try the first setting record; the epoch lets only one run, and the loser's start fails once and succeeds on retry. Real Keychain, DPAPI and Secret Service stores are still not exercised.
+## U11d (finish slice 3) (2026-11-14, branch u11d-finish3)
+
+Done in this slice (each with tests on all four storage backends where storage is touched):
+
+- **Answer a Needs-you item in place.** New owner-only op `needs-you.answer` (not from a task credential) routes by item kind: question,
+  review approval (allow/deny), meeting decision (agree/decline), held-resume (approve/decline), meeting question and blocker. The
+  `needs_you` status now returns structured `items` (kind, id, project, answer type) next to its lines. In chat it is a "propose" op
+  (shown first, applied on agreement), resolved from the owner's words against the live Needs-you list; several matches ask which.
+  The interpreter prompt describes it. Not built: web-door buttons (the view's own rendering).
+- **Deferred meeting items (M03)** appear in Needs you as meeting-question items (`meetings.openOwnerQuestions`, owner only, bounded).
+- **Per-agent "nothing else to do".** `WorkSource.agentOf/agentIdle` (assignments plus ready/running tasks across projects, minus tasks held by an
+  open blocker, bounded; unknown past the bounds or on a failing read). The stopped-work trigger now raises when the project OR the
+  agent the waiting task is assigned to has nothing else, with its own text and its own idle clock.
+- **Refusal counting** on the approved-call path (a call the owner approved but the agent no longer holds the grant for) and on the state API's own
+  `forbidden` answers to an agent credential.
+- **Integrity hooks.** A generic hook at the API door reports an `integrity` failure from any op once (covers staged restore, manifest,
+  maintenance settings reads through the API); swarm limits and context route settings are also wrapped (`watchIntegrity`).
+- **Watchdog outside the controller.** `notifications/watchdog.ts` and `scripts/nimblenewt-watchdog.mjs`: a separate process (no database, no
+  controller credential) probes the controller (heartbeat file or HTTP address), after N bad looks records the outage in a small file and tells
+  the owner through a webhook on its own channel (reminders on a schedule, bounded, restart-safe). When the controller runs again, `UrgentWatch`
+  raises that outage ONCE as an Urgent item (remembered in `<record>.raised`). Owner switch `controllerDownNotice` through
+  `notifications.configure` (free-form chat; false is shown first; prompt line added). Product option `watchdog: { file }` on `start`.
+
+Already satisfied (checked, nothing built): `scripts/local-host.mjs` passes `security` to LocalWorkspaces; `scripts/remote-host.mjs` wires `client.reportSecurity`.
+
+NOT done, exactly:
+- **Sandbox-escape signal.** No runtime observation tells an escape from a failed launch; only the swap-race tamper flag exists. Nothing invented.
+- **Integrity errors raised outside the API door** (the maintenance applier's caught error, startup restore recovery) are not reported.
+- **Watchdog, what offline cannot show:** a real external channel (only a loopback fake HTTP server was used), a real separate host or service
+  unit running the watchdog (printing a unit for it was not added), and the controller-down detection by a real killed process. The heartbeat
+  probe was tested with a fake clock and files, not a real hang. The default probe/tell use plain HTTP(S) through node:http.
+- Web-door buttons for answering in place; persistence of agent-idle clocks (memory only: a restart delays a page, never fires early).
+
+ASSUMPTION: the generic API-door integrity hook reports any `integrity` error once per normalised message (IDs and digits stripped).
+ASSUMPTION: only `forbidden` answers to an agent credential count as refusals (owner, host and bad-credential answers do not).
+ASSUMPTION: a no-grant refusal of an owner-approved call counts once, only when the call was still open.
+ASSUMPTION: `needs-you.answer` is "propose" in chat; a blocker is answerable only when its resolver is the owner.
+ASSUMPTION: meeting questions are listed in Needs you (rank after decisions).
+ASSUMPTION: an agent is idle if it has no other assigned ready/running task, in any project, free of an open blocker; an unreadable view decides nothing.
+ASSUMPTION: an outage seen while `controllerDownNotice` is false is marked seen and not raised later; the watchdog itself (outside) still tells.
+
+## U11d (finish slice 3) review (Claude agent, Opus, 2026-11-14)
+
+Branch `u11d-finish3` at `90612ccc`, merged with origin/main `8c2723d7` (no conflicts). Checked: owner-only and shown-first on every `needs-you.answer` kind, stale and repeated answers, the watchdog's secrets, bounds, addresses and restart behaviour, two controllers, the four backends, and the new tests on Windows and macOS.
+
+- **Fixed: a held resume could be answered under another check's name.** The item's ID is the resume check's, but the operation used only `taskId`. A check that was started over or replaced after the owner saw the item would have been approved or declined. Now the task's current check must be the item's (`invalid_transition` otherwise). Test on all backends (stub resume service).
+- **Fixed: the webhook address was a command-line argument.** Other users of the machine can read it there, and such addresses usually carry the channel's token. It now comes from `NIMBLENEWT_WATCHDOG_WEBHOOK` or the first line of an owner-only file (`--webhook-file`, mode 600 checked off Windows); `--webhook` is refused without repeating the value. The address must be https, except to this machine, and may not hold a user name or password. An invalid address no longer echoes itself in the error.
+- **Fixed: `--record` with a relative path passed the check on POSIX** (`resolve()` always starts with `/`), and every write then failed, so the owner was never told. `isAbsolute` now; the heartbeat file too.
+- **Fixed: `--every-seconds` above 60 meant the heartbeat probe never judged.** It treats a gap of more than half its 120 s limit as a pause of the watchdog. The limit is now `max(120 s, 3 x interval)`.
+- **Fixed: a stop request waited out the interval** (up to an hour). It now ends the pause at once.
+- **Fixed: a refused message was retried at every look** (every 15 s for the whole outage). It now waits 1, 2, 4 ... minutes, capped at the reminder gap or an hour. Each request has one hard time limit for the whole exchange (the socket idle limit alone let a trickling answer hold a look), and the response is closed after its status line.
+- **Fixed: no production start could raise the outage.** `StartOptions.watchdog` was not set by `scripts/nimblenewt-controller.mjs`. It now is, from `--watchdog-record` or `NIMBLENEWT_WATCHDOG_RECORD` (absolute only).
+- **Fixed: the stopped-work sweep re-read all of an agent's work for each of its waiting items** (up to 100 items x 5,000 tasks and 3,000 assignment reads per sweep). `WorkSource.agentWork` is now read once per agent per sweep; `agentIdle` derives from it.
+- **Hardened:** the controller's `<record>.raised` note is read only as a plain file of at most 64 bytes.
+- **Checked, not changed.** Every kind is owner-only (`ownerOnly` and `notFromTask`); an agent, a task credential and the reviews' replay rules were already tested. A review or blocker answered meanwhile is refused with where it stands, and the same answer again is a replay. A meeting question uses the revision read at the time of the answer. In chat the item comes from the live list, several matches ask, and the answer is a proposal. Two controllers raise one outage once (same command ID; test added). A crash between the raise and the `.raised` write raises it again under the same command ID, so the outcome is one item. The HTTP probe and webhook follow no redirects, and only the configured addresses are contacted. The record holds times and counts only. The implementer's claim stands: `scripts/local-host.mjs` passes `security` to `LocalWorkspaces` (reported through `composed.reportSecurity`), and `scripts/remote-host.mjs` sends through `client.reportSecurity`.
+- **Mutations (built files, one at a time, all caught):** `needs-you.answer` without `ownerOnly` (8 failures); the held-resume check removed (4); `.raised` ignored (4); reminders always due (1); owner refusals counted as an agent's (12); the per-agent read not shared (4); the waiting task counted as the agent's other work (1); plain http accepted to any host (1).
+- **Left, and accurate.** The implementer's list stands: a sandbox-escape signal, integrity errors outside the API door, a real external channel, a real separate host or service unit for the watchdog, a real killed or hung controller, web-door buttons, and agent idle clocks kept in memory. Two more items: the watchdog does not report on its own channel when the controller is back (the controller does), and two watchdogs on one record file can both send the first message.
+- **Runs (Linux, merged with origin/main 8c2723d7, `npx tsc --build --force` clean, no stale dist tests, `api:docs:write` unchanged, `check:deps` ok, task plan regenerated unchanged; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, `/tmp/nn-slot.sh`, `--test-timeout=600000`):** controller shard 1/3 4,881 of 4,881, 2/3 4,530 of 4,530, 3/3 4,518 of 4,518; worker 480 (2 skipped), pi-adapter 252, contracts 19, config 52 (24 skipped), ui 34, registry 15, integration 177 (10 skipped), `scripts/*.test.mjs` 161 (1 skipped). No failures and no flakes.

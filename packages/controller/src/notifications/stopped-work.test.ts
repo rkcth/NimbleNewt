@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { BlockerService } from "../domain/blockers.js";
 import { DomainError } from "../domain/errors.js";
+import { AssignmentService } from "../domain/assignments.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
@@ -365,4 +366,133 @@ for (const backend of backends) {
       assert.ok(WORK_LIMITS.tasks >= WORK_LIMITS.taskPage);
     } finally { await world.close(); }
   });
+
+  suite("an agent with nothing else to do while its decision waits is enough, even when the project has other work: raised after the owner's minutes, said as the agent's, put back when it has work again, and an unknown agent view decides nothing (card U11d, per-agent half)", async (c) => {
+    const agents = new Map<string, string>(); const agentIdle = new Map<string, boolean | undefined>(); let reads = 0;
+    const source: WorkSource = {
+      idle: async (p) => c.work.idle.get(p),
+      agentOf: async (task) => agents.get(task),
+      agentIdle: async (agent) => { reads++; return agentIdle.get(agent); },
+    };
+    const watch = new UrgentWatch({ notifications: c.svc, work: source, clock: iso });
+    const { blockerId, taskId } = await c.held();
+    agents.set(taskId, "agent:ann");
+    await c.report(blockerId);
+    c.work.idle.set(c.projectA, false);   // other agents have work in the project
+    agentIdle.set("agent:ann", true);
+    // Before the owner's minutes have passed nothing is read about the agent, and nothing is raised.
+    await watch.sweep(c.owner);
+    assert.equal(reads, 0, "the agent's work is read only for an item that has waited the limit");
+    now += 31 * MIN; await watch.sweep(c.owner);
+    assert.equal((await c.stopped()).length, 0, "the agent was just seen idle: the minutes count from there");
+    now += 29 * MIN; await watch.sweep(c.owner);
+    assert.equal((await c.stopped()).length, 0);
+    now += 2 * MIN; const swept = await watch.sweep(c.owner);
+    assert.equal(swept.raised.length, 1, JSON.stringify(swept));
+    const [item] = await c.stopped();
+    assert.equal(item!.level, "urgent");
+    assert.match(item!.detail ?? "", /The agent working on this has had nothing else to do/);
+    await c.flush();
+    assert.equal(c.sent.length, 1, JSON.stringify(c.sent));
+    assert.match(c.sent[0]!.text, /URGENT, work is stopped: the agent has nothing else to do in project/);
+    assert.ok(!c.sent[0]!.text.includes(SECRET_TITLE) && !c.sent[0]!.text.includes("ann"), "no title and no agent name leave");
+    // Told once: later sweeps, with the agent still idle, send nothing more.
+    now += 5 * MIN; await watch.sweep(c.owner); await c.flush();
+    assert.equal(c.sent.length, 1);
+    // An agent view that cannot be read decides nothing: the item stays raised.
+    agentIdle.set("agent:ann", undefined);
+    now += MIN; await watch.sweep(c.owner);
+    assert.equal((await c.stopped()).length, 1, "not known: not put back");
+    // Work for the agent: put back to Needs you, silently.
+    agentIdle.set("agent:ann", false);
+    now += MIN; const back = await watch.sweep(c.owner);
+    assert.deepEqual(back.cleared, [`work:${item!.id}`]);
+    assert.equal((await c.stopped()).length, 0);
+    const [again] = (await c.open()).filter((i) => i.ref.id === blockerId);
+    assert.equal(again!.level, "needs-you");
+    assert.equal(c.sent.length, 1, "putting it back sends nothing");
+  });
+
+  suite("several decisions waiting on one agent read that agent's work once per sweep, and each is judged without its own task (card U11d review, per-agent half)", async (c) => {
+    const first = await c.held(); const second = await c.held();
+    await c.report(first.blockerId); await c.report(second.blockerId);
+    c.work.idle.set(c.projectA, false);
+    let reads = 0;
+    // The agent's live work is the two waiting tasks, both held by their blockers: idle whichever item is judged.
+    const source: WorkSource = {
+      idle: async (p) => c.work.idle.get(p),
+      agentOf: async () => "agent:ann",
+      agentIdle: async () => { throw new Error("the per-agent read is used instead"); },
+      agentWork: async () => { reads++; return { mine: [first.taskId, second.taskId], held: new Set([first.taskId, second.taskId]), complete: true }; },
+    };
+    const watch = new UrgentWatch({ notifications: c.svc, work: source, clock: iso });
+    now += 31 * MIN; await watch.sweep(c.owner);
+    assert.equal(reads, 1, "two items of one agent: one read");
+    now += 31 * MIN; const swept = await watch.sweep(c.owner);
+    assert.equal(reads, 2);
+    assert.equal(swept.raised.length, 2, JSON.stringify(swept));
+  });
+
+  suite("without a view of the agent, or with an item about no task or an unassigned one, only the project half applies (card U11d, per-agent half)", async (c) => {
+    const { blockerId, taskId } = await c.held();
+    await c.report(blockerId);
+    c.work.idle.set(c.projectA, false);
+    const noAgentView = new UrgentWatch({ notifications: c.svc, work: { idle: async (p) => c.work.idle.get(p) }, clock: iso });
+    now += 90 * MIN; await noAgentView.sweep(c.owner); now += 90 * MIN; await noAgentView.sweep(c.owner);
+    assert.equal((await c.stopped()).length, 0);
+    let asked = 0;
+    const unassigned = new UrgentWatch({ notifications: c.svc, work: { idle: async (p) => c.work.idle.get(p), agentOf: async () => { asked++; return undefined; }, agentIdle: async () => true }, clock: iso });
+    now += 90 * MIN; await unassigned.sweep(c.owner); now += 90 * MIN; await unassigned.sweep(c.owner);
+    assert.ok(asked > 0, `the assignee is looked up (${taskId})`);
+    assert.equal((await c.stopped()).length, 0, "nobody to say has nothing else to do");
+    await c.set({ stoppedWorkAfterMinutes: null });
+    const off = new UrgentWatch({ notifications: c.svc, work: { idle: async () => false, agentOf: async () => "agent:ann", agentIdle: async () => true }, clock: iso });
+    now += 90 * MIN; await off.sweep(c.owner);
+    assert.equal((await c.stopped()).length, 0, "the owner turned the trigger off");
+  });
 }
+
+test("the real work view: an agent has nothing else to do when no other task assigned to it, in any project, is ready or running and free of an open blocker; the waiting task itself does not count; unknown past its bounds or on a failing read (card U11d, per-agent half)", async () => {
+  for (const backend of backends) {
+    const world = await backend.open();
+    try {
+      const options = { clock: iso, pause: async () => undefined };
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, options);
+      const blockers = BlockerService.withEpoch(world.storage, projects.epoch, options);
+      const a = (await projects.createProject({ commandId: cid("pa"), actor: "owner:rob", name: "A" })).id;
+      const b = (await projects.createProject({ commandId: cid("pb"), actor: "owner:rob", name: "B" })).id;
+      const task = async (projectId: string, owner: string | undefined, to: "ready" | "in_progress" | "done" = "ready"): Promise<string> => {
+        const t = await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId, title: "work" });
+        let revision = t.revision;
+        for (const step of to === "ready" ? ["ready"] : to === "in_progress" ? ["ready", "in_progress"] : ["ready", "in_progress", "done"]) revision = (await projects.transitionTask({ commandId: cid("m"), actor: "owner:rob", taskId: t.id, expectedRevision: revision, to: step as never })).revision;
+        if (owner !== undefined && to !== "done") await assignments.assignTask({ commandId: cid("as"), actor: "owner:rob", taskId: t.id, owner: { kind: "agent", id: owner } });
+        return t.id;
+      };
+      const view = workSource({ tasks: projects, blockers, assignments });
+      const waiting = await task(a, "agent:ann");
+      assert.equal(await view.agentOf(waiting), "agent:ann");
+      assert.equal(await view.agentOf((await task(a, undefined))), undefined, "an unassigned task has no agent");
+      assert.equal(await view.agentIdle("agent:ann", waiting), true, `${backend.name}: the waiting task itself is not "something else"`);
+      const other = await task(b, "agent:ann");
+      assert.equal(await view.agentIdle("agent:ann", waiting), false, `${backend.name}: ready work in another project`);
+      assert.equal(await view.agentIdle("agent:bob", waiting), true, `${backend.name}: another agent's work does not count`);
+      const hold = await blockers.openBlocker({ commandId: cid("bl"), actor: "owner:rob", type: "manual_hold", subject: { kind: "task", id: other }, summary: "held", resolver: "owner:rob" });
+      assert.equal(await view.agentIdle("agent:ann", waiting), true, `${backend.name}: held by an open blocker`);
+      await task(a, "agent:ann", "done");
+      assert.equal(await view.agentIdle("agent:ann", waiting), true, `${backend.name}: finished work does not count`);
+      const running = await task(a, "agent:ann", "in_progress");
+      assert.equal(await view.agentIdle("agent:ann", waiting), false, `${backend.name}: running work`);
+      const bl = (await blockers.getBlocker(hold.id))!;
+      await blockers.resolveBlocker({ commandId: cid("rs"), actor: "owner:rob", blockerId: hold.id, expectedRevision: bl.revision, resolution: "ok" });
+      assert.equal(await view.agentIdle("agent:ann", waiting), false);
+      assert.equal(await view.agentIdle("agent:ann", running), false, "the other project's task is still work");
+      // Unknown: no way to list projects, a failing read, or too many projects to read.
+      assert.equal(await workSource({ tasks: { listTasks: projects.listTasks.bind(projects) }, blockers, assignments }).agentIdle("agent:ann", waiting), undefined);
+      assert.equal(await workSource({ tasks: { listTasks: projects.listTasks.bind(projects), listProjects: async () => { throw new Error("down"); } }, blockers, assignments }).agentIdle("agent:ann", waiting), undefined);
+      const many = Array.from({ length: WORK_LIMITS.projects + 1 }, (_, i) => ({ id: `proj-${i}` }));
+      assert.equal(await workSource({ tasks: { listTasks: projects.listTasks.bind(projects), listProjects: async () => many as never }, blockers, assignments }).agentIdle("agent:ann", waiting), undefined);
+      assert.equal(await workSource({ tasks: projects, blockers }).agentIdle("agent:ann", waiting), undefined, "no assignment service");
+    } finally { await world.close(); }
+  }
+});

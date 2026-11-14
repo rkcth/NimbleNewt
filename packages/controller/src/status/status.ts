@@ -393,7 +393,13 @@ export type StatusRequest =
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; since: string; id: string; rank: number }
+/** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
+export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string }
+/** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
+export type NeedKind = "question" | "approval" | "meeting-decision" | "meeting-question" | "held-resume" | "blocker";
+/** How an item is answered: one of the named choices, or the owner's own words. */
+export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer }
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
@@ -572,6 +578,8 @@ export interface StatusDeps {
   };
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
+  /** Questions a meeting asked the owner (card M03h; a deferred decision or agenda item asks one, card M05): the open ones across projects, oldest first. Owner only. Absent: they are not listed in the needs-you list. */
+  readonly meetingQuestions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; topic: string; question: string; askedAt: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
   /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
   readonly critical?: { readonly holdsUp: () => Promise<HoldsUp | undefined>; readonly list: (by: Principal) => Promise<{ readonly revision: number; readonly marks: readonly { readonly kind: string; readonly id: string; readonly markedAt: string }[] }> };
@@ -2107,7 +2115,7 @@ export class StatusService {
       const asked = await this.#deps.ownerQuestions.ownerQuestions(by, { limit: 51 });
       if (asked.items.length > 50) truncated.push("questions");
       for (const q of asked.items.slice(0, 50)) {
-        all.push({ text: `${shown(q.asker)} asks about ${quoted(q.task.title)}: ${quoted(q.question)} (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId, rank: 1 });
+        all.push({ text: `${shown(q.asker)} asks about ${quoted(q.task.title)}: ${quoted(q.question)} (answer the question)`, cites: [cite("inquiry", q.inquiryId, q.revision), cite("task", q.task.id)], taskId: q.task.id, since: q.askedAt, id: q.inquiryId, rank: 1, kind: "question", answer: { kind: "words" } });
       }
     }
     if (this.#deps.reviews !== undefined) {
@@ -2115,14 +2123,21 @@ export class StatusService {
       const pending = await this.#deps.reviews.ownerPending(by, 51);
       if (pending.length > 50) truncated.push("approvals");
       for (const r of pending.slice(0, 50)) {
-        all.push({ text: `An approval of ${quoted(r.name)} is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, since: r.requestedAt, id: r.id, rank: 0 });
+        all.push({ text: `An approval of ${quoted(r.name)} is waiting for you (allow or deny it)`, cites: [cite("review", r.id), cite("task", r.taskId)], taskId: r.taskId, projectId: r.projectId, since: r.requestedAt, id: r.id, rank: 0, kind: "approval", answer: { kind: "choice", choices: ["allow", "deny"] } });
       }
     }
     if (this.#deps.meetingDecisions !== undefined) {
       const waiting = await this.#deps.meetingDecisions(by, 51);
       if (waiting.truncated || waiting.items.length > 50) truncated.push("meeting decisions");
       for (const m of waiting.items.slice(0, 50)) {
-        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: ${quoted(m.text, 160)}`}${m.topic === undefined ? "" : ` (topic ${quoted(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], since: m.since, id: m.id, rank: 2 });
+        all.push({ text: `A meeting decision waits for you${m.text === undefined ? "" : `: ${quoted(m.text, 160)}`}${m.topic === undefined ? "" : ` (topic ${quoted(m.topic)})`}: ${m.left} change${m.left === 1 ? "" : "s"} left to carry out${m.applied > 0 ? ` (${m.applied} already done)` : ""} (agree, decline or choose another)`, cites: [cite("meeting-decision", m.id, m.revision), cite("project", m.projectId)], projectId: m.projectId, since: m.since, id: m.id, rank: 2, kind: "meeting-decision", answer: { kind: "choice", choices: ["agree", "decline"] } });
+      }
+    }
+    if (this.#deps.meetingQuestions !== undefined) {
+      const asked = await this.#deps.meetingQuestions(by, 51);
+      if (asked.truncated || asked.items.length > 50) truncated.push("meeting questions");
+      for (const q of asked.items.slice(0, 50)) {
+        all.push({ text: `A meeting asks you about ${quoted(q.topic, 80)}: ${quoted(q.question, 200)} (answer the question; the topic stays decided as the meeting left it)`, cites: [cite("owner-question", q.id, q.revision), cite("project", q.projectId)], projectId: q.projectId, since: q.askedAt, id: q.id, rank: 2, kind: "meeting-question", answer: { kind: "words" } });
       }
     }
     if (this.#deps.heldResumes !== undefined) {
@@ -2130,7 +2145,7 @@ export class StatusService {
       if (held.truncated || held.items.length > 50) truncated.push("held resumes");
       for (const h of held.items.slice(0, 50)) {
         const names = h.changes.slice(0, 3).map((c) => `${c.kind} ${shown(c.key)} (${c.status})`).join(", ");
-        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${heldWhy(h.changes.length, h.notReviewed === undefined ? 0 : (h.notReviewedCount ?? h.changes.length), h.notReviewed)}: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3 });
+        all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${heldWhy(h.changes.length, h.notReviewed === undefined ? 0 : (h.notReviewedCount ?? h.changes.length), h.notReviewed)}: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3, kind: "held-resume", answer: { kind: "choice", choices: ["approve", "decline"] } });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
@@ -2146,7 +2161,7 @@ export class StatusService {
         if (onTask && (await taskOf(b.subject.id))?.open === false) continue;
         if (owned >= 50) { blockersCut = true; break; }
         owned++;
-        all.push({ text: `${quoted(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id, rank: 4 });
+        all.push({ text: `${quoted(b.summary)} (${b.type}; resolve it or give what is missing)`, cites: [cite("blocker", b.id), ...(onTask ? [cite("task", b.subject.id)] : [])], ...(onTask ? { taskId: b.subject.id } : {}), since: b.openedAt, id: b.id, rank: 4, kind: "blocker", answer: { kind: "words" } });
       }
       if (page.next === undefined) break;
       after = page.next;
@@ -2198,7 +2213,7 @@ export class StatusService {
    * One list of what waits for the owner's decision: agent questions, reviews only the owner can decide, adopted meeting decisions waiting for the owner's answer, resume checks held for the owner (L04c), and open blockers whose resolver is the owner. What holds up the critical path the owner marked comes first, then what other open tasks wait for (how many), then oldest first, then the kind (approvals, questions, meeting decisions, held resumes, blockers).
    * `count` is the number found (each source up to 50); `truncated` names the sources (`questions`, `approvals`, `meeting decisions`, `held resumes`, `blockers`) that had more than was read, so the list may be missing items; the lines are cut at `limit`. Owner only (anyone else: undefined).
    */
-  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[]; /** How many of them hold up the critical path the owner marked (present when anything is marked). */ readonly critical?: number } | undefined> {
+  async needsYou(by: Principal, limit?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[]; readonly count: number; readonly truncated: readonly string[]; /** How many of them hold up the critical path the owner marked (present when anything is marked). */ readonly critical?: number; /** The same items as the lines, in the same order (the lines past `limit` are cut here too): what each is, and how it is answered in place with `needs-you.answer`. */ readonly items: readonly NeedItemView[] } | undefined> {
     if (by.kind !== "owner") return undefined;
     const cap = limit === undefined ? 20 : Number.isSafeInteger(limit) && limit >= 1 && limit <= 50 ? limit : invalid("limit", "must be 1 to 50");
     const { items, taskOf, truncated } = await this.#needItems(by);
@@ -2239,7 +2254,8 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    return { observedAt: this.#runner.now(), lines, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
+    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text }));
+    return { observedAt: this.#runner.now(), lines, items: views, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 
   // ---- one task ------------------------------------------------------------------------------------------------------------
