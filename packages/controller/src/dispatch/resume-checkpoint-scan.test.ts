@@ -48,14 +48,53 @@ for (const backend of backends) {
     const first = await c.contracts.prerequisitesOf(a.taskId, scan);
     assert.deepEqual(first?.dependsOn.map((x) => x.taskId), [b.taskId]);
     assert.equal(scan.size, 1);
-    // A dependency added after the scan is not in the shared scan (it is in the next tick's), but is read without one.
-    await c.contracts.addDependency(owner, { commandId: "dep-2", taskId: a.taskId, prerequisiteId: e.taskId });
+    // Nothing changed: the second ask reuses the scan (the same entry), it does not read the records again.
+    const kept = [...scan.values()][0];
     assert.deepEqual((await c.contracts.prerequisitesOf(a.taskId, scan))?.dependsOn.map((x) => x.taskId), [b.taskId]);
+    assert.equal([...scan.values()][0], kept, "an unchanged project's records are read once per scan");
+    // A dependency added after the scan was made is seen through it (review: a dependency added mid-tick must hold the dependent in that same tick), and so is one removed.
+    await c.contracts.addDependency(owner, { commandId: "dep-2", taskId: a.taskId, prerequisiteId: e.taskId });
+    assert.deepEqual((await c.contracts.prerequisitesOf(a.taskId, scan))?.dependsOn.map((x) => x.taskId).sort(), [b.taskId, e.taskId].sort());
+    assert.notEqual([...scan.values()][0], kept, "a changed project's records are read again");
     assert.deepEqual((await c.contracts.prerequisitesOf(a.taskId))?.dependsOn.map((x) => x.taskId).sort(), [b.taskId, e.taskId].sort());
-    // The state of a prerequisite is never taken from the scan.
-    const before = (await c.contracts.prerequisitesOf(a.taskId, scan))!.dependsOn[0]!.state;
-    assert.ok(before !== undefined);
+    await c.contracts.removeDependency(owner, { commandId: "dep-2-off", taskId: a.taskId, prerequisiteId: e.taskId });
+    assert.deepEqual((await c.contracts.prerequisitesOf(a.taskId, scan))?.dependsOn.map((x) => x.taskId), [b.taskId]);
+    // The state of a prerequisite is never taken from the scan: one cancelled after the scan reads cancelled through it.
+    assert.equal((await c.contracts.prerequisitesOf(a.taskId, scan))!.dependsOn[0]!.state, "ready");
+    const bt = (await c.projects.getTask(b.taskId))!;
+    await c.projects.transitionTask({ commandId: "b-cx", actor: owner.id, taskId: b.taskId, expectedRevision: bt.revision, to: "cancelled" });
+    assert.equal((await c.contracts.prerequisitesOf(a.taskId, scan))!.dependsOn[0]!.state, "cancelled");
     assert.equal((await c.contracts.prerequisitesOf(`task-${"a".repeat(20)}`, scan)), undefined);
+  });
+
+  suite("a dependency added while a tick runs holds the dependent asked about later in that same tick (review)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const one = await c.task("one", ann);
+    const two = await c.task("two", ann);
+    const base = await c.task("base", ann, { admit: false });
+    const asked: string[] = [];
+    const d = c.restart({
+      prerequisites: async (taskId, scan) => {
+        const got = await c.contracts.prerequisitesOf(taskId, scan);
+        if (got === undefined) return [];
+        if (asked.length === 0) {
+          // The first task of the tick has been checked: the owner now makes the other one wait for `base`.
+          const other = taskId === one.taskId ? two.taskId : one.taskId;
+          await c.contracts.addDependency(c.owner, { commandId: "mid-tick", taskId: other, prerequisiteId: base.taskId });
+        }
+        asked.push(taskId);
+        return got.dependsOn.filter((x) => x.state !== "done").map((x) => `${x.taskId} (${x.state})`);
+      },
+    });
+    c.worker.script = async () => ({ status: "completed", text: "done" });
+    const t = await d.tick();
+    await d.idle();
+    assert.ok(asked.length >= 2, `both tasks were asked about: ${JSON.stringify(asked)}`);
+    const second = asked.find((x) => x !== asked[0])!;
+    const attemptOf = second === one.taskId ? one.attemptId : two.attemptId;
+    assert.ok(!t.started.includes(attemptOf!), `the task given a prerequisite mid-tick did not start: ${JSON.stringify(t)}`);
+    const w = t.skipped.find((x) => x.attemptId === attemptOf);
+    assert.equal(w?.check, "dependency", JSON.stringify(t));
   });
 
   suite("a resume from a checkpoint other than the one the check is made against says so in the task's activity, once", async (c) => {

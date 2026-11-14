@@ -559,7 +559,8 @@ export class DispatcherService {
   async tick(): Promise<TickReport> {
     // A second call while a tick runs is the same tick: it waits for it and gets its report.
     if (this.#ticking !== undefined) return this.#ticking;
-    // One tick shares one scan of the dependency records per project (card L04d): each task's prerequisites are asked for in this tick, and the records are read once, not once per task. Task states are still read fresh each time.
+    // One tick shares one scan of the dependency records per project (card L04d): each task's prerequisites are asked for in this tick, and the records are read once, not once per task, while the project's
+    // dependency registry stays at the revision they were read at (a dependency added or removed mid-tick is seen by the next task asked about). Task states are still read fresh each time.
     this.#tickScan = new Map();
     const running = this.#tick();
     this.#ticking = running;

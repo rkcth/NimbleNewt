@@ -372,10 +372,24 @@ export class ContractService {
     const task = (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined;
     if (task === undefined) return undefined;
     const dependsOn: { taskId: string; state: string | undefined }[] = [];
-    // With a `scan` (one dispatcher tick's), the project's dependency records are read once and shared by every task asked about in that tick. The prerequisite tasks' states are read fresh every time.
-    const key = `edges:${task.projectId}`;
-    let edges = scan?.get(key) as Promise<(Aggregate & { taskId: string; prerequisiteId: string })[]> | undefined;
-    if (edges === undefined) { edges = this.#edgeRecords(task.projectId); if (scan !== undefined) { scan.set(key, edges); edges.catch(() => scan.delete(key)); } }
+    // With a `scan` (one dispatcher tick's), the project's dependency records are read once and shared by every task asked about in that tick, for as long as they are current: every change to a project's
+    // dependencies updates its registry record in the same write, so the registry's revision is read on every call (one record) and a scan kept under another revision is read again. A dependency added or
+    // removed mid-tick is therefore seen by the next task asked about, as without a scan. The registry is read before the records, so a scan is never older than the revision it is kept under.
+    // The prerequisite tasks' states are read fresh every time. A read that fails is not kept.
+    let edges: Promise<(Aggregate & { taskId: string; prerequisiteId: string })[]>;
+    if (scan === undefined) edges = this.#edgeRecords(task.projectId);
+    else {
+      const key = `edges:${task.projectId}`;
+      const revision = (await this.#runner.get("dep-registry", task.projectId))?.revision ?? 0;
+      const held = scan.get(key) as { revision: number; edges: typeof edges } | undefined;
+      if (held !== undefined && held.revision === revision) edges = held.edges;
+      else {
+        edges = this.#edgeRecords(task.projectId);
+        const entry = { revision, edges };
+        scan.set(key, entry);
+        edges.catch(() => { if (scan.get(key) === entry) scan.delete(key); });
+      }
+    }
     for (const e of (await edges).filter((x) => x.taskId === id)) {
       const pre = (await this.#runner.get("task", e.prerequisiteId))?.body as unknown as TaskBody | undefined;
       dependsOn.push({ taskId: e.prerequisiteId, state: pre?.state });
