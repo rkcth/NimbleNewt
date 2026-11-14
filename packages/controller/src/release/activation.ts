@@ -947,10 +947,17 @@ export class ReleaseActivationService {
    * until the next change or start, and a stale copy that still lists a withdrawn key must not go unnoticed.
    */
   async #mirrorTrust(): Promise<void> {
-    const t = await this.#trust.list();
-    try { await writeTrustMirror(this.#o.root, { required: t.required, keys: t.keys.map((k) => k.publicKey) }); } catch (error) {
-      throw new DomainError("unavailable", `the trust root change is recorded, but the updater's copy of it (trust-root.json) could not be written (${(error as NodeJS.ErrnoException).code ?? "error"}); it is written again at the next trust change or start`);
-    }
+    // One copy write at a time in this process. Another controller on the same database can change the root between our read and our write; the root is read again after the write and the copy rewritten
+    // until the revision it was written from is still the stored one, so a late write of an older root (one that still lists a withdrawn key) does not stay. A change still racing after that writes its own copy.
+    await this.#serial("trust-mirror", async () => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const t = await this.#trust.list();
+        try { await writeTrustMirror(this.#o.root, { required: t.required, keys: t.keys.map((k) => k.publicKey) }); } catch (error) {
+          throw new DomainError("unavailable", `the trust root change is recorded, but the updater's copy of it (trust-root.json) could not be written (${(error as NodeJS.ErrnoException).code ?? "error"}); it is written again at the next trust change or start`);
+        }
+        if ((await this.#trust.list()).revision === t.revision) return;
+      }
+    });
   }
   /** Owner or a holder of release.manage: keeps a signature after checking it against the trust root. Changes nothing that runs; a signature by an untrusted key is refused. */
   async attachSignature(by: Principal, command: NoActor & { candidateId: string; signature?: unknown; signatureFile?: unknown }): Promise<{ keyId: string; replayed: boolean }> {

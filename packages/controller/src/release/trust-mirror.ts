@@ -3,7 +3,7 @@ import { constants as fsc } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { renameReplacing } from "./launcher.js";
-import { parsePublicKey } from "./trust.js";
+import { SIGNING, parsePublicKey } from "./trust.js";
 
 /**
  * The updater's copy of the trust root (card K02, finish).
@@ -23,9 +23,13 @@ export async function writeTrustMirror(root: string, m: { readonly required: boo
   const body: TrustMirror = { version: 1, required: m.required, keys: [...m.keys] };
   const file = join(root, TRUST_MIRROR_FILE);
   const tmp = `${file}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
-  const fh = await open(tmp, "w", 0o644);
-  try { await fh.writeFile(`${JSON.stringify(body)}\n`); await fh.sync(); } finally { await fh.close(); }
+  const fh = await open(tmp, "wx", 0o644);
+  try { await fh.writeFile(`${JSON.stringify(body)}\n`); await fh.sync(); } catch (error) { await fh.close().catch(() => undefined); await rm(tmp, { force: true }).catch(() => undefined); throw error; }
+  await fh.close();
   try { await renameReplacing(tmp, file); } catch (error) { await rm(tmp, { force: true }).catch(() => undefined); throw error; }
+  // The rename itself is made durable where the platform allows it, so a power cut does not bring back the previous copy (one that may still list a withdrawn key).
+  let dir;
+  try { dir = await open(root, "r"); await dir.sync(); } catch { /* not every platform syncs a directory */ } finally { await dir?.close().catch(() => undefined); }
 }
 
 /** Reads the copy. `undefined` when there is none; throws an Error with a plain message when it is present and not valid. */
@@ -44,7 +48,7 @@ export async function readTrustMirror(root: string): Promise<TrustMirror | undef
   let v: unknown;
   try { v = JSON.parse(text); } catch { throw new Error(`${TRUST_MIRROR_FILE} is damaged`); }
   const o = v as { version?: unknown; required?: unknown; keys?: unknown };
-  if (typeof v !== "object" || v === null || Array.isArray(v) || o.version !== 1 || typeof o.required !== "boolean" || !Array.isArray(o.keys) || o.keys.length > 20) throw new Error(`${TRUST_MIRROR_FILE} is damaged`);
+  if (typeof v !== "object" || v === null || Array.isArray(v) || o.version !== 1 || typeof o.required !== "boolean" || !Array.isArray(o.keys) || o.keys.length > SIGNING.maxKeys) throw new Error(`${TRUST_MIRROR_FILE} is damaged`);
   const keys: string[] = [];
   for (const k of o.keys) { try { keys.push(parsePublicKey(k).publicKey); } catch { throw new Error(`${TRUST_MIRROR_FILE} holds a key that is not a usable Ed25519 public key`); } }
   return { version: 1, required: o.required, keys };

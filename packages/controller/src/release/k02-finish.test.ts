@@ -495,12 +495,40 @@ for (const backend of backends) {
       await act.requireSignature(c.owner, { commandId: cid("t"), required: null });
       assert.equal(mirror().required, true);
       // A damaged copy is refused, never guessed at.
-      for (const text of ["{", "[]", JSON.stringify({ version: 2, required: false, keys: [] }), JSON.stringify({ version: 1, required: false, keys: ["nope"] }), JSON.stringify({ version: 1, required: "no", keys: [] })]) {
+      for (const text of ["{", "[]", JSON.stringify({ version: 2, required: false, keys: [] }), JSON.stringify({ version: 1, required: false, keys: ["nope"] }), JSON.stringify({ version: 1, required: "no", keys: [] }), JSON.stringify({ version: 1, required: false, keys: Array.from({ length: 21 }, () => k.publicKey) })]) {
         writeFileSync(join(c.root, TRUST_MIRROR_FILE), text);
         unlockAll(join(c.root, "releases")); rmSync(join(c.root, "releases"), { recursive: true, force: true });
         await assert.rejects(stageRelease({ root: c.root, source: src, digest, signature: good }), (e: unknown) => e instanceof UpdaterError && e.code === "signature" && /cannot be used/.test(e.message), text);
       }
     } finally { rmSync(src, { recursive: true, force: true }); unlockAll(join(c.root, "releases")); }
+  });
+
+  suite("a trust change made by a second controller between this controller's read of the root and its write of the copy does not leave a withdrawn key in the copy (review)", async (c) => {
+    // Controller A reads the stored root through a storage view that lets controller B commit a removal right after A has read the root for its copy, and before A writes that copy.
+    let armed: number | undefined;
+    let interleave: (() => Promise<unknown>) | undefined;
+    const view = new Proxy(c.storage, {
+      get(target, prop, receiver) {
+        if (prop !== "getAggregate") { const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v; }
+        return async (ref: { kind: string; id: string }) => {
+          const found = await target.getAggregate(ref);
+          if (ref.kind === "release-trust" && armed !== undefined && found?.revision === armed && interleave !== undefined) { const run = interleave; interleave = undefined; await run(); }
+          return found;
+        };
+      },
+    });
+    const a = ReleaseActivationService.withEpoch(view, c.epoch, { root: c.root, switcher: "pointer", platform: linux, runner: options });
+    const b = c.make();
+    const mirror = (): { required: boolean; keys: string[] } => JSON.parse(readFileSync(join(c.root, TRUST_MIRROR_FILE), "utf8")) as never;
+    const k1 = keypair(), k2 = keypair();
+    const first = await b.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k1.publicKey });
+    // A adds k2 (revision first+1); when A next reads that revision (for its copy), B withdraws k1 and writes its own copy first.
+    armed = first.revision + 1;
+    interleave = async () => b.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: first.keyId });
+    await a.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k2.publicKey });
+    assert.equal(interleave, undefined, "the interleaving ran");
+    assert.deepEqual((await b.trust(c.owner)).keys.map((k) => k.publicKey), [k2.publicKey]);
+    assert.deepEqual(mirror().keys, [k2.publicKey], "the withdrawn key is not in the updater's copy");
   });
 
   suite("a trust root change whose updater copy cannot be written is recorded and says so; the next change repairs the copy", async (c) => {
