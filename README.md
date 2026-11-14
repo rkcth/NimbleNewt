@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **267 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **269 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -118,9 +118,9 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
-| Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 27 of 32 |
+| Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓░░` 84% | 16 of 19 |
-| Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 33% | 6 of 18 |
+| Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 38% | 7 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -477,7 +477,7 @@ Stall detection and bounded supervisor recovery.
 </details>
 
 <details>
-<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 27 of 32</summary>
+<summary><strong>Meetings</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 28 of 32</summary>
 
 Scheduling, votes and decisions, stand-ups, attendance and return to work, and facilitation.
 
@@ -508,7 +508,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 - [x] **M02g** · P35 · Meeting decisions: per-decision limit on widening changes, guarded refusals, chat reading of the decision log _(needs M02f)_
 - [x] **M03f** · P35 · Stand-ups: agenda outcomes to chat turns and inquiries, the open agenda and the owner's items in chat _(needs M03e)_
 - [x] **M04f** · P35 · Stopped-agent meeting exception in chat, and the host wake path _(needs M04e)_
-- [ ] **M02h** · P36 · Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap _(needs M02g)_
+- [x] **M02h** · P36 · Finish meeting records: steward agent, narrator, meeting chat commands, learned rules, aggregate cap _(needs M02g)_
 - [x] **M03g** · P36 · Finish stand-ups: allocation sink, follow-ups in the chat listing, stand-up chat commands _(needs M03f)_
 - [x] **M04g** · P36 · Compose a real safeLongRunning from the job records _(needs M04f)_
 - [x] **M03h** · P37 · Finish stand-ups: usage sink, owner questions raised by a stand-up, chat to run and read a stand-up _(needs M03g)_
@@ -544,7 +544,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓░░░░░░░░ 6 of 18</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓░░░░░░░░ 7 of 18</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
@@ -555,7 +555,7 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 - [x] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
 - [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [x] **P08c** · P33 · Guide project creation in chat and list integration defaults _(needs P08b)_
-- [ ] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
+- [x] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
 - [ ] **P03** · P35 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
 - [ ] **P02b** · P36 · Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_

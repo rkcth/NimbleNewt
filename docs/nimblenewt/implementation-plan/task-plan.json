@@ -7388,12 +7388,36 @@
       ],
       "deliverable": "Split from M02g (2026-10-31): the steward agent for decisions no coded rule covers (decidedBy steward), the narrator, chat commands for meetings (moving and voting, not only reading the log), learning auto-apply rules from the log once production data exists, and a cap across decisions on policy-agreed grants and raises, so splitting a list across several decisions cannot get round the per-decision limit of M02g. Also from the M02g reviews: a pending-decisions index instead of scanning, expiry of stale holds and whether the gate, rights and target checks come before a hold (owner question), order dependence between allowed and asked widening changes, re-driving an applying change after a decline in a held decision, waitingFor when the apply loop ends at exactly 10 changes, and clearing the held flag",
       "acceptance_and_verification": "Unforeseen decisions go to a capable agent under the same widening policy; the commands are reachable through chat",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "7a290de4",
+          "9891fa4c",
+          "554331ad",
+          "a1160743",
+          "1ff1c74a",
+          "33b2f991",
+          "b8c3082c",
+          "fa77f90a",
+          "14f3b2df",
+          "34897dda",
+          "855e902b",
+          "7aa6cb48",
+          "235e3fa0",
+          "36280d77"
+        ],
+        "ci_runs": [
+          "43598501884"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Widening changes the policy leaves to the owner can go to a steward agent (owner switch per class, rights separately, default off) under the same per-decision limit, the new rolling 24-hour cap across decisions per project and the raise ceiling, logged decidedBy steward; a failure, slow, nonsense or ask reply goes to the owner, and with no usable model route the vote asks the owner at once. The launcher wires the steward and narrator to the chat's model route; the sweep writes a time-limited narrator overview. Owner chat commands answer a held decision (agree, decline, own alternative), open and count a vote, table a motion, end a meeting and carry a decision out; the widening settings and a decision_patterns status are reachable in chat. Also: pending index, hold expiry (default 14 days, ends as a decline), checks before the hold, order independence, waitingFor at the tenth change, held flag cleared. Limits: steward and narrator judgement quality is unverified without a real model (offline proof with a scripted model); learned rules are suggestions only and are meaningful only with production data; the owner cannot move or vote on a motion (no seat; recorded ASSUMPTION), and amending a motion or adding an owner message by chat is not built; decisions made before the pending index existed are not listed."
+      }
     },
     {
       "id": "M03",
@@ -8621,12 +8645,28 @@
       ],
       "deliverable": "Retirement commands for projects, agents and responsibilities that release resources, revoke execution access and archive records (README 611; operational-contracts 91)",
       "acceptance_and_verification": "Archived records stay searchable under the same access rules; active resources, leases and worker slots are released; execution grants and credentials are revoked; retirement is refused while live assignments remain unless they are released or transferred first; a retired agent's ID is never reused and its records are retained per the retention policy; an archived project can be restored",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "df175c2e",
+          "c90cbf5b",
+          "e81944ce",
+          "611dcd1d",
+          "8b9bd38b",
+          "a7ab471d"
+        ],
+        "ci_runs": [
+          "43598501884"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Owner-confirmed, ledgered retirement of agents and archiving and restoring of projects through the API and free-form chat (preview and digest first). Retirement is refused while a live assignment remains; leases, bindings and duties are released; execution grant records are revoked and non-read grants on a principal's own record or a task credential stop working in an archived project; the agent's credential and identity are disabled; read-only access and searching are unchanged; a retired agent's ID is never reused and the ledger and agent records are held by retention. Limits: worker slots are released through the live-assignment refusal (an attempt ends with its assignment), shown with the real services on four backends but not with a running worker process or a remote host; a write in the same instant as the PostgreSQL archive check is not seen; scans fail closed above 50,000 records of a kind; the ledger lives in the database, not in an outside file. Not fenced by project state in an archived project (outside the card's clauses, which ask for grants and credentials to be revoked): deliverable roles that count read-only grants, meeting records allowed by roster and meeting schedules that keep making occurrences and invitations, and hosts and services that act by their kind; a grant for every project still writes there by design."
+      }
     },
     {
       "id": "P07",

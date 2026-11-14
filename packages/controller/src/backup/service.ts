@@ -1,9 +1,9 @@
 import { DomainError } from "../domain/errors.js";
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat, statfs } from "node:fs/promises";
 import type { FileBlobStore } from "../artifacts/index.js";
 import type { ControllerStorage } from "../storage/index.js";
 import { type BackupKind, type BackupManifest } from "./format.js";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention } from "./retention.js";
 import type { BackupScope, Keyring } from "./crypto.js";
 import type { SecretsSource } from "./secrets.js";
@@ -35,6 +35,11 @@ export interface BackupServiceOptions {
   readonly signer?: BackupSigner;
   /** The agents' own conversation stores on this machine (card K01h): copied into each backup. */
   readonly piState?: PiStateSource;
+  /**
+   * The free bytes on the disk that holds `dir` (default: the operating system's answer; undefined when it cannot say). A scheduled backup is not started when the disk has less room than the newest backup took plus a margin,
+   * so the automatic copy (on by default in the production entry, card K01i) cannot fill the disk the controller writes to; the owner's own "back up now" is not held back by it (review).
+   */
+  readonly freeBytes?: (dir: string) => Promise<number | undefined>;
   /** Tests only: passed to `createBackup` (the rename that puts a finished backup in place). */
   readonly renameFolder?: (from: string, to: string) => Promise<void>;
 }
@@ -131,8 +136,21 @@ export class BackupService {
     }
     const every = this.#options.everyMs ?? 24 * 3_600_000;
     if (newest !== undefined && this.#now().getTime() - Date.parse(newest.at) < every) return false;
+    const short = await this.#roomShort(newest?.path).catch(() => undefined);
+    if (short !== undefined) { this.#lastError = { at: this.#now().toISOString(), message: short }; return false; }
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
     return true;
+  }
+
+  /** Why the disk has no room for a scheduled backup, or undefined when it has (or cannot be asked: the backup then runs and a full disk fails it, as before). */
+  async #roomShort(newest: string | undefined): Promise<string | undefined> {
+    let dir = this.#options.root;
+    while (!await lstat(dir).then(() => true, () => false)) { const up = dirname(dir); if (up === dir) return undefined; dir = up; }
+    const free = await (this.#options.freeBytes ?? defaultFreeBytes)(dir);
+    if (free === undefined) return undefined;
+    const need = Math.ceil((newest === undefined ? 0 : await folderBytes(newest)) * 1.1) + SCHEDULED_FREE_MARGIN;
+    if (free >= need) return undefined;
+    return `the scheduled backup was not made: the disk has ${Math.floor(free / 1024 ** 2)} MiB free and a backup needs about ${Math.ceil(need / 1024 ** 2)} MiB (the newest backup's size and a margin); free some room or move the backups (--backup-dir)`;
   }
 
   #held = false;
@@ -185,4 +203,18 @@ export class BackupService {
     const newest = all[0];
     return { root: this.#options.root, count: all.length, running: this.#running !== undefined, piStateIncluded: this.#options.piState !== undefined, ...(newest === undefined ? {} : { newest: { name: newest.manifest.name, createdAt: newest.manifest.createdAt, kind: newest.manifest.kind } }), ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }) };
   }
+}
+
+/** The room a scheduled backup leaves on top of the newest backup's size (card K01i review). */
+export const SCHEDULED_FREE_MARGIN = 256 * 1024 * 1024;
+const defaultFreeBytes = async (dir: string): Promise<number | undefined> => { try { const s = await statfs(dir); return Number(s.bavail) * Number(s.bsize); } catch { return undefined; } };
+/** The bytes of the files under a backup folder (links are not followed). */
+async function folderBytes(dir: string): Promise<number> {
+  let total = 0;
+  for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) total += await folderBytes(p);
+    else if (e.isFile()) total += await stat(p).then((x) => x.size, () => 0);
+  }
+  return total;
 }
