@@ -326,6 +326,13 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.meetings.callUrgent(c.mgr, { ...command, commandId: cid("ug"), roster: [] }));
     await refuses("command_conflict", () => c.meetings.callUrgent(c.mgr, { ...command, title: "something else" }));
     await refuses("invalid_command", () => c.meetings.callUrgent(c.mgr, { ...command, commandId: cid("ug"), extra: 1 } as never));
+    // Card P06 review: in an archived project an urgent meeting is refused in plain words (its invitations would be held), even for the owner; after the restore it can be called.
+    const flip = async (state: "archived" | "active") => c.projects.updateProject({ commandId: cid("st"), actor: c.owner.id, projectId: c.a, expectedRevision: (await c.projects.getProject(c.a))!.revision, state } as never);
+    await c.meetings.settle(c.host, { commandId: cid("se"), occurrenceId: made.id, outcome: "held" });
+    await flip("archived");
+    await refuses("invalid_command", () => c.meetings.callUrgent(c.owner, { ...command, commandId: cid("ug") }), (e) => assert.match(e.message, /is archived; restore it to call a meeting/));
+    await flip("active");
+    assert.equal((await c.meetings.callUrgent(c.owner, { ...command, commandId: cid("ug") })).replayed, false);
   });
 
   suite("the agenda is retained: urgent first, limited to the participants named, cancelled or missed meetings give items back, held meetings defer what they did not reach", async (c) => {

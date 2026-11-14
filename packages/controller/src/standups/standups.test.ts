@@ -218,6 +218,19 @@ for (const backend of backends) {
     assert.equal(c.notices.filter((n) => n.agent === c.pB).length, 1);
   });
 
+  suite("card P06 review: a planned stand-up of an archived project sends no advance notice and records nobody as told; after the restore the notices go out", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    const flip = async (state: "archived" | "active") => c.projects.updateProject({ commandId: cid("st"), actor: c.owner.id, projectId: c.a, expectedRevision: (await c.projects.getProject(c.a))!.revision, state } as never);
+    await flip("archived");
+    const held = await c.standups.prepare(c.host, occ);
+    assert.deepEqual([held.notified, c.notices.length], [[], 0], "nothing is sent while the project is archived");
+    assert.deepEqual(Object.keys((await c.standups.prepared(c.owner, occ))?.notified ?? {}), [], "nobody is recorded as told");
+    assert.equal(held.briefs.length, 3, "the briefs (records only) are still made");
+    await flip("active");
+    const after = await c.standups.prepare(c.host, occ);
+    assert.deepEqual([...after.notified].sort(), [c.pA, c.pB, c.pC].sort(), "after the restore the notices go out");
+  });
+
   suite("through the controller's own messages, the advance notice cannot stop a preparation: a full inbox is told later and the briefs are made, a notice filed before a lost preparation record is not refused once the agent's task changed, and only an agent that was told is recorded as told (card M03h review)", async (c) => {
     const grants = GrantService.withEpoch(c.storage, c.epoch, options);
     for (const p of [c.pA, c.pB, c.pC]) await grants.grant(c.owner, { commandId: cid("g"), grantee: p, action: "task.read", project: c.a, source: "direct", basis: "test" });
