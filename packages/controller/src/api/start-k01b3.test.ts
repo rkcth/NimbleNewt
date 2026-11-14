@@ -12,6 +12,8 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { NotificationService } from "../notifications/index.js";
 import { startController } from "./index.js";
 
+/** A secret store in memory for the backup-signing key (signing is not optional where backups are encrypted). */
+const memorySecrets = () => { const m = new Map<string, string>(); return { resolve: async (n: string) => m.get(n), set: async (n: string, v: string) => { m.set(n, v); } }; };
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 const PASS = "correct horse battery staple";
@@ -35,7 +37,7 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
     let clock = Date.parse("2026-11-01T10:00:00.000Z");
     const start = (extra: object) => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, backup: { directory: join(d, "backups"), now: () => new Date(clock), ...extra } });
     const dir = join(d, "backups");
-    let c = await start({ encryption: { keyringFile, recoveryFile: recoveryPath } });
+    let c = await start({ signing: { store: memorySecrets() }, encryption: { keyringFile, recoveryFile: recoveryPath } });
     let token = "";
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
@@ -53,7 +55,7 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
       assert.equal((await call(zed, "backup.signing.status", {})).error?.code, "forbidden");
       // The status shows the setting and what it means.
       const status = (await call(boot.token, "backup.encryption.status", {})).result.item;
-      assert.deepEqual([status.setting.enabled, status.setting.scope, status.setting.revision], [true, "everything", 0]);
+      assert.deepEqual([status.setting.enabled, status.setting.scope, status.setting.revision], [true, "everything", 1]);
       assert.match(status.setting.text, /every file of a new backup is sealed/);
       // Bad asks.
       for (const [args, id] of [[{}, "i0"], [{ enabled: "no" }, "i1"], [{ scope: "all" }, "i2"], [{ enabled: false, passcode: PASS }, "i3"], [{ enabled: true }, "i4"]] as const) {
@@ -67,7 +69,7 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
 
       // Off: the next backup is plain, the change is said back, announced, and kept in the setting.
       clock += 61_000;
-      const off = await call(boot.token, "backup.encryption.set", { enabled: false, expectedRevision: 0 }, "s1");
+      const off = await call(boot.token, "backup.encryption.set", { enabled: false, expectedRevision: 1 }, "s1");
       assert.ok(off.ok, JSON.stringify(off));
       assert.deepEqual([off.result.enabled, off.result.weaker, off.result.changed], [false, true, true]);
       assert.match(off.result.text, /new backups are written in plain/);
@@ -78,7 +80,7 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
       assert.match(told[0]!.label, /made weaker/);
       assert.equal((await call(boot.token, "backup.encryption.set", { enabled: false }, "s2")).error?.code, "invalid_command", "already off");
       const after = (await call(boot.token, "backup.encryption.status", {})).result.item;
-      assert.deepEqual([after.setting.enabled, after.setting.revision, after.setting.changedBy], [false, 1, "owner:rob"]);
+      assert.deepEqual([after.setting.enabled, after.setting.revision, after.setting.changedBy], [false, 2, "owner:rob"]);
 
       // On again: the key was never touched, so no new key is needed; the next backup is sealed for the same key.
       clock += 61_000;
@@ -113,14 +115,14 @@ test("the owner switches backup encryption off, on and narrows its scope by chat
     // Dropping the keyring option from the configuration is refused while encryption is on (an installation that sealed backups does not go plain by omission) ...
     await assert.rejects(start({}), /no longer names a keyring file/);
     // ... and allowed once the owner has switched it off, by a recorded setting.
-    c = await start({ encryption: { keyringFile } });
+    c = await start({ signing: { store: memorySecrets() }, encryption: { keyringFile } });
     try {
       const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as Reply;
       const st = (await call("backup.encryption.status", {})).result.item;
       assert.equal(st.setting.enabled, true, "the setting survives a restart");
       assert.ok((await call("backup.encryption.set", { enabled: false }, "s6")).ok);
     } finally { await c.close(); }
-    c = await start({});
+    c = await start({ signing: { store: memorySecrets() } });
     try {
       clock += 61_000;
       assert.ok(((await c.api.handle(token, { v: 1, op: "backup.now", commandId: "b5", args: {} } as never)) as Reply).ok);
@@ -215,7 +217,7 @@ test("the quarterly proof is a Needs-you notification, becomes Urgent when it st
     let clock = Date.parse("2026-11-01T10:00:00.000Z");
     const sent: { text: string }[] = [];
     const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
-    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, backup: { directory: join(d, "backups"), now: () => new Date(clock), encryption: { keyringFile, passcodeFile: pf }, everyMs: 1000 * DAY }, notifications: { channels, clock: () => new Date(clock).toISOString() } });
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), manual: true, intervalMs: 1000 }, backup: { directory: join(d, "backups"), now: () => new Date(clock), signing: { store: memorySecrets() }, encryption: { keyringFile, passcodeFile: pf }, everyMs: 1000 * DAY }, notifications: { channels, clock: () => new Date(clock).toISOString() } });
     try {
       const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
       const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as Reply;
