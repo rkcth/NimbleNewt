@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { HostService } from "../hosts/index.js";
 import type { RemoteAttempt } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import { REMOTE_LIMITS, SCRIPT_PROTOCOL, type ControlMessage, type RunOutcomeWire, type SequencedControl } from "./protocol.js";
 import { orderDigest, runIdOf, ScriptOrders, type ScriptOrderInput } from "./script-orders.js";
 import { RemoteScriptRuns, orderProblem, type HostScriptLaunch, type HostScriptRunner } from "./script-runs.js";
+import { RemoteWorkerService } from "./service.js";
 import { refuses, remoteSuite, wireRefuses, type Ctx } from "./testing/suite.js";
 import { rawRequest } from "./testing/world.js";
 import { PROTOCOL_HEADER, SESSION_HEADER } from "./protocol.js";
@@ -277,6 +279,19 @@ for (const backend of backends) {
     void attempt;
   });
 
+  suite("T02d: a controller that took the store over orders nothing of a host whose session was opened with the earlier primary (the host connects again first)", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId } = await c.started(r1, "Order seeds");
+    const { epoch } = await c.storage.acquireEpoch({ holder: "controller-2", at: c.clock.now() });
+    const hosts = HostService.withEpoch(c.storage, epoch, c.assignments, c.options);
+    const second = RemoteWorkerService.withEpoch(c.storage, epoch, { principal: c.dispatcherPrincipal, hosts, artifacts: c.artifacts, dispatch: c.current as never }, c.options);
+    try {
+      await refuses("unavailable", () => second.runScript(c.dispatcherPrincipal, callOf(attemptId, r1.id), input(), new AbortController().signal), (e) => assert.match(e.message, /not connected to this controller in the session that holds the attempt/));
+      assert.deepEqual((await second.placement(c.dispatcherPrincipal, attemptId))!.control.filter((m) => m.kind === "run"), [], "nothing was sent");
+      assert.deepEqual(second.scriptRuns(c.dispatcherPrincipal, attemptId), []);
+    } finally { second.close(); }
+  });
+
   suite("T02d: a host whose session negotiated protocol 1 is never ordered a script, and the routes refuse it", async (c) => {
     const r1 = await c.host("r1", { protocol: { min: 1, max: 1 } });
     assert.equal(r1.client.session!.protocol, 1);
@@ -339,8 +354,14 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.remote.control(by, attemptId, { kind: "revoke", name: "a-ann.check", version: "1.0.0", choice: "ignore" } as never, placement));
     await refuses("invalid_command", () => c.remote.control(by, attemptId, { kind: "revoke", name: "", version: "1.0.0", choice: "cancel" }, placement));
     await refuses("fenced", () => c.remote.control(by, attemptId, { kind: "revoke", name: "a-ann.check", version: "1.0.0", choice: "cancel" }, placement + 1));
+    await c.remote.control(by, attemptId, { kind: "stop", emergency: false }, placement);
     await c.remote.control(by, attemptId, { kind: "revoke", name: "a-ann.check", version: "1.0.0", choice: "cancel" }, placement);
     assert.equal((await c.remote.placement(by, attemptId))!.control.filter((m) => m.kind === "revoke").length, 1);
+    // A revocation tells every running call of the version: those messages replace one another in the bounded queue, so many calls of one version cannot push the owner's stop out. Another version's is its own message.
+    for (let i = 0; i < REMOTE_LIMITS.control + 5; i++) await c.remote.control(by, attemptId, { kind: "revoke", name: "a-ann.check", version: "1.0.0", choice: "cancel" }, placement);
+    await c.remote.control(by, attemptId, { kind: "revoke", name: "a-ann.check", version: "2.0.0", choice: "cancel" }, placement);
+    const queue = (await c.remote.placement(by, attemptId))!.control;
+    assert.deepEqual(queue.map((m) => m.kind === "revoke" ? `revoke ${m.version}` : m.kind), ["stop", "revoke 1.0.0", "revoke 2.0.0"]);
   });
 }
 
@@ -426,6 +447,20 @@ test("T02d: the order book: the run ID follows the placement, a send that fails 
   assert.deepEqual(book.done("att-a", 1, "ses-2", runId, { state: "done", text: "x" }), { kept: false });
   assert.throws(() => book.fetch("att-a", 2, "ses-1", runId), /no such run/);
   book.close();
+  // A call that joined a run another caller stopped is never answered with an empty or late result: the run ends as stopped for it too, whatever the host reports.
+  const book2 = new ScriptOrders({ send: async (_a, _p, m) => { sent.push(m); } });
+  const first = new AbortController();
+  const a = book2.run(call, input(), first.signal).then(() => "ran", (e: Error) => e.message);
+  await until(() => book2.open("att-a").length === 1);
+  const b = book2.run(call, input(), new AbortController().signal).then((r) => `ran: ${JSON.stringify(r)}`, (e: Error) => e.message);
+  first.abort(new Error("first caller stopped"));
+  assert.equal(await a, "first caller stopped");
+  assert.equal(book2.open("att-a")[0]?.state, "aborting");
+  assert.ok(sent.some((m) => m.kind === "abort"), "the host was told to stop it");
+  // The host's script had finished before the stop reached it: its output is not given to the joiner.
+  assert.deepEqual(book2.done("att-a", 1, "ses-1", runId, { state: "done", text: '{"late":true}' }), { kept: true });
+  assert.equal(await b, "the run was stopped before it ended");
+  assert.deepEqual(book2.open("att-a"), []);
   assert.match(await waiting, /closing/);
   assert.deepEqual(book.open("att-a"), []);
   await assert.rejects(book.run(call, input(), new AbortController().signal), /closing/);

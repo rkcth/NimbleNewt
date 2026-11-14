@@ -9,7 +9,7 @@ import type { JsonObject } from "../storage/types.js";
 import { RunningCallStore, ToolExecutionService, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
 import { FULL_ABILITIES, remoteSuite, type Ctx } from "./testing/suite.js";
 import type { RemoteAttempt } from "./client.js";
-import type { RemoteHost } from "./testing/world.js";
+import { REMOTE_CAPS, type RemoteHost } from "./testing/world.js";
 import type { SequencedControl } from "./protocol.js";
 import { RemoteScriptRuns, type HostScriptLaunch, type HostScriptRunner } from "./script-runs.js";
 
@@ -59,10 +59,11 @@ for (const backend of backends) {
   }
 
   /** An agent on a remote host with everything the bridge needs, a tool service whose remote runs go through the real remote service, and a host loop with a fake sandbox. */
-  async function rig(c: Ctx, o: { choice?: "finish" | "cancel" | "pause"; protocol?: { min: number; max: number }; hostName?: string } = {}): Promise<Rig> {
+  async function rig(c: Ctx, o: { choice?: "finish" | "cancel" | "pause"; protocol?: { min: number; max: number }; hostName?: string; /** What the remote host announces as its tools (default the interpreter the manifest names). */ tools?: readonly string[] } = {}): Promise<Rig> {
     const desks = DeskService.withEpoch(c.storage, c.epoch, c.options);
     const catalog = CatalogService.withEpoch(c.storage, c.epoch, desks, c.options);
-    const host = await c.host(o.hostName ?? "r1", o.protocol === undefined ? {} : { protocol: o.protocol });
+    // The remote host's facts are what it announced (its interpreters as `name@version`) and the capacity the owner declared; this machine's facts (`facts` below) are never used for it.
+    const host = await c.host(o.hostName ?? "r1", { caps: { ...REMOTE_CAPS, tools: [...(o.tools ?? ["node@22.19.0"])] }, ...(o.protocol === undefined ? {} : { protocol: o.protocol }) });
     const p = "agent:ann";
     const grants: Grant[] = [...workGrants(c.project), { action: "desk.write", project: c.project }, { action: "desk.read", project: c.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" }, { action: `tool.${personalNamespace(p).replace(/^a_/, "a-")}.*`, project: c.project }];
     const ann = await c.agent("ann", grants);
@@ -95,6 +96,7 @@ for (const backend of backends) {
     const paused: string[] = [];
     const make = (over: Partial<ToolExecutionDeps> = {}): ToolExecutionService => new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: { get: (...a: Parameters<typeof c.current.get>) => c.current.get(...a), toolOperation: (...a: Parameters<typeof c.current.toolOperation>) => c.current.toolOperation(...a) } as never,
+      // This machine's facts (it has the interpreter): asked only for a local host, so a remote host is judged by its own announcement.
       assignments: c.assignments, catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, desks, facts: async () => hostFacts,
       // Nothing is local: a call that reached this runner would be a call that ran on the wrong machine.
       runner: { run: async () => { throw new Error("the local runner must not run a remote host's tool"); } }, isLocalHost: () => false,
@@ -202,6 +204,18 @@ for (const backend of backends) {
       assert.match(JSON.stringify(out), /protocol 1/);
       assert.equal(r.launches.length, 0);
       assert.deepEqual((await c.remote.placement(c.dispatcherPrincipal, r.attemptId))!.control.filter((m) => m.kind === "run"), []);
+    } finally { await r.end(); }
+  });
+
+  suite("T02d: a remote host is judged by what IT announced, not by this machine's facts: a host that offers no interpreter the manifest names is refused before anything is ordered", async (c) => {
+    const r = await rig(c, { tools: [] });
+    try {
+      const name = await r.install("check", "1.0.0");
+      const refused = bad(await r.send("tool.invoke", { tool: name, version: "1.0.0", input: { url: "u" } }, "c-nonode"));
+      assert.match(refused.message, /cannot run on this host/);
+      assert.match(refused.message, /node/);
+      assert.equal(r.launches.length, 0);
+      assert.deepEqual((await c.remote.placement(c.dispatcherPrincipal, r.attemptId))!.control.filter((m) => m.kind === "run"), [], "nothing was ordered");
     } finally { await r.end(); }
   });
 

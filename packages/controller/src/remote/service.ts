@@ -1126,7 +1126,10 @@ export class RemoteWorkerService {
       }
       // A `look` or a `kill` replaces one of its kind still queued (review of L02e): every Stop pass asks for a look, and a worker that is slow to read must not find its stop, checkpoint, restart or note pushed out of the bounded
       // queue by repeated looks. The newer one says all the older one did; a worker that read the older one already is not hurt by its going.
-      const queued = msg.kind === "look" || msg.kind === "kill" ? current.body.control.filter((m) => m.kind !== msg.kind) : current.body.control;
+      // A `revoke` likewise replaces one queued for the same version (card T02d review): a revocation tells every running call of the version, and those messages say the same thing to the host, so several of them must not push a stop out.
+      const queued = msg.kind === "look" || msg.kind === "kill" ? current.body.control.filter((m) => m.kind !== msg.kind)
+        : msg.kind === "revoke" ? current.body.control.filter((m) => !(m.kind === "revoke" && m.name === msg.name && m.version === msg.version))
+        : current.body.control;
       return { next: { ...current.body, ...(contract === undefined ? {} : { contract }), controlSeq: seq, control: [...queued, { ...msg, seq }].slice(-REMOTE_LIMITS.control) } };
     }, "control");
     return done.body.controlSeq;

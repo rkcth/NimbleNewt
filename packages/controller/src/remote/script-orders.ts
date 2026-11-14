@@ -137,7 +137,8 @@ export class ScriptOrders {
       this.#end(run, new Error(`the host's script wrote more than ${run.order.maxOutputBytes} bytes`));
       return { kept: true };
     }
-    if (run.state === "aborting") { this.#end(run); return { kept: true }; }
+    // A run being stopped ends as stopped, whatever the host reports: a call that joined it and is still waiting must not take an empty answer (or output that came in after the stop) as the tool's result.
+    if (run.state === "aborting") { this.#end(run, new Error("the run was stopped before it ended")); return { kept: true }; }
     if (outcome.state === "done") this.#end(run, undefined, { text: outcome.text, ...(outcome.cpuMs === undefined ? {} : { cpuMs: outcome.cpuMs }), ...(outcome.memoryMb === undefined ? {} : { memoryMb: outcome.memoryMb }) });
     else if (outcome.state === "failed") this.#end(run, new Error(redactText(outcome.error).slice(0, REMOTE_LIMITS.scriptErrorChars)));
     else this.#end(run, new Error("the host stopped the run"));

@@ -142,7 +142,10 @@ export interface ToolExecutionDeps {
   readonly state?: Pick<StateApi, "handle">;
   /** Card W13: the read-only memory tool. Absent: the operation answers as unavailable. */
   readonly recall?: Pick<RecallService, "recall">;
-  /** The host's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). */
+  /**
+   * This machine's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). Asked only for a host `isLocalHost` accepts: a remote
+   * worker host (card T02d) is judged by its own announcement and declared capacity.
+   */
   readonly facts?: (hostId: string) => Promise<HostFacts | undefined>;
   /**
    * Whether the host runs attempts on this machine. A script of the catalogue runs through this process's launcher, so a call made from an attempt on any other host (a remote worker, card H02) is refused instead of running on the wrong machine.
@@ -1180,7 +1183,9 @@ export class ToolExecutionService {
   }
 
   async #facts(hostId: string): Promise<HostFacts | undefined> {
-    if (this.#deps.facts !== undefined) return this.#deps.facts(hostId);
+    // The composer's facts describe this machine (the shipped composition passes the local script runner's, which takes no host): a remote worker host is judged by what it announced and the capacity the owner declared for it,
+    // never by this machine's interpreters (review of T02d remote execution).
+    if (this.#deps.facts !== undefined && this.#deps.isLocalHost(hostId)) return this.#deps.facts(hostId);
     const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
     const capacity = (await this.#deps.admission.snapshot()).capacity[hostId];
     return catalogFacts(status?.capabilities, capacity);
