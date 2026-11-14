@@ -97,10 +97,15 @@ test("user-requested deletion: material a resumable task needs is retained and s
     assert.equal(preview.result.status, "preview");
     assert.deepEqual([preview.result.derived.copies, preview.result.derived.summaries, preview.result.derived.compactions], [[copy.id], [sum.id], ["cmp-1"]]);
     assert.equal((await c.storage.getAggregate({ kind: "desk-record", id: rec.id }))!.body["body"], "North bed done", "a preview changes nothing");
+    // A second place that keeps backups for a different time: the confirmation says how long the text stays, by target (card K01c).
+    assert.ok((await call(boot.token, "backup.target.add", { name: "Other disk", kind: "disk", location: join(d, "other-disk"), keepDays: 10 }, "tgt1")).ok);
     const done = await call(boot.token, "retention.delete", { recordId: rec.id, reason: "owner asked" }, "d2");
     assert.ok(done.ok, JSON.stringify(done));
     assert.equal(done.result.status, "deleted");
     assert.equal(done.result.backups.handling, "left to expire");
+    assert.equal(done.result.backups.staysUpToDays, 34, "the main folder: the counts (7 daily, 4 weekly) are about 34 days, inside the 35-day age limit");
+    assert.deepEqual(done.result.backups.byTarget, [{ name: "Other disk", staysUpToDays: 10 }]);
+    assert.match(done.result.backups.note, /Other disk at the latest in 10 days/);
     assert.equal(done.result.backups.holding, 1);
     assert.match(done.result.backups.note, /not altered/);
     assert.match(done.result.derived.indexes, /none exist/); assert.match(done.result.derived.cachedReplies, /none are stored/);

@@ -1,3 +1,4 @@
+import { describeRules } from "../backup/retention.js";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -48,6 +49,8 @@ export interface RetentionValues {
   readonly backupWeekly: number;
   /** How many of the snapshots taken before a restore (kind pre-restore) are kept, newest first. `null`: keep them all (the default). */
   readonly preRestoreKept: number | null;
+  /** A backup older than this many days is deleted even when a daily or weekly count would keep it (card K01c; default 35, about what 7 daily and 4 weekly give). The newest good backup, the newest one verified complete and every pre-upgrade snapshot are never deleted by age. `null`: no age limit, the counts alone decide. */
+  readonly backupMaxAgeDays: number | null;
   /** Snapshots taken before a restore older than this many days are removed by the nightly run (the newest backup is always kept). `null`: no age limit (the default). They never take the place of a scheduled daily or weekly backup. */
   readonly preRestoreMaxAgeDays: number | null;
   /** How many minutes another start waits for the data directory lock's refresh before calling it stale when it cannot look for the holder's process (another host name, e.g. a container). `null`: never by age. Takes effect on the holder's next refresh. */
@@ -77,7 +80,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, noteArchiveDays: null, scratchArchiveDays: null, scratchPurgeDays: null, transcriptDays: null, deliveryLogDays: null, autoRun: false, thinkingDays: 14, thinkingAuto: true, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, noteArchiveDays: null, scratchArchiveDays: null, scratchPurgeDays: null, transcriptDays: null, deliveryLogDays: null, autoRun: false, thinkingDays: 14, thinkingAuto: true, backupDaily: 7, backupWeekly: 4, backupMaxAgeDays: 35, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -102,6 +105,7 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   thinkingAuto: { kind: "flag", min: 0, max: 1, nullable: false },
   backupDaily: { kind: "count", min: 1, max: 365, nullable: false },
   backupWeekly: { kind: "count", min: 0, max: 520, nullable: false },
+  backupMaxAgeDays: { kind: "days", min: 1, max: 3650, nullable: true },
   preRestoreKept: { kind: "count", min: 1, max: 1000, nullable: true },
   preRestoreMaxAgeDays: { kind: "days", min: 1, max: 3650, nullable: true },
   dataLockStaleMinutes: { kind: "count", min: 1, max: 10080, nullable: true },
@@ -202,7 +206,10 @@ export class RetentionSettingsService {
     if (this.#onChange !== undefined) { const now = applied ?? await this.effective().catch(() => undefined); if (now !== undefined) await this.#onChange(now); }
     const fmt = (v: unknown): string => (v === null ? "none" : String(v));
     const summary = changed.length === 0 ? "No retention value changed." : `Retention changed: ${changed.map((c) => `${c.field} ${fmt(c.old)} -> ${fmt(c.new)}`).join("; ")}.`;
-    return { revision: result.revision, changed, summary };
+    // Counts and the age limit side by side: when one overrides the other, the owner is told which decides (card K01c).
+    const backupChanged = changed.some((c) => c.field === "backupDaily" || c.field === "backupWeekly" || c.field === "backupMaxAgeDays");
+    const rules = backupChanged ? describeRules({ daily: (applied ?? this.#defaults).backupDaily, weekly: (applied ?? this.#defaults).backupWeekly, maxAgeDays: (applied ?? this.#defaults).backupMaxAgeDays }) : undefined;
+    return { revision: result.revision, changed, summary: rules === undefined ? summary : `${summary} ${rules.text}` };
   }
 
   #parse(body: unknown): Partial<RetentionValues> | undefined {

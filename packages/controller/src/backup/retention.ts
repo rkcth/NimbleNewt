@@ -11,6 +11,13 @@ export interface BackupInfo { readonly path: string; readonly manifest: BackupMa
 
 const secondOf = (iso: unknown): string | undefined => { if (typeof iso !== "string") return undefined; const t = Date.parse(iso); return Number.isNaN(t) ? undefined : `${new Date(t).toISOString().slice(0, 19)}.000Z`; };
 
+/** The info of one backup from its name and manifest (any target): the same trust rule as a folder on this machine. `mtime` stands in for the time of a name that is not a backup's. */
+export function infoOf(path: string, name: string, manifest: BackupManifest, mtime?: string): BackupInfo {
+  const named = parseBackupName(name);
+  const trusted = named !== undefined && manifest.name === name && manifest.kind === named.kind && secondOf(manifest.createdAt) === named.at;
+  return { path, manifest, at: named?.at ?? mtime ?? "0000-00-00T00:00:00.000Z", trusted };
+}
+
 /** The complete backups in a folder, newest first. A folder without a finished manifest (a backup that was interrupted, or something else) is not one and is not listed. */
 export async function listBackups(root: string): Promise<BackupInfo[]> {
   let names: string[];
@@ -32,14 +39,20 @@ export async function listBackups(root: string): Promise<BackupInfo[]> {
 }
 
 /** `preRestoreKept`: keep the newest this many snapshots taken before a restore (card K01h); absent or null: keep them all. `preRestoreMaxAgeDays`: those older than this are not kept (absent or null: no age limit). */
-export interface Retention { readonly daily: number; readonly weekly: number; readonly preRestoreKept?: number | null; readonly preRestoreMaxAgeDays?: number | null }
+export interface Retention {
+  readonly daily: number; readonly weekly: number; readonly preRestoreKept?: number | null; readonly preRestoreMaxAgeDays?: number | null;
+  /** Card K01c: a backup older than this many days is deleted even when a count would keep it (absent or null: no age limit). Never deleted by age: the newest good backup, a name in `protect`, a pre-upgrade snapshot, a snapshot taken before a restore (those have their own rules). */
+  readonly maxAgeDays?: number | null;
+  /** Card K01c: the names (folder names; `path` or `manifest.name`) of backups the age limit must not delete: the newest one verified complete. */
+  readonly protect?: ReadonlySet<string>;
+}
 export const DEFAULT_RETENTION: Retention = { daily: 7, weekly: 4 };
 
 const day = (iso: string): string => iso.slice(0, 10);
 /** The Monday (UTC) that starts the week the instant is in. */
 const week = (iso: string): string => { const d = new Date(`${day(iso)}T00:00:00.000Z`); const back = (d.getUTCDay() + 6) % 7; return new Date(d.getTime() - back * 86_400_000).toISOString().slice(0, 10); };
 
-/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, and every pre-upgrade snapshot (a later release decides when those may go). */
+/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, the newest manual or scheduled one (card K01c: a newer snapshot never takes its place), and every pre-upgrade snapshot (a later release decides when those may go). */
 export function chooseKept(backups: readonly BackupInfo[], retention: Retention = DEFAULT_RETENTION, now: Date = new Date()): Set<string> {
   const newestFirst = backups.filter((b) => b.trusted).sort((a, b) => b.at.localeCompare(a.at));
   // Snapshots taken before a restore are counted apart: they fill no daily or weekly slot (a scheduled backup of the same day is still kept) and do not stretch the time untrusted backups are kept for.
@@ -72,9 +85,40 @@ export function chooseKept(backups: readonly BackupInfo[], retention: Retention 
   };
   keepBy(day, retention.daily);
   keepBy(week, retention.weekly);
+  // The age limit (card K01c): a backup that is older, goes even when a count would keep it; the newest good one, the newest verified complete one and the snapshots with rules of their own stay.
+  // The newest good backup (a manual or scheduled one) is never deleted by any rule: a newer snapshot taken before an upgrade or a restore does not take its place.
+  const newestGood = newestFirst.find((b) => b.manifest.kind !== "pre-upgrade" && b.manifest.kind !== "pre-restore");
+  if (newestGood !== undefined) kept.add(newestGood.path);
+  if (retention.maxAgeDays !== undefined && retention.maxAgeDays !== null) {
+    const limit = new Date(now.getTime() - retention.maxAgeDays * 86_400_000).toISOString();
+    for (const b of newestFirst) {
+      if (!kept.has(b.path) || b.at >= limit || b.path === first?.path || b.path === newestGood?.path || b.manifest.kind === "pre-upgrade" || b.manifest.kind === "pre-restore") continue;
+      if (retention.protect?.has(b.path) === true || retention.protect?.has(b.manifest.name) === true) continue;
+      kept.delete(b.path);
+    }
+  }
   const oldestKept = newestFirst.filter((b) => kept.has(b.path) && !preRestoreOnly.has(b.path)).map((b) => b.at).sort()[0];
   for (const b of backups) if (!b.trusted && (oldestKept === undefined || b.at >= oldestKept)) kept.add(b.path);
   return kept;
+}
+
+/** How long a backup made today can stay under these rules, in days: the longer of the daily and weekly counts, cut short by the age limit when there is one (it is the answer a deletion confirmation gives, card K01c). */
+export function staysUpToDays(r: Pick<Retention, "daily" | "weekly" | "maxAgeDays">): number {
+  const byCounts = Math.max(r.daily, r.weekly * 7 + 6);
+  return r.maxAgeDays === undefined || r.maxAgeDays === null ? byCounts : Math.min(byCounts, r.maxAgeDays);
+}
+
+/**
+ * The counts and the age limit side by side, in plain words, for the owner (card K01c). `overrides` says which one decides: `age` when the age limit is shorter than the counts would keep a backup (the counts' extra
+ * copies are deleted early), `counts` when the counts let a backup go before the limit (the limit then matters only when backups stop), `none` without a limit.
+ */
+export function describeRules(r: Pick<Retention, "daily" | "weekly" | "maxAgeDays">): { readonly overrides: "none" | "age" | "counts" | "same"; readonly byCountsDays: number; readonly text: string } {
+  const byCounts = Math.max(r.daily, r.weekly * 7 + 6);
+  const base = `A backup is deleted once it falls outside the newest ${r.daily} daily and ${r.weekly} weekly copies${r.maxAgeDays === undefined || r.maxAgeDays === null ? "" : ` or is older than ${r.maxAgeDays} days`}. The newest backup, the newest one verified complete and every pre-upgrade snapshot are never deleted by age.`;
+  if (r.maxAgeDays === undefined || r.maxAgeDays === null) return { overrides: "none", byCountsDays: byCounts, text: `${base} There is no age limit, so the counts alone decide (about ${byCounts} days).` };
+  if (r.maxAgeDays < byCounts) return { overrides: "age", byCountsDays: byCounts, text: `${base} The age limit (${r.maxAgeDays} days) is shorter than the counts alone would keep a backup (about ${byCounts} days), so the age limit decides: copies between ${r.maxAgeDays} and ${byCounts} days old are deleted although a count would keep them.` };
+  if (r.maxAgeDays > byCounts) return { overrides: "counts", byCountsDays: byCounts, text: `${base} The counts let a backup go after about ${byCounts} days, sooner than the age limit (${r.maxAgeDays} days), so the counts decide; the age limit only matters when no new backups are made (then old copies still go once they are past it, but the newest good one stays).` };
+  return { overrides: "same", byCountsDays: byCounts, text: `${base} The counts and the age limit agree (about ${byCounts} days).` };
 }
 
 /** Deletes the backups outside every rule, and the `.partial` folders of backups that were interrupted (older than `partialAgeMs`, so one being written now is left alone). Returns what was removed. */

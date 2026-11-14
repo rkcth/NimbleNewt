@@ -22,6 +22,12 @@ export interface BackupServiceOptions {
   readonly retention?: Retention;
   /** The counts now in force (card K06: the owner's retention settings). Takes precedence over `retention` and is read at each prune. */
   readonly retentionSource?: () => Promise<Retention>;
+  /** The owner's schedule now in force (card K01c), read at each run; `undefined` leaves `everyMs`. `hourUtc`: the run is made in that hour of the day (a catch-up is made later if the machine was off). */
+  readonly scheduleSource?: () => Promise<{ readonly everyMs: number; readonly hourUtc?: number | null } | undefined>;
+  /** The folder names of the backups verified complete (card K01c): the newest of them is never deleted by age. */
+  readonly verifiedSource?: () => Promise<ReadonlySet<string>>;
+  /** Called after a backup was written and the old ones pruned (card K01c: copies to the targets, their retention, key generations). It never fails the backup: a failure is kept in the status. */
+  readonly afterBackup?: (made: { path: string; manifest: BackupManifest }) => Promise<void>;
   readonly pageSize?: number;
   /** The artifact store, if the installation has one: its blobs are part of each backup. */
   readonly blobs?: FileBlobStore;
@@ -111,7 +117,9 @@ export class BackupService {
       try {
         const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
         this.#lastError = undefined;
-        await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.#counts() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
+        await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.rules() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
+        // The copies to the targets run beside the next backups, not inside this one: a slow off-machine target never holds up the answer to "back up now" (the next backup waits for it, and shutdown does).
+        if (this.#options.afterBackup !== undefined) { const hook = this.#options.afterBackup; this.#after = this.#after.then(() => hook(made)).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `after the backup: ${error instanceof Error ? error.message.slice(0, 250) : String(error).slice(0, 250)}` }; }); }
         return made;
       } catch (error) {
         this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backup failed" };
@@ -134,8 +142,13 @@ export class BackupService {
       this.#lastError = { at: this.#now().toISOString(), message: error instanceof Error ? error.message.slice(0, 300) : "the backups folder could not be read" };
       return false;
     }
-    const every = this.#options.everyMs ?? 24 * 3_600_000;
-    if (newest !== undefined && this.#now().getTime() - Date.parse(newest.at) < every) return false;
+    const schedule = await this.#options.scheduleSource?.().catch(() => undefined);
+    const every = schedule?.everyMs ?? this.#options.everyMs ?? 24 * 3_600_000;
+    const age = newest === undefined ? Number.POSITIVE_INFINITY : this.#now().getTime() - Date.parse(newest.at);
+    if (schedule?.hourUtc !== undefined && schedule.hourUtc !== null && newest !== undefined) {
+      // A fixed hour: made in that hour once half a period has passed, or later (a catch-up) when the hour was missed by more than three hours.
+      if (!(this.#now().getUTCHours() === schedule.hourUtc && age >= every / 2) && age < every + 3 * 3_600_000) return false;
+    } else if (age < every) return false;
     const short = await this.#roomShort(newest?.path).catch(() => undefined);
     if (short !== undefined) { this.#lastError = { at: this.#now().toISOString(), message: short }; return false; }
     try { await this.backUpNow("scheduled"); } catch { return false; } // the failure is kept in `status`
@@ -153,6 +166,7 @@ export class BackupService {
     return `the scheduled backup was not made: the disk has ${Math.floor(free / 1024 ** 2)} MiB free and a backup needs about ${Math.ceil(need / 1024 ** 2)} MiB (the newest backup's size and a margin); free some room or move the backups (--backup-dir)`;
   }
 
+  #after: Promise<unknown> = Promise.resolve();
   #held = false;
   /** The maintenance barrier's hold (card K01h): no backup is started, and the one running is waited for; the returned function lets backups go on. */
   async hold(): Promise<() => void> {
@@ -162,9 +176,26 @@ export class BackupService {
   }
 
   /** Resolves when no backup is running (a failure is already in the status). Called at shutdown, so the store is not closed in the middle of a copy. */
-  async finish(): Promise<void> { await this.#running?.catch(() => undefined); }
+  async finish(): Promise<void> { await this.#running?.catch(() => undefined); await this.#after; }
 
   list(): Promise<BackupInfo[]> { return listBackups(this.#options.root); }
+
+  /** The names of the newest backup verified complete (card K01c), if one is listed: protected from the age limit. */
+  async #protect(): Promise<ReadonlySet<string> | undefined> {
+    if (this.#options.verifiedSource === undefined) return undefined;
+    try {
+      const verified = await this.#options.verifiedSource();
+      const newest = (await listBackups(this.#options.root)).find((b) => b.trusted && verified.has(b.manifest.name));
+      return newest === undefined ? undefined : new Set([newest.manifest.name]);
+    } catch { return undefined; }
+  }
+
+  /** The counts and age limit in force with what the age limit must spare. */
+  async rules(retention?: Retention): Promise<Retention> {
+    const base = retention ?? await this.#counts();
+    const protect = await this.#protect();
+    return protect === undefined ? base : { ...base, protect };
+  }
 
   /** The counts in force: the owner's setting when one is wired, else the option, else the 7 daily and 4 weekly of the first release. A source that fails leaves the option (never fewer copies than before). */
   async #counts(): Promise<Retention> {
@@ -175,13 +206,13 @@ export class BackupService {
   /** The names of the backups the rule would delete under these counts (default: those in force). Nothing is deleted. */
   async preview(retention?: Retention): Promise<string[]> {
     const all = await listBackups(this.#options.root);
-    const kept = chooseKept(all, retention ?? await this.#counts(), this.#now());
+    const kept = chooseKept(all, await this.rules(retention), this.#now());
     return all.filter((b) => !kept.has(b.path)).map((b) => b.manifest.name);
   }
 
   /** Deletes the backups outside the rule (the newest, every pre-upgrade snapshot and any backup that cannot be trusted by name are kept) and returns their names. Used by the retention runner. */
   async prune(retention?: Retention): Promise<string[]> {
-    const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: retention ?? await this.#counts() });
+    const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.rules(retention) });
     return result.deleted.map((p) => basename(p));
   }
 
