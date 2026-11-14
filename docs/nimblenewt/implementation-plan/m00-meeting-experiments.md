@@ -35,7 +35,7 @@ Prototype additions made for this completion (all in `prototypes/meeting/`): a s
 | Role personalities and information habits, notes from the first round, tabling | Yes (earlier batch); tabling again here with a scenario where research matters | rules 13, 19 |
 | Blind or open first round | Yes (earlier batch, and all new `m00-full` runs are blind) | rule 3 |
 | One or two comment rounds | Partly: `one-round` ran 3 times here; it also drops chair questions and desk notes, so it is not a clean comparison | rule 2 |
-| Whole transcript against a short summary of each turn written by the speaker (the summary chain), full text kept and retrievable, against a digest | Summary chain and facts-style summaries: yes (earlier batch); full text is kept in `transcript.md`; a separate digest variant was not built (the chair's round-1 summary is the nearest thing) | rule 14 |
+| Whole transcript against a short summary of each turn written by the speaker (the summary chain), full text kept and retrievable, against a digest | Summary chain and facts-style summaries: yes (earlier batch); full text is kept in `transcript.md`; a separate digest variant was not built at the time of the runs; it is now built and tested offline (variant `digest`, see the implementation notes, M00 finish) but not yet run with a model | rule 14 |
 | Turn limits counted in output tokens | Yes, all runs, measured | rule 14 |
 | Shared-first against agent-first prompt order, cache hit rate on a hosted provider | Yes: 12 OpenRouter meetings, 3 per model and variant | rule 15 |
 | A question to a non-present subordinate answered from its checkpoint | Yes: 18 answers on 3 models | rule 17 |

@@ -883,3 +883,171 @@ test("the chat's op table holds the web sign-out (applied at once, with the argu
   for (const k of ["all", "browser"]) assert.ok(acceptedArgs("web.access.revoke")!.includes(k), k);
   assert.equal(CHAT_OPS["web.access.get"], undefined);
 });
+
+// ---- history and live updates (card U07 finish) --------------------------------------------------------------------------------
+
+interface Sse { status: number; headers: Record<string, string | string[] | undefined>; events: { event: string; data: string }[]; comments: number; closed: Promise<void>; isClosed(): boolean; close(): void; waitFor(pred: (events: { event: string; data: string }[]) => boolean): Promise<void> }
+/** An open event stream, read as it arrives. */
+function stream(w: World, session: { cookie: string }, o: { path?: string } = {}): Promise<Sse> {
+  return new Promise((resolve, reject) => {
+    const events: { event: string; data: string }[] = []; let comments = 0; let buffer = ""; let closed = false;
+    const waiters: (() => void)[] = [];
+    const req = request({ host: "127.0.0.1", port: w.port, method: "GET", path: o.path ?? "/web/events", headers: { host: `127.0.0.1:${w.port}`, cookie: session.cookie, accept: "text/event-stream" } }, (res) => {
+      let finish!: () => void; const closedP = new Promise<void>((r) => { finish = r; });
+      const sse: Sse = {
+        status: res.statusCode!, headers: res.headers, events, get comments() { return comments; }, closed: closedP, isClosed: () => closed, close: () => { req.destroy(); },
+        waitFor: (pred) => new Promise<void>((ok, bad) => {
+          const t = setTimeout(() => bad(new Error(`timed out; saw ${JSON.stringify(events)}`)), 20_000);
+          const check = (): void => { if (pred(events)) { clearTimeout(t); ok(); } else waiters.push(check); };
+          check();
+        }),
+      };
+      if (res.statusCode !== 200) { const chunks: Buffer[] = []; res.on("data", (x: Buffer) => chunks.push(x)); res.on("end", () => { (sse as { body?: string }).body = Buffer.concat(chunks).toString("utf8"); closed = true; finish(); resolve(sse); }); return; }
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => {
+        buffer += chunk;
+        for (let i = buffer.indexOf("\n\n"); i >= 0; i = buffer.indexOf("\n\n")) {
+          const block = buffer.slice(0, i); buffer = buffer.slice(i + 2);
+          let event = "message"; let data = "";
+          for (const line of block.split("\n")) { if (line.startsWith(":")) comments += 1; else if (line.startsWith("event: ")) event = line.slice(7); else if (line.startsWith("data: ")) data += line.slice(6); }
+          if (block.split("\n").some((l) => l.startsWith("event: ") || l.startsWith("data: "))) events.push({ event, data });
+        }
+        for (const f of waiters.splice(0)) f();
+      });
+      const done = (): void => { closed = true; finish(); for (const f of waiters.splice(0)) f(); };
+      res.on("end", done); res.on("close", done); res.on("error", done);
+      resolve(sse);
+    });
+    req.on("error", (e) => { if (!closed) reject(e); });
+    req.end();
+  });
+}
+
+test("the history shows what the controller recorded to a browser that did not send it, newest first, and refuses what is not a limit or a cursor", async () => {
+  const w = await world();
+  try {
+    const phone = await w.signIn();
+    const laptop = await w.signIn();
+    assert.equal((await w.call("GET", "/web/history")).status, 401, "a session is needed");
+    const sent = await w.call("POST", "/web/chat", { cookie: phone.cookie, csrf: phone.csrf, body: { messageId: "h-1", text: "/nimblenewt.nothing" } });
+    assert.ok([200, 201].includes(sent.status), sent.text);
+    // A message typed in the terminal chat is also in the owner's conversation. (The clock is the real one here: wait until it has moved on, so the order is the order of time.)
+    for (const t0 = Date.now(); Date.now() === t0;) await new Promise((r) => setImmediate(r));
+    await w.c.chat!.submit(w.token, { messageId: "term-1", text: "/nimblenewt.nothing" });
+    const seen = await w.call("GET", "/web/history", { cookie: laptop.cookie });
+    assert.equal(seen.status, 200, seen.text);
+    assert.deepEqual(new Set(seen.body.turns.map((t: { messageId: string }) => t.messageId)), new Set(["h-1", "term-1"]), "the laptop sees the phone's message and the terminal's");
+    assert.deepEqual(seen.body.turns.map((t: { messageId: string }) => t.messageId), ["term-1", "h-1"], "the newest first");
+    assert.equal(seen.body.complete, true);
+    assert.match(seen.body.observedAt, /^2026-11-10T/);
+    for (const t of seen.body.turns) { assert.equal(t.status, "done"); assert.equal(typeof t.text, "string"); assert.ok(Array.isArray(t.reply)); assert.ok(Array.isArray(t.outcomes)); }
+    assert.equal(seen.text.includes(w.token), false, "no credential in the history");
+    const one = await w.call("GET", "/web/history?limit=1", { cookie: laptop.cookie });
+    assert.equal(one.body.turns.length, 1); assert.equal(typeof one.body.next, "string");
+    const rest = await w.call("GET", `/web/history?limit=1&before=${encodeURIComponent(one.body.next)}`, { cookie: laptop.cookie });
+    assert.equal(rest.body.turns.length, 1); assert.notEqual(rest.body.turns[0].turnId, one.body.turns[0].turnId);
+    for (const bad of ["limit=0", "limit=51", "limit=x", "limit=1.5", "before=nonsense", `before=${"a".repeat(81)}`]) assert.equal((await w.call("GET", `/web/history?${bad}`, { cookie: laptop.cookie })).status, 400, bad);
+    assert.equal((await w.call("POST", "/web/history", { cookie: laptop.cookie, csrf: laptop.csrf, body: {} })).status, 405);
+  } finally { await w.c.close(); }
+});
+
+test("an event stream needs a session, says ready, announces a change of the conversation by name and otherwise only keeps alive", async () => {
+  const w = await world({ limits: { eventsEveryMs: 40 } });
+  try {
+    const phone = await w.signIn();
+    const nobody = await stream(w, { cookie: "nn_session=nothing" });
+    assert.equal(nobody.status, 401);
+    const s = await stream(w, phone);
+    assert.equal(s.status, 200);
+    assert.match(String(s.headers["content-type"]), /^text\/event-stream/);
+    assert.equal(s.headers["cache-control"], "no-store");
+    assert.match(String(s.headers["content-security-policy"]), /default-src 'none'/);
+    await s.waitFor((e) => e.some((x) => x.event === "ready"));
+    assert.equal((await w.call("GET", "/web/settings", { cookie: phone.cookie })).body.liveStreams, 1, "the settings say how many live connections are open");
+    await s.waitFor(() => s.comments >= 2);
+    assert.equal(s.events.filter((x) => x.event === "changed").length, 0, "nothing changed: only keep-alives");
+    // A message from another door (the terminal chat) changes the conversation.
+    await w.c.chat!.submit(w.token, { messageId: "term-live", text: "/nimblenewt.nothing" });
+    await s.waitFor((e) => e.some((x) => x.event === "changed"));
+    const changed = s.events.find((x) => x.event === "changed")!;
+    assert.deepEqual(JSON.parse(changed.data).views, ["chat"]);
+    assert.equal(changed.data.includes("term-live"), false, "a nudge carries no content");
+    s.close();
+    await s.closed;
+  } finally { await w.c.close(); }
+});
+
+test("a stream ends with `ended` when its session is signed out or its credential is rotated, and its limits and the door's close are kept", async () => {
+  const w = await world({ limits: { eventsEveryMs: 40, streamsPerSession: 2, streamsTotal: 3 } });
+  try {
+    const phone = await w.signIn();
+    const laptop = await w.signIn();
+    const a = await stream(w, phone); const b = await stream(w, phone);
+    await a.waitFor((e) => e.some((x) => x.event === "ready"));
+    const third = await stream(w, phone);
+    assert.equal(third.status, 429, "a third stream of one session");
+    const c = await stream(w, laptop);
+    await c.waitFor((e) => e.some((x) => x.event === "ready"));
+    assert.equal((await stream(w, laptop)).status, 429, "the controller's total");
+    // Signing the phone out from the laptop ends both of its streams at the next look.
+    const phoneHandle = (await w.call("GET", "/web/sessions", { cookie: laptop.cookie })).body.sessions.find((s: { current: boolean }) => !s.current).handle;
+    assert.equal((await w.call("POST", "/web/sessions/revoke", { cookie: laptop.cookie, csrf: laptop.csrf, body: { handle: phoneHandle } })).status, 200);
+    await a.waitFor((e) => e.some((x) => x.event === "ended")); await b.waitFor((e) => e.some((x) => x.event === "ended"));
+    await a.closed; await b.closed;
+    assert.equal(c.isClosed(), false, "the laptop's stream goes on");
+    // Rotating the owner's credential ends the laptop's stream too.
+    const owner = await w.c.services.principals.authenticate(w.token);
+    await w.c.services.principals.issueCredential(owner, owner.id);
+    await c.waitFor((e) => e.some((x) => x.event === "ended")); await c.closed;
+    // A stream open when the door closes does not hold the close up.
+    const again = (await w.c.services.principals.issueCredential(owner, owner.id)).token;
+    const fresh = await w.call("POST", "/web/login", { body: { token: again } });
+    const open = await stream(w, { cookie: String([fresh.headers["set-cookie"]].flat()[0]).split(";")[0]! });
+    await open.waitFor((e) => e.some((x) => x.event === "ready"));
+    await w.c.close();
+    await open.closed;
+  } finally { await w.c.close().catch(() => undefined); }
+});
+
+test("a stream the browser drops gives its place back at once, and a stream whose session expired ends at the next look", async () => {
+  const w = await world({ session: { idleMs: 60_000, maxMs: 3_600_000 }, limits: { eventsEveryMs: 40, streamsPerSession: 2, streamsTotal: 2 } });
+  try {
+    const phone = await w.signIn();
+    const a = await stream(w, phone); const b = await stream(w, phone);
+    await a.waitFor((e) => e.some((x) => x.event === "ready")); await b.waitFor((e) => e.some((x) => x.event === "ready"));
+    assert.equal((await stream(w, phone)).status, 429, "both places are taken");
+    // The browser goes away (a closed tab, a lost network): the door notices the closed connection and frees the place.
+    a.close(); await a.closed;
+    for (let n = 0; (await w.call("GET", "/web/settings", { cookie: phone.cookie })).body.liveStreams !== 1; n++) { assert.ok(n < 250, "the dropped stream was never let go"); await new Promise((r) => setTimeout(r, 100)); }
+    const c = await stream(w, phone);
+    assert.equal(c.status, 200, "the freed place can be used again");
+    await c.waitFor((e) => e.some((x) => x.event === "ready"));
+    // Idle past the limit (the stream's looks do not keep a session alive): both remaining streams end.
+    w.now.t += 61_000;
+    await b.waitFor((e) => e.some((x) => x.event === "ended")); await c.waitFor((e) => e.some((x) => x.event === "ended"));
+    await b.closed; await c.closed;
+    assert.equal((await w.call("GET", "/web/session", { cookie: phone.cookie })).status, 401);
+  } finally { await w.c.close(); }
+});
+
+test("a proposal decided elsewhere (the terminal chat) nudges an open page to read the chat again, so its buttons go", async () => {
+  const script = new ScriptedInterpreter((input: { text: string }) => [{ kind: "command", op: "task.create", args: { title: "Weed", projectName: "garden" }, evidence: input.text, basis: "owner" }]);
+  const w = await world({ limits: { eventsEveryMs: 40 } }, script);
+  try {
+    const owner = await w.c.services.principals.authenticate(w.token);
+    await w.c.services.projects.createProject({ commandId: "p-live", actor: owner.id, name: "Garden" });
+    const phone = await w.signIn();
+    const said = await w.call("POST", "/web/chat", { cookie: phone.cookie, csrf: phone.csrf, body: { messageId: "prop-live", text: "add task Weed to garden" } });
+    const proposalId = said.body.outcomes[0].proposalId as string;
+    assert.equal(said.body.outcomes[0].status, "proposed", said.text);
+    const s = await stream(w, phone);
+    await s.waitFor((e) => e.some((x) => x.event === "ready"));
+    await s.waitFor(() => s.comments >= 2);
+    assert.equal(s.events.filter((x) => x.event === "changed").length, 0);
+    await w.c.chat!.applyProposal(w.token, { commandId: "apply-live", proposalId });
+    await s.waitFor((e) => e.some((x) => x.event === "changed" && (JSON.parse(x.data).views as string[]).includes("chat")));
+    const seen = await w.call("GET", "/web/history", { cookie: phone.cookie });
+    assert.equal(seen.body.turns[0].outcomes[0].proposalState, "applied");
+    s.close(); await s.closed;
+  } finally { await w.c.close(); }
+});
