@@ -1131,6 +1131,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       storage, source: sourcePlace, targets: () => transferTargets, stateDirectory, barrier, enabled: async () => (await configuration.installationValue("database.transfer.enabled")) !== false,
       references: { ...(options.transfer.references?.checkpoints === undefined ? {} : { checkpoints: options.transfer.references.checkpoints }), ...(blobStore === undefined ? {} : { artifacts: async (digests: readonly string[]) => { const missing: string[] = []; for (const d of digests) if (!(await blobStore.has(d))) missing.push(d); return missing; } }) },
       ...(options.transfer.inject === undefined ? {} : { inject: options.transfer.inject }), ...(options.transfer.onSwitched === undefined ? {} : { onSwitched: () => options.transfer!.onSwitched!() }),
+      ...(options.onInternalError === undefined ? {} : { onError: options.onInternalError }),
       ...(options.transfer.restart === undefined ? {} : { restart: options.transfer.restart, restartEnabled: async () => (await configuration.installationValue("database.transfer.restart")) !== false }),
       settings: {
         // The two switches live in the installation settings layer, so its revision is the one a change quotes (card F04m, third slice): a chat proposal pins the revision it was planned at and is
