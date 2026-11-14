@@ -1,4 +1,4 @@
-export { PROTOCOL_HEADER, SESSION_HEADER, DIGEST_HEADER, REMOTE_LIMITS, WORKER_PROTOCOL, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ThinkingAnswer, type ThinkingWire } from "./protocol.js";
+export { PROTOCOL_HEADER, SESSION_HEADER, DIGEST_HEADER, REMOTE_LIMITS, WORKER_PROTOCOL, SCRIPT_PROTOCOL, RUN_ID, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ThinkingAnswer, type ThinkingWire, type RunAck, type RunOrderWire, type RunOutcomeWire } from "./protocol.js";
 export { PLACEMENT_KIND, RECONCILE_KIND, type ReconcileReport, type ReconcileVerdict, RemoteWorkerService, SESSION_KIND, STORE_KIND, capabilityReasons, policyReasons, type PlacementPolicy, type PlacementPolicyFor, type Placed, type PlacementBody, type PlacementState, type RelocationPolicy, type RelocationPolicyFor, type RelocationResult, type RemoteDeps, type RemoteOptions, type Requirements, type SessionBody, type StoreBody } from "./service.js";
 export { DEFAULT_WORKER_TRANSPORT_LIMITS, WorkerTransport, type WorkerTransportLimits, type WorkerTransportOptions } from "./server.js";
 export { RemoteAttempt, RemoteWorkerClient, WorkerRequestError, type AttemptWatchdog, type RemoteWorkerClientOptions } from "./client.js";
@@ -15,3 +15,5 @@ export { CONTRACT_FORMAT, CONTRACT_FEATURES, checkContract, contractDigest, cont
 export { RELEASE_RUNNER_LIMITS, ReleaseHostRunner, type ReleaseHostRunnerOptions, type ReleaseSuiteJob, type ReleaseSuiteResult, type ReleaseTested } from "./release-runner.js";
 export { commandReleaseSuite, readSuiteAnswer, type CommandSuiteConfig } from "./release-command-suite.js";
 export { readReleaseHostConfig, runReleaseHost, type ReleaseHostConfig, type RunReleaseHostOptions } from "./release-host.js";
+export { RemoteScriptRuns, orderProblem, type HostScriptLaunch, type HostScriptRunner, type RemoteScriptRunsOptions } from "./script-runs.js";
+export { ScriptOrders, orderDigest, runIdOf, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";

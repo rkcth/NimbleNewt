@@ -4,7 +4,7 @@ import { request as httpsRequest } from "node:https";
 import type { DispatchContract, RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkOrder, WorkerTurnResult } from "../dispatch/ports.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import { contractProblems, enforcementFor, recipeChanged, restartDigest, type WorkerAbilities } from "./contract-wire.js";
-import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, type ThinkingAnswer, type ThinkingWire, type ArtifactListing, type ControlMessage, type ProcessReport, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
+import { DIGEST_HEADER, PROTOCOL_HEADER, SESSION_HEADER, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, type ThinkingAnswer, type ThinkingWire, type ArtifactListing, type ControlMessage, type ProcessReport, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk, type ToolBridgeAnswer, type ToolBridgeRequest, type RunAck, type RunOrderWire, type RunOutcomeWire } from "./protocol.js";
 
 /** One stream-events message carries at most this many events and about this many bytes of JSON (the controller refuses more; its body limit is 1 MB). */
 const STREAM_MESSAGE_EVENTS = 400;
@@ -299,6 +299,21 @@ export class RemoteAttempt implements ToolGateway {
   async toolBridge(token: string, request: ToolBridgeRequest, key?: string): Promise<ToolBridgeAnswer> {
     await this.watchdog?.assertProductive();
     return await this.#post("tool", { token, request: request as unknown as Json }, key ?? `tool:${request.callId}:${createHash("sha256").update(JSON.stringify([request.op, request.args ?? {}])).digest("hex").slice(0, 16)}`) as never;
+  }
+  /**
+   * Card T02d (protocol 2): the order of a catalogue script the controller asked this host to run (the `run` control message named it). Throws `WorkerRequestError` (`not_found`: the run is no longer wanted; `fenced`: another placement or session;
+   * a session that negotiated protocol 1 never reaches the route).
+   */
+  async fetchRun(runId: string): Promise<RunOrderWire> {
+    await this.watchdog?.assertProductive();
+    return await this.#post("run-fetch", { runId }) as never;
+  }
+  /**
+   * Card T02d: what became of a run, or the acknowledgement that a run the controller told this host to stop is gone. The same outcome sent again (a lost answer) is the same report; the controller answers `kept: false` for a run it no longer
+   * waits for, which the host drops. The text of an outcome is the script's own output and is sent only here.
+   */
+  async finishRun(runId: string, outcome: RunOutcomeWire): Promise<RunAck> {
+    return await this.#post("run-done", { runId, outcome: outcome as unknown as Json }, `run-done:${runId}:${createHash("sha256").update(JSON.stringify(outcome)).digest("hex").slice(0, 16)}`) as never;
   }
   /**
    * The model's thinking the machine's agent process reported (card U09c), carried to the controller's thinking store. The text is untrusted and goes as it came (the controller cleans and bounds it); a message too large for the route is sent in

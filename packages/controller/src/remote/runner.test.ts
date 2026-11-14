@@ -175,3 +175,44 @@ test("the controller's verdicts after a reconnect: stop ends the sandbox, reacce
   assert.deepEqual(stopped, ["stop"]);
   } finally { release.open!(); await done; }
 });
+
+test("catalogue scripts (card T02d): the control messages run, abort and revoke reach the host's script runner while the turn runs; the scripts of the attempt are stopped when it ends, and a host without a script runner answers an order as failed", async () => {
+  const { RemoteScriptRuns } = await import("./script-runs.js");
+  const { orderDigest, runIdOf } = await import("./script-orders.js");
+  const runId = runIdOf("att-1", "c", 3);
+  const wire = { runId, program: "node", argv: ["x.js"], stdin: "{}", source: "1", tool: { name: "a-b.c", version: "1.0.0", digest: "d" }, interpreterVersion: "22", maxOutputBytes: 100, limits: { cpus: 1, memoryMb: 16, seconds: 5 }, env: {} };
+  const reports: unknown[] = [];
+  let sent = false;
+  const f = fake({ control: async () => { if (sent) return []; sent = true; return [{ seq: 1, kind: "run", runId, digest: orderDigest(wire) }]; } });
+  const attempt = (f.client as unknown as { attempt: (id: string, p: number) => Record<string, unknown> }).attempt("att-1", 3);
+  attempt["fetchRun"] = async () => wire;
+  attempt["finishRun"] = async (id: string, o: unknown) => { reports.push([id, o]); return { kept: true }; };
+  let aborted = false; let started!: () => void; const hasStarted = new Promise<void>((r) => { started = r; });
+  const scripts = new RemoteScriptRuns({ runner: { run: (_l, signal) => new Promise((_resolve, reject) => { started(); signal.addEventListener("abort", () => { aborted = true; reject(new Error("killed")); }); }) }, retryMs: 1 });
+  const release: { open?: () => void } = {};
+  const running = new Promise<void>((r) => { release.open = r; });
+  const runner = new RemoteOfferRunner({ ...base, client: f.client, scripts, host: { start: async () => handle({ run: async () => { await running; return { status: "completed" } as never; } }) } });
+  const done = runner.run(offer);
+  await hasStarted;
+  assert.deepEqual(scripts.running("att-1"), [runId]);
+  release.open!();
+  assert.equal(await done, "completed");
+  assert.equal(aborted, true, "the attempt ending stops its scripts");
+  assert.deepEqual(scripts.running("att-1"), []);
+  assert.deepEqual(reports, [], "an ended attempt reports nothing (the controller no longer accepts it)");
+  // A host without a script runner answers the order as failed, at once.
+  const g = fake({ control: async () => (g2.sent ? [] : ((g2.sent = true), [{ seq: 1, kind: "run", runId, digest: "a".repeat(64) }])) });
+  const g2 = { sent: false };
+  const attemptG = (g.client as unknown as { attempt: (id: string, p: number) => Record<string, unknown> }).attempt("att-1", 3);
+  const failed: unknown[] = [];
+  attemptG["finishRun"] = async (_id: string, o: unknown) => { failed.push(o); return { kept: true }; };
+  const hold: { open?: () => void } = {};
+  const holding = new Promise<void>((r) => { hold.open = r; });
+  const bare = new RemoteOfferRunner({ ...base, client: g.client, host: { start: async () => handle({ run: async () => { await holding; return { status: "completed" } as never; } }) } });
+  const doneG = bare.run(offer);
+  const end = Date.now() + 5000;
+  while (failed.length === 0) { if (Date.now() > end) assert.fail("the host did not answer the order"); await new Promise((r) => setTimeout(r, 5)); }
+  hold.open!();
+  await doneG;
+  assert.match(String((failed[0] as { error: string }).error), /no script sandbox/);
+});

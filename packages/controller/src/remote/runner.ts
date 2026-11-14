@@ -5,6 +5,7 @@ import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
 import type { WorkerAbilities } from "./contract.js";
 import { cleanProcessRef } from "./process-ref.js";
+import { RemoteScriptRuns } from "./script-runs.js";
 import { REMOTE_LIMITS, type Offer, type ProcessReport, type SequencedControl, type ThinkingWire, type ToolBridgeAnswer, type ToolBridgeRequest } from "./protocol.js";
 
 /** The processes of one attempt as this machine's sandbox lists them, the entries a report to the controller carries (card L02e). */
@@ -27,6 +28,11 @@ export interface RemoteOfferRunnerOptions {
   readonly controlMs?: number;
   /** The worker's batching for the stream messages (without it the owner's figures from the controller's answer, at least 50 ms apart; else 250 ms and 4000 characters; an explicit `batchMs: 0` sends every piece). */
   readonly stream?: { readonly batchMs?: number; readonly batchChars?: number };
+  /**
+   * Card T02d (protocol 2): runs the catalogue scripts the controller orders on this host (`run`, `abort` and `revoke` control messages). Absent, or without a sandbox of its own, the host answers every order as failed ("no script
+   * sandbox") and runs nothing, so a controller never waits out a run a host cannot start.
+   */
+  readonly scripts?: RemoteScriptRuns;
   /** Told about a trouble that does not end the attempt (a control message that failed, a checkpoint that could not be sent). */
   readonly onTrouble?: (attemptId: string, what: string, error: unknown) => void;
 }
@@ -44,7 +50,9 @@ export class RemoteOfferRunner {
   readonly #o: RemoteOfferRunnerOptions;
   readonly #live = new Map<string, { readonly attempt: RemoteAttempt; tap?: ModelStreamTap; handle?: WorkerHandle; noThinking?: true; thinkingSent?: Set<Promise<void>> }>();
 
-  constructor(options: RemoteOfferRunnerOptions) { this.#o = options; }
+  readonly #scripts: RemoteScriptRuns;
+
+  constructor(options: RemoteOfferRunnerOptions) { this.#o = options; this.#scripts = options.scripts ?? new RemoteScriptRuns(options.onTrouble === undefined ? {} : { onTrouble: options.onTrouble }); }
 
   /** The attempts this runner is running now. */
   get running(): readonly string[] { return [...this.#live.keys()]; }
@@ -155,6 +163,8 @@ export class RemoteOfferRunner {
       trouble("offer", error);
       return "failed";
     } finally {
+      // The scripts of the attempt are stopped (and waited for) before its sandbox is: nothing is reported for them, the controller no longer accepts it.
+      await this.#scripts.endAttempt(order.attemptId).catch((error) => trouble("script stop", error));
       this.#live.delete(order.attemptId);
       if (handle !== undefined) {
         await handle.stop().catch((error) => trouble("stop", error));
@@ -256,6 +266,8 @@ export class RemoteOfferRunner {
           // Force Stop (card L02e): what the sandbox holds is killed here, then looked at again and reported whether or not it changed. A look is answered the same way.
           else if (m.kind === "kill") { fresh = true; await this.#o.host.endLocalWork?.([order.attemptId]); }
           else if (m.kind === "look") fresh = true;
+          // Catalogue scripts (card T02d): ordered, stopped or revoked. Started in the background, so the loop goes on reading the control messages while a script runs.
+          else if (m.kind === "run" || m.kind === "abort" || m.kind === "revoke") await this.#scripts.handle(attempt, order.attemptId, m);
         } catch (error) { trouble(`control ${m.kind}`, error); }
       }
       // The look comes after the messages were handled: a look asked in the same batch as a kill reports what is left after the kill.

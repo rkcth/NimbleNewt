@@ -298,9 +298,9 @@ export class WorkerTransport {
     const placementOf = (body: Record<string, unknown>): unknown => body["placement"];
     if (parts.length === 4 && c !== "checkpoint" && c !== "control" && c !== "artifacts") {
       allowed("POST");
-      const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : c === "thinking" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.thinkingBytes) : c === "processes" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.processBytes) : undefined);
+      const body = await this.#body(req, c === "tool" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.toolBytes) : c === "thinking" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.thinkingBytes) : c === "processes" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.processBytes) : c === "run-done" ? Math.min(this.#limits.bodyBytes, REMOTE_LIMITS.scriptBytes) : undefined);
       const p = placementOf(body);
-      this.#only(body, { tool: ["placement", "token", "request"], thinking: ["placement", "blocks"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], processes: ["placement", "seq", "final", "canLook", "computeMs", "processes"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
+      this.#only(body, { tool: ["placement", "token", "request"], thinking: ["placement", "blocks"], accept: ["placement"], begin: ["placement", "request"], effect: ["placement", "request", "effect"], report: ["placement", "operationId", "outcome"], usage: ["placement", "usage"], heartbeat: ["placement"], acknowledge: ["placement"], complete: ["placement", "result"], launched: ["placement", "digest", "enforcement"], processes: ["placement", "seq", "final", "canLook", "computeMs", "processes"], "run-fetch": ["placement", "runId"], "run-done": ["placement", "runId", "outcome"], refuse: ["placement", "digest", "reasons"], "stream-start": ["placement", "call"], "stream-events": ["placement", "streamId", "n", "events"], "stream-end": ["placement", "streamId", "ok"] }[c] ?? ["placement"]);
       switch (c) {
         case "accept": return { status: 200, body: await svc.accept(host, session, attempt, p) };
         case "tool": this.#key(req); return { status: 200, body: await svc.toolBridge(host, session, attempt, p, body["token"], body["request"]) };
@@ -317,6 +317,8 @@ export class WorkerTransport {
         case "stream-events": this.#limit(`stream:${host.id}:${String(attempt)}`, this.#limits.streamEventsPerMinute); return { status: 200, body: await svc.streamEvents(host, session, attempt, p, body["streamId"], body["n"], body["events"]) };
         case "stream-end": await svc.streamEnd(host, session, attempt, p, body["streamId"], { ok: body["ok"] }); return { status: 204 };
         case "processes": return { status: 200, body: await svc.reportProcesses(host, session, attempt, p, { seq: body["seq"], final: body["final"], canLook: body["canLook"], computeMs: body["computeMs"], processes: body["processes"] }) };
+        case "run-fetch": return { status: 200, body: await svc.scriptFetch(host, session, attempt, p, body["runId"]) as unknown as Record<string, unknown> };
+        case "run-done": this.#key(req); return { status: 200, body: { ...(await svc.scriptDone(host, session, attempt, p, body["runId"], body["outcome"])) } };
         case "refuse": await svc.refuseOrder(host, session, attempt, p, { digest: body["digest"], reasons: body["reasons"] }); return { status: 204 };
         default: throw new HttpError(404, "not_found", "no such route");
       }

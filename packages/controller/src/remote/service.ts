@@ -23,7 +23,8 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type CarriedLanding, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
-import { PI_TRANSFER_ID, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
+import { ScriptOrders, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
+import { PI_TRANSFER_ID, RUN_ID, SCRIPT_PROTOCOL, WORKER_PROTOCOL, WAITING_FOR_OWNER, REMOTE_LIMITS, ProtocolMismatch, checkRange, negotiateProtocol, type RunAck, type RunOrderWire, type ArtifactListing, type ToolBridgeAnswer, type ToolBridgeRequest, type ThinkingAnswer, type ThinkingWire, type ControlMessage, type Offer, type SequencedControl, type SessionInfo, type StoredResult, type VersionRange, type RemoteWorkspaceAnswer, type WorkspaceAsk } from "./protocol.js";
 
 /** The latest events message of a model call: its number, a digest of its content and its (possibly still pending) answer. */
 interface LastMessage { readonly n: number; readonly digest: string; readonly answer: Promise<{ readonly held?: string }> }
@@ -378,6 +379,8 @@ export interface RemoteDeps {
   readonly thinking?: (attempt: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number }, blocks: readonly ThinkingWire[]) => Promise<ThinkingAnswer>;
   /** The most thinking messages an attempt may send (default `REMOTE_LIMITS.thinkingMessages`, the figure a local process is held to); settable so a test need not send two thousand. */
   readonly thinkingMessages?: number;
+  /** Card T02d: milliseconds beyond a script's own time limit that a run waits for its host's word (default `REMOTE_LIMITS.scriptGraceMs`). */
+  readonly scriptGraceMs?: number;
   /** How often, at most, the output received so far of a remote model call is reported to `monitor` while it streams (ms, default 15,000, as for a local relay; 0 = with every message that carries output). */
   readonly monitorProgressMs?: number;
   /** Keeps what a remote launch came to, as for a local agent (card H12a; the owner's launch record). A failure refuses the confirmation: nothing runs unrecorded. */
@@ -466,7 +469,11 @@ export class RemoteWorkerService {
   /** The answer to each `stream-start` by its idempotency key, so a retry whose answer was lost does not begin a second generation (which would supersede the first). */
   readonly #starts = new Map<string, Promise<Awaited<ReturnType<RemoteWorkerService["streamStart"]>>>>();
 
+  /** Catalogue scripts ordered of hosts and not yet ended (card T02d). */
+  readonly #scripts: ScriptOrders;
+
   private constructor(runner: CommandRunner, deps: RemoteDeps, protocol: VersionRange, fileBytes: number, settleMs: number) {
+    this.#scripts = new ScriptOrders({ send: (attemptId, placement, message) => this.control(this.#deps.principal, attemptId, message, placement), onError: (error) => this.#reportError(error), ...(deps.scriptGraceMs === undefined ? {} : { graceMs: deps.scriptGraceMs }) });
     this.#settleMs = settleMs;
     this.#runner = runner;
     this.#deps = deps;
@@ -598,7 +605,7 @@ export class RemoteWorkerService {
   #endPoll(hostId: string): void { this.#made.set(hostId, (this.#made.get(hostId) ?? 0) + 1); this.#polls.get(hostId)?.end(); }
 
   /** Ends every open poll (the controller is stopping). */
-  close(): void { this.#closed = true; for (const c of this.#calls.values()) this.#abandon(c); this.#calls.clear(); for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
+  close(): void { this.#closed = true; this.#scripts.close(); for (const c of this.#calls.values()) this.#abandon(c); this.#calls.clear(); for (const poll of [...this.#polls.values()]) poll.end(); for (const ask of this.#asks.values()) for (const wake of [...ask.waiters]) wake(); }
 
   // ---- workspace operations on a remote host (card H12m) -------------------------------------------------------------------------
 
@@ -1164,6 +1171,8 @@ export class RemoteWorkerService {
 
   #wake(attemptId: string, placement: number, reason: string, result?: StoredResult): void {
     this.#endStreams(attemptId, placement);
+    // The scripts the placement had running on its host are over for the calls that wait for them (the host is fenced and ends its own processes).
+    this.#scripts.end(attemptId, placement, reason);
     const set = this.#waiters.get(`${attemptId}#${placement}`);
     if (set === undefined) return;
     for (const done of [...set]) done(result ?? { status: "cancelled", error: reason.slice(0, 300) });
@@ -1646,6 +1655,57 @@ export class RemoteWorkerService {
     this.#bridging.set(key, { request: canonical, answer });
     while (this.#bridging.size > 256) this.#bridging.delete(this.#bridging.keys().next().value as string);
     try { return await answer; } finally { if (this.#bridging.get(key)?.answer === answer) this.#bridging.delete(key); }
+  }
+
+  /**
+   * Card T02d: runs a catalogue script on the host that holds an attempt and answers its standard output. Only the owner and the dispatcher may ask (the tool service does, after the tool's own checks). The placement must be accepted and held
+   * by `hostId` in a session of this primary that negotiated protocol 2, with the dispatch contract confirmed; otherwise nothing is sent and the call fails with the reason. The order goes to the host as a `run` control message naming only the run
+   * and the digest of the order; the host fetches the order itself (`scriptFetch`) and reports its outcome (`scriptDone`), both fenced by the placement and session. `signal` aborts the run (the host is told to stop it), and `onRevoke` receives the
+   * function that tells the host a revocation with the owner's recorded choice. The same call asked again under the same placement is the same run.
+   */
+  async runScript(by: Principal, call: { readonly attemptId: string; readonly callId: string; readonly hostId: string }, input: ScriptOrderInput, signal: AbortSignal, onRevoke?: (tell: (choice: "finish" | "cancel" | "pause") => void) => void): Promise<ScriptResult> {
+    this.#staff(by);
+    const attemptId = attemptIdOf(call.attemptId);
+    const b = (await this.#runner.get(PLACEMENT_KIND, attemptId))?.body as unknown as PlacementBody | undefined;
+    if (b === undefined || b.hostId !== call.hostId) throw new DomainError("unavailable", `attempt ${attemptId} is not held by host ${String(call.hostId).slice(0, 60)}; the script was not sent`);
+    if (b.state !== "accepted") throw new DomainError("unavailable", `the placement of attempt ${attemptId} is ${b.state}; the script was not sent`);
+    const session = await this.#connected(b.hostId);
+    if (session === undefined || session.sessionId !== b.sessionId || session.primaryEpoch !== this.#runner.epoch) throw new DomainError("unavailable", `host ${b.hostId} is not connected to this controller in the session that holds the attempt; the script was not sent`);
+    if ((session.protocol ?? 1) < SCRIPT_PROTOCOL) throw new DomainError("unavailable", `host ${b.hostId} speaks worker protocol ${session.protocol ?? 1}; running catalogue tools on a remote host needs protocol ${SCRIPT_PROTOCOL}: upgrade its worker`);
+    this.#needsConfirmation(b, "a script run");
+    if (b.expiresAt !== undefined && b.expiresAt <= this.#runner.now()) throw new DomainError("unavailable", `attempt ${attemptId} has expired; the script was not sent`);
+    return this.#scripts.run({ attemptId, callId: call.callId, placement: b.placement, sessionId: b.sessionId! }, input, signal, onRevoke);
+  }
+
+  /** The runs this controller waits for on an attempt's host (state and placement; never the order). */
+  scriptRuns(by: Principal, attemptId: string): readonly { readonly runId: string; readonly state: string; readonly placement: number }[] {
+    this.#staff(by);
+    return this.#scripts.open(attemptIdOf(attemptId));
+  }
+
+  /** The session of a worker, and only when it negotiated the protocol that carries scripts. */
+  async #scriptSession(host: Principal, sessionId: unknown): Promise<void> {
+    const session = await this.#session(host, sessionId);
+    if ((session.protocol ?? 1) < SCRIPT_PROTOCOL) throw new DomainError("invalid_command", `this session speaks protocol ${session.protocol ?? 1}; script runs need ${SCRIPT_PROTOCOL}`, { field: "protocol" });
+  }
+
+  /** The order of a run the controller made for this host's placement (`run-fetch`). Fenced like every message about an attempt; another host's attempt is not found; a run that is not open (or is being stopped) is not found. */
+  async scriptFetch(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, runId: unknown): Promise<RunOrderWire> {
+    await this.#scriptSession(host, sessionId);
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "fetching a run order");
+    return this.#scripts.fetch(b.attemptId, b.placement, b.sessionId!, runId);
+  }
+
+  /**
+   * What a host reports of a run (`run-done`): its output, a failure, or the acknowledgement that a run it was told to stop (or that a revocation stopped) is gone. A report for a run that is not open is answered `kept: false`. The output is held to
+   * the order's own limit, and the host's error text is redacted and cut. Nothing of it is recorded; the waiting call gets it.
+   */
+  async scriptDone(host: Principal, sessionId: unknown, attemptId: unknown, placement: unknown, runId: unknown, outcome: unknown): Promise<RunAck> {
+    await this.#scriptSession(host, sessionId);
+    const b = await this.#running(host, sessionId, attemptId, placement);
+    this.#needsConfirmation(b, "a run outcome");
+    return this.#scripts.done(b.attemptId, b.placement, b.sessionId!, runId, outcome);
   }
 
   /**
@@ -2327,7 +2387,23 @@ function checkControl(value: unknown): ControlMessage {
     }
     case "kill": onlyKnown(m, ["kind"]); return { kind: "kill" };
     case "look": onlyKnown(m, ["kind"]); return { kind: "look" };
-    default: return invalid("kind", "must be tell, restart, checkpoint, stop, kill or look");
+    case "run": {
+      onlyKnown(m, ["kind", "runId", "digest"]);
+      if (typeof m["runId"] !== "string" || !RUN_ID.test(m["runId"])) invalid("runId", "is not a run ID");
+      if (typeof m["digest"] !== "string" || !/^[0-9a-f]{64}$/.test(m["digest"])) invalid("digest", "must be a SHA-256 in hex");
+      return { kind: "run", runId: m["runId"] as string, digest: m["digest"] as string };
+    }
+    case "abort": {
+      onlyKnown(m, ["kind", "runId"]);
+      if (typeof m["runId"] !== "string" || !RUN_ID.test(m["runId"])) invalid("runId", "is not a run ID");
+      return { kind: "abort", runId: m["runId"] as string };
+    }
+    case "revoke": {
+      onlyKnown(m, ["kind", "name", "version", "choice"]);
+      if (m["choice"] !== "finish" && m["choice"] !== "cancel" && m["choice"] !== "pause") invalid("choice", "must be finish, cancel or pause");
+      return { kind: "revoke", name: text(m["name"], "name", { min: 1, max: 120 }), version: text(m["version"], "version", { min: 1, max: 120 }), choice: m["choice"] as "finish" | "cancel" | "pause" };
+    }
+    default: return invalid("kind", "must be tell, restart, checkpoint, stop, kill, look, run, abort or revoke");
   }
 }
 
