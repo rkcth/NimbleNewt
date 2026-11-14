@@ -2230,7 +2230,7 @@ Arguments:
 
 - `responsibilityId`: the responsibility
 
-Result: `{ item }`.
+Result: `{ item }`: `responsibilityId`, `intended`, `observed`, `lastCheckAt?`, `openIncidents` and `coverageGaps` (the times nothing was watching since the last check, or since the responsibility began when none: `id`, `reason`, `start`, `end?`; empty when there were none). A gap explains a missing check, it never makes the state healthy.
 
 #### `responsibility.coverage`
 
