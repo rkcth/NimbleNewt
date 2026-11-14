@@ -37,8 +37,15 @@ test("deliveryLogDays: owner-only, bounded, recorded; the running controller pre
     assert.equal((await c.storage.getAggregate({ kind: "notification-delivery", id: "ndl-a" })), undefined);
     for (const id of ["ndl-b", "ndl-c"]) assert.ok(await c.storage.getAggregate({ kind: "notification-delivery", id }), id);
     const audit = await c.storage.listAudit({ afterSeq: 0, limit: 1000 });
-    assert.ok(audit.some((e) => e.type === "retention.settings" || /deliveryLogDays/.test(JSON.stringify(e))), "the tier change is recorded");
+    assert.ok(audit.some((e) => /deliveryLogDays/.test(JSON.stringify(e))), "the tier change is recorded");
     assert.equal((await call(boot.token, "retention.settings.set", { deliveryLogDays: null }, "set-2")).ok, true, "and off again");
     assert.equal((await call("not-a-token", "retention.settings.set", { deliveryLogDays: 30 }, "x")).ok, false);
+    // An agent, even one granted everything, may not change the tier, nor preview or run the removal.
+    const rob = await c.services.principals.authenticate(boot.token);
+    await c.services.principals.enroll(rob, { commandId: "e-wild", kind: "agent", name: "wild", grants: [{ action: "*", project: "*" }] } as never);
+    const wild = (await c.services.principals.issueCredential(rob, "agent:wild")).token;
+    assert.equal((await call(wild, "retention.settings.set", { deliveryLogDays: 7 }, "w-1")).error?.code, "forbidden");
+    assert.equal((await call(wild, "retention.run", {}, "w-2")).error?.code, "forbidden");
+    assert.equal((await call(boot.token, "retention.settings.get", {})).result.item.effective.deliveryLogDays, null, "still off");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
