@@ -1134,6 +1134,26 @@ Arguments:
 
 Result: `{ item: { meetings: [{ id, projectId, title, motions: [{ id, number, text, state, deferred }] }], truncated } }`.
 
+#### `meeting.proc.status`
+
+Where a motion's procedure stands: stage, round, objection check answers, rulings, follow-ups and what it waits for. The owner, a host, a service and the chair see all of it; a member or a reader sees no vote progress.
+
+Arguments:
+
+- `motionId`: the motion's ID
+
+Result: `{ item }`.
+
+#### `meeting.proc.owner-controls`
+
+What the owner can rule on in the meeting procedure (card M06): motions waiting for a ruling on an objection or a request for research, and tabled motions the owner can overrule. Owner only.
+
+Arguments:
+
+- none
+
+Result: `{ item: { rulings: [{ motionId, recordId, projectId, number, text, why }], tabled: [{ motionId, recordId, projectId, number, text, reason }] } }`.
+
 #### `meeting.desk-reads`
 
 What a meeting's chair read from absent members' desks and shared working notes, and every refused attempt to change one (card M05b): per file read, which file and revision, whose it is, the digest and size of what was shown, who read it and when, in the order the reads happened; seen by the owner, by the file's own agent and by the meeting's roster and chair. Reading never changes or wakes anyone.
@@ -4341,6 +4361,101 @@ Arguments:
 - `commandId`: required
 
 Result: `{ closed, tied, failedTies, interrupted, logChecked, returned, returnFailed, expired, narrated }`.
+
+#### `meeting.proc.begin`
+
+Starts the procedure for a proposed motion (comment rounds, objection check, then the vote): the controller or the chair. The settings in force (meeting.rounds, meeting.objection.reruns, meeting.vote.maxRevisions, meeting.tabling, meeting.echoFlag, meeting.seating) are kept for this motion.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `skipComments` (optional): true to begin at the objection check (a motion moved again after the owner overruled a tabling)
+
+Result: `{ id, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.advance`
+
+Does the next step of a motion's procedure (one member's turn, answer or ballot) and says what it waits for. Owner, host or service only.
+
+Arguments:
+
+- `motionId`: the motion's ID
+
+Result: `{ stage, did, waiting?: { on, why }, done }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.run`
+
+Moves a motion's procedure until it waits for a ruling, the owner, the vote's time or is finished (at most 400 steps). Owner, host or service only.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `steps` (optional): at most this many steps, 1 to 400
+
+Result: `{ stage, did, waiting?: { on, why }, done, steps }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.rule`
+
+The chair's or the owner's ruling on the objections and requests for research that hold a vote: `proceed` (go to the vote; remaining objections are recorded as dissent), `table` (no vote; needs `reason`; the chair only when a member asked for time to research and meeting.tabling is on, the owner always; the research becomes follow-up tasks) or `uphold` (the objection is addressed by `addressed` clarify or amend with `text`, and the check runs again, at most meeting.objection.reruns times).
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `ruling`: proceed, table or uphold
+- `text` (optional): the clarification, the amended wording or a note
+- `reason` (optional): why the motion is tabled
+- `addressed` (optional): clarify or amend (uphold only)
+
+Result: `{ stage }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.amend`
+
+Amends a motion under way (the chair, the owner, a host or a service). A material amendment after the comment rounds starts a fresh round, a fresh objection check and a fresh vote.
+
+Arguments:
+
+- `motionId`: the motion's ID
+- `text`: the new wording
+- `material`: true if it changes what is voted on
+- `changes` (optional): proposed changes to tasks
+
+Result: `{ version, fresh }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.untable`
+
+Owner only: overrules the tabling of a motion and asks for the vote anyway. The tabled motion stays on record; its wording is moved again and begins at the objection check.
+
+Arguments:
+
+- `motionId`: the tabled motion's ID
+
+Result: `{ motionId, procedureId }` of the motion moved again.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `meeting.proc.owner-message`
+
+Owner only: writes to a meeting. While a vote is open a message that repeats a cast ballot's reason is refused with a warning until sent again with `acknowledged` true. Nobody gets the floor by it; each voter who cast before it is offered one revision turn.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `text`: the message
+- `acknowledged` (optional): true to send it although it quotes a ballot
+
+Result: `{ id, seq, warning? }`.
+
+Completion: finished when accepted (`completed: true`).
 
 #### `meeting.attend.open-room`
 
