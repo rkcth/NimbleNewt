@@ -83,4 +83,11 @@ for (const backend of backends) {
     setNow("2026-11-14T12:00:00.000Z");
     assert.equal(await leases.expiredUntold(carl, project), undefined);
   });
+
+  suite("review: only the owner (the controller's sweep) marks an expiry as told; an agent, even the holder with write rights, is refused and the lease stays untold (card P04g)", async ({ owner, project, leases, resource, ann, bob, carl, setNow }) => {
+    await leases.acquire(ann, { commandId: cid("a"), resourceId: resource, purpose: "upgrade", minutes: 5 });
+    setNow("2026-11-14T12:00:00.000Z");
+    for (const p of [ann, bob, carl]) await assert.rejects(leases.markExpiryTold(p, resource, 1), (e: { code?: string }) => e.code === "forbidden");
+    assert.deepEqual((await leases.expiredUntold(owner, project))!.map((l) => l.generation), [1], "still to be told");
+  });
 }

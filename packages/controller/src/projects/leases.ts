@@ -217,6 +217,8 @@ export class MaintenanceLeaseService {
 
   /** Marks the expiry of one holding as told, once the notice was sent. A lease that moved on (taken over, released) or was marked already is left alone and answers false. */
   async markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<boolean> {
+    // The controller's own sweep marks a notice it sent (it runs as the owner); an agent or a task credential never marks one, or it could keep the owner from being told.
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "mark a lease expiry as told");
     const ref: AggregateRef = { kind: LEASE, id: leaseIdOf(resourceId) };
     try {
       const result = await this.#runner.command("responsibility.lease.expiry-told", { commandId: `mlx-${hash(ref.id, String(generation))}`, actor: by.id }, async () => ({
