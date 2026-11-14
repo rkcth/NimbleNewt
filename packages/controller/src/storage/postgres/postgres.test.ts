@@ -503,7 +503,9 @@ test("competing claimants on a real server never receive the same delivery, and 
 });
 
 test("a claim skips a delivery another session holds locked instead of waiting for it", async () => {
-  const { storage, schema, url, close } = await fresh({ lockTimeoutMs: 400 });
+  // A claim that waited for the locked row would wait until the lock timeout (20 s here) and then fail; one that skips it answers at once. The bound sits far between the two, so a slow
+  // machine cannot fail it (it was 300 ms against a 400 ms timeout, which a slow Windows runner exceeded though the row was skipped: CI repair round 14).
+  const { storage, schema, url, close } = await fresh({ lockTimeoutMs: 20_000 });
   const holder = new pg.Client({ connectionString: url });
   try {
     await storage.acquireEpoch({ holder: "a", at: T0 });
@@ -518,7 +520,7 @@ test("a claim skips a delivery another session holds locked instead of waiting f
     const started = Date.now();
     const claims = await storage.claimDeliveries({ epoch: 1, destination: "d", claimant: "w", now: "2026-10-19T13:00:00.000Z", leaseMs: 1000, limit: 5 });
     assert.deepEqual(claims.map((c) => c.deliveryId), ["d2", "d3"], "the locked delivery is skipped, the others are claimed");
-    assert.ok(Date.now() - started < 300, "the claim must not wait for the locked row");
+    assert.ok(Date.now() - started < 10_000, `the claim must not wait for the locked row (${Date.now() - started} ms)`);
     await holder.query("ROLLBACK");
     assert.deepEqual((await storage.claimDeliveries({ epoch: 1, destination: "d", claimant: "w", now: "2026-10-19T13:00:00.000Z", leaseMs: 1000, limit: 5 })).map((c) => c.deliveryId), ["d1"]);
   } finally { await holder.end().catch(() => undefined); await close(); }

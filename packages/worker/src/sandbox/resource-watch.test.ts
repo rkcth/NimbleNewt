@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { detectLimitCapabilities, limitedPlan, type LimitCapabilities } from "./limits.js";
-import { ResourceWatch, judge, measureDirs, newJudgeState, parseCpuTime, parsePsUsage, psSampler, type UsageSample } from "./resource-watch.js";
+import { CPU_BURST_SECONDS, ResourceWatch, judge, measureDirs, newJudgeState, parseCpuTime, parsePsUsage, psSampler, type UsageSample } from "./resource-watch.js";
 import type { SandboxRecipe } from "./recipe.js";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-rwatch-")));
@@ -364,20 +364,25 @@ describe("the sampling monitor: real runs through the launcher (this host's ps, 
 
   test("a run using more CPU than its share is paced (paused and resumed) and nothing is left stopped", async (t) => {
     if (process.platform === "win32" || availableParallelism() < 2) return t.skip("needs ps and two cores");
-    // The pacing needs the host to really give the two loops more than one core's worth; on a machine busy with other work it cannot be shown (the unit tests above hold the decision itself), so say so instead of failing.
-    const probe = spawn("/bin/sh", ["-c", `${node} -e 'for(;;);' & ${node} -e 'for(;;);' & wait`], { stdio: "ignore" });
-    const t0 = Date.now(); await sleep(1500);
-    const seen = await psSampler()(probe.pid!);
-    const cores = seen === undefined ? 0 : seen.cpuMs / (Date.now() - t0);
-    try { execFileSync("pkill", ["-P", String(probe.pid)], { stdio: "ignore" }); } catch { /* none */ } probe.kill("SIGKILL");
-    if (cores < 1.4) return t.skip(`this host gave two busy loops only ${cores.toFixed(2)} cores' worth just now`);
-    const launcher = await make();
+    // Pacing is due only when the run really gets more than its share, which a busy host may not give it. Whether it did is read from what the watch itself saw during this run (its samples,
+    // through the real ps): an earlier probe of the host could not say what the run would get (CI repair round 14, macOS: "paused 0 times" after a probe that saw enough). The decision itself is
+    // held by the unit tests above; this one holds that a run over its share is really paused and resumed, and that nothing is left stopped.
+    const seen: { at: number; cpuMs: number }[] = [];
+    const runPids = new Set<number>();
+    const real = psSampler();
+    const launcher = await make({ usageSampler: async (pid) => { const u = await real(pid); if (u !== undefined) { seen.push({ at: Date.now(), cpuMs: u.cpuMs }); for (const p of u.pids) runPids.add(p); } return u; } });
     const r = await go(launcher, ["/bin/sh", "-c", `${node} -e 'for(;;);' & ${node} -e 'for(;;);' & wait`], { cpus: 1 }, recipe(), 6000);
     assert.equal(r.timedOut, true);
-    assert.ok((r.cpuPauses ?? 0) >= 1, `paused ${String(r.cpuPauses)} times`);
+    // The share's bucket over the run's own samples (one core-second a second, a burst of CPU_BURST_SECONDS): clearly overdrawn somewhere means the run was over its share there.
+    let credit = CPU_BURST_SECONDS * 1000; let over = 0;
+    for (let i = 1; i < seen.length; i++) { credit = Math.min(CPU_BURST_SECONDS * 1000, credit + (seen[i]!.at - seen[i - 1]!.at)) - Math.max(0, seen[i]!.cpuMs - seen[i - 1]!.cpuMs); over = Math.max(over, -credit); }
+    if (over < 200 && (r.cpuPauses ?? 0) === 0) return t.skip(`this host never let the run use more than its share (most overdrawn ${Math.round(over)} ms over ${seen.length} samples), so there was nothing to pace`);
+    assert.ok((r.cpuPauses ?? 0) >= 1, `paused ${String(r.cpuPauses)} times, though the run was ${Math.round(over)} ms over its share`);
     assert.equal(r.limitExceeded, undefined, "pacing is not ending the run");
     await sleep(500);
-    const left = execFileSync("ps", ["-A", "-o", "pid=,stat=,args="], { encoding: "utf8" }).split("\n").filter((l) => l.includes("for(;;);"));
+    // This run's own processes (every one its samples named), not every busy loop on the machine: another run's leftovers on a shared host are not this run's.
+    const left = [...runPids].filter((p) => { try { process.kill(p, 0); return true; } catch { return false; } });
+    assert.ok(runPids.size >= 2, `the samples named the run's processes: ${[...runPids].join(", ")}`);
     assert.deepEqual(left, [], "the paced processes were ended at the time limit, even though they were paused at times");
   });
 

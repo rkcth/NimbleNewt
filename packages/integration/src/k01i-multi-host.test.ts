@@ -58,9 +58,13 @@ for (const kind of ["sqlite", "postgres"] as const) {
       const busy = { ids: [] as string[] };
       const responder = new WorkspaceResponder({ client, busy: () => [], port: { run: async () => ({ ok: false, reason: "no" }) }, piState: new PiStateHost({ client, source: remoteStores.source, final: remoteStores.final, busy: () => busy.ids, scratch: join(d, "remote", "copies") }) });
       let running = true; let seq = 0;
-      const connect = async (): Promise<void> => { await client.connect(CAPS as never); await client.heartbeat(++seq); };
+      // One sender at a time, as the real host's poller sends them: each heartbeat's number must arrive after the last accepted one, and two sent at once over two requests can arrive the other
+      // way round (CI repair round 14, macOS: "sequence 9 is not after the last accepted one (10)", from the loop's heartbeat and the reconnect's sent together).
+      let beats: Promise<unknown> = Promise.resolve();
+      const heartbeat = (): Promise<unknown> => { const next = beats.then(() => client.heartbeat(++seq), () => client.heartbeat(++seq)); beats = next.catch(() => undefined); return next; };
+      const connect = async (): Promise<void> => { await client.connect(CAPS as never); await heartbeat(); };
       await connect();
-      const loop = (async () => { while (running) { try { const l = await client.workspaceList(); responder.handle(l.requests, l.withdrawn); await client.heartbeat(++seq); } catch { /* the controller is restarting */ } await sleep(40); } })();
+      const loop = (async () => { while (running) { try { const l = await client.workspaceList(); responder.handle(l.requests, l.withdrawn); await heartbeat(); } catch { /* the controller is restarting */ } await sleep(40); } })();
       stopHost = async () => { running = false; await loop; await responder.idle(); };
 
       const made = await call(c, boot.token, "backup.now", {}, "b1");
