@@ -364,7 +364,7 @@ async function supervised(body: (s: { root: string; clock: Clock; launcher: Laun
 }
 const startsOf = (events: SupervisorEvent[], id: string): number => events.filter((e) => e.kind === "started" && e.releaseId === id).length;
 
-test("a controller that exits 76 before confirming is not set aside: it is started again, counted, and the owner is told after the owner's number of tries (K03, supervisor)", async () => {
+test("a controller that exits 76 before confirming is believed the owner's number of times, then its start is the release's failure and the launcher falls back (K03, supervisor)", async () => {
   await supervised(async (s) => {
     const good = await s.release("good", "confirm");
     await pointerTo(s.root, good);
@@ -372,17 +372,53 @@ test("a controller that exits 76 before confirming is not set aside: it is start
     const bad = await s.release("bad", "host-trouble");
     await pointerTo(s.root, bad);
     const run = s.start();
-    await s.waitFor("three tries", () => startsOf(s.events, bad.id) >= 3 && notices(s.state()).length === 1);
+    await s.waitFor("the fall-back", () => startsOf(s.events, good.id) >= 1);
     run.stop();
     await run.done;
     const st = s.state();
-    assert.deepEqual(st.failed, [], "never set aside");
+    assert.equal(startsOf(s.events, bad.id), POLICY.hostRetries + 1, "believed hostRetries times, then not");
+    assert.deepEqual(st.failed.map((f: any) => f.id), [bad.id], "set aside in the end");
     assert.equal(st.known.id, good.id);
-    assert.equal(startsOf(s.events, good.id), 0, "never fell back");
-    assert.equal(st.external.cause, "host");
-    assert.ok(st.external.count >= 3);
-    assert.equal(notices(st)[0]!.cause, "host");
+    assert.equal(notices(st).filter((n) => n.cause === "host").length, 1, "the owner was told about the machine once");
     assert.ok(s.lines.some((l) => /the machine is at fault \(the controller reported that the machine stopped it \(exit 76\)\); the release is not set aside/.test(l)), s.lines.join("\n"));
+    assert.ok(s.lines.some((l) => /too many times in a row with nothing to confirm it; counted as the release's own failure/.test(l)), s.lines.join("\n"));
+  });
+});
+
+test("a controller that exits 76 while the launcher's own probe sees the disk full is never set aside (K03, supervisor)", async () => {
+  await supervised(async (s) => {
+    const good = await s.release("good", "confirm");
+    await pointerTo(s.root, good);
+    await s.launcher.prepare(); await s.launcher.confirm(good.id);
+    const bad = await s.release("bad", "host-trouble");
+    await pointerTo(s.root, bad);
+    const run = s.start([async () => ({ cause: "host", problem: "the data folder cannot be written" })]);
+    await s.waitFor("more tries than the owner's number", () => startsOf(s.events, bad.id) >= POLICY.hostRetries + 3);
+    run.stop();
+    await run.done;
+    assert.deepEqual(s.state().failed, []);
+    assert.equal(startsOf(s.events, good.id), 0, "never fell back");
+  });
+});
+
+test("a release under watch that keeps saying the machine stopped it is believed the owner's number of times; changing between 76 and 77 does not reset that (K03)", async () => {
+  await world(async (w) => {
+    const { good, next } = await rollout(w);
+    for (let i = 1; i <= POLICY.hostRetries; i++) {
+      const r = await w.launcher.externalFailure(next.id, i % 2 === 0 ? "host" : "provider", "said so", { selfReported: true });
+      assert.equal(r.blamed, false, `claim ${i}`);
+      // every restart confirms again; the watch keeps the count
+      assert.equal((await w.run(next)).action, "run");
+      await w.launcher.confirm(next.id);
+    }
+    assert.equal(w.state().probation.claims, POLICY.hostRetries);
+    assert.equal((await w.launcher.externalFailure(next.id, "host", "said so", { selfReported: true })).blamed, true);
+    // confirmed by what the launcher sees: never blamed
+    assert.equal((await w.launcher.externalFailure(next.id, "host", "disk full")).blamed, false);
+    // the last known good outside any watch is always believed
+    w.clock.advance(31 * 60);
+    for (let i = 0; i < POLICY.hostRetries + 2; i++) assert.equal((await w.launcher.externalFailure(next.id, "host", "said so", { selfReported: true })).blamed, false);
+    void good;
   });
 });
 

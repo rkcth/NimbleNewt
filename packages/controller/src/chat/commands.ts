@@ -169,11 +169,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "release.trust.require": { verb: "Change whether releases must be signed", mode: "propose" },
   "release.signature.attach": { verb: "Attach a signature to a release candidate", mode: "apply" },
   // The owner saying they have seen a failed start or fall-back only closes a notice: it changes no release and no setting (card K02f).
-  // Migration recovery and rollback limits (card K03): the policy and the approval for destructive migrations change what can be undone, so they are shown first; stopping a rollout only ends a watch and applies at once.
+  // Migration recovery and rollback limits (card K03): the policy and the approval for destructive migrations change what can be undone, so they are shown first; so is stopping a rollout, which removes the automatic way back. Withdrawing an approval only narrows and applies at once.
   "migration.policy.set": { verb: "Change the rollback period, or how a newly activated release is watched and when its failures send the installation back to the release before it", mode: "propose" },
   "migration.contract.approve": { verb: "Allow destructive database migrations to run at the next start (after this the previous release cannot come back)", mode: "propose" },
   "migration.contract.withdraw": { verb: "Take back an approval for destructive database migrations that has not run yet", mode: "apply" },
-  "release.rollout.stop": { verb: "Stop the rollout of the current release: end its watch, leaving it running", mode: "apply" },
+  "release.rollout.stop": { verb: "Stop the rollout of the current release: end its watch (its failures no longer send the installation back), leaving it running", mode: "propose" },
   "release.start.acknowledge": { verb: "Acknowledge that a release failed to start or fell back", mode: "apply" },
   "release.staging.settings.set": { verb: "Change the release staging settings", mode: "propose" },
   "release.approval.enable": { verb: "Require an approved release for activation", mode: "apply" },

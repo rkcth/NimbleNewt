@@ -49,7 +49,7 @@ import { SwarmLimitsService, SwarmService } from "../swarm/index.js";
 import { CheckRunService, noteSuspendedResponsibilities, CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ResponsibilityEventChecks, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { DISPATCHER_PRINCIPAL, GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
-import { MigrationGuardService, GATE_FILE, readContractGate } from "../migration/index.js";
+import { MigrationGuardService, GATE_FILE, openApprovedContract } from "../migration/index.js";
 import { SqliteStorage, probeSqliteLibrary, MIGRATIONS as SQLITE_MIGRATIONS } from "../storage/sqlite/index.js";
 import { PostgresStorage, probePostgresLibrary, MIGRATIONS as POSTGRES_MIGRATIONS } from "../storage/postgres/index.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -525,14 +525,18 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   // restore's swap, the migrations of the database); the holder check is made under it again, and the epoch is taken with the epoch that check read (card F04m), so nothing slips in between.
   if (stateDirectory !== undefined) await withStateLock(stateDirectory, async () => { const settled = await guardStart(stateDirectory, sourcePlace, undefined, "later"); if (settled.note !== undefined) print(settled.note); }, { wait: true });
   let seenEpoch: number | undefined;
-  // Card K03: a destructive migration runs only after the owner allowed it (`migration.contract.approve`), which is kept in a file in the data directory because the opener must know it before the database is open.
-  const contractThrough = dataDirectory === undefined ? 0 : await readContractGate(join(dataDirectory, GATE_FILE));
+  // Card K03: a destructive migration runs only after the owner allowed it (`migration.contract.approve`). The approval is kept in a file in the data directory AND in the database; the database is first opened
+  // with every destructive migration deferred, and only when the file agrees with the approval the database holds is it opened again allowing them (a file written by anything else allows nothing).
+  const gateFile = dataDirectory === undefined ? undefined : join(dataDirectory, GATE_FILE);
+  let openPg: ((contractThrough: number) => Promise<PostgresStorage>) | undefined;
   {
     if (options.storage.kind === "sqlite" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, resolve(options.storage.path), print, { ...(piFinal === undefined ? {} : { piFinal }), ...(dataLock === undefined || !(await dataLock.isHeld()) ? {} : { lock: dataLock }) });
     // PostgreSQL (card K01i): a restore staged in a new schema is swapped in before the schema is opened; the marker, key and journal are in the data directory the host gave.
     if (options.storage.kind === "postgres" && dataDirectory !== undefined) await applyPendingRestore(dataDirectory, { postgres: { url: options.storage.url, schema: options.storage.schema ?? "nimblenewt" } }, print, { ...(piFinal === undefined ? {} : { piFinal }) });
     if (options.storage.kind === "postgres") {
-      const pg = await PostgresStorage.open({ connectionString: options.storage.url, allowUnsupportedServer: override, ...(contractThrough > 0 ? { contractThrough } : {}), ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }), ...(options.storage.schema === undefined ? {} : { schema: options.storage.schema }), ...(options.storage.maxConnections === undefined ? {} : { maxConnections: options.storage.maxConnections }), ...(options.storage.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: options.storage.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
+      const pgOptions: Extract<typeof options.storage, { kind: "postgres" }> = options.storage;
+      openPg = (contractThrough: number): Promise<PostgresStorage> => PostgresStorage.open({ connectionString: pgOptions.url, allowUnsupportedServer: override, ...(contractThrough > 0 ? { contractThrough } : {}), ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }), ...(pgOptions.schema === undefined ? {} : { schema: pgOptions.schema }), ...(pgOptions.maxConnections === undefined ? {} : { maxConnections: pgOptions.maxConnections }), ...(pgOptions.minimumServerVersionNum === undefined ? {} : { minimumServerVersionNum: pgOptions.minimumServerVersionNum }) }).catch((error: unknown) => { if (error instanceof Error && error.message.startsWith("NimbleNewt will not start")) print(error.message); throw error; });
+      const pg = await openPg(0);
       storage = pg;
       const server = pg.unsupportedServer;
       if (server !== undefined) {
@@ -543,7 +547,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         check = full;
       }
     } else {
-      storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(contractThrough > 0 ? { contractThrough } : {}), ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
+      storage = await SqliteStorage.open({ path: options.storage.path, allowNetworkFilesystem: override, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) });
+    }
+    {
+      const s = options.storage;
+      storage = await openApprovedContract<ControllerStorage>({ storage, gateFile, migrations: s.kind === "postgres" ? POSTGRES_MIGRATIONS : SQLITE_MIGRATIONS, print,
+        reopen: async (contractThrough) => (s.kind === "postgres" ? openPg!(contractThrough) : SqliteStorage.open({ path: s.path, allowNetworkFilesystem: override, contractThrough, ...(beforeUpgrade === undefined ? {} : { beforeUpgrade }) })) });
     }
     // A database a transfer left stays fenced inside the database itself: it starts only if the authority file names it for that transfer (checked before the epoch is taken, under the state lock, and again guarded by the transfer files).
     try {

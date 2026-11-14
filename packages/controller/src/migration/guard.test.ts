@@ -8,7 +8,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { Migration } from "../storage/migrations.js";
-import { GATE_FILE, MigrationGuardService, POLICY_DEFAULTS, readContractGate, type EffectivePolicy, type GuardOptions } from "./guard.js";
+import type { ControllerStorage } from "../storage/types.js";
+import { GATE_FILE, MigrationGuardService, POLICY_DEFAULTS, confirmedContract, readContractGate, type EffectivePolicy, type GuardOptions } from "./guard.js";
 import { additiveBetween, contractRefusals, journalView, judgeRollback, type TestedPair, type UpgradeRecord } from "./rules.js";
 
 after(stopServer);
@@ -58,7 +59,7 @@ test("destructive migrations may be allowed only for a destructive one that wait
   assert.deepEqual(journalView(LIST, 1, 0).map((m) => m.state), ["applied", "pending", "deferred", "deferred", "deferred"]);
 });
 
-interface C { make: (o?: Partial<GuardOptions>) => MigrationGuardService; owner: Principal; agent: Principal; dir: string; schema: { v: number }; clock: { t: string }; policies: EffectivePolicy[] }
+interface C { storage: ControllerStorage; make: (o?: Partial<GuardOptions>) => MigrationGuardService; owner: Principal; agent: Principal; dir: string; schema: { v: number }; clock: { t: string }; policies: EffectivePolicy[] }
 for (const backend of backends) {
   const suite = (name: string, body: (c: C) => Promise<void>): void => {
     test(`${backend.name}: ${name}`, async () => {
@@ -75,7 +76,7 @@ for (const backend of backends) {
         const schema = { v: 1 };
         const policies: EffectivePolicy[] = [];
         const make = (extra: Partial<GuardOptions> = {}): MigrationGuardService => MigrationGuardService.withEpoch(world.storage, projects.epoch, { migrations: LIST, schemaVersion: async () => schema.v, gateFile: join(dir, GATE_FILE), snapshots: true, now: () => clock.t, onPolicy: async (p) => { policies.push(p); }, runner: o, ...extra });
-        await body({ make, owner, agent, dir, schema, clock, policies });
+        await body({ storage: world.storage, make, owner, agent, dir, schema, clock, policies });
       } finally { await world.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
     });
   };
@@ -169,5 +170,52 @@ for (const backend of backends) {
     const g = c.make({ schemaVersion: async () => { throw new Error("database gone"); } });
     assert.deepEqual(await g.noteStart(), { schema: -1 });
     assert.equal(await g.notePair("rcn-x"), false);
+  });
+  suite("the gate file counts only when it agrees with the approval the database holds: a written, edited, copied or withdrawn file allows nothing", async (c) => {
+    const file = join(c.dir, GATE_FILE);
+    const g = c.make();
+    await g.noteStart();
+    c.schema.v = 2; c.clock.t = day(1);
+    await g.noteStart();
+    // a file nobody approved (for example written by an agent) allows nothing, and the status does not show its migrations as allowed
+    writeFileSync(file, JSON.stringify({ v: 1, through: 3, approvedBy: c.owner.id, approvedAt: day(1) }));
+    assert.equal(await readContractGate(file), 3, "the file alone claims 3");
+    const forged = await confirmedContract(c.storage, file);
+    assert.equal(forged.through, 0); assert.match(forged.note ?? "", /does not match the approval recorded by the owner/);
+    assert.deepEqual((await g.status(c.owner)).deferred, [3, 4, 5]);
+    // the owner's approval: the file and the record agree
+    c.clock.t = day(20);
+    await g.approveContract(c.owner, { commandId: "ok", through: 3 });
+    assert.deepEqual(await confirmedContract(c.storage, file), { through: 3 });
+    const original = readFileSync(file, "utf8");
+    // repeating the same command keeps the recorded time, so the file still agrees
+    c.clock.t = day(21);
+    await g.approveContract(c.owner, { commandId: "ok", through: 3 });
+    assert.equal(readFileSync(file, "utf8"), original);
+    assert.deepEqual(await confirmedContract(c.storage, file), { through: 3 });
+    // edited: a higher number, another time or another approver
+    const rec = JSON.parse(original) as Record<string, unknown>;
+    for (const edit of [{ through: 5 }, { approvedAt: day(22) }, { approvedBy: "agent:plain" }]) {
+      writeFileSync(file, JSON.stringify({ ...rec, ...edit }));
+      assert.equal((await confirmedContract(c.storage, file)).through, 0, JSON.stringify(edit));
+      assert.deepEqual((await g.summary()).deferred, [3, 4, 5], JSON.stringify(edit));
+    }
+    // withdrawn, then the old file put back: nothing
+    writeFileSync(file, original);
+    await g.withdrawContract(c.owner, { commandId: "w" });
+    writeFileSync(file, original);
+    assert.equal((await confirmedContract(c.storage, file)).through, 0);
+    // applied: an old copy of the file allows nothing more
+    await g.approveContract(c.owner, { commandId: "again", through: 3 });
+    const again = readFileSync(file, "utf8");
+    c.schema.v = 3;
+    await g.noteStart();
+    writeFileSync(file, again);
+    assert.equal((await confirmedContract(c.storage, file)).through, 0);
+    // no file, a damaged file, a database that cannot be read
+    rmSync(file, { force: true });
+    assert.deepEqual(await confirmedContract(c.storage, file), { through: 0 });
+    writeFileSync(file, again);
+    assert.equal((await confirmedContract({ getAggregate: async () => { throw new Error("gone"); } }, file)).through, 0);
   });
 }

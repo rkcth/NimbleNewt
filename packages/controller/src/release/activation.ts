@@ -920,13 +920,14 @@ export class ReleaseActivationService {
       trust: { required: trust.required, keys: trust.keys.map((k) => ({ keyId: k.keyId, label: k.label })) },
       ...(dbSchema === undefined ? {} : { databaseSchema: dbSchema }),
       settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, startupWindowSeconds: s.startupWindowSeconds, startFailureLevel: s.startFailureLevel, revision: s.revision },
-      ...(await this.#migrationView()),
+      ...(await this.#migrationView(isOwner(owner))),
       startNotices: ((await this.#launcher.read().catch(() => undefined))?.notices ?? []).map((n) => ({ kind: n.kind, release: n.release, ...(n.to === undefined ? {} : { to: n.to }), reason: n.reason, at: n.at, told: n.sentAt !== undefined, state: n.closedBy ?? "open" })),
     };
   }
 
-  async #migrationView(): Promise<Pick<ActivationStatus, "migration" | "rollout">> {
-    const migration = this.#o.migrationSummary === undefined ? undefined : await this.#o.migrationSummary().catch(() => undefined);
+  /** The migration guard's account is the owner's (as `migration.status` is); a holder of release.manage sees the rollout only. */
+  async #migrationView(owner: boolean): Promise<Pick<ActivationStatus, "migration" | "rollout">> {
+    const migration = !owner || this.#o.migrationSummary === undefined ? undefined : await this.#o.migrationSummary().catch(() => undefined);
     const r = await this.#launcher.rollout().catch(() => undefined);
     const rollout = r === undefined || (r.probation === undefined && r.external === undefined && r.policy === undefined) ? undefined : { ...(r.probation === undefined ? {} : { probation: r.probation }), ...(r.external === undefined ? {} : { external: r.external }), ...(r.policy === undefined ? {} : { policy: r.policy }) };
     return { ...(migration === undefined ? {} : { migration }), ...(rollout === undefined ? {} : { rollout }) };

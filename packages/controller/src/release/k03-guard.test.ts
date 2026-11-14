@@ -78,9 +78,12 @@ for (const backend of backends) {
     const schema = { v: 1 };
     const clock = { t: "2026-11-12T12:00:00.000Z" };
     const guard = guardFor(c, schema, clock);
-    const act = c.make({ compat: { workers: { min: 1, max: 1 }, required: true }, schemaVersion: async () => schema.v, rollbackGuard: (id) => guard.rollbackVerdict(id), safeBack: () => guard.safeBack() });
+    const act = c.make({ compat: { workers: { min: 1, max: 1 }, required: true }, schemaVersion: async () => schema.v, rollbackGuard: (id) => guard.rollbackVerdict(id), safeBack: () => guard.safeBack(), migrationSummary: () => guard.summary() });
     const a = await c.candidate({ "nn.js": "a" }, { compatText: compat({ min: 1, max: 1 }) });
     const b = await c.candidate({ "nn.js": "b" }, { compatText: compat({ min: 1, max: 2 }) });
+    // the migration guard's account is the owner's: a release.manage holder reads the release status without it
+    assert.equal((await act.status(c.owner)).migration?.schemaVersion, 1);
+    assert.equal((await act.status(c.manager)).migration, undefined);
     await guard.noteStart();
     await go0(c, act, a);
     // A is current but never started healthy here: no tested pair. Going to B and back is refused until A has been a tested pair.

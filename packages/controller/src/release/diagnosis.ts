@@ -21,7 +21,13 @@ import { join } from "node:path";
  */
 export const CONTROLLER_TROUBLE = { host: 76, provider: 77 } as const;
 export type FailureCause = "release" | "host" | "provider";
-export interface Diagnosis { readonly cause: FailureCause; readonly reason: string; readonly evidence: readonly string[] }
+export interface Diagnosis {
+  readonly cause: FailureCause;
+  readonly reason: string;
+  readonly evidence: readonly string[];
+  /** Only the controller's own exit code (76, 77) says the machine or a provider is at fault; no probe confirms it. The launcher believes that from a release that has not proved itself only a bounded number of times. */
+  readonly selfReported?: boolean;
+}
 
 /** Errors that say the machine, not the program, failed (Node `code` values and the storage layer's connection errors). */
 const HOST_CODES = new Set(["ENOSPC", "EDQUOT", "EROFS", "EACCES", "EPERM", "EMFILE", "ENFILE", "ENOMEM", "EADDRINUSE", "EBUSY", "ENOTCONN", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN"]);
@@ -97,10 +103,12 @@ export interface ExitFacts { readonly code: number | null; readonly signal: stri
  * Precedence: the controller's own exit code, then the probes (host before provider), then the release. Never throws.
  */
 export async function diagnoseFailure(exit: ExitFacts, probes: readonly Probe[]): Promise<Diagnosis> {
-  if (exit.code === CONTROLLER_TROUBLE.host) return { cause: "host", reason: "the controller reported that the machine stopped it (exit 76)", evidence: ["exit 76"] };
-  if (exit.code === CONTROLLER_TROUBLE.provider) return { cause: "provider", reason: "the controller reported that a provider is unavailable (exit 77)", evidence: ["exit 77"] };
   const found: ProbeResult[] = [];
   for (const p of probes) { try { const r = await p(); if (r !== undefined) found.push(r); } catch { /* a probe that fails finds nothing */ } }
+  // The controller's own word comes first; whether anything the launcher sees confirms it is kept (`selfReported`), because a release could otherwise exit 76 or 77 to avoid being set aside.
+  const confirmed = found.length > 0;
+  if (exit.code === CONTROLLER_TROUBLE.host) return { cause: "host", reason: "the controller reported that the machine stopped it (exit 76)", evidence: ["exit 76", ...found.map((f) => f.problem)], ...(confirmed ? {} : { selfReported: true }) };
+  if (exit.code === CONTROLLER_TROUBLE.provider) return { cause: "provider", reason: "the controller reported that a provider is unavailable (exit 77)", evidence: ["exit 77", ...found.map((f) => f.problem)], ...(confirmed ? {} : { selfReported: true }) };
   const host = found.find((f) => f.cause === "host") ?? found[0];
   if (host !== undefined) return { cause: host.cause, reason: host.problem, evidence: found.map((f) => f.problem) };
   const how = exit.spawnFailed === true ? "a program that could not be started" : exit.signal !== null ? `signal ${exit.signal}` : `exit code ${exit.code ?? "none"}`;

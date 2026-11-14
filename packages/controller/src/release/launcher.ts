@@ -76,11 +76,13 @@ export interface Probation {
   readonly prior?: KnownGood;
   readonly failures: readonly ProbationFailure[];
   readonly state: "watching" | "passed" | "breached" | "stopped";
+  /** Runs during the watch that the release itself said were the machine's or a provider's fault (exit 76 or 77) with nothing the launcher could see to confirm it (see `externalFailure`). */
+  readonly claims?: number;
   readonly endedAt?: string;
   readonly reason?: string;
 }
 /** Consecutive starts of one release that failed for reasons of the machine or a provider, not the release (card K03). */
-export interface ExternalTrouble { readonly release: string; readonly cause: "host" | "provider"; readonly count: number; readonly since: string; readonly at: string; readonly reason: string }
+export interface ExternalTrouble { readonly release: string; readonly cause: "host" | "provider"; readonly count: number; readonly since: string; readonly at: string; readonly reason: string; /** Of these failures of this release in a row (any cause), how many only the release itself reported. */ readonly claims?: number }
 export interface LauncherState {
   readonly v: 1;
   /** The release the controller said may be run next, with the digest of its manifest. */
@@ -543,23 +545,40 @@ export class Launcher {
    * A start or a run of `releaseId` ended because the machine or a provider failed, not the release (the supervisor's diagnosis). Nothing is quarantined and the last known good is untouched. An open start is closed
    * so the next launch starts the same release afresh; consecutive failures of this release for the same cause are counted and, from the owner's `hostRetries`, told once as a notice that names the machine, not the release.
    */
-  externalFailure(releaseId: string, cause: "host" | "provider", reason: string): Promise<{ readonly count: number }> {
-    return this.#serial(async () => this.#noteExternal(await this.#load(), releaseId, cause, reason, this.#now()));
+  externalFailure(releaseId: string, cause: "host" | "provider", reason: string, options: { readonly selfReported?: boolean } = {}): Promise<{ readonly count: number; readonly blamed: boolean }> {
+    return this.#serial(async () => this.#noteExternal(await this.#load(), releaseId, cause, reason, this.#now(), options.selfReported === true));
   }
-  async #noteExternal(s: LauncherState, releaseId: string, cause: "host" | "provider", reason: string, at: string): Promise<{ count: number }> {
+  /**
+   * `selfReported`: only the release's own exit code (76, 77) says so; nothing the launcher can see confirms it. A release that has not proved itself (not the last known good, or still under watch) is
+   * believed only the owner's `hostRetries` times in a row: after that the failure is the release's (`blamed`), so a release cannot keep itself from being set aside by exiting with those codes. Failures the
+   * launcher's own probes confirm are never held against a release.
+   */
+  async #noteExternal(s: LauncherState, releaseId: string, cause: "host" | "provider", reason: string, at: string, selfReported = false): Promise<{ count: number; blamed: boolean }> {
     const e = s.external;
     const same = e !== undefined && e.release === releaseId && e.cause === cause;
     const count = same ? e.count + 1 : 1;
     const text = reason.slice(0, 200);
     const limit = s.policy?.hostRetries ?? DEFAULT_HOST_RETRIES;
+    const watch = s.probation === undefined ? undefined : settled(s.probation, at);
+    const watching = watch !== undefined && watch.release === releaseId && watch.state === "watching";
+    const proven = s.known?.id === releaseId && !watching;
+    const claimsOf = (v: unknown): number => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
+    const claims = !selfReported || proven ? undefined : (watching ? claimsOf(watch.claims) : e?.release === releaseId ? claimsOf(e.claims) : 0) + 1;
+    if (claims !== undefined && claims > limit) {
+      // Not believed any more: recorded, and the open start (if any) is left as it is, so the next launch judges it as the release's failed start.
+      const told = `${releaseId} said ${claims} times in a row that the ${cause === "host" ? "machine" : "provider"} stopped it, and nothing the launcher can see confirms it; counted as the release's own failure`.slice(0, 200);
+      await this.#write({ ...s, ...(watching ? { probation: { ...watch, claims } } : { external: { release: releaseId, cause, count, since: same ? e.since : at, at, reason: text, claims } }) }, { at, kind: "external", release: releaseId, reason: told });
+      return { count, blamed: true };
+    }
     const a = s.attempt;
     const { attempt: _a, ...rest } = s; void _a;
     // An open, unconfirmed start is closed so it is started afresh (the next launch must not find it unconfirmed and quarantine the release); a confirmed run's attempt stays as it is.
     const keep = a !== undefined && (a.confirmedAt !== undefined || a.id !== releaseId) ? { attempt: a } : {};
     const told = `${count} starts of this release in a row failed because of the ${cause === "host" ? "machine" : "provider"}, not the release (${text}); it is not set aside and is tried again`.slice(0, 200);
     const notices = count >= limit ? withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, cause, reason: told, at }) : s.notices;
-    await this.#write({ ...rest, ...keep, external: { release: releaseId, cause, count, since: same ? e.since : at, at, reason: text }, ...(notices === undefined ? {} : { notices }) }, { at, kind: "external", release: releaseId, reason: `${cause}: ${text}`.slice(0, 200) });
-    return { count };
+    const externalClaims = claims !== undefined && !watching ? { claims } : e?.release === releaseId && e.claims !== undefined ? { claims: e.claims } : {};
+    await this.#write({ ...rest, ...keep, external: { release: releaseId, cause, count, since: same ? e.since : at, at, reason: text, ...externalClaims }, ...(watching && claims !== undefined ? { probation: { ...watch, claims } } : {}), ...(notices === undefined ? {} : { notices }) }, { at, kind: "external", release: releaseId, reason: `${cause}: ${text}`.slice(0, 200) });
+    return { count, blamed: false };
   }
 
   /** The owner acknowledges (or a later confirmation closes) the notices that match; nothing else changes. Returns how many were closed. */

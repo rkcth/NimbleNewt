@@ -6,7 +6,7 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import type { Migration } from "../storage/migrations.js";
+import { runnableThrough, type Migration } from "../storage/migrations.js";
 import { DEFAULT_ROLLBACK_PERIOD_DAYS, POLICY_LIMITS, ROLLBACK_PERIOD_BOUNDS, additiveBetween, contractRefusals, journalView, judgeRollback, type RollbackVerdict, type TestedPair, type UpgradeRecord } from "./rules.js";
 
 /**
@@ -56,12 +56,54 @@ export interface GuardOptions {
   readonly now?: () => string;
 }
 
-/** Reads the approval before the database is opened: the highest destructive migration the owner allowed, or 0. A damaged or foreign file allows nothing. */
+/** Reads the approval before the database is opened: the highest destructive migration the file allows, or 0. A damaged or foreign file allows nothing. On its own it is only a claim: see `confirmedContract`. */
 export async function readContractGate(file: string): Promise<number> {
+  return (await readGateRecord(file))?.through ?? 0;
+}
+
+interface GateRecord { readonly through: number; readonly approvedBy: string; readonly approvedAt: string }
+async function readGateRecord(file: string): Promise<GateRecord | undefined> {
   try {
-    const v = JSON.parse(await readFile(file, "utf8")) as { v?: unknown; through?: unknown };
-    return v.v === 1 && typeof v.through === "number" && Number.isSafeInteger(v.through) && v.through >= 1 ? v.through : 0;
-  } catch { return 0; }
+    const v = JSON.parse(await readFile(file, "utf8")) as { v?: unknown; through?: unknown; approvedBy?: unknown; approvedAt?: unknown };
+    if (v.v !== 1 || typeof v.through !== "number" || !Number.isSafeInteger(v.through) || v.through < 1) return undefined;
+    return { through: v.through, approvedBy: typeof v.approvedBy === "string" ? v.approvedBy : "", approvedAt: typeof v.approvedAt === "string" ? v.approvedAt : "" };
+  } catch { return undefined; }
+}
+
+/** The file's approval counts only when the database holds the same, not yet applied, approval (the owner's `migration.contract.approve` writes both): a file written or edited by anything else allows nothing. */
+const gateAgrees = (gate: GateRecord | undefined, contract: ContractRecord | undefined): number =>
+  gate !== undefined && contract !== undefined && contract.appliedAt === undefined && contract.through === gate.through && contract.approvedAt === gate.approvedAt && contract.approvedBy === gate.approvedBy ? gate.through : 0;
+
+/**
+ * The approval for destructive migrations that may be acted on (card K03): the gate file's, confirmed against the approval recorded in the database (read from the database as it is, before any destructive
+ * migration ran). 0 when there is no file, the file is damaged, or it does not match the owner's recorded approval (then `note` says so, without the file's content). Never throws.
+ */
+export async function confirmedContract(storage: Pick<ControllerStorage, "getAggregate">, file: string): Promise<{ through: number; note?: string }> {
+  const gate = await readGateRecord(file);
+  if (gate === undefined) return { through: 0 };
+  let contract: ContractRecord | undefined;
+  try { contract = ((await storage.getAggregate(STATE))?.body as unknown as GuardBody | undefined)?.contract; } catch { return { through: 0, note: `${GATE_FILE}: the owner's recorded approval could not be read, so destructive migrations stay deferred` }; }
+  const through = gateAgrees(gate, contract);
+  return through > 0 ? { through } : { through: 0, note: `${GATE_FILE} does not match the approval recorded by the owner (migration.contract.approve), so destructive migrations stay deferred` };
+}
+
+/**
+ * The start's second step for destructive migrations (card K03). The database was opened with every destructive migration deferred; when the gate file claims an approval that would let more run and the
+ * database's own record confirms it, the store is closed and `reopen` opens it again allowing exactly the confirmed number (that open takes the pre-upgrade snapshot). Otherwise the store is returned as it is.
+ */
+export async function openApprovedContract<S extends Pick<ControllerStorage, "getAggregate" | "snapshot" | "close">>(input: { readonly storage: S; readonly gateFile: string | undefined; readonly migrations: readonly Migration[]; readonly reopen: (contractThrough: number) => Promise<S>; readonly print: (line: string) => void }): Promise<S> {
+  if (input.gateFile === undefined) return input.storage;
+  const claim = await readContractGate(input.gateFile);
+  if (claim === 0) return input.storage;
+  const snap = await input.storage.snapshot();
+  let at: number;
+  try { at = snap.schemaVersion; } finally { await snap.close(); }
+  if (runnableThrough(input.migrations, at, { contractThrough: claim }) <= at) return input.storage;
+  const confirmed = await confirmedContract(input.storage, input.gateFile);
+  if (confirmed.note !== undefined) input.print(confirmed.note);
+  if (confirmed.through === 0) return input.storage;
+  await input.storage.close();
+  return input.reopen(confirmed.through);
 }
 
 async function writeGate(file: string, body: object): Promise<void> {
@@ -235,8 +277,7 @@ export class MigrationGuardService {
     const { body } = await this.#state();
     const policy = await this.effective();
     const schema = await this.#o.schemaVersion();
-    const gate = this.#o.gateFile === undefined ? 0 : await readContractGate(this.#o.gateFile);
-    const allowed = gate;
+    const allowed = this.#o.gateFile === undefined ? 0 : gateAgrees(await readGateRecord(this.#o.gateFile), body?.contract);
     const view = journalView(this.#o.migrations, schema, allowed);
     const deferred = view.filter((m) => m.state === "deferred").map((m) => m.version);
     const latest = [...(body?.upgrades ?? [])].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
@@ -257,7 +298,7 @@ export class MigrationGuardService {
     const { body } = await this.#state();
     const policy = await this.effective();
     const schema = await this.#o.schemaVersion();
-    const gate = this.#o.gateFile === undefined ? 0 : await readContractGate(this.#o.gateFile);
+    const gate = this.#o.gateFile === undefined ? 0 : gateAgrees(await readGateRecord(this.#o.gateFile), body?.contract);
     const deferred = journalView(this.#o.migrations, schema, gate).filter((m) => m.state === "deferred").map((m) => m.version);
     const latest = [...(body?.upgrades ?? [])].sort((x, y) => Date.parse(y.at) - Date.parse(x.at))[0];
     const until = latest === undefined ? undefined : new Date(Date.parse(latest.at) + policy.rollbackPeriodDays * 86_400_000).toISOString();
@@ -286,7 +327,10 @@ export class MigrationGuardService {
       await this.#write("migration.contract.approve", scopedCommandId(owner.id, command.commandId), owner.id, { through: through as number }, (b) => ({
         highWater: b?.highWater ?? schema, upgrades: b?.upgrades ?? [], pairs: b?.pairs ?? [], contract: { through: through as number, approvedBy: owner.id, approvedAt: now }, updatedAt: now,
       }), { through: through as number });
-      await writeGate(this.#o.gateFile!, { v: 1, through, approvedBy: owner.id, approvedAt: now });
+      // The file copies the approval as recorded (a repeated command keeps its first time), so the start can confirm it against the database.
+      const recorded = (await this.#state()).body?.contract;
+      if (recorded === undefined || recorded.appliedAt !== undefined) throw new DomainError("invalid_transition", "the approval was not recorded");
+      await writeGate(this.#o.gateFile!, { v: 1, through: recorded.through, approvedBy: recorded.approvedBy, approvedAt: recorded.approvedAt });
     });
     return { revision: (await this.#state()).revision, through: through as number, appliesAt: "next start" };
   }

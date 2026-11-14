@@ -253,8 +253,13 @@ export class Supervisor {
         const r = await this.#o.launcher.releaseFailure(releaseId, d.reason);
         if (r.counted) this.#say(`${releaseId} failure ${r.failures} of ${r.max} during its probation${r.breached ? (r.fellBack ? "; probation failed, the launcher falls back" : "; probation failed, nothing earlier to fall back to") : ""}`);
       } else {
-        const r = await this.#o.launcher.externalFailure(releaseId, d.cause, d.reason);
-        this.#say(`${releaseId} ended after ${Math.round(ranMs)} ms and the ${d.cause === "host" ? "machine" : "provider"} is at fault (${d.reason}); the release is not set aside (${r.count} in a row)`);
+        const r = await this.#o.launcher.externalFailure(releaseId, d.cause, d.reason, { selfReported: d.selfReported === true });
+        if (r.blamed) {
+          // Card K03: a release that keeps saying the machine or a provider stopped it, with nothing the launcher sees to confirm it, is not believed any more: the failure is its own.
+          this.#say(`${releaseId} ended after ${Math.round(ranMs)} ms saying the ${d.cause === "host" ? "machine" : "provider"} is at fault, too many times in a row with nothing to confirm it; counted as the release's own failure`);
+          const p = await this.#o.launcher.releaseFailure(releaseId, `${d.reason}, not confirmed`);
+          if (p.counted) this.#say(`${releaseId} failure ${p.failures} of ${p.max} during its probation${p.breached ? (p.fellBack ? "; probation failed, the launcher falls back" : "; probation failed, nothing earlier to fall back to") : ""}`);
+        } else this.#say(`${releaseId} ended after ${Math.round(ranMs)} ms and the ${d.cause === "host" ? "machine" : "provider"} is at fault (${d.reason}); the release is not set aside (${r.count} in a row)`);
       }
     } catch { this.#say("the cause of the failure could not be recorded"); }
   }
