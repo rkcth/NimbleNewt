@@ -1239,7 +1239,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         try { await pauses.authorizeControl(ctx.by, { kind: "task", id: ctx.taskId }); return undefined; } catch (error) { return error instanceof DomainError ? `${ctx.by.id} may not ${action} the task: ${error.message}`.slice(0, 200) : undefined; }
       },
     };
-    const releaseService = ReleaseService.withEpoch(storage, epoch);
+    const releaseService = ReleaseService.withEpoch(storage, epoch, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) });
     releaseLive = releaseService;
     // The model's own copy of its thinking sits in the conversation store of each attempt (card K06c): cleaned where the host composition gave the Pi adapter's removal (this machine), and on every remote host that can be asked.
     const localPi = options.dispatch?.local?.piState;

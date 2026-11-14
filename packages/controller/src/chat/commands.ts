@@ -278,6 +278,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "difficulty.set-profiles": { verb: "Replace the difficulty profiles", mode: "propose", revision: "difficulty-profiles" },
   // Release testing (card X09b). Starting a destructive test on a host is shown first (provisional); cancelling is the safe direction and applies at once (an ended attempt is never a pass). Who besides the owner may start or cancel is a widening
   // when turned on (shown first) and a narrowing when turned off (applies at once).
+  // Submitting a candidate (card X09b finish) records what is to be tested and nothing else, but the platforms it lists decide what approval requires (one left out is never tested), so it is shown first with its platforms.
+  "release.submit": { verb: "Submit a release candidate for testing", mode: "propose" },
   "release.start": { verb: "Start release test", mode: "propose" },
   "release.cancel": { verb: "Cancel release test", mode: "apply" },
   "release.settings.set": { verb: "Change who may start release tests", mode: "propose" },
@@ -721,6 +723,16 @@ function landingMeaning(op: string, args: Readonly<Record<string, unknown>>): st
   return ` (from now on, ${means})`;
 }
 
+/** What a release candidate holds, in one escaped line: the platforms come first because approval needs every one of them. */
+export function manifestSummary(m: Readonly<Record<string, unknown>>): string {
+  const cells = Array.isArray(m["matrix"]) ? (m["matrix"] as unknown[]).map((c) => { const o = c !== null && typeof c === "object" ? (c as Record<string, unknown>) : {}; return `${short(o["os"])} ${short(o["arch"])}${o["osVersion"] === undefined ? "" : ` ${short(o["osVersion"])}`}`; }) : [];
+  const count = (v: unknown): number => (v !== null && typeof v === "object" ? Object.keys(v).length : 0);
+  // The installations it may go to and a migration plan bind what may later be staged, so they are on the line too when the candidate names them.
+  const targets = Array.isArray(m["targets"]) ? `; only for ${(m["targets"] as unknown[]).map(short).join(", ")}` : "";
+  const plan = m["migrationPlan"] === undefined ? "" : `; migration plan ${short(m["migrationPlan"])}`;
+  return `must pass on ${cells.length === 0 ? "no platform" : cells.join(" and ")}; commit ${short(m["sourceCommit"])}, suite ${short(m["suiteRevision"])}, ${count(m["artifacts"])} artifact hash(es), ${count(m["dependencyLocks"])} lock hash(es)${targets}${plan}`;
+}
+
 /**
  * One plain line saying what a command will do, for the owner to read before it happens. Built from the typed command, never from model text.
  * Everything on it that someone else wrote — a label from a record (a task's title, a project's or stand-up's name, an agent's name, a decision's wording, a maintenance request's description, all of them text an agent wrote when it made the record),
@@ -737,6 +749,11 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     if (key === "expectedRevision" || key === "expectedVersion") continue;
     // The binding an approval carries is the chat's own reading of the gate, and the owner is shown those failures in plain words beside the proposal line; the raw argument names and attempt list are not shown again here.
     if (op === "release.approve" && (key === "acknowledgeFlaky" || key === "expectedFailures")) continue;
+    // A candidate is shown as what it holds, with every platform it must pass on, so a cut line can never hide a platform that was left out or added.
+    if (op === "release.submit" && key === "manifest" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+      parts.push(manifestSummary(value as Record<string, unknown>));
+      continue;
+    }
     // The owner's own alternative is shown as the words they will have recorded and the topic they go under, never as the record's fields. Both are quoted, so neither can carry the line into a second one; an alternative missing either is refused long before this line is drawn up.
     if (op === "meeting.record.owner-respond" && key === "alternative" && value !== null && typeof value === "object") {
       const alt = value as Record<string, unknown>;
