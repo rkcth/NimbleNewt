@@ -159,7 +159,10 @@ export class ResponsibilityChecks {
     const last = new Map<string, number | undefined>();
     for (const r of list) { const lastAt = (await this.#responsibilities.status(by, r.id))?.lastCheckAt; last.set(r.id, lastAt === undefined ? undefined : Date.parse(lastAt)); }
     const owed = (c: View<CheckBody>): boolean => last.has(c.responsibilityId) && (last.get(c.responsibilityId) === undefined || Date.parse(c.slotStart) > last.get(c.responsibilityId)!);
-    const found = await this.#candidates(by, projectId, owed);
+    // What the index keeps: every check not known to be finished. A check of a responsibility made after `list` was read above (it can be generated and indexed before the index is read) is not in `last`: it is kept,
+    // or a complete index would lose it for good. Only a check of a known responsibility whose last check is at or after its slot is dropped (and one whose record is gone).
+    const keepIndexed = (c: View<CheckBody>): boolean => !last.has(c.responsibilityId) || owed(c);
+    const found = await this.#candidates(by, projectId, keepIndexed);
     return found.filter(owed).sort((a, b) => (a.slotStart < b.slotStart ? -1 : a.slotStart > b.slotStart ? 1 : a.id < b.id ? -1 : 1));
   }
 
@@ -178,7 +181,7 @@ export class ResponsibilityChecks {
    * The checks that may still be owed in a project: from the index when it is complete, otherwise from a scan of all checks, after which the controller writes the index (so the next tick does not scan). The index is a hint
    * that is only ever too wide (a finished check may still be listed), never too narrow: the caller keeps the owed ones. When the controller reads it also drops the ones that are finished or gone.
    */
-  async #candidates(by: Principal, projectId: string, owed: (c: View<CheckBody>) => boolean): Promise<View<CheckBody>[]> {
+  async #candidates(by: Principal, projectId: string, kept: (c: View<CheckBody>) => boolean): Promise<View<CheckBody>[]> {
     const ref: AggregateRef = { kind: INDEX, id: indexIdOf(projectId) };
     const index = await this.#runner.get(INDEX, ref.id);
     const body = index?.body as unknown as IndexBody | undefined;
@@ -186,12 +189,12 @@ export class ResponsibilityChecks {
     if (index !== undefined && body !== undefined && body.complete) {
       const views: View<CheckBody>[] = [];
       for (const id of body.ids) { const a = await this.#runner.get(KIND, id); if (a !== undefined) views.push(view<CheckBody>(a)); }
-      const keep = views.filter(owed).map((c) => c.id);
+      const keep = views.filter(kept).map((c) => c.id);
       if (controller && keep.length < body.ids.length) await this.#writeIndex(ref, index.revision, { projectId, ids: keep, complete: true });
       return views;
     }
     const views = (await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).projectId === projectId)).map((a) => view<CheckBody>(a));
-    const keep = views.filter(owed).map((c) => c.id);
+    const keep = views.filter(kept).map((c) => c.id);
     if (controller && keep.length <= INDEX_MAX) await this.#writeIndex(ref, index?.revision, { projectId, ids: keep, complete: true });
     return views;
   }

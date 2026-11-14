@@ -102,19 +102,28 @@ for (const backend of backends) {
     const g = (reason: "controller-down" | "provider-outage" | "event-source-outage" | "events-missed", key: string) => ({ reason, key });
     assert.equal(gapAppliesTo(g("controller-down", "controller"), quiet), true, "downtime is about all");
     assert.deepEqual([gapAppliesTo(g("provider-outage", "provider:model:m1"), watcher), gapAppliesTo(g("provider-outage", "provider:model:m1"), quiet)], [true, false], "no answering agent: no model is asked, so a provider outage changes nothing");
-    assert.deepEqual([gapAppliesTo(g("event-source-outage", "source:files"), watcher), gapAppliesTo(g("event-source-outage", "source:deploy"), watcher), gapAppliesTo(g("event-source-outage", "source:git"), watcher), gapAppliesTo(g("event-source-outage", "source:files"), quiet)], [true, true, false, false], "a source id, or source:kind, names the source; one that names none is not affected");
-    assert.deepEqual([gapAppliesTo(g("events-missed", "source:fil"), watcher), gapAppliesTo(g("events-missed", "source:files"), watcher)], [false, true], "a prefix of a name is not the name");
+    const exact = { id: "resp-3", eventSources: ["files:changed", "deploy:finished"] };
+    assert.deepEqual([gapAppliesTo(g("event-source-outage", "source:files"), exact), gapAppliesTo(g("event-source-outage", "source:deploy"), exact), gapAppliesTo(g("event-source-outage", "source:git"), exact), gapAppliesTo(g("event-source-outage", "source:files"), quiet)], [true, true, false, false], "source:kind names the source; one that names none is not affected");
+    assert.deepEqual([gapAppliesTo(g("events-missed", "source:fil"), exact), gapAppliesTo(g("events-missed", "source:files"), exact)], [false, true], "a prefix of a name is not the name");
+    // Review: a bare name may be an event kind, which any source can send, so every source's outage is about it (listing one too many is safe; hiding one is not).
+    assert.deepEqual([gapAppliesTo(g("event-source-outage", "source:git"), watcher), gapAppliesTo(g("event-source-outage", "source:git"), { id: "resp-4", eventSources: ["push"] })], [true, true]);
+    assert.equal(gapAppliesTo(g("event-source-outage", `source:${"s".repeat(153)}`), { id: "resp-5", eventSources: [`${"s".repeat(170)}:push`] }), true, "a key cut at its limit still matches the source it was cut from");
     assert.deepEqual([gapAppliesTo(g("events-missed", "events:resp-1:7"), watcher), gapAppliesTo(g("events-missed", "events:resp-1:7"), quiet)], [true, false], "a retention cut is about the responsibility whose look it was");
     assert.equal(gapAppliesTo(g("events-missed", "something-else"), quiet), true, "a gap that cannot be narrowed is not hidden");
   });
 
-  suite("the owed checks of a project come from an index after one scan, every check made after that is in it, a finished one drops out, and a reader never changes it (card P04h)", async ({ owner, project, duties, checks, scans, setNow, carl, storage, epoch }) => {
+  suite("the owed checks of a project come from an index after one scan, every check made after that is in it, a finished one drops out, and a reader never changes it (card P04h)", async ({ owner, project, duties, checks, scans, setNow, carl, ann, storage, epoch }) => {
     const [r] = (await duties.list(owner, project))!;
     setNow(at(60));
     assert.equal((await checks.generate(owner, project)).length, 1);
     scans.count = 0;
     const a = (await checks.pending(carl, project)) ?? null;
     assert.equal(a, null, "a reader of nothing sees nothing");
+    // Review: an agent that may read the project sees the owed checks but never writes the index (only the controller does).
+    const indexBody = async () => (await storage.listAggregates("responsibility-check-index", { limit: 10 })).map((x) => [x.revision, (x.body as { complete: boolean }).complete]);
+    const beforeRead = await indexBody();
+    assert.deepEqual((await checks.pending(ann, project))!.map((c) => c.slotStart), [at(60)]);
+    assert.deepEqual(await indexBody(), beforeRead, "a reader's read leaves the index as it was");
     assert.deepEqual((await checks.pending(owner, project))!.map((c) => c.slotStart), [at(60)]);
     assert.ok(scans.count > 0, "the first read scans (the index had not been completed)");
     scans.count = 0;
@@ -124,6 +133,10 @@ for (const backend of backends) {
     assert.equal((await checks.generate(owner, project)).length, 1);
     assert.deepEqual((await checks.pending(owner, project))!.map((c) => [c.responsibilityId === second, c.slotStart]), [[false, at(60)], [true, at(121)]]);
     assert.equal(scans.count, 0, "from then on no scan of check records is needed");
+    // Review: a read that listed the responsibilities before the second one was made (its check was generated and indexed meanwhile) must not drop that check from the index.
+    const early = new Proxy(duties, { get: (t, p) => p === "list" ? async (b: Principal, pid: string) => ((await t.list(b, pid)) ?? []).filter((d) => d.id !== second) : ((v) => typeof v === "function" ? v.bind(t) : v)(Reflect.get(t, p, t)) }) as ResponsibilityService;
+    assert.deepEqual((await ResponsibilityChecks.withEpoch(storage, epoch, early, { clock: () => at(121) }).pending(owner, project))!.map((c) => c.slotStart), [at(60)]);
+    assert.deepEqual((await checks.pending(owner, project))!.map((c) => [c.responsibilityId === second, c.slotStart]), [[false, at(60)], [true, at(121)]], "the newer responsibility's check is still owed");
     // A check recorded by the responsibility ends what was owed before it; the next read drops it from the index.
     await duties.record(owner, { commandId: cid("c"), responsibilityId: r!.id, kind: "check", summary: "fine", outcome: "ok" });
     assert.deepEqual((await checks.pending(owner, project))!.map((c) => c.responsibilityId === second), [true]);

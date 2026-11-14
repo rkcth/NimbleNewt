@@ -2230,7 +2230,7 @@ Arguments:
 
 - `responsibilityId`: the responsibility
 
-Result: `{ item }`: `responsibilityId`, `intended`, `observed`, `lastCheckAt?`, `openIncidents` and `coverageGaps` (the times nothing was watching since the last check, or since the responsibility began when none: `id`, `reason`, `start`, `end?`; empty when there were none). A gap explains a missing check, it never makes the state healthy. Only gaps about this responsibility are listed: downtime always, a provider outage when it has an answering agent, an event-source outage when it names that source.
+Result: `{ item }`: `responsibilityId`, `intended`, `observed`, `lastCheckAt?`, `openIncidents` and `coverageGaps` (the times nothing was watching since the last check, or since the responsibility began when none: `id`, `reason`, `start`, `end?`; empty when there were none). A gap explains a missing check, it never makes the state healthy. Only gaps about this responsibility are listed: downtime always, a provider outage when it has an answering agent, an event-source outage when it names that source or a bare event kind (a kind may come from any source).
 
 #### `responsibility.coverage`
 

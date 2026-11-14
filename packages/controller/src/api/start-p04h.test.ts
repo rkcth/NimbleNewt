@@ -64,7 +64,8 @@ test("through the running controller: a lease that keeps others waiting is told 
     assert.equal((await items("ran out with nobody releasing")).length, 1);
 
     // 3. Gaps narrow: a source outage concerns only a responsibility that names the source; a provider outage only one with an answering agent.
-    const watcher = (await call("responsibility.create", { projectId: project, title: "Watch files", objective: "React", eventSources: ["files"], escalation: { to: "owner" } }, "r2")).result.id as string;
+    const watcher = (await call("responsibility.create", { projectId: project, title: "Watch files", objective: "React", eventSources: ["files:changed"], escalation: { to: "owner" } }, "r2")).result.id as string;
+    const byKind = (await call("responsibility.create", { projectId: project, title: "Watch pushes", objective: "React", eventSources: ["push"], escalation: { to: "owner" } }, "r2b")).result.id as string;
     const gaps = CoverageGapService.withEpoch(c.storage, c.epoch);
     const start = ago(5);
     await gaps.open(owner, { key: "source:git", reason: "event-source-outage", start, detail: "git unreadable" } as never);
@@ -73,6 +74,7 @@ test("through the running controller: a lease that keeps others waiting is told 
     const reasons = async (id: string) => ((await call("responsibility.observed", { responsibilityId: id })).result.item.coverageGaps as any[]).map((g) => `${g.reason}`);
     assert.deepEqual(await reasons(watcher), ["event-source-outage"], "only the source it names (no answering agent, so the provider route is not about it)");
     assert.deepEqual(await reasons(duty), [], "names no source and has no answering agent: neither gap is about it");
+    assert.deepEqual(await reasons(byKind), ["event-source-outage", "event-source-outage"], "a bare name may be a kind any source sends: every source outage is listed");
     assert.equal((await call("responsibility.gaps", { projectId: project })).result.items.length, 3, "the list of gaps stays whole");
 
     // 4. A Suspend of the answering agent leaves a note on each of its responsibilities.
@@ -86,6 +88,7 @@ test("through the running controller: a lease that keeps others waiting is told 
     const note = history.filter((h) => h.kind === "note" && h.summary.includes("does not stop the service it maintains"));
     assert.equal(note.length, 1, JSON.stringify(history));
     assert.match(note[0]!.summary, /agent:.* was suspended\..*"Keep db up"/);
+    assert.equal((note[0] as unknown as { by: string }).by, "service:stop-notes", "written under the controller's own name, not the name of whoever settled the request");
     assert.deepEqual((await call("responsibility.history", { responsibilityId: duty, limit: 20 })).result.items.filter((h: any) => h.summary.includes("was suspended")), [], "another agent's responsibility is not noted");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
