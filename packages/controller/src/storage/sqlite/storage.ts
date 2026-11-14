@@ -12,7 +12,7 @@ import type {
 } from "../types.js";
 import { classify, isBusy } from "./errors.js";
 import { assertLocalFilesystem } from "./filesystem.js";
-import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
+import { migrationChecksum, planMigrations, runnableThrough, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 import { checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 import { TABLE_SPECS } from "../snapshot.js";
@@ -37,6 +37,8 @@ export interface SqliteOptions {
    * For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it.
    */
   readonly migrations?: readonly Migration[];
+  /** The highest destructive migration this open may run (card K03; default none: destructive migrations wait, see `Migration.kind`). */
+  readonly contractThrough?: number;
   /** Called before an existing database is upgraded to a newer schema, with a snapshot of it as it is (card K01). A throw stops the upgrade and the open. */
   readonly beforeUpgrade?: BeforeUpgrade;
 }
@@ -107,8 +109,8 @@ export class SqliteStorage implements ControllerStorage {
       db = new DatabaseSync(absolute, { timeout: busyTimeoutMs, enableForeignKeyConstraints: true });
       const store = new SqliteStorage(db, absolute, busyTimeoutMs, options.testHooks);
       store.#configure();
-      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
-      store.#migrate(options.migrations ?? MIGRATIONS);
+      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade, options.contractThrough);
+      store.#migrate(options.migrations ?? MIGRATIONS, options.contractThrough);
       return store;
     } catch (error) {
       try { db?.close(); } catch { /* already unusable */ }
@@ -117,10 +119,11 @@ export class SqliteStorage implements ControllerStorage {
   }
 
   /** An existing database whose journal is behind the migrations this version has: the hook is told, with a snapshot, before anything changes. */
-  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade): Promise<void> {
+  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade, contractThrough?: number): Promise<void> {
     const journal = this.#get("SELECT 1 AS x FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'") === undefined ? undefined : this.#get("SELECT MAX(version) AS v FROM schema_migrations WHERE state = 'done'");
     const from = journal === undefined ? 0 : count(journal, "v") || 0;
-    if (from > 0 && from < migrations.length) await hook({ from, to: migrations.length, snapshot: () => this.snapshot() });
+    const to = runnableThrough(migrations, from, { ...(contractThrough === undefined ? {} : { contractThrough }) });
+    if (from > 0 && from < to) await hook({ from, to, snapshot: () => this.snapshot() });
   }
 
   #configure(): void {
@@ -141,7 +144,7 @@ export class SqliteStorage implements ControllerStorage {
    * crash qualification. A new database gets the journal and every migration; a database that has tables but no journal was not
    * created by NimbleNewt and is refused untouched; one from a newer version, or with an edited migration, is refused untouched.
    */
-  #migrate(migrations: readonly Migration[]): void {
+  #migrate(migrations: readonly Migration[], contractThrough?: number): void {
     this.#ordinal = 0;
     this.#inWrite = true;
     const at = (): string => new Date().toISOString();
@@ -171,7 +174,7 @@ export class SqliteStorage implements ControllerStorage {
         let committed = false;
         try {
           const journal = this.#all("SELECT version, name, checksum, state FROM schema_migrations ORDER BY version").map((r): JournalEntry => ({ version: count(r, "version"), name: text(r, "name"), checksum: text(r, "checksum"), state: text(r, "state") as JournalEntry["state"] }));
-          const plan = planMigrations(migrations, journal);
+          const plan = planMigrations(migrations, journal, contractThrough === undefined ? {} : { contractThrough });
           const next = plan.resume ?? plan.pending[0];
           if (next === undefined) { commit(); committed = true; return; }
           const record = (state: "running" | "done"): void => {

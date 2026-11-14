@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { HEARTBEAT_ENV, HEARTBEAT_STALE_BOUNDS, HeartbeatError, planLiveness, sweepHeartbeats, type HungResult, type LivenessPlan } from "./heartbeat.js";
+import { diagnoseFailure, type Probe } from "./diagnosis.js";
 import type { Launcher, WatchdogResult } from "./launcher.js";
 
 /**
@@ -65,6 +66,11 @@ export type SupervisorEvent =
 
 export interface SupervisorOptions {
   readonly launcher: Launcher;
+  /**
+   * What the supervisor can see of the machine and the providers when a run ends badly (card K03): the failure is blamed on the release only when none of these finds a problem and the controller did not itself
+   * exit with a host or provider code (see `diagnosis.ts`). Without probes only the controller's own exit codes can clear a release.
+   */
+  readonly probes?: readonly Probe[];
   /** How to start the controller of the chosen release. */
   readonly child: (release: RunningRelease) => ChildSpec;
   /** The release root: when given, the supervisor holds the root's launcher lock while it runs (see `lockRoot`) and exits 5 when another holds it. */
@@ -219,6 +225,7 @@ export class Supervisor {
         if (await this.#confirmed(d.releaseId)) return this.#end(SUPERVISOR_EXIT.stopped, `${d.releaseId} stopped on purpose (exit 0 after its start was confirmed); not restarted`);
         this.#say(`${d.releaseId} exited 0 before its start was confirmed: a failed start`);
       } else if (!e.spawnFailed && e.signal === null && e.code === CONTROLLER_EXIT.restart) this.#say(`${d.releaseId} asked to be restarted`);
+      else if (!outcome.judged || outcome.hung) await this.#blame(d.releaseId, e, ranMs);
       // A hang counts as a short run however long the run was: a controller that always hangs after a while is a loop too, and must end in the visible exit 4, not restart forever.
       failures = !outcome.hung && ranMs >= stableMs ? 0 : failures + 1;
       if (failures >= giveUpAfter) {
@@ -233,6 +240,28 @@ export class Supervisor {
         await this.#sleep(ms, o.signal);
       }
     }
+  }
+
+  /**
+   * A run ended badly. Decides whose fault it was (card K03): the machine or a provider (counted, the release is not set aside, the start is tried again) or the release (counted against its probation, if it has one;
+   * an unconfirmed start is quarantined by the next launch as before). Never throws.
+   */
+  async #blame(releaseId: string, e: Exit, ranMs: number): Promise<void> {
+    try {
+      const d = await diagnoseFailure({ code: e.code, signal: e.signal, spawnFailed: e.spawnFailed }, this.#o.probes ?? []);
+      if (d.cause === "release") {
+        const r = await this.#o.launcher.releaseFailure(releaseId, d.reason);
+        if (r.counted) this.#say(`${releaseId} failure ${r.failures} of ${r.max} during its probation${r.breached ? (r.fellBack ? "; probation failed, the launcher falls back" : "; probation failed, nothing earlier to fall back to") : ""}`);
+      } else {
+        const r = await this.#o.launcher.externalFailure(releaseId, d.cause, d.reason, { selfReported: d.selfReported === true });
+        if (r.blamed) {
+          // Card K03: a release that keeps saying the machine or a provider stopped it, with nothing the launcher sees to confirm it, is not believed any more: the failure is its own.
+          this.#say(`${releaseId} ended after ${Math.round(ranMs)} ms saying the ${d.cause === "host" ? "machine" : "provider"} is at fault, too many times in a row with nothing to confirm it; counted as the release's own failure`);
+          const p = await this.#o.launcher.releaseFailure(releaseId, `${d.reason}, not confirmed`);
+          if (p.counted) this.#say(`${releaseId} failure ${p.failures} of ${p.max} during its probation${p.breached ? (p.fellBack ? "; probation failed, the launcher falls back" : "; probation failed, nothing earlier to fall back to") : ""}`);
+        } else this.#say(`${releaseId} ended after ${Math.round(ranMs)} ms and the ${d.cause === "host" ? "machine" : "provider"} is at fault (${d.reason}); the release is not set aside (${r.count} in a row)`);
+      }
+    } catch { this.#say("the cause of the failure could not be recorded"); }
   }
 
   async #confirmed(releaseId: string): Promise<boolean> {
@@ -367,7 +396,7 @@ export class Supervisor {
       else {
         const v = first.v;
         if (v !== undefined && v.action !== "none") this.#emit({ kind: "judged", releaseId: release.releaseId, verdict: v.action, ...("reason" in v ? { reason: v.reason } : {}) });
-        if (v?.action === "failed") {
+        if (v?.action === "failed" || v?.action === "external") {
           judged = true;
           result = await stop("watchdog");
         } else {

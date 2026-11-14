@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { checkRange, negotiateProtocol, type VersionRange } from "../remote/protocol.js";
 import { verifyReleaseDirectory, type Switcher } from "./activation.js";
+import type { Diagnosis } from "./diagnosis.js";
 
 /**
  * The launcher's own record and decision (card K02, second slice): which release to start, what counts as a confirmed start, and the last-known-good release.
@@ -24,7 +25,7 @@ import { verifyReleaseDirectory, type Switcher } from "./activation.js";
  * write this file. The launcher and updater are not part of a release: a routine release cannot name `launcher` or `updater` as an artifact (staging refuses it).
  */
 export const LAUNCHER_FILE = "launcher-state.json";
-export const LAUNCHER_LIMITS = { failed: 50, log: 30, notices: 20 } as const;
+export const LAUNCHER_LIMITS = { failed: 50, log: 30, notices: 20, probationFailures: 20 } as const;
 /** How long a started release may stay unconfirmed before the watchdog counts the start as failed (the owner's `startupWindowSeconds`, mirrored here); bounds for the owner's value. */
 export const DEFAULT_STARTUP_WINDOW_SECONDS = 300;
 export const STARTUP_WINDOW_BOUNDS = { min: 10, max: 86_400 } as const;
@@ -50,7 +51,7 @@ export interface LauncherNotice {
    * `hung`: the release was running and stopped responding (the liveness heartbeat); it was restarted, nothing was set aside. Its own key, so the crash-loop notice that may follow a run of hangs is not swallowed by
    * it. An optional field rather than a new kind: a controller of an older release keeps a field it does not know, but drops a kind it does not know.
    */
-  readonly cause?: "hung";
+  readonly cause?: "hung" | "host" | "provider" | "probation";
   readonly reason: string;
   readonly at: string;
   readonly sentAt?: string;
@@ -58,7 +59,30 @@ export interface LauncherNotice {
   readonly closedBy?: "acknowledged" | "confirmed";
   readonly settledAt?: string;
 }
-export interface LauncherLogEntry { readonly at: string; readonly kind: "expected" | "started" | "confirmed" | "failed" | "fell_back" | "blocked" | "stopped"; readonly release?: string; readonly to?: string; readonly reason?: string }
+export interface LauncherLogEntry { readonly at: string; readonly kind: "expected" | "started" | "confirmed" | "failed" | "fell_back" | "blocked" | "stopped" | "external" | "probation"; readonly release?: string; readonly to?: string; readonly reason?: string }
+/** The owner's rollout policy, copied here by the controller because the launcher cannot read the database (card K03). Absent: probation is off and a host failure is retried five times before the owner is told. */
+export interface LauncherPolicy { readonly probationMinutes: number; readonly maxReleaseFailures: number; readonly hostRetries: number }
+export interface ProbationFailure { readonly at: string; readonly reason: string }
+/**
+ * The watch over a newly confirmed release (card K03). `prior` is the last known good before it, kept as the fall-back; `failures` are runs of this release that ended badly for reasons of its own (host and provider
+ * failures are not counted); `max` of them end the probation as `breached`: the release is quarantined and the launcher falls back to `prior`. Past `until` with fewer, it is `passed`. The owner can end it early
+ * (`stopped`): nothing is judged any more and nothing is undone.
+ */
+export interface Probation {
+  readonly release: string;
+  readonly since: string;
+  readonly until: string;
+  readonly max: number;
+  readonly prior?: KnownGood;
+  readonly failures: readonly ProbationFailure[];
+  readonly state: "watching" | "passed" | "breached" | "stopped";
+  /** Runs during the watch that the release itself said were the machine's or a provider's fault (exit 76 or 77) with nothing the launcher could see to confirm it (see `externalFailure`). */
+  readonly claims?: number;
+  readonly endedAt?: string;
+  readonly reason?: string;
+}
+/** Consecutive starts of one release that failed for reasons of the machine or a provider, not the release (card K03). */
+export interface ExternalTrouble { readonly release: string; readonly cause: "host" | "provider"; readonly count: number; readonly since: string; readonly at: string; readonly reason: string; /** Of these failures of this release in a row (any cause), how many only the release itself reported. */ readonly claims?: number }
 export interface LauncherState {
   readonly v: 1;
   /** The release the controller said may be run next, with the digest of its manifest. */
@@ -75,7 +99,10 @@ export interface LauncherState {
   /** Things the owner is to be told; see `LauncherNotice`. */
   readonly notices?: readonly LauncherNotice[];
   /** The highest database schema version a controller has opened (K02d): a release whose declared schema range ends below it cannot start on this database, so it is not a fall-back. Only ever raised. */
-  readonly db?: { readonly version: number; readonly by: string; readonly at: string };
+  readonly db?: { readonly version: number; readonly by: string; readonly at: string; /** The lowest schema a release can have been tested on and still run on this database (every migration above it additive), until `safeUntil` (K03). */ readonly safeBackTo?: number; readonly safeUntil?: string };
+  readonly policy?: LauncherPolicy;
+  readonly probation?: Probation;
+  readonly external?: ExternalTrouble;
   readonly failed: readonly FailedRelease[];
   readonly log: readonly LauncherLogEntry[];
 }
@@ -111,21 +138,32 @@ function checkState(value: unknown): LauncherState {
   const out: Record<string, unknown> = { ...s };
   if (s["window"] !== undefined && !validWindow(s["window"])) delete out["window"];
   if (s["db"] !== undefined && !validDb(s["db"])) delete out["db"];
+  if (s["policy"] !== undefined && !validPolicy(s["policy"])) delete out["policy"];
+  if (s["probation"] !== undefined && !validProbation(s["probation"])) delete out["probation"];
+  if (s["external"] !== undefined && !validExternal(s["external"])) delete out["external"];
   if (s["notices"] !== undefined) {
     const kept = Array.isArray(s["notices"]) ? (s["notices"] as unknown[]).filter(validNotice).slice(-LAUNCHER_LIMITS.notices) : [];
     if (kept.length > 0) out["notices"] = kept; else delete out["notices"];
   }
   return out as unknown as LauncherState;
 }
+const whole = (v: unknown, lo: number, hi: number): boolean => typeof v === "number" && Number.isSafeInteger(v) && v >= lo && v <= hi;
+const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+const validPolicy = (p: unknown): boolean => isObject(p) && whole(p["probationMinutes"], 0, 1440) && whole(p["maxReleaseFailures"], 1, 20) && whole(p["hostRetries"], 1, 50);
+const validProbation = (p: unknown): boolean => isObject(p) && typeof p["release"] === "string" && CANDIDATE_ID.test(p["release"]) && typeof p["since"] === "string" && typeof p["until"] === "string" && whole(p["max"], 1, 20)
+  && Array.isArray(p["failures"]) && (p["failures"] as unknown[]).every((f) => isObject(f) && typeof f["at"] === "string" && typeof f["reason"] === "string") && ["watching", "passed", "breached", "stopped"].includes(String(p["state"]))
+  && (p["prior"] === undefined || (isObject(p["prior"]) && typeof p["prior"]["id"] === "string" && CANDIDATE_ID.test(p["prior"]["id"]) && typeof p["prior"]["digest"] === "string" && SHA.test(p["prior"]["digest"]) && typeof p["prior"]["confirmedAt"] === "string"));
+const validExternal = (e: unknown): boolean => isObject(e) && typeof e["release"] === "string" && CANDIDATE_ID.test(e["release"]) && (e["cause"] === "host" || e["cause"] === "provider") && whole(e["count"], 1, 1_000_000) && typeof e["since"] === "string" && typeof e["at"] === "string" && typeof e["reason"] === "string";
 const validWindow = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= STARTUP_WINDOW_BOUNDS.min && v <= STARTUP_WINDOW_BOUNDS.max;
-const validDb = (d: unknown): boolean => d !== null && typeof d === "object" && !Array.isArray(d) && Number.isSafeInteger((d as { version?: unknown }).version) && (d as { version: number }).version >= 0 && typeof (d as { by?: unknown }).by === "string" && typeof (d as { at?: unknown }).at === "string";
+const validDb = (d: unknown): boolean => d !== null && typeof d === "object" && !Array.isArray(d) && Number.isSafeInteger((d as { version?: unknown }).version) && (d as { version: number }).version >= 0 && typeof (d as { by?: unknown }).by === "string" && typeof (d as { at?: unknown }).at === "string"
+  && ((d as { safeBackTo?: unknown }).safeBackTo === undefined || whole((d as { safeBackTo?: unknown }).safeBackTo, 0, 1_000_000)) && ((d as { safeUntil?: unknown }).safeUntil === undefined || typeof (d as { safeUntil?: unknown }).safeUntil === "string");
 function validNotice(n: unknown): boolean {
   if (n === null || typeof n !== "object" || Array.isArray(n)) return false;
   const r = n as Record<string, unknown>;
   const optionalText = (k: string): boolean => r[k] === undefined || typeof r[k] === "string";
   return (r["kind"] === "fell_back" || r["kind"] === "failed_start") && typeof r["release"] === "string" && CANDIDATE_ID.test(r["release"]) && typeof r["fallback"] === "boolean" && typeof r["reason"] === "string" && typeof r["at"] === "string"
     && (r["to"] === undefined || (typeof r["to"] === "string" && CANDIDATE_ID.test(r["to"]))) && optionalText("sentAt") && optionalText("closedAt") && optionalText("settledAt")
-    && (r["closedBy"] === undefined || r["closedBy"] === "acknowledged" || r["closedBy"] === "confirmed") && (r["cause"] === undefined || r["cause"] === "hung");
+    && (r["closedBy"] === undefined || r["closedBy"] === "acknowledged" || r["closedBy"] === "confirmed") && (r["cause"] === undefined || r["cause"] === "hung" || r["cause"] === "host" || r["cause"] === "provider" || r["cause"] === "probation");
 }
 /** The file changed under a change made from what was read before (another process wrote it): the change is made again from the new content. */
 class LauncherConflict extends LauncherStateError { constructor() { super(`${LAUNCHER_FILE} was changed by another process at the same moment`); this.name = "LauncherConflict"; } }
@@ -167,6 +205,8 @@ export interface LauncherOptions {
   readonly now?: () => string;
   /** A clock that never jumps (milliseconds), for how long `watch` has been waiting; default `performance.now`. The wall clock (`now`) can jump, for example when a device without a clock battery syncs its time. */
   readonly monotonic?: () => number;
+  /** What the launcher can see of the machine and the providers (card K03): asked when the startup window runs out, before a release is blamed. A host or provider cause is not a quarantine. */
+  readonly diagnose?: () => Promise<Diagnosis | undefined>;
 }
 
 export class Launcher {
@@ -252,7 +292,10 @@ export class Launcher {
       const at = this.#now();
       const known: KnownGood = { id: a.id, digest: a.digest, confirmedAt: at, ...(a.protocol === undefined ? {} : { protocol: a.protocol }) };
       // What was told before this start is over, and so is a late-start notice about this very start (it did confirm after all).
-      await this.#write({ ...s, attempt: { ...a, confirmedAt: at }, known, failed: s.failed.filter((f) => f.id !== releaseId), notices: closing(s, (n) => n.at <= a.startedAt || n.release === releaseId, "confirmed", at) }, { at, kind: "confirmed", release: releaseId });
+      // Card K03: a newly confirmed release is watched for the owner's probation time; the release that was the last known good until now stays its fall-back. A release already under watch keeps its watch.
+      const watch = this.#beginProbation(s, a.id, at);
+      const { external: _e, ...noTrouble } = s; void _e;
+      await this.#write({ ...noTrouble, attempt: { ...a, confirmedAt: at }, known, failed: s.failed.filter((f) => f.id !== releaseId), notices: closing(s, (n) => n.at <= a.startedAt || n.release === releaseId, "confirmed", at), ...(watch === undefined ? {} : { probation: watch }) }, { at, kind: "confirmed", release: releaseId });
       return true;
     });
   }
@@ -290,14 +333,20 @@ export class Launcher {
    * A controller opened the database at this schema version (K02d). Kept only when higher than what is recorded, so the record says how far any release has taken the data. The launcher reads it when it
    * decides whether the last known good can still run on this database. Writes nothing when it is already recorded.
    */
-  async noteDatabase(version: number, by: string): Promise<void> {
+  async noteDatabase(version: number, by: string, safe?: { readonly backTo: number; readonly until: string } | null): Promise<void> {
     if (!Number.isSafeInteger(version) || version < 0) throw new LauncherStateError("a database schema version is a whole number");
     await this.#serial(async () => {
       const s = await this.#load();
-      if (s.db !== undefined && s.db.version >= version) return;
+      const same = (s.db?.safeBackTo ?? null) === (safe?.backTo ?? null) && (s.db?.safeUntil ?? null) === (safe?.until ?? null);
+      if (s.db !== undefined && s.db.version >= version && (safe === undefined || same)) return;
       // The first controller start on a new installation comes before any staging, so the release root may not exist yet.
       await mkdir(this.#o.root, { recursive: true, mode: 0o700 });
-      await this.#write({ ...s, db: { version, by: by.slice(0, 80), at: this.#now() } });
+      const raised = s.db === undefined || version > s.db.version;
+      const base = raised ? { version, by: by.slice(0, 80), at: this.#now() } : s.db!;
+      // The safe-back line belongs to the schema it was computed for: a raised schema without a new line clears it (what was safe before is not known to be safe now).
+      const line = safe === undefined ? (raised ? undefined : { backTo: s.db?.safeBackTo, until: s.db?.safeUntil }) : safe === null ? undefined : safe;
+      const { safeBackTo: _b, safeUntil: _u, ...plain } = base as typeof base & { safeBackTo?: number; safeUntil?: string }; void _b; void _u;
+      await this.#write({ ...s, db: { ...plain, ...(line?.backTo === undefined || line.until === undefined ? {} : { safeBackTo: line.backTo, safeUntil: line.until }) } });
     });
   }
 
@@ -342,6 +391,15 @@ export class Launcher {
       }
       if (waited < windowSeconds * 1000) return { action: "waiting", releaseId: a.id, startedAt: a.startedAt, waitedMs: Math.max(0, waited), remainingMs: windowSeconds * 1000 - waited } as const;
       const reason = `not confirmed within the ${windowSeconds}-second startup window`;
+      // Card K03: a start that ran out of time while the machine or a provider was failing is not the release's fault. Nothing is quarantined; the start is closed and counted, and the caller starts it again.
+      if (this.#o.diagnose !== undefined && s.known?.id !== a.id) {
+        let d: Diagnosis | undefined;
+        try { d = await this.#o.diagnose(); } catch { d = undefined; }
+        if (d !== undefined && d.cause !== "release") {
+          const c = await this.#noteExternal(s, a.id, d.cause, `${reason}; ${d.reason}`, nowIso);
+          return { action: "external", releaseId: a.id, cause: d.cause, reason: `${reason}; ${d.reason}`, count: c.count } as const;
+        }
+      }
       if (s.known?.id === a.id) {
         await this.#write({ ...s, attempt: { ...a, watchdogAt: nowIso }, notices: withNotice(s, { kind: "failed_start", release: a.id, fallback: false, reason: `the last known good ${reason}`.slice(0, 200), at: nowIso }) }, { at: nowIso, kind: "failed", release: a.id, reason: `the last known good ${reason}; not quarantined`.slice(0, 200) });
         return { action: "late", releaseId: a.id, reason } as const;
@@ -358,8 +416,8 @@ export class Launcher {
   }
 
   /** Why the last known good cannot be fallen back to instead of `failing` (undefined: it can). The same test for the watchdog and for `prepare()`. */
-  async #noFallback(s: LauncherState, failing: string): Promise<string | undefined> {
-    const k = s.known;
+  async #noFallback(s: LauncherState, failing: string, target: KnownGood | undefined = s.known): Promise<string | undefined> {
+    const k = target;
     if (k === undefined) return "there is no last known good release to fall back to";
     if (k.id === failing) return "the release that failed is the last known good itself";
     const kp = await verifyReleaseDirectory(this.#dir(k.id), k.digest);
@@ -370,7 +428,8 @@ export class Launcher {
     if (s.db !== undefined) {
       let schema: VersionRange | undefined;
       try { schema = parseCompat(await readFile(join(this.#dir(k.id), "compat.json"), "utf8")).schema; } catch { schema = undefined; }
-      if (schema !== undefined && s.db.version > schema.max) return `the database is at schema version ${s.db.version} (taken there by ${s.db.by}), newer than the last known good understands (up to ${schema.max}); falling back would not start, so a snapshot taken before the upgrade has to be restored first (K01)`;
+      const safe = s.db.safeBackTo !== undefined && s.db.safeUntil !== undefined && Date.parse(this.#now()) <= Date.parse(s.db.safeUntil) && schema !== undefined && schema.max >= s.db.safeBackTo;
+      if (schema !== undefined && s.db.version > schema.max && !safe) return `the database is at schema version ${s.db.version} (taken there by ${s.db.by}), newer than the last known good understands (up to ${schema.max}); falling back would not start, so a snapshot taken before the upgrade has to be restored first (K01)`;
     }
     return undefined;
   }
@@ -409,6 +468,117 @@ export class Launcher {
       const text = `it stopped responding (${reason}) and the launcher restarted it`.slice(0, 200);
       await this.#write({ ...s, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, cause: "hung", reason: text, at }) }, { at, kind: "failed", release: releaseId, reason: text });
     });
+  }
+
+  // ---- rollout probation and failures that are not the release's (card K03) ------------------------------------------------------------------------------------------
+
+  /** The watch a confirmed release gets, or undefined when probation is off, there is nothing earlier to fall back to, or it already has one. */
+  #beginProbation(s: LauncherState, id: string, at: string): Probation | undefined {
+    const p = s.policy;
+    if (p === undefined || p.probationMinutes <= 0) return undefined;
+    if (s.probation?.release === id && s.probation.state === "watching") return s.probation;
+    if (s.known === undefined || s.known.id === id) return undefined;
+    return { release: id, since: at, until: new Date(Date.parse(at) + p.probationMinutes * 60_000).toISOString(), max: p.maxReleaseFailures, prior: s.known, failures: [], state: "watching" };
+  }
+
+  /** The owner's rollout policy, copied into the file (the launcher cannot read the database). Writes nothing when it is already there. */
+  setPolicy(policy: LauncherPolicy | null): Promise<void> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const same = policy === null ? s.policy === undefined : s.policy !== undefined && s.policy.probationMinutes === policy.probationMinutes && s.policy.maxReleaseFailures === policy.maxReleaseFailures && s.policy.hostRetries === policy.hostRetries;
+      if (same) return;
+      await mkdir(this.#o.root, { recursive: true, mode: 0o700 });
+      const { policy: _p, ...rest } = s; void _p;
+      await this.#write(policy === null ? rest : { ...rest, policy: { probationMinutes: policy.probationMinutes, maxReleaseFailures: policy.maxReleaseFailures, hostRetries: policy.hostRetries } });
+    });
+  }
+
+  /** The probation, as of now (a watch whose time is up reads as passed), the policy and the open host or provider trouble. */
+  async rollout(): Promise<{ readonly policy: LauncherPolicy | undefined; readonly probation: Probation | undefined; readonly external: ExternalTrouble | undefined }> {
+    const s = await this.read();
+    return { policy: s.policy, probation: s.probation === undefined ? undefined : settled(s.probation, this.#now()), external: s.external };
+  }
+
+  /**
+   * A run of `releaseId` ended badly for a reason of its own (the supervisor judged it with `diagnoseFailure`). During its probation it is counted; at `max` the probation is `breached`: the release is quarantined,
+   * the release before it becomes the last known good again and the next `prepare()` falls back to it. With nothing earlier to go back to, nothing is quarantined (it is the only thing that can run): the owner is told.
+   */
+  releaseFailure(releaseId: string, reason: string): Promise<{ readonly counted: boolean; readonly breached: boolean; readonly failures: number; readonly max: number; readonly fellBack: boolean }> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const none = { counted: false, breached: false, failures: 0, max: 0, fellBack: false } as const;
+      const at = this.#now();
+      if (s.probation === undefined || s.probation.release !== releaseId) return none;
+      const p = settled(s.probation, at);
+      if (p.state !== "watching") { if (p !== s.probation) await this.#write({ ...s, probation: p }, { at, kind: "probation", release: releaseId, reason: "passed" }); return { ...none, max: p.max }; }
+      const failures = [...p.failures, { at, reason: reason.slice(0, 200) }].slice(-LAUNCHER_LIMITS.probationFailures);
+      if (failures.length < p.max) {
+        await this.#write({ ...s, probation: { ...p, failures } }, { at, kind: "probation", release: releaseId, reason: `failure ${failures.length} of ${p.max}: ${reason}`.slice(0, 200) });
+        return { counted: true, breached: false, failures: failures.length, max: p.max, fellBack: false };
+      }
+      const text = `probation: ${failures.length} runs ended badly within ${Math.round((Date.parse(at) - Date.parse(p.since)) / 60000)} minutes of the release being confirmed (last: ${reason})`.slice(0, 200);
+      const why = p.prior === undefined ? "there is no earlier release to fall back to" : await this.#noFallback(s, releaseId, p.prior);
+      if (why !== undefined || p.prior === undefined) {
+        const told = `${text}; ${why ?? ""}; it is left running`.slice(0, 200);
+        await this.#write({ ...s, probation: { ...p, failures, state: "breached", endedAt: at, reason: told }, notices: withNotice(s, { kind: "failed_start", release: releaseId, fallback: false, cause: "probation", reason: told, at }) }, { at, kind: "probation", release: releaseId, reason: told });
+        return { counted: true, breached: true, failures: failures.length, max: p.max, fellBack: false };
+      }
+      await this.#write({ ...s, known: p.prior, failed: [...s.failed.filter((f) => f.id !== releaseId), { id: releaseId, at, reason: text }], probation: { ...p, failures, state: "breached", endedAt: at, reason: text } }, { at, kind: "probation", release: releaseId, reason: text });
+      return { counted: true, breached: true, failures: failures.length, max: p.max, fellBack: true };
+    });
+  }
+
+  /** The owner ends the watch over the current release early: nothing is judged any more and nothing is undone. Returns whether a watch was open. */
+  stopProbation(reason: string): Promise<{ readonly stopped: boolean; readonly release?: string }> {
+    return this.#serial(async () => {
+      const s = await this.#load();
+      const at = this.#now();
+      if (s.probation === undefined) return { stopped: false };
+      const p = settled(s.probation, at);
+      if (p.state !== "watching") { if (p !== s.probation) await this.#write({ ...s, probation: p }); return { stopped: false, release: p.release }; }
+      await this.#write({ ...s, probation: { ...p, state: "stopped", endedAt: at, reason: reason.slice(0, 200) } }, { at, kind: "probation", release: p.release, reason: `stopped by the owner: ${reason}`.slice(0, 200) });
+      return { stopped: true, release: p.release };
+    });
+  }
+
+  /**
+   * A start or a run of `releaseId` ended because the machine or a provider failed, not the release (the supervisor's diagnosis). Nothing is quarantined and the last known good is untouched. An open start is closed
+   * so the next launch starts the same release afresh; consecutive failures of this release for the same cause are counted and, from the owner's `hostRetries`, told once as a notice that names the machine, not the release.
+   */
+  externalFailure(releaseId: string, cause: "host" | "provider", reason: string, options: { readonly selfReported?: boolean } = {}): Promise<{ readonly count: number; readonly blamed: boolean }> {
+    return this.#serial(async () => this.#noteExternal(await this.#load(), releaseId, cause, reason, this.#now(), options.selfReported === true));
+  }
+  /**
+   * `selfReported`: only the release's own exit code (76, 77) says so; nothing the launcher can see confirms it. A release that has not proved itself (not the last known good, or still under watch) is
+   * believed only the owner's `hostRetries` times in a row: after that the failure is the release's (`blamed`), so a release cannot keep itself from being set aside by exiting with those codes. Failures the
+   * launcher's own probes confirm are never held against a release.
+   */
+  async #noteExternal(s: LauncherState, releaseId: string, cause: "host" | "provider", reason: string, at: string, selfReported = false): Promise<{ count: number; blamed: boolean }> {
+    const e = s.external;
+    const same = e !== undefined && e.release === releaseId && e.cause === cause;
+    const count = same ? e.count + 1 : 1;
+    const text = reason.slice(0, 200);
+    const limit = s.policy?.hostRetries ?? DEFAULT_HOST_RETRIES;
+    const watch = s.probation === undefined ? undefined : settled(s.probation, at);
+    const watching = watch !== undefined && watch.release === releaseId && watch.state === "watching";
+    const proven = s.known?.id === releaseId && !watching;
+    const claimsOf = (v: unknown): number => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
+    const claims = !selfReported || proven ? undefined : (watching ? claimsOf(watch.claims) : e?.release === releaseId ? claimsOf(e.claims) : 0) + 1;
+    if (claims !== undefined && claims > limit) {
+      // Not believed any more: recorded, and the open start (if any) is left as it is, so the next launch judges it as the release's failed start.
+      const told = `${releaseId} said ${claims} times in a row that the ${cause === "host" ? "machine" : "provider"} stopped it, and nothing the launcher can see confirms it; counted as the release's own failure`.slice(0, 200);
+      await this.#write({ ...s, ...(watching ? { probation: { ...watch, claims } } : { external: { release: releaseId, cause, count, since: same ? e.since : at, at, reason: text, claims } }) }, { at, kind: "external", release: releaseId, reason: told });
+      return { count, blamed: true };
+    }
+    const a = s.attempt;
+    const { attempt: _a, ...rest } = s; void _a;
+    // An open, unconfirmed start is closed so it is started afresh (the next launch must not find it unconfirmed and quarantine the release); a confirmed run's attempt stays as it is.
+    const keep = a !== undefined && (a.confirmedAt !== undefined || a.id !== releaseId) ? { attempt: a } : {};
+    const told = `${count} starts of this release in a row failed because of the ${cause === "host" ? "machine" : "provider"}, not the release (${text}); it is not set aside and is tried again`.slice(0, 200);
+    const notices = count >= limit ? withNotice(s, { kind: "failed_start", release: releaseId, fallback: true, cause, reason: told, at }) : s.notices;
+    const externalClaims = claims !== undefined && !watching ? { claims } : e?.release === releaseId && e.claims !== undefined ? { claims: e.claims } : {};
+    await this.#write({ ...rest, ...keep, external: { release: releaseId, cause, count, since: same ? e.since : at, at, reason: text, ...externalClaims }, ...(watching && claims !== undefined ? { probation: { ...watch, claims } } : {}), ...(notices === undefined ? {} : { notices }) }, { at, kind: "external", release: releaseId, reason: `${cause}: ${text}`.slice(0, 200) });
+    return { count, blamed: false };
   }
 
   /** The owner acknowledges (or a later confirmation closes) the notices that match; nothing else changes. Returns how many were closed. */
@@ -516,9 +686,14 @@ export type WatchdogResult =
   | { readonly action: "none"; readonly reason: string }
   | { readonly action: "waiting"; readonly releaseId: string; readonly startedAt: string; readonly waitedMs: number; readonly remainingMs: number }
   | { readonly action: "failed"; readonly releaseId: string; readonly reason: string; readonly fallback: boolean }
-  | { readonly action: "late"; readonly releaseId: string; readonly reason: string };
+  | { readonly action: "late"; readonly releaseId: string; readonly reason: string }
+  /** The start ran out of time because the machine or a provider is failing (K03): not quarantined, the attempt is closed, the same release is started again. */
+  | { readonly action: "external"; readonly releaseId: string; readonly cause: "host" | "provider"; readonly reason: string; readonly count: number };
 
 const stopped = (signal?: AbortSignal): boolean => signal?.aborted === true;
+export const DEFAULT_HOST_RETRIES = 5;
+/** A watch whose time is up is passed (pure). */
+const settled = (p: Probation, now: string): Probation => (p.state === "watching" && Date.parse(now) >= Date.parse(p.until) ? { ...p, state: "passed", endedAt: p.until } : p);
 export const noticeKey = (n: Pick<LauncherNotice, "kind" | "release" | "cause">): string => `${n.kind}|${n.release}${n.cause === undefined ? "" : `|${n.cause}`}`;
 
 /**

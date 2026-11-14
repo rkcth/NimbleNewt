@@ -73,9 +73,59 @@ export interface RestorePlan {
   /** Counted from a plain backup; absent for an encrypted one (its rows can only be read after the unlock). */
   readonly effectsToMarkUncertain?: number;
   readonly deliveriesToResend?: number;
+  /** What happened OUTSIDE NimbleNewt after the backup was made, read from the live database at preview time (card K03): the restore cannot undo it and the restored data will not know it happened. */
+  readonly externalSinceBackup?: ExternalSince;
   /** What the owner will see happen, in order. */
   readonly steps: readonly string[];
   readonly warnings: readonly string[];
+}
+
+/**
+ * Card K03: the difference between "a restore puts the data back" and "the world goes back". Actions with an effect outside the installation (a push, a sent message, a payment, an installed file) that were made or
+ * finished after the backup are NOT undone by restoring it; the restored data does not know they happened, so a task that repeats them could do them twice. Counted from the live `effects` and `deliveries`
+ * tables by the time the backup was made. `targets` names what was touched (at most 10), so the owner can check each one before anything is repeated.
+ */
+export interface ExternalSince {
+  /** Effects finished (confirmed) after the backup was made: they happened. */
+  readonly happened: number;
+  /** Effects begun or finished after the backup whose outcome is not known (uncertain or still intended): they may have happened. */
+  readonly unknown: number;
+  /** Effects that failed after the backup: nothing happened. */
+  readonly failed: number;
+  /** Messages and notices delivered after the backup: the person already has them; the backup's copy of one that was still waiting then is sent again. */
+  readonly deliveredAfter: number;
+  readonly targets: readonly string[];
+  /** The live data was larger than what was read (the count is a lower bound). */
+  readonly truncated: boolean;
+}
+const EXTERNAL_SCAN = { pageSize: 500, pages: 40, targets: 10 } as const;
+
+/** Reads the live effects and deliveries from a snapshot and counts what happened after `since`. Never throws: a store that cannot be read gives no figure. */
+export async function externalSince(snapshot: { read(table: "effects" | "deliveries", page: { after?: Record<string, string | number | null>; limit: number }): Promise<Record<string, string | number | null>[]> }, since: string): Promise<ExternalSince | undefined> {
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return undefined;
+  const after = (v: unknown): boolean => typeof v === "string" && Date.parse(v) > t;
+  let happened = 0, unknown = 0, failed = 0, deliveredAfter = 0, truncated = false;
+  const targets = new Set<string>();
+  try {
+    for (const table of ["effects", "deliveries"] as const) {
+      let last: Record<string, string | number | null> | undefined;
+      for (let page = 0; ; page++) {
+        if (page >= EXTERNAL_SCAN.pages) { truncated = true; break; }
+        const rows = await snapshot.read(table, { ...(last === undefined ? {} : { after: last }), limit: EXTERNAL_SCAN.pageSize });
+        for (const r of rows) {
+          if (table === "deliveries") { if (r["state"] === "delivered" && after(r["delivered_at"])) deliveredAfter += 1; continue; }
+          if (!after(r["updated_at"]) && !after(r["created_at"])) continue;
+          const status = r["status"];
+          if (status === "confirmed") happened += 1; else if (status === "failed") failed += 1; else unknown += 1;
+          if (status !== "failed" && targets.size < EXTERNAL_SCAN.targets && typeof r["target"] === "string") targets.add(r["target"].slice(0, 120));
+        }
+        if (rows.length < EXTERNAL_SCAN.pageSize) break;
+        last = rows[rows.length - 1];
+      }
+    }
+  } catch { return undefined; }
+  return { happened, unknown, failed, deliveredAfter, targets: [...targets].sort(), truncated };
 }
 
 export interface PendingRestore {
@@ -578,6 +628,7 @@ export class StagedRestore {
   async #plan(path: string, m: BackupManifest, verify: boolean): Promise<Omit<RestorePlan, "token" | "expiresAt">> {
     const probe = await this.#o.storage.snapshot();
     const live = probe.schemaVersion;
+    const since = await externalSince(probe, m.createdAt);
     await probe.close();
     if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
     const encrypted = m.encryption !== undefined;
@@ -603,6 +654,10 @@ export class StagedRestore {
       const live = await this.#o.liveAttempts().catch(() => undefined);
       if (live !== undefined && live > 0) warnings.push(`${live} agent attempt${live === 1 ? " is" : "s are"} running now, and a restore is refused while any runs. Stop the work first, or apply with stopAttempts set: that stops all agent work (each attempt is checkpointed, then ended) and then prepares the restore.`);
     }
+    if (since !== undefined && (since.happened > 0 || since.unknown > 0 || since.deliveredAfter > 0)) {
+      const what = [since.happened > 0 ? `${since.happened} action${since.happened === 1 ? "" : "s"} outside NimbleNewt finished` : "", since.unknown > 0 ? `${since.unknown} more ${since.unknown === 1 ? "is" : "are"} not known to have finished or not` : "", since.deliveredAfter > 0 ? `${since.deliveredAfter} message${since.deliveredAfter === 1 ? " was" : "s were"} delivered` : ""].filter((x) => x !== "");
+      warnings.push(`Since this backup was made, ${what.join(", ")}${since.truncated ? " (at least; the live data is larger than was read)" : ""}. A restore cannot undo any of that, and the restored data will not know it happened${since.targets.length === 0 ? "" : `: check ${since.targets.join(", ")} before anything is repeated`}. Actions the backup holds as only intended come back as uncertain and are never run again by themselves.`);
+    }
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
     const changes = last === undefined || backupSeq === undefined ? undefined : Math.max(0, last - backupSeq);
@@ -613,6 +668,7 @@ export class StagedRestore {
       ...(m.piState?.problems === undefined ? {} : { piStateProblems: m.piState.problems }),
       ...(changes === undefined ? {} : { changesSinceBackup: changes }),
       ...(effects === undefined ? {} : { effectsToMarkUncertain: effects }), ...(deliveries === undefined ? {} : { deliveriesToResend: deliveries }),
+      ...(since === undefined ? {} : { externalSinceBackup: since }),
       steps: [
         "1. The backup is checked against its manifest (and opened, if encrypted).",
         this.#o.postgres === undefined ? "2. It is restored into a new database and new conversation folders beside the live ones; the live ones are not touched." : "2. It is restored into a new schema of the same PostgreSQL database and new conversation folders beside the live ones; the live ones are not touched.",

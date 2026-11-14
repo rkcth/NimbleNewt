@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { StorageError } from "../errors.js";
+import type { BeforeUpgrade } from "../snapshot.js";
 import type { ControllerStorage } from "../types.js";
 import { ACTIONS, seedWorld, snapshotWorld, type CrashPoint } from "./boundaries.js";
 import type { RegistryName } from "./migration-registry.js";
@@ -19,7 +20,7 @@ export interface MigrationWorld {
   /** Opens the database with the named migrations (migrating it), then closes it; optionally killed at `point`. */
   attempt(migrations: RegistryName, point?: CrashPoint): Promise<MigrationOutcome>;
   /** Opens the database with the named migrations, runs `fn`, closes it. */
-  withStorage<T>(migrations: RegistryName, fn: (storage: ControllerStorage) => Promise<T>): Promise<T>;
+  withStorage<T>(migrations: RegistryName, fn: (storage: ControllerStorage) => Promise<T>, options?: { readonly contractThrough?: number; readonly beforeUpgrade?: BeforeUpgrade }): Promise<T>;
   /** The raw schema, journal and probe rows, without migrating anything and without timestamps. */
   describe(): Promise<Description>;
   /** Runs raw SQL against the database (setup and tampering). */
@@ -38,6 +39,8 @@ export interface Description {
 export interface MigrationRig {
   readonly name: string;
   readonly dialect: "sqlite" | "postgres";
+  /** False when this storage takes no `beforeUpgrade` hook (the worker-thread storage), so the snapshot assertions are skipped. */
+  readonly upgradeHook?: boolean;
   open(): Promise<MigrationWorld>;
 }
 
@@ -206,5 +209,62 @@ export async function cannotLoopForever(rig: MigrationRig): Promise<void> {
     assert.ok(Date.now() - started < 60_000, `${rig.name}: the runner did not give up on a migration that cannot be journaled`);
     assert.equal(outcome.error?.kind, "unavailable");
     assert.match(outcome.error?.message ?? "", /not making progress/);
+  } finally { await world.close(); }
+}
+
+
+/**
+ * Card K03: a destructive migration is deferred. A database upgraded by a build that ships one gets every migration before it, keeps working, and the destructive one (and everything numbered after it) waits
+ * until an opener allows it; the pre-upgrade snapshot is taken before the destructive step and not at a start that only finds it waiting; an interrupted destructive step is finished by the next start.
+ */
+/** The schema version a storage reports, with the snapshot it took to read it closed again (an open one holds a transaction). */
+const versionOf = async (s: ControllerStorage): Promise<number> => { const snap = await s.snapshot(); try { return snap.schemaVersion; } finally { await snap.close(); } };
+
+export async function destructiveMigrationsWait(rig: MigrationRig): Promise<void> {
+  const world = await rig.open();
+  try {
+    const before = await populated(world);
+    const notices: { from: number; to: number }[] = [];
+    const hook: BeforeUpgrade = async (n) => { notices.push({ from: n.from, to: n.to }); await (await n.snapshot()).close(); };
+    // v1 -> v123: additive, takes the pre-upgrade snapshot as before.
+    await world.withStorage("v123", async () => undefined, { beforeUpgrade: hook });
+    const hooked = rig.upgradeHook !== false;
+    if (hooked) assert.deepEqual(notices, [{ from: 1, to: 3 }]);
+
+    // The build now ships v4 (destructive) and v5 (additive). Nothing may be dropped yet, and v5 waits behind v4 (gapless numbering).
+    await world.withStorage("v12345", async (s) => {
+      assert.deepEqual(await snapshotWorld(s), before, `${rig.name}: a deferred migration changed what the storage reports`);
+      assert.equal(await versionOf(s), 3, "the schema stays at 3 while v4 waits");
+    }, { beforeUpgrade: hook });
+    if (hooked) assert.deepEqual(notices, [{ from: 1, to: 3 }], "a start that only finds deferred work takes no snapshot");
+    const waiting = await world.describe();
+    assert.deepEqual(journalVersions(waiting, "done"), [1, 2, 3]);
+    assert.deepEqual(waiting.probe, [2, 3]);
+    assert.ok(/\bnote\b/.test(JSON.stringify(waiting.structure)), "the column the destructive migration drops is still there");
+    // Allowing a number below v4 does not run it either.
+    await world.withStorage("v12345", async () => undefined, { contractThrough: 3 });
+    assert.deepEqual(journalVersions(await world.describe(), "done"), [1, 2, 3]);
+
+    // Allowing it runs v4 and then v5, with a snapshot first.
+    await world.withStorage("v12345", async (s) => { assert.equal(await versionOf(s), 5); }, { contractThrough: 4, beforeUpgrade: hook });
+    if (hooked) assert.deepEqual(notices, [{ from: 1, to: 3 }, { from: 3, to: 5 }]);
+    const done = await world.describe();
+    assert.deepEqual(journalVersions(done, "done"), [1, 2, 3, 4, 5]);
+    assert.ok(!/\bnote\b/.test(JSON.stringify(done.structure)), "the column is gone");
+    // A later start with the default settings has nothing waiting and changes nothing.
+    const after = await world.describe();
+    await world.withStorage("v12345", async () => undefined);
+    assert.deepEqual(await world.describe(), after);
+  } finally { await world.close(); }
+}
+
+/** A destructive migration that was changed after it was applied is refused like any other edit, and a build that knows fewer migrations than the database refuses it (no downgrade) even when the extra ones were destructive. */
+export async function destructiveMigrationsAreJournaled(rig: MigrationRig): Promise<void> {
+  const world = await rig.open();
+  try {
+    await world.withStorage("v1234", async () => undefined, { contractThrough: 4 });
+    assert.deepEqual(journalVersions(await world.describe(), "done"), [1, 2, 3, 4]);
+    await assert.rejects(world.withStorage("v123", async () => undefined), (e) => e instanceof StorageError && /migration 4 \(drop_note_column\), newer than the latest/.test(e.message));
+    assert.deepEqual(journalVersions(await world.describe(), "done"), [1, 2, 3, 4], "refused untouched");
   } finally { await world.close(); }
 }

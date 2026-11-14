@@ -632,6 +632,24 @@ const TASK_ID_IN_TEXT = /task-[a-z2-7]{20}/g;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const cite = (kind: string, id: string, revision?: number): Cite => ({ kind, id, ...(revision === undefined ? {} : { revision }) });
 const line = (text: string, ...cites: Cite[]): Line => ({ text, cites });
+
+/** Card K03: what the owner is told about the database schema, the rollback period and the watch over the current release, in plain words, next to the staging line. */
+function migrationLines(st: ActivationStatus, cite: Cite): Line[] {
+  const out: Line[] = [];
+  const m = st.migration;
+  if (m !== undefined) {
+    const waiting = m.deferred.length === 0 ? "no destructive migration is waiting" : `${m.deferred.length} migration${m.deferred.length === 1 ? " waits" : "s wait"} for your approval (${m.deferred.slice(0, 6).join(", ")}; migration.contract.approve allows them once the rollback period is over)`;
+    const back = m.rollbackOpen ? `the release before this one can come back until ${shown(m.rollbackUntil ?? "", 30)} (the rollback period)` : "no rollback period is open, so going back to an earlier release needs a restore";
+    out.push(line(`Database schema ${m.schemaVersion}: ${waiting}; ${back}${m.approvedThrough === null ? "" : `; you allowed destructive migrations through ${m.approvedThrough}, which run at the next start`}.`, cite));
+  }
+  const r = st.rollout;
+  if (r?.probation !== undefined) {
+    const p = r.probation;
+    out.push(line(p.state === "watching" ? `Rollout: ${quoted(p.release, 80)} is being watched until ${shown(p.until, 30)}; ${p.failures.length} of ${p.max} failures of its own so far${p.prior === undefined ? "" : `; ${quoted(p.prior.id, 80)} is kept as the way back`} (release.rollout.stop ends the watch).` : `Rollout: the watch over ${quoted(p.release, 80)} ${p.state === "passed" ? "passed" : p.state === "stopped" ? "was stopped" : "failed"}${p.reason === undefined ? "" : ` (${shown(p.reason, 160)})`}.`, cite));
+  }
+  if (r?.external !== undefined) out.push(line(`${r.external.count} start${r.external.count === 1 ? "" : "s"} of ${quoted(r.external.release, 80)} in a row failed because of the ${r.external.cause === "host" ? "machine" : "provider"} (${shown(r.external.reason, 160)}); the release is not blamed or set aside.`, cite));
+  return out;
+}
 const FRESH_WORDS: Readonly<Record<Freshness, string>> = { fresh: "recent", stale: "old", unknown: "not heard from lately" };
 /** How many declared hosts the capacity view lists before it counts the rest (the owner's own `capacity.quotas.change` refuses a record holding more than 200). */
 const CAPACITY_HOSTS = 10;
@@ -1271,7 +1289,9 @@ export class StatusService {
     else {
       try {
         const st = await release.status(by);
+        const k03 = migrationLines(st, staging);
         lines.push(line(`Staging: ${st.current === undefined ? "nothing has been activated yet" : `the current release is ${quoted(st.current.id, 80)} since ${shown(st.current.at, 30)}`}${st.previous === undefined ? "" : `; going back would return to ${quoted(st.previous.id, 80)}`}; ${st.staged.length} staged release${st.staged.length === 1 ? "" : "s"}; activation ${st.settings.requireApproval ? "needs the candidate approved (release.approve)" : "does not need an approval right now"}${st.diverged ? `; WARNING: the launcher's pointer says ${quoted(st.pointer ?? "nothing", 80)}, not the release the record calls current` : ""}.`, staging));
+        for (const l of k03) lines.push(l);
       } catch (error) {
         if (!(error instanceof DomainError) || (error.code !== "forbidden" && error.code !== "unavailable")) throw error;
         lines.push(line("Staging: not set up on this controller; nothing is staged or activated to show.", staging));

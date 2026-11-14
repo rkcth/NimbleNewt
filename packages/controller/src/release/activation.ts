@@ -11,7 +11,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
-import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type LauncherNotice } from "./launcher.js";
+import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type ExternalTrouble, type LauncherNotice, type LauncherPolicy, type Probation } from "./launcher.js";
 import { DEFAULT_START_FAILURE_LEVEL, type StartFailureLevel, type StartNoticeSink } from "./start-notices.js";
 import { ReleaseTrust, type TrustedKey } from "./trust.js";
 import { writeTrustMirror } from "./trust-mirror.js";
@@ -70,7 +70,7 @@ export interface StagedBody { readonly candidateId: string; readonly digest: str
 /** `digest` is the digest of the staged MANIFEST.json (the manifest digest) that the launcher verifies at launch. */
 export interface ReleaseRef { readonly id: string; readonly digest: string }
 export interface JournalBody { readonly kind: "activate" | "rollback"; readonly from?: ReleaseRef; readonly to: ReleaseRef; readonly by: string; readonly startedAt: string }
-export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved" | "confirmed" | "fell_back"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
+export interface HistoryEntry { readonly at: string; readonly kind: "activated" | "rolled_back" | "aborted" | "recovered" | "resolved" | "confirmed" | "fell_back" | "rollout_stopped"; readonly by: string; readonly to?: string; readonly from?: string; readonly reason?: string }
 /** The release that last started and reported itself healthy (or that the owner confirmed). Rollback after a failed start goes here, never to an unproven release. */
 export interface KnownGoodRef extends ReleaseRef { readonly confirmedAt: string; readonly via: "startup" | "owner" }
 export interface ActivationBody { readonly current?: ReleaseRef & { readonly at: string; readonly by: string; /** When this release reported a healthy start; absent until then. */ readonly confirmedAt?: string }; readonly lastKnownGood?: KnownGoodRef; readonly previous?: ReleaseRef; readonly journal?: JournalBody; readonly history: readonly HistoryEntry[]; readonly updatedAt: string }
@@ -205,6 +205,12 @@ export interface ActivationOptions {
   readonly installationId?: string;
   /** The database's current schema version (the number of the last applied migration), for the launcher's fall-back check (K02d). Without it nothing is recorded and that check never refuses. */
   readonly schemaVersion?: () => Promise<number>;
+  /** Card K03: asked before a rollback, and before a release the data has outgrown is allowed back: may this release run on the data as it is (a tested pair, additive migrations since, the rollback period open)? Unset: not asked. */
+  readonly rollbackGuard?: (releaseId: string) => Promise<{ readonly ok: boolean; readonly reasons: readonly string[] }>;
+  /** Card K03: the safe-back line copied into the launcher's file with the schema version (see `Launcher.noteDatabase`). Unset: nothing is copied. */
+  readonly safeBack?: () => Promise<{ readonly backTo: number; readonly until: string } | undefined>;
+  /** Card K03: a short account of the migration guard for the status view (the schema, what waits for approval, whether the rollback period is open). */
+  readonly migrationSummary?: () => Promise<{ readonly schemaVersion: number; readonly deferred: readonly number[]; readonly rollbackOpen: boolean; readonly rollbackUntil?: string; readonly approvedThrough: number | null }>;
 }
 export interface ActivationStatus {
   readonly revision: number;
@@ -227,6 +233,10 @@ export interface ActivationStatus {
   readonly databaseSchema?: number;
   readonly settings: { readonly requireApproval: boolean; readonly maxStagedBytes: number | null; readonly keepStaged: number | null; readonly startupWindowSeconds: number; readonly startFailureLevel: StartFailureLevel; readonly revision: number };
   /** What the launcher wrote for the owner (a fall-back, a failed start), newest last, with whether it was told and whether it is still open. */
+  /** Card K03: the migration guard's short account, when there is one. */
+  readonly migration?: { readonly schemaVersion: number; readonly deferred: readonly number[]; readonly rollbackOpen: boolean; readonly rollbackUntil?: string; readonly approvedThrough: number | null };
+  /** Card K03: the watch over the current release and any open run of failures that are not the release's. */
+  readonly rollout?: { readonly probation?: Probation; readonly external?: ExternalTrouble; readonly policy?: LauncherPolicy };
   readonly startNotices: readonly { readonly kind: LauncherNotice["kind"]; readonly release: string; readonly to?: string; readonly reason: string; readonly at: string; readonly told: boolean; readonly state: "open" | "acknowledged" | "confirmed" }[];
 }
 
@@ -497,6 +507,8 @@ export class ReleaseActivationService {
       if (body?.previous === undefined || body.previous.id !== id) throw new DomainError("invalid_transition", "that is not the release before the current one");
       await this.#startable(id);
       await this.#compatible(id, "the release to go back to");
+      // Card K03: code goes back only to a tested compatible pair: the release must have started healthy on this installation, on data it can still read (see `migration/rules.ts`).
+      if (this.#o.rollbackGuard !== undefined) { const v = await this.#o.rollbackGuard(id); if (!v.ok) throw new DomainError("invalid_transition", `the release to go back to is not a tested pair with this data: ${v.reasons.join("; ")}`); }
       const cand = (await this.#runner.get(RELEASE_KINDS.candidate, id))?.body as unknown as CandidateBody | undefined;
       if (cand !== undefined) this.#target(cand.manifest);
       await this.#signed(id);
@@ -529,7 +541,10 @@ export class ReleaseActivationService {
     // K02d: a release that states the database schemas it can run on is not switched to (or rolled back to) when the data has already been taken past them: code goes back only to a release that understands the data.
     const staged = (await this.#runner.get(STAGED, id))?.body as unknown as StagedBody | undefined;
     const db = (await this.#launcher.read().catch(() => undefined))?.db;
-    if (staged?.schema !== undefined && db !== undefined && db.version > staged.schema.max) throw new DomainError("invalid_transition", `${what} understands database schema versions up to ${staged.schema.max}, but this database is at ${db.version}; it would not start (a snapshot taken before the upgrade has to be restored first)`);
+    const outgrown = staged?.schema !== undefined && db !== undefined && db.version > staged.schema.max;
+    // Card K03: a release the data has outgrown still comes back when it is a tested pair, every migration since is additive and the rollback period is open.
+    const verdict = outgrown && this.#o.rollbackGuard !== undefined ? await this.#o.rollbackGuard(id) : undefined;
+    if (outgrown && verdict?.ok !== true) throw new DomainError("invalid_transition", `${what} understands database schema versions up to ${staged!.schema!.max}, but this database is at ${db!.version}; it would not start${verdict === undefined ? "" : ` (${verdict.reasons.join("; ")})`} (a snapshot taken before the upgrade has to be restored first)`);
     const c = this.#o.compat;
     if (c === undefined) return;
     const range = staged?.protocol;
@@ -905,8 +920,17 @@ export class ReleaseActivationService {
       trust: { required: trust.required, keys: trust.keys.map((k) => ({ keyId: k.keyId, label: k.label })) },
       ...(dbSchema === undefined ? {} : { databaseSchema: dbSchema }),
       settings: { requireApproval: s.requireApproval, maxStagedBytes: s.maxStagedBytes, keepStaged: s.keepStaged, startupWindowSeconds: s.startupWindowSeconds, startFailureLevel: s.startFailureLevel, revision: s.revision },
+      ...(await this.#migrationView(isOwner(owner))),
       startNotices: ((await this.#launcher.read().catch(() => undefined))?.notices ?? []).map((n) => ({ kind: n.kind, release: n.release, ...(n.to === undefined ? {} : { to: n.to }), reason: n.reason, at: n.at, told: n.sentAt !== undefined, state: n.closedBy ?? "open" })),
     };
+  }
+
+  /** The migration guard's account is the owner's (as `migration.status` is); a holder of release.manage sees the rollout only. */
+  async #migrationView(owner: boolean): Promise<Pick<ActivationStatus, "migration" | "rollout">> {
+    const migration = !owner || this.#o.migrationSummary === undefined ? undefined : await this.#o.migrationSummary().catch(() => undefined);
+    const r = await this.#launcher.rollout().catch(() => undefined);
+    const rollout = r === undefined || (r.probation === undefined && r.external === undefined && r.policy === undefined) ? undefined : { ...(r.probation === undefined ? {} : { probation: r.probation }), ...(r.external === undefined ? {} : { external: r.external }), ...(r.policy === undefined ? {} : { policy: r.policy }) };
+    return { ...(migration === undefined ? {} : { migration }), ...(rollout === undefined ? {} : { rollout }) };
   }
 
   // ---- signed artifact sets: the trust root (K02b) -------------------------------------------------------------------------------------------------------------------------
@@ -997,6 +1021,59 @@ export class ReleaseActivationService {
     // The updater's copy of the trust root is brought up to date at every start (best effort here; a change made later reports its own failure).
     await this.#mirrorTrust().catch(() => undefined);
     if (this.#o.schemaVersion === undefined) return undefined;
-    try { const v = await this.#o.schemaVersion(); await this.#launcher.noteDatabase(v, this.#o.runningRelease ?? "controller"); return v; } catch { return undefined; }
+    try {
+      const v = await this.#o.schemaVersion();
+      // The safe-back line (K03) is the guard's: undefined from the guard clears it, an installation without a guard leaves the file as it is.
+      const safe = this.#o.safeBack === undefined ? undefined : ((await this.#o.safeBack().catch(() => undefined)) ?? null);
+      await this.#launcher.noteDatabase(v, this.#o.runningRelease ?? "controller", safe);
+      return v;
+    } catch { return undefined; }
   }
+
+  // ---- rollout probation and health thresholds (K03) ------------------------------------------------------------------------------------------------------------------------
+
+  /** The watch over the current release, the policy the launcher holds and any open host or provider trouble. Owner, or a holder of release.manage. */
+  async rolloutStatus(by: Principal): Promise<{ probation: Awaited<ReturnType<Launcher["rollout"]>>["probation"] | null; policy: Awaited<ReturnType<Launcher["rollout"]>>["policy"] | null; external: Awaited<ReturnType<Launcher["rollout"]>>["external"] | null; current: string | null; lastKnownGood: string | null }> {
+    mayManage(by, "read the rollout status");
+    const r = await this.#launcher.rollout();
+    const body = (await this.#runner.get(STATE.kind, STATE.id))?.body as unknown as ActivationBody | undefined;
+    return { probation: r.probation ?? null, policy: r.policy ?? null, external: r.external ?? null, current: body?.current?.id ?? null, lastKnownGood: body?.lastKnownGood?.id ?? null };
+  }
+
+  /**
+   * Owner only: stops the rollout of the current release. The watch ends (nothing is judged any more, so a run of failures no longer sets the release aside) and the release stays running; going back is a separate,
+   * guarded `release.rollback`. Recorded in the history. Without an open watch nothing changes.
+   */
+  async stopRollout(owner: Principal, command: NoActor & { reason?: unknown }): Promise<{ stopped: boolean; releaseId: string | null }> {
+    strictOwner(owner, "stop a rollout");
+    known(command, ["commandId", "reason"]);
+    const reason = command.reason === undefined ? "stopped by the owner" : typeof command.reason === "string" && command.reason.trim() !== "" && command.reason.length <= 200 ? command.reason.trim() : bad("reason", "must be a short text (up to 200 characters)");
+    return this.#serial("switch", async () => {
+      const r = await this.#launcher.stopProbation(reason);
+      if (!r.stopped) return { stopped: false, releaseId: r.release ?? null };
+      const state = await this.#runner.get(STATE.kind, STATE.id);
+      const body = state?.body as unknown as ActivationBody | undefined;
+      if (state !== undefined && body !== undefined) {
+        const at = this.#runner.now();
+        const next: ActivationBody = { ...body, history: [...body.history, { at, kind: "rollout_stopped" as const, by: owner.id, to: r.release!, reason }].slice(-ACTIVATION_LIMITS.history), updatedAt: at };
+        await this.#runner.command("release.rollout.stop", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+          payload: { reason },
+          build: async () => ({ ref: STATE, creates: false, changes: [{ type: "update" as const, ref: STATE, expectedRevision: state.revision, body: next as unknown as JsonObject }], detail: { releaseId: r.release!, reason } }),
+        }));
+      }
+      return { stopped: true, releaseId: r.release! };
+    });
+  }
+
+  /** Whether `releaseId` could be rolled back to on the data as it is now: a tested pair, additive migrations since, the rollback period open (K03). Owner, or a holder of release.manage. Without a guard: always yes. */
+  async rollbackCheck(by: Principal, releaseId: unknown): Promise<{ releaseId: string; ok: boolean; reasons: readonly string[]; guarded: boolean }> {
+    mayManage(by, "check a rollback");
+    const id = idOf(releaseId);
+    if (this.#o.rollbackGuard === undefined) return { releaseId: id, ok: true, reasons: ["this installation has no migration guard, so no pair is checked"], guarded: false };
+    const v = await this.#o.rollbackGuard(id);
+    return { releaseId: id, ok: v.ok, reasons: v.reasons, guarded: true };
+  }
+
+  /** The owner's rollout policy for the launcher's file (it cannot read the database). */
+  async syncLauncherPolicy(policy: { probationMinutes: number; maxReleaseFailures: number; hostRetries: number }): Promise<void> { await this.#launcher.setPolicy(policy); }
 }

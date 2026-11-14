@@ -13,7 +13,7 @@ import type {
 import { classify, isConnectionLoss } from "./errors.js";
 import { CLOSE_GRACE_MS, KEEPALIVE_IDLE_MS, REPLY_MARGIN_MS, answeredOrCut, endConnection, socketOf, within } from "./connection.js";
 import { CONTROLLER_APPLICATION, LIVE_LOCK_CLASS, liveLockKey } from "./restore-swap.js";
-import { migrationChecksum, planMigrations, type JournalEntry, type Migration } from "../migrations.js";
+import { migrationChecksum, planMigrations, runnableThrough, type JournalEntry, type Migration } from "../migrations.js";
 import { JOURNAL_SQL, MIGRATIONS } from "./schema.js";
 import { SNAPSHOT_PAGE_MAX, TABLE_SPECS, checkSnapshotRow, type BeforeUpgrade, type SnapshotRow, type SnapshotTable, type StorageSnapshot } from "../snapshot.js";
 
@@ -38,6 +38,8 @@ export interface PostgresOptions {
   readonly idleTimeoutMs?: number;
   /** For the migration qualification only: the migrations to apply instead of this version's own. Production code never sets it. */
   readonly migrations?: readonly Migration[];
+  /** The highest destructive migration this open may run (card K03; default none: destructive migrations wait, see `Migration.kind`). */
+  readonly contractThrough?: number;
   /** Called before an existing database is upgraded to a newer schema, with a snapshot of it as it is (card K01). A throw stops the upgrade and the open. */
   readonly beforeUpgrade?: BeforeUpgrade;
   /**
@@ -150,7 +152,7 @@ const types = { getTypeParser: (oid: number, format?: "text" | "binary") => (oid
  */
 export class PostgresStorage implements ControllerStorage {
   readonly #pool: pg.Pool;
-  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
+  readonly #options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "contractThrough" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>;
   readonly #version: { readonly allowUnsupported: boolean; readonly minimum: number | undefined };
   #unsupportedServer: Problem | undefined;
   #createdSchema = false;
@@ -169,7 +171,7 @@ export class PostgresStorage implements ControllerStorage {
   /** The pool's connections, so a close can cut those whose goodbye is not answered (the pool ends its idle connections without waiting for them). */
   readonly #pooled = new Set<pg.ClientBase>();
 
-  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
+  private constructor(pool: pg.Pool, options: Required<Omit<PostgresOptions, "connectionString" | "migrations" | "contractThrough" | "beforeUpgrade" | "allowUnsupportedServer" | "minimumServerVersionNum">>, version: { allowUnsupported: boolean; minimum: number | undefined }) {
     this.#pool = pool;
     this.#options = options;
     this.#version = version;
@@ -234,8 +236,8 @@ export class PostgresStorage implements ControllerStorage {
       store.#liveTaking = holding.catch(() => undefined);
       await Promise.all([holding, store.#verifyServer()]);
       store.#liveTaking = undefined;
-      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade);
-      await store.#migrate(options.migrations ?? MIGRATIONS);
+      if (options.beforeUpgrade !== undefined) await store.#announceUpgrade(options.migrations ?? MIGRATIONS, options.beforeUpgrade, options.contractThrough);
+      await store.#migrate(options.migrations ?? MIGRATIONS, options.contractThrough);
       store.#schemaOid = await store.#schemaIdentity();
       return store;
     } catch (error) {
@@ -324,12 +326,13 @@ export class PostgresStorage implements ControllerStorage {
   get holdsLiveLock(): boolean { return this.#liveHold !== undefined; }
 
   /** An existing database whose journal is behind the migrations this version has: the hook is told, with a snapshot, before anything changes. */
-  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade): Promise<void> {
+  async #announceUpgrade(migrations: readonly Migration[], hook: BeforeUpgrade, contractThrough?: number): Promise<void> {
     const from = await this.#read(async (tx) => {
       if ((await tx.q("SELECT to_regclass($1) AS t", [`${this.#options.schema}.schema_migrations`]))[0]!.t === null) return 0;
       return count((await tx.q("SELECT COALESCE(MAX(version), 0)::int AS v FROM schema_migrations WHERE state = 'done'"))[0]!, "v");
     });
-    if (from > 0 && from < migrations.length) await hook({ from, to: migrations.length, snapshot: () => this.snapshot() });
+    const to = runnableThrough(migrations, from, { ...(contractThrough === undefined ? {} : { contractThrough }) });
+    if (from > 0 && from < to) await hook({ from, to, snapshot: () => this.snapshot() });
   }
 
   async #verifyServer(): Promise<void> {
@@ -353,7 +356,7 @@ export class PostgresStorage implements ControllerStorage {
    * nothing left to do), and the lock disappears with the connection if the process dies. A schema that has tables but no journal was
    * not created by NimbleNewt and is refused untouched, as is a database from a newer version or with an edited migration.
    */
-  async #migrate(migrations: readonly Migration[]): Promise<void> {
+  async #migrate(migrations: readonly Migration[], contractThrough?: number): Promise<void> {
     const name = this.#options.schema;
     this.#usable();
     let client: pg.PoolClient;
@@ -426,7 +429,7 @@ export class PostgresStorage implements ControllerStorage {
           let committed = false;
           try {
             const journal = (await q("SELECT version, name, checksum, state FROM schema_migrations ORDER BY version")).map((r): JournalEntry => ({ version: count(r, "version"), name: text(r, "name"), checksum: text(r, "checksum"), state: text(r, "state") as JournalEntry["state"] }));
-            const plan = planMigrations(migrations, journal);
+            const plan = planMigrations(migrations, journal, contractThrough === undefined ? {} : { contractThrough });
             const next = plan.resume ?? plan.pending[0];
             if (next === undefined) { await q("COMMIT"); committed = true; return; }
             const record = (state: "running" | "done"): Promise<Row[]> => q("INSERT INTO schema_migrations (version, name, checksum, state, started_at, finished_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (version) DO UPDATE SET state = excluded.state, finished_at = excluded.finished_at",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { StorageError } from "./errors.js";
-import { assertValidMigrations, migrationChecksum, planMigrations, type JournalEntry, type Migration } from "./migrations.js";
+import { assertValidMigrations, migrationChecksum, planMigrations, runnableThrough, type JournalEntry, type Migration } from "./migrations.js";
 
 const m = (version: number, name: string, statements: readonly string[] = [`step ${version}`], transactional?: boolean): Migration => ({ version, name, statements, ...(transactional === undefined ? {} : { transactional }) });
 const registry = [m(1, "initial"), m(2, "add_things"), m(3, "add_more", ["a second step"], false)];
@@ -63,4 +63,29 @@ test("programmer mistakes in a list of migrations are rejected loudly", () => {
   assert.throws(() => assertValidMigrations([m(1, "a"), m(2, "a")]), /used twice/);
   assert.throws(() => assertValidMigrations([m(1, "a", [])]), /empty statement/);
   assert.throws(() => assertValidMigrations([m(1, "a", ["  "])]), /empty statement/);
+});
+
+test("a destructive migration is deferred unless the opener allows it, and everything after it waits (card K03)", () => {
+  const d = (version: number, name: string): Migration => ({ ...m(version, name), kind: "destructive" });
+  const reg = [m(1, "initial"), m(2, "add_things"), d(3, "drop_things"), m(4, "after_the_drop")];
+  const done = (n: number) => reg.slice(0, n).map((x) => entry(x));
+  const plan = planMigrations(reg, done(2));
+  assert.deepEqual([plan.applied, plan.pending, plan.deferred?.map((x) => x.version)], [2, [], [3, 4]]);
+  assert.deepEqual(planMigrations(reg, done(2), { contractThrough: 2 }).deferred?.map((x) => x.version), [3, 4], "below the destructive number is not enough");
+  const allowed = planMigrations(reg, done(2), { contractThrough: 3 });
+  assert.deepEqual([allowed.pending.map((x) => x.version), allowed.deferred], [[3, 4], undefined]);
+  assert.equal(planMigrations(reg, []).pending.length, 2, "a new database gets the additive ones and waits at the first destructive one");
+  assert.equal(runnableThrough(reg, 2), 2);
+  assert.equal(runnableThrough(reg, 1), 2);
+  assert.equal(runnableThrough(reg, 2, { contractThrough: 3 }), 4);
+  // an interrupted destructive migration is finished whatever is allowed (it was begun)
+  const running = planMigrations(reg, [...done(2), entry(reg[2]!, "running")]);
+  assert.equal(running.resume?.version, 3);
+  assert.deepEqual(running.deferred === undefined ? [] : running.deferred.map((x) => x.version), [], "nothing waits behind a running one that is resumed first, then the rest follow");
+});
+
+test("the checksum of a destructive migration differs from the same migration marked additive, and an additive one is unchanged by the new field (card K03)", () => {
+  assert.notEqual(migrationChecksum({ ...m(1, "initial"), kind: "destructive" }), migrationChecksum(m(1, "initial")));
+  assert.equal(migrationChecksum({ ...m(1, "initial"), kind: "additive" }), migrationChecksum(m(1, "initial")));
+  assert.throws(() => assertValidMigrations([{ ...m(1, "initial"), kind: "sideways" as never }]), /additive or destructive/);
 });

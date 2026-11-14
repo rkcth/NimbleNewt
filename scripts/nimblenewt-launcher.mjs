@@ -30,6 +30,8 @@ const HELP = `NimbleNewt release launcher
   --poll-ms N          How often the startup watchdog looks (default 1000).
   --backoff-initial-ms N, --backoff-max-ms N, --stable-seconds N, --give-up-after N
                        Restart rate limit: waits initial * 2^(n-1) (up to max) after the n-th short run in a row; a run of --stable-seconds (default 60) resets it; after --give-up-after (default 20) it exits 4.
+  --data-dir DIR       The controller's data folder (card K03): a start that fails while its disk is nearly full or it cannot be written is blamed on the machine, not the release.
+  --min-free-mb N      Free space in MB below which the data folder's disk counts as full (default 256).
   --heartbeat on|off   The controller liveness heartbeat (default on): a controller whose event loop stops turning is stopped and started again (never quarantined; counts as a short run).
   --heartbeat-stale-seconds N        How long the counter may stand still before the controller counts as hung (default 120, at least 30, at most 3600; never below 6 heartbeat intervals).
   --heartbeat-interval-seconds N     How often the controller beats (default 5, 1 to 60).
@@ -89,7 +91,15 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     try { workers = { min: intFlag(args.flags, "workers-min", workers.min, { min: 1 }), max: intFlag(args.flags, "workers-max", workers.max, { min: 1 }) }; } catch (error) { err(safeMessage(error, 2000)); return 1; }
   }
   const switcher = kind === "symlink" ? new SymlinkSwitcher(root) : new PointerSwitcher(root);
-  const launcher = new Launcher({ root, switcher, workers });
+  const { hostProbes, diagnoseFailure } = await lib("release/diagnosis.js");
+  let probes;
+  try {
+    const dataDir = typeof args.flags["data-dir"] === "string" && args.flags["data-dir"] !== "" ? resolve(args.flags["data-dir"]) : undefined;
+    const minMb = intFlag(args.flags, "min-free-mb", 256, { min: 1, max: 10_000_000 });
+    probes = hostProbes({ ...(dataDir === undefined ? {} : { dataDir }), minFreeBytes: minMb * 1024 * 1024 });
+  } catch (error) { err(safeMessage(error, 2000)); return 1; }
+  // A start that does not confirm is blamed on the machine when a probe finds the disk full or the data unwritable; otherwise on the release.
+  const launcher = new Launcher({ root, switcher, workers, diagnose: async () => { const d = await diagnoseFailure({ code: null, signal: null }, probes); return d.cause === "release" ? undefined : d; } });
   // The child is started from the release directory, so a relative --node would otherwise be looked up there (a file the release brought): it is taken from where the launcher was started instead.
   const node = typeof args.flags.node === "string" && args.flags.node !== "" ? (/[\\/]/.test(args.flags.node) ? resolve(args.flags.node) : args.flags.node) : process.execPath;
   const abort = new AbortController();
@@ -105,6 +115,7 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     // The child's environment is this process's: secrets reach it the way the service manager gave them. This launcher logs none of it. Two values are added so the controller's release wiring agrees with this launcher
     // (scripts/nimblenewt-controller.mjs reads them): the release root and the pointer kind (the controller's own default differs from this launcher's).
     child: (release) => ({ command: node, args: [join(release.dir, entry), ...passed], cwd: release.dir, env: { ...io.env, NIMBLENEWT_RELEASE_ROOT: root, NIMBLENEWT_RELEASE_SWITCHER: kind } }),
+    probes,
     pollMs: opts.poll,
     graceMs: opts.grace,
     backoff: { initialMs: opts.initial, maxMs: opts.max, stableMs: opts.stable, giveUpAfter: opts.giveUp },

@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { StorageError } from "../errors.js";
 import { registry } from "../qualification/migration-registry.js";
 import {
-  cannotLoopForever, concurrentOpensApplyOnce, refusals, resumesRunningMigrations, upgradeCrashMatrix, upgradePreservesState, type Description, type MigrationOutcome, type MigrationRig, type MigrationWorld,
+  cannotLoopForever, concurrentOpensApplyOnce, destructiveMigrationsAreJournaled, destructiveMigrationsWait, refusals, resumesRunningMigrations, upgradeCrashMatrix, upgradePreservesState, type Description, type MigrationOutcome, type MigrationRig, type MigrationWorld,
 } from "../qualification/migrations-suite.js";
 import { PostgresStorage } from "./index.js";
 import { FaultProxy } from "./testing/proxy.js";
@@ -40,8 +40,8 @@ const rig: MigrationRig = {
     };
     const world: MigrationWorld = {
       attempt: outcomeOf,
-      withStorage: async (migrations, fn) => {
-        const storage = await open(s.url(), migrations);
+      withStorage: async (migrations, fn, options) => {
+        const storage = await PostgresStorage.open({ connectionString: s.url(), schema, maxConnections: 2, migrations: registry("postgres", migrations), ...(options?.contractThrough === undefined ? {} : { contractThrough: options.contractThrough }), ...(options?.beforeUpgrade === undefined ? {} : { beforeUpgrade: options.beforeUpgrade }) });
         try { return await fn(storage); } finally { await storage.close(); }
       },
       describe: async (): Promise<Description> => withClient(s.url(), async (c) => {
@@ -79,3 +79,6 @@ test("PostgreSQL: an upgrade cut before or after every statement leaves a recove
 });
 
 test("PostgreSQL: a migration that cannot be journaled stops the runner with an error instead of repeating forever", { timeout: 90_000 }, () => cannotLoopForever(rig));
+
+test("PostgreSQL: a destructive migration waits until it is allowed; what follows it waits too; the snapshot is taken before it runs", () => destructiveMigrationsWait(rig));
+test("PostgreSQL: a destructive migration is journaled like any other and a build that does not know it refuses the database", () => destructiveMigrationsAreJournaled(rig));

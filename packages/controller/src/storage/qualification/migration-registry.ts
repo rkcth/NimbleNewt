@@ -12,7 +12,7 @@ import { MIGRATIONS as SQLITE } from "../sqlite/schema.js";
  *   of its statements is idempotent, as the rules require.
  */
 export type Dialect = "sqlite" | "postgres";
-export type RegistryName = "v1" | "v12" | "v123" | "v123-with-v2-edited" | "v12-with-erasing-v3";
+export type RegistryName = "v1" | "v12" | "v123" | "v123-with-v2-edited" | "v12-with-erasing-v3" | "v1234" | "v12345";
 
 const v2 = (dialect: Dialect): Migration => ({
   version: 2,
@@ -51,12 +51,26 @@ const v3 = (dialect: Dialect): Migration => ({
     ],
 });
 
+/** Destructive (card K03): removes the column v2 added. It waits until the opener allows it (`contractThrough`). */
+const v4 = (): Migration => ({ version: 4, name: "drop_note_column", kind: "destructive", statements: ["ALTER TABLE aggregates DROP COLUMN note"] });
+
+/** Additive, after the destructive one: it waits behind it, because numbering stays gapless. */
+const v5 = (dialect: Dialect): Migration => ({
+  version: 5,
+  name: "late_probe",
+  statements: dialect === "sqlite"
+    ? ["CREATE TABLE late_probe (n INTEGER PRIMARY KEY) STRICT", "INSERT INTO late_probe (n) VALUES (5)"]
+    : ["CREATE TABLE late_probe (n integer PRIMARY KEY)", "INSERT INTO late_probe (n) VALUES (5)"],
+});
+
 export function registry(dialect: Dialect, name: RegistryName): readonly Migration[] {
   const first = (dialect === "sqlite" ? SQLITE : POSTGRES).slice(0, 1);
   switch (name) {
     case "v1": return first;
     case "v12": return [...first, v2(dialect)];
     case "v123": return [...first, v2(dialect), v3(dialect)];
+    case "v1234": return [...first, v2(dialect), v3(dialect), v4()];
+    case "v12345": return [...first, v2(dialect), v3(dialect), v4(), v5(dialect)];
     case "v12-with-erasing-v3": {
       // A (broken) non-transactional migration whose statement deletes its own journal row: the runner must notice that it is not
       // getting anywhere instead of applying it again forever.

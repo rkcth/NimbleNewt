@@ -136,3 +136,10 @@ test("a second SIGTERM or SIGINT while the launcher is stopping does not end it 
     await until("the stubborn controller gone", () => !alive(pid), 5000);
   } finally { for (const p of pidsIn(pidFile)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the launcher takes the data folder and the free-space floor for its probes, and refuses a bad floor (K03)", async () => {
+  let text = "";
+  const code = await main(["--root", tmpdir(), "--min-free-mb", "0"], { stderr: { write: (t) => { text += t; } }, env: {}, signal: AbortSignal.abort() });
+  assert.equal(code, 1);
+  assert.match(text, /--min-free-mb must be a whole number from 1/);
+});
