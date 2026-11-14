@@ -65,3 +65,19 @@ test("review: the source gap hook opens an outage for a failed poll, closes it o
   await assert.rejects(hook([run("files", { error: "unreadable" }), run("git", { gap: { from: "2026-11-01T00:00:00.000Z", to: "2026-11-12T12:00:00.000Z" } }), run("bad", { gap: { from: "later", to: "x" } })] as never), /storage busy/);
   assert.deepEqual(log, ["open:source:files:event-source-outage", "record:source:git:events-missed:2026-11-01T00:00:00.000Z:2026-11-12T12:00:00.000Z", "close:source:git:2026-11-12T12:00:00.000Z", "close:source:bad:2026-11-12T12:00:00.000Z"], "an unreadable gap time is not recorded");
 });
+
+import { leaseExpiryLoops } from "./loops.js";
+
+test("the lease-expiry loop tells each ran-out lease once, marks it only after the notice, counts an already-sent notice as sent, and one failure does not skip the rest (card P04g)", async () => {
+  const mk = (resourceId: string, generation: number, projectId = "p") => ({ leaseId: `l-${resourceId}`, resourceId, projectId, responsibilityId: "r", holderId: "agent:a", expiredAt: "2026-11-14T10:00:00.000Z", generation, blockedCount: 0 });
+  const log: string[] = [];
+  const untold: Record<string, ReturnType<typeof mk>[]> = { p: [mk("a", 1), mk("b", 2), mk("c", 1)], q: [mk("d", 1, "q")] };
+  const [loop] = leaseExpiryLoops(
+    { expiredUntold: async (_b, p) => untold[p] ?? [], markExpiryTold: async (_b, r, g) => { log.push(`mark:${r}:${g}`); } },
+    async () => ["p", "q"],
+    async (l) => { log.push(`tell:${l.resourceId}`); if (l.resourceId === "a") throw new Error("notices busy"); if (l.resourceId === "b") throw Object.assign(new (await import("../domain/errors.js")).DomainError("command_conflict", "already sent"), {}); },
+  );
+  assert.equal(loop!.name, "responsibilities.lease-expiry");
+  await assert.rejects(loop!.run(by), /notices busy/);
+  assert.deepEqual(log, ["tell:a", "tell:b", "mark:b:2", "tell:c", "mark:c:1", "tell:d", "mark:d:1"], "a failed notice is not marked (it is offered again next tick); the others and the next project go on");
+});
