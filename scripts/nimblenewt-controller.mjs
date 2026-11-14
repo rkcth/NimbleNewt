@@ -12,6 +12,7 @@
 //   running release        NIMBLENEWT_RUNNING_RELEASE only (the launcher sets it) -> StartOptions.releases.runningRelease; it needs the release root
 //   liveness heartbeat     NIMBLENEWT_HEARTBEAT_FILE / _TOKEN / _INTERVAL_MS (the launcher sets them; startController reads them from the environment given here)
 //   environment changes    --local-host-environments or NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1; OFF by default (card A09b)
+//   backups (card K01i)    on by default in DATA/backups; --backup-dir or NIMBLENEWT_BACKUP_DIR moves them; --no-backups or NIMBLENEWT_NO_BACKUPS=1 turns the backup service off
 // Secrets: provider keys and the database address are looked up by their configured NAME in the operating system's secret store (the owner's credential only there), and for a name the store does not
 // hold in the environment as NIMBLENEWT_SECRET_<NAME> (a service manager's way). Nothing secret is printed or put in an argument.
 //
@@ -35,6 +36,8 @@ const HELP = `NimbleNewt controller entry
   --config FILE                  The configuration file, when it is somewhere else.
   --serve                        Also listen for the conversation on this computer (loopback only).
   --allow-unsupported-environment   Start on a system the start-up check does not support (recorded and printed at every start).
+  --backup-dir DIR               Where the controller keeps its backups (or NIMBLENEWT_BACKUP_DIR; default DATA/backups).
+  --no-backups                   Do not run the controller's own backup service (or NIMBLENEWT_NO_BACKUPS=1).
   --local-host-environments      Let the worker host install approved package changes into agents' environments (or NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1). Off by default.
   --release-root DIR             The release root (or NIMBLENEWT_RELEASE_ROOT, which the launcher sets): turns on release staging and activation.
   --release-switcher KIND        pointer or symlink (or NIMBLENEWT_RELEASE_SWITCHER). Default: the controller's own (symlink; pointer on Windows). The launcher sets it.
@@ -42,8 +45,8 @@ const HELP = `NimbleNewt controller entry
 Exit codes: 0 stopped on purpose, 75 restart me, 1 could not start. Stops on SIGTERM, SIGINT or SIGHUP.
 `;
 
-const BOOLEAN = new Set(["serve", "allow-unsupported-environment", "local-host-environments", "help"]);
-const VALUE = new Set(["data", "config", "release-root", "release-switcher"]);
+const BOOLEAN = new Set(["serve", "allow-unsupported-environment", "local-host-environments", "no-backups", "help"]);
+const VALUE = new Set(["data", "config", "release-root", "release-switcher", "backup-dir"]);
 
 /** Strict arguments: an unknown flag, a flag without its value or a flag given twice is an error (a supervised program must not run with a setting it silently ignored). */
 export function parseControllerArgs(argv) {
@@ -80,18 +83,25 @@ export function controllerSettings(flags, env) {
   if (running !== undefined) {
     // Under the launcher the process runs in the release directory, so a relative path would name a folder inside the release (a new, empty installation for every release); and the launcher's own root and
     // pointer kind must be the ones used, or this start could never be confirmed. Both are refused rather than guessed.
-    for (const [what, v] of [["--data", flags.data], ["NIMBLENEWT_DATA", flags.data === undefined ? env.NIMBLENEWT_DATA || undefined : undefined], ["--config", flags.config], ["the release root", rootGiven]]) {
+    for (const [what, v] of [["--data", flags.data], ["NIMBLENEWT_DATA", flags.data === undefined ? env.NIMBLENEWT_DATA || undefined : undefined], ["--config", flags.config], ["the release root", rootGiven], ["--backup-dir", flags["backup-dir"]], ["NIMBLENEWT_BACKUP_DIR", flags["backup-dir"] === undefined ? env.NIMBLENEWT_BACKUP_DIR || undefined : undefined]]) {
       if (v !== undefined && !isAbsolute(v)) throw new Error(`${what} is the relative path ${JSON.stringify(v)}; under the launcher this process runs in the release directory, so give an absolute path`);
     }
     for (const [flag, name] of [["release-root", "NIMBLENEWT_RELEASE_ROOT"], ["release-switcher", "NIMBLENEWT_RELEASE_SWITCHER"]]) {
       if (flags[flag] !== undefined && env[name] && (flag === "release-root" ? resolve(flags[flag]) !== resolve(env[name]) : flags[flag] !== env[name])) throw new Error(`--${flag} differs from the launcher's ${name}; the launcher's setting must be used`);
     }
   }
+  // Backups (card K01i review): the switch is read strictly (a value that is not understood is an error, not "on"), and a folder given together with "no backups" is refused rather than silently ignored.
+  const noBackupsEnv = typeof env.NIMBLENEWT_NO_BACKUPS === "string" ? env.NIMBLENEWT_NO_BACKUPS.trim().toLowerCase() : "";
+  if (!["", "0", "false", "off", "1", "true", "on"].includes(noBackupsEnv)) throw new Error("NIMBLENEWT_NO_BACKUPS must be 1, true, on, 0, false or off");
+  const noBackups = flags["no-backups"] === true || ["1", "true", "on"].includes(noBackupsEnv);
+  if (noBackups && (flags["backup-dir"] !== undefined || env.NIMBLENEWT_BACKUP_DIR)) throw new Error("backups are switched off (--no-backups or NIMBLENEWT_NO_BACKUPS) and a backup folder is given too (--backup-dir or NIMBLENEWT_BACKUP_DIR); give one or the other");
   return {
     dataDir, configFile,
     ...(rootGiven === undefined ? {} : { release: { root: resolve(rootGiven), ...(kind === undefined ? {} : { switcher: kind }), ...(running === undefined ? {} : { runningRelease: running }) } }),
     environments: environmentsRequested(flags["local-host-environments"], env.NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS),
     serve: flags.serve === true,
+    // Backups (card K01i): on by default, in <data>/backups; --backup-dir (or NIMBLENEWT_BACKUP_DIR) moves them, --no-backups (or NIMBLENEWT_NO_BACKUPS=1) turns the controller's own backup service off.
+    backups: noBackups ? undefined : { directory: resolve(flags["backup-dir"] ?? (env.NIMBLENEWT_BACKUP_DIR || join(dataDir, "backups"))) },
     allowUnsupported: flags["allow-unsupported-environment"] === true,
   };
 }
@@ -114,7 +124,13 @@ export function composeSecrets(store, env, ownerPrefix, environmentSecrets) {
 /** The start options this entry adds to the launcher's own: release wiring, and the restart request when a supervisor is there to restart the process (and a database move is configured). */
 export function controllerStartOptions(settings, config, requestRestart) {
   const restartable = settings.release?.runningRelease !== undefined && (config.controller.databaseTransfer?.targets?.length ?? 0) > 0;
+  const underLauncher = settings.release?.runningRelease !== undefined;
+  // A staged restore needs the controller started again. Under the launcher the controller exits with 75 (restart me) after it closed, and the launcher starts it; without a supervisor the owner is told to restart by hand.
+  const restart = underLauncher
+    ? { automatic: () => requestRestart("a staged backup restore"), instruction: "The controller restarts itself in a moment and the restore is applied as it starts; nothing for you to do. If it does not come back, start it again the usual way." }
+    : { instruction: "Stop the controller and start it again the usual way (this controller was not started by the launcher, so it cannot restart itself); the restore is applied as it starts." };
   return {
+    ...(settings.backups === undefined ? {} : { backup: { directory: settings.backups.directory, ...(underLauncher ? { version: settings.release.runningRelease } : {}), restore: { restart } } }),
     ...(settings.release === undefined ? {} : { releases: settings.release }),
     // Only under the launcher: without a supervisor nothing would start the process again, and the owner is told to restart by hand (the controller's own default).
     ...(restartable ? { transfer: { restart: { run: () => requestRestart("the database move or rollback") } } } : {}),

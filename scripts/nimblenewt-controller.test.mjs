@@ -125,7 +125,39 @@ test("a restart can be requested only under the launcher and only when a databas
   assert.equal(reasons.length, 1);
   assert.equal(controllerStartOptions(underLauncher, { controller: {} }, () => undefined).transfer, undefined, "no database move configured: no transfer option at all");
   assert.equal(controllerStartOptions(controllerSettings({ "release-root": "/r" }, {}), withTargets, () => undefined).transfer, undefined, "nobody would start it again");
-  assert.deepEqual(controllerStartOptions(controllerSettings({}, {}), withTargets, () => undefined), {}, "nothing wired by default");
+  assert.equal(controllerStartOptions(controllerSettings({}, {}), withTargets, () => undefined).transfer, undefined, "no database move without a supervisor");
+});
+
+test("backups are wired for production: on by default in <data>/backups, movable, switchable off; a staged restore restarts the controller by itself only under the launcher (card K01i)", () => {
+  const data = resolve(repo, "tmp-data-not-created");
+  const plain = controllerSettings({ data }, {});
+  const o = controllerStartOptions(plain, { controller: {} }, () => { throw new Error("must not be called"); });
+  assert.equal(o.backup.directory, join(data, "backups"));
+  assert.equal(o.backup.restore.restart.automatic, undefined, "no supervisor: the owner restarts by hand and is told so");
+  assert.match(o.backup.restore.restart.instruction, /Stop the controller and start it again/);
+  assert.equal(o.backup.version, undefined);
+  const moved = controllerSettings({ data, "backup-dir": join(data, "..", "elsewhere") }, {});
+  assert.equal(controllerStartOptions(moved, { controller: {} }, () => undefined).backup.directory, resolve(data, "..", "elsewhere"));
+  assert.equal(controllerStartOptions(controllerSettings({ data }, { NIMBLENEWT_BACKUP_DIR: join(data, "env") }), { controller: {} }, () => undefined).backup.directory, join(data, "env"));
+  assert.equal(controllerStartOptions(controllerSettings({ data, "no-backups": true }, {}), { controller: {} }, () => undefined).backup, undefined);
+  assert.equal(controllerStartOptions(controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "1" }), { controller: {} }, () => undefined).backup, undefined);
+  const why = [];
+  const launched = controllerStartOptions(controllerSettings({ data }, { NIMBLENEWT_RELEASE_ROOT: resolve("/r"), NIMBLENEWT_RUNNING_RELEASE: RELEASE, NIMBLENEWT_DATA: data }), { controller: {} }, (w) => why.push(w));
+  assert.equal(launched.backup.version, RELEASE);
+  assert.match(launched.backup.restore.restart.instruction, /restarts itself/);
+  launched.backup.restore.restart.automatic();
+  assert.deepEqual(why, ["a staged backup restore"]);
+  assert.deepEqual(parseControllerArgs(["--no-backups", "--backup-dir", "x"]), { "no-backups": true, "backup-dir": "x" });
+  assert.throws(() => parseControllerArgs(["--no-backups=1"]), /takes no value/);
+  // Review: a switch value that is not understood, or "no backups" together with a folder, is refused; under the launcher a relative backup folder (it would be inside the release directory) is refused.
+  assert.equal(controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "true" }).backups, undefined);
+  assert.equal(controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "0" }).backups.directory, join(data, "backups"));
+  assert.throws(() => controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "yes please" }), /NIMBLENEWT_NO_BACKUPS must be/);
+  assert.throws(() => controllerSettings({ data, "no-backups": true, "backup-dir": join(data, "b") }, {}), /give one or the other/);
+  assert.throws(() => controllerSettings({ data }, { NIMBLENEWT_NO_BACKUPS: "1", NIMBLENEWT_BACKUP_DIR: join(data, "b") }), /give one or the other/);
+  const launcherEnv = { NIMBLENEWT_RELEASE_ROOT: resolve("/r"), NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+  assert.throws(() => controllerSettings({ data, "backup-dir": "backups" }, launcherEnv), /--backup-dir is the relative path/);
+  assert.throws(() => controllerSettings({ data }, { ...launcherEnv, NIMBLENEWT_BACKUP_DIR: "b" }), /NIMBLENEWT_BACKUP_DIR is the relative path/);
 });
 
 test("secrets: the store first, the environment for a name the store lacks, never the owner's credential from the environment, set writes the store only (entry)", async () => {
@@ -248,6 +280,64 @@ test("a database move under the launcher ends with exit 75, and the entry starte
     assert.equal(third.code, 0, third.log);
     assert.doesNotMatch(third.log, /was moved to/, "back on the configured database: nothing to follow");
   } finally { inst.cleanup(); rmSync(base, { recursive: true, force: true }); }
+});
+
+test("production wiring of backups: a backup is made in <data>/backups, a restore applied under the launcher restarts the controller by itself (exit 75) and the next start has the restored data; without the launcher the owner is told to restart by hand (entry, K01i)", async () => {
+  const inst = installation();
+  try {
+    const { ownerSecretName } = await dist("controller", "index.js");
+    const env = { NIMBLENEWT_RELEASE_ROOT: join(inst.base, "rel"), NIMBLENEWT_RELEASE_SWITCHER: "pointer", NIMBLENEWT_RUNNING_RELEASE: RELEASE };
+    const c = capture();
+    let seen;
+    // The test's own stop (review): the entry installs no process signal handlers in the test process, and whatever fails below, the controller is stopped and waited for, so none is left running.
+    const ac = new AbortController();
+    let ended = false;
+    const done = main(["--allow-unsupported-environment", "--data", inst.dataDir], { stderr: c.stderr, env, signal: ac.signal, ready: (handle) => { seen = handle; } });
+    done.then(() => { ended = true; }, () => { ended = true; });
+    try {
+      await Promise.race([until("the controller", () => seen !== undefined), done.then((code) => { throw new Error(`exited ${code} before it was up:\n${c.text}`); })]);
+      const token = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+      const call = (op, args, commandId) => seen.controller.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+      assert.equal((await call("project.create", { name: "Garden" }, "p1")).ok, true);
+      const made = await call("backup.now", {}, "b1");
+      assert.equal(made.ok, true, JSON.stringify(made));
+      assert.equal(existsSync(join(inst.dataDir, "backups")), true, "the backup is in <data>/backups");
+      assert.equal((await call("project.create", { name: "Late" }, "p2")).ok, true);
+      const preview = await call("backup.restore.preview", { name: made.result.item.name });
+      assert.equal(preview.ok, true, JSON.stringify(preview));
+      assert.match(JSON.stringify(preview.result), /restart/i);
+      const applied = await call("backup.restore.apply", { name: made.result.item.name, confirm: preview.result.item.token }, "r1");
+      assert.equal(applied.ok, true, JSON.stringify(applied));
+      assert.equal(applied.result.item.restart.automatic, true, "the controller restarts itself under the launcher");
+      let giveUp;
+      try { assert.equal(await Promise.race([done, new Promise((r) => { giveUp = setTimeout(() => r("still running"), 30_000); })]), 75, c.text); } finally { clearTimeout(giveUp); }
+    } finally {
+      if (!ended) { ac.abort(); let cap; await Promise.race([done.catch(() => undefined), new Promise((r) => { cap = setTimeout(r, 60_000); })]); clearTimeout(cap); }
+    }
+    const after = await runEntry(["--data", inst.dataDir], env, async ({ controller }) => {
+      const t = await (await fileStore(inst.dataDir)).resolve(ownerSecretName(inst.dataDir));
+      const list = JSON.stringify(await controller.api.handle(t, { v: 1, op: "project.list", args: {} }));
+      assert.match(list, /Garden/);
+      assert.doesNotMatch(list, /Late/, "the restore was applied as the controller started");
+    });
+    assert.equal(after.code, 0, after.log);
+    // Not under the launcher: the owner is told to restart by hand.
+    const plain = installation();
+    try {
+      const names = {};
+      const r = await runEntry(["--data", plain.dataDir], {}, async ({ controller }) => {
+        const t = await (await fileStore(plain.dataDir)).resolve(ownerSecretName(plain.dataDir));
+        const call2 = (op, args, commandId) => controller.api.handle(t, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
+        const b = await call2("backup.now", {}, "b1");
+        const pv = await call2("backup.restore.preview", { name: b.result.item.name });
+        const ap = await call2("backup.restore.apply", { name: b.result.item.name, confirm: pv.result.item.token }, "r1");
+        names.restart = ap.result.item.restart;
+      });
+      assert.equal(r.code, 0, r.log);
+      assert.equal(names.restart.automatic, false);
+      assert.match(names.restart.instruction, /Stop the controller and start it again/);
+    } finally { plain.cleanup(); }
+  } finally { inst.cleanup(); }
 });
 
 test("after a move, a destination whose file is gone (a disk not attached) is not started on as a new empty database: refused whether the launcher follows the move or the configuration names it by hand (entry, F04m review)", async () => {
