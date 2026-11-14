@@ -3,14 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import type { Principal } from "../security/principals.js";
-import { registry, type RegistryName } from "../storage/qualification/migration-registry.js";
-import type { BeforeUpgrade } from "../storage/snapshot.js";
-import { SqliteStorage } from "../storage/sqlite/index.js";
-import { PostgresStorage } from "../storage/postgres/index.js";
-import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
-import type { ControllerStorage } from "../storage/types.js";
-import { GATE_FILE, MigrationGuardService, openApprovedContract } from "./guard.js";
+import type { Principal } from "../../security/principals.js";
+import { registry, type RegistryName } from "./migration-registry.js";
+import type { BeforeUpgrade } from "../snapshot.js";
+import { SqliteStorage } from "../sqlite/index.js";
+import { PostgresStorage } from "../postgres/index.js";
+import { startTestServer, withClient, type TestServer } from "../postgres/testing/server.js";
+import type { ControllerStorage } from "../types.js";
+import { GATE_FILE, MigrationGuardService, openApprovedContract } from "../../migration/guard.js";
 
 /**
  * Card K03, the start's two-step open with real databases: the database is opened with every destructive migration deferred, and opened again allowing one only when the gate file agrees with the approval
