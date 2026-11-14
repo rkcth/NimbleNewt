@@ -169,12 +169,12 @@ export interface DispatcherDeps {
    * The prerequisite tasks of `taskId` that are not complete, each as a short description (card L04c). Work whose prerequisites are not done is not started: the attempt waits, with the reason in the tick's report, and nothing fails.
    * Without it prerequisites are not looked at here.
    */
-  readonly prerequisites?: (taskId: string) => Promise<readonly string[] | { readonly open: readonly string[]; /** Prerequisites that will not complete by themselves: cancelled or gone. The dependent waits and the owner gets one blocker. */ readonly dead: readonly string[] }>;
+  readonly prerequisites?: (taskId: string, scan?: Map<string, unknown>) => Promise<readonly string[] | { readonly open: readonly string[]; /** Prerequisites that will not complete by themselves: cancelled or gone. The dependent waits and the owner gets one blocker. */ readonly dead: readonly string[] }>;
   /**
    * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
    * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
    */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation">>;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation" | "latestCheckpoint">>;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -559,10 +559,14 @@ export class DispatcherService {
   async tick(): Promise<TickReport> {
     // A second call while a tick runs is the same tick: it waits for it and gets its report.
     if (this.#ticking !== undefined) return this.#ticking;
+    // One tick shares one scan of the dependency records per project (card L04d): each task's prerequisites are asked for in this tick, and the records are read once, not once per task. Task states are still read fresh each time.
+    this.#tickScan = new Map();
     const running = this.#tick();
     this.#ticking = running;
-    try { return await running; } finally { this.#ticking = undefined; }
+    try { return await running; } finally { this.#ticking = undefined; this.#tickScan = undefined; }
   }
+
+  #tickScan: Map<string, unknown> | undefined;
 
   async #tick(): Promise<TickReport> {
     const at = this.#runner.now();
@@ -857,6 +861,23 @@ export class DispatcherService {
     try { budget = await this.#deps.budgets?.accounting(this.#deps.principal, taskId); } catch (error) { this.#options.onError?.(error); budget = UNREADABLE; }
     const words = routeCostWords({ table, from, to, budget });
     await this.#stepOf(attemptId, `route-cost:${createHash("sha256").update(`${from}>${to}`).digest("hex").slice(0, 24)}`, "model-selected", `Attempt ${attemptId} moved from route ${from} to route ${to}. ${words}`, [{ kind: "dispatch", id: attemptId }]);
+  }
+
+  /**
+   * The check is made against the task's latest complete continuation. When the checkpoint this attempt resumes from is another one (a later checkpoint that did not read back, so it was captured incomplete), the check
+   * and the resume record still name the earlier complete capture; the task's activity says so, so the record is not read as being about the checkpoint the attempt actually restores (card L04d). Best effort.
+   */
+  async #checkpointStep(resumes: NonNullable<DispatcherDeps["resumes"]>, attemptId: string, taskId: string, from: JsonObject): Promise<void> {
+    if (resumes.latestCheckpoint === undefined) return;
+    try {
+      const pi = (from as Record<string, unknown>)["pi"];
+      if (typeof pi !== "object" || pi === null) return;
+      const mine = pi as Record<string, unknown>;
+      if (typeof mine["digest"] !== "string" || typeof mine["conversationId"] !== "number" || typeof mine["at"] !== "number") return;
+      const checked = await resumes.latestCheckpoint(this.#deps.principal, taskId);
+      if (checked === undefined || checked.digest === mine["digest"]) return;
+      await this.#stepOf(attemptId, `resume-checkpoint:${String(mine["digest"]).slice(0, 24)}`, "harness-selected", `Attempt ${attemptId} resumes from the checkpoint taken at ${mine["at"]} in conversation ${mine["conversationId"]}, which has no complete capture (it did not read back as complete). Its resume check is made against the task's latest complete capture, taken at ${checked.at} in conversation ${checked.conversationId}; that is the continuation the check and the resume record name.`, [{ kind: "dispatch", id: attemptId }]);
+    } catch (error) { this.#options.onError?.(error); }
   }
 
   /** Records a step of an attempt in its task's activity (best effort, see `DispatcherDeps.activity`). */
@@ -1826,6 +1847,7 @@ export class DispatcherService {
     if (resumes.hasContinuation !== undefined) {
       try { if (!(await resumes.hasContinuation(by, taskId))) return undefined; } catch (error) { return `the resume check could not be run: ${errorText(error)}`.slice(0, 500); }
     }
+    await this.#checkpointStep(resumes, attemptId, taskId, b.resumeFrom);
     const plain = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 80) || "unknown";
     const modelOf = (r: string): { provider: string; id: string } => { const slash = r.indexOf("/"); return { provider: plain(slash < 0 ? "route" : r.slice(0, slash)), id: plain(slash < 0 ? r : r.slice(slash + 1)) }; };
     const model = modelOf(route);
@@ -2008,7 +2030,7 @@ export class DispatcherService {
     // 3a. Prerequisite tasks: work does not start before the tasks it depends on are complete (card L04c). The wait is recorded in the tick's report; it is not a failure.
     if (this.#deps.prerequisites !== undefined) {
       let got: Awaited<ReturnType<NonNullable<DispatcherDeps["prerequisites"]>>>;
-      try { got = await this.#deps.prerequisites(taskId); } catch (error) {
+      try { got = await this.#deps.prerequisites(taskId, this.#tickScan); } catch (error) {
         // Too many dependency records to look through, or an unreadable prerequisite: the attempt does not start (fail closed) and the tick goes on.
         if (!isDomainError(error, "unavailable")) throw error;
         return skip("dependency", "dependencies could not be read");

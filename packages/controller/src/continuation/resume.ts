@@ -495,6 +495,13 @@ export class ResumeCheckService {
     return (await this.#continuations.latest(by, checkTaskId(taskId))) !== undefined;
   }
 
+  /** The adapter checkpoint of the task's latest complete continuation (the one a check is made against), or `undefined`. */
+  async latestCheckpoint(by: Principal, taskId: string): Promise<{ readonly conversationId: number; readonly at: number; readonly digest: string } | undefined> {
+    await this.#authorize(by, checkTaskId(taskId));
+    const c = await this.#continuations.latest(by, checkTaskId(taskId));
+    return c === undefined ? undefined : { conversationId: c.checkpoint.conversationId, at: c.checkpoint.at, digest: c.checkpoint.digest };
+  }
+
   /** The ID the check started with this command ID by this principal has (or would have): lets a caller tell its own check from another one. */
   checkIdFor(by: Principal, commandId: string): string { return derivedId("rck", scopedCommandId(by.id, commandId)); }
 
