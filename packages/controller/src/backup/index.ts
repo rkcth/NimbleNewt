@@ -22,6 +22,6 @@ export { SECRET_NAME, secretsSourceOf, secretsText, restoreSecrets, readSecrets,
 export { argon2idAsync, argon2idSync, blake2b, DEFAULT_ARGON2, type Argon2Params } from "./argon2.js";
 export { generationReport, pruneGenerations, removedText, type GenerationReport, type GenerationUse } from "./generations.js";
 export { BackupConfigService, CONFIG_DEFAULTS, MAX_TARGETS, buildTarget, describeSchedule, type ConfigBody, type ConfigChange, type PurgeRecord, type PurgeResult, type StateBody, type TargetRecord, type VerifiedMark } from "./config.js";
-export { FolderDriver, HttpDriver, TARGET_KINDS, checkedName, filesUnder, offsiteLocationProblem, type TargetDriver, type TargetKind, type TargetTest } from "./targets.js";
+export { FolderDriver, HttpDriver, TARGET_KINDS, checkedName, filesUnder, offsiteLocationProblem, safeMessage, type TargetDriver, type TargetKind, type TargetTest } from "./targets.js";
 export { BackupSystem, PRIMARY as PRIMARY_TARGET, type BackupSystemOptions, type PurgeAnswer, type TestRestoreResult } from "./system.js";
 export { describeRules, infoOf, staysUpToDays } from "./retention.js";

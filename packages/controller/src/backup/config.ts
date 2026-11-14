@@ -5,6 +5,7 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
+import { SIGNING_SECRET_NAME } from "./signing.js";
 import { TARGET_KINDS, offsiteLocationProblem, type TargetKind } from "./targets.js";
 
 const CONFIG = { kind: "backup-config", id: "main" } as const;
@@ -123,16 +124,23 @@ export class BackupConfigService {
   /** The controller's update of its own record, one at a time. `change` gets the state and returns the new one (undefined: nothing to write). Recorded in the audit log as a controller command. */
   updateState(what: string, change: (s: StateBody) => StateBody | undefined): Promise<StateBody> {
     const run = this.#chain.then(async () => {
-      const found = await this.#runner.get(STATE.kind, STATE.id);
-      const before = await this.state();
-      const after = change(before);
-      if (after === undefined) return before;
-      const trimmed: StateBody = { ...after, verified: after.verified.slice(-MAX_MARKS), purges: trimPurges(after.purges) };
-      await this.#runner.command(`backup.state.${what}`, { commandId: `bs:${what}:${Date.now().toString(36)}:${randomBytes(6).toString("hex")}`, actor: "controller" }, async () => ({
-        payload: { what },
-        build: async () => ({ ref: STATE, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: STATE, body: trimmed as unknown as JsonObject } : { type: "update" as const, ref: STATE, expectedRevision: found.revision, body: trimmed as unknown as JsonObject }], detail: { what } }),
-      }));
-      return trimmed;
+      // Another controller sharing the database may write the record between the read and the write: the change is made again on what is there then (a few times), never written over it.
+      for (let attempt = 1; ; attempt++) {
+        const found = await this.#runner.get(STATE.kind, STATE.id);
+        const before = await this.state();
+        const after = change(before);
+        if (after === undefined) return before;
+        const trimmed: StateBody = { ...after, verified: after.verified.slice(-MAX_MARKS), purges: trimPurges(after.purges) };
+        try {
+          await this.#runner.command(`backup.state.${what}`, { commandId: `bs:${what}:${Date.now().toString(36)}:${randomBytes(6).toString("hex")}`, actor: "controller" }, async () => ({
+            payload: { what },
+            build: async () => ({ ref: STATE, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: STATE, body: trimmed as unknown as JsonObject } : { type: "update" as const, ref: STATE, expectedRevision: found.revision, body: trimmed as unknown as JsonObject }], detail: { what } }),
+          }));
+          return trimmed;
+        } catch (error) {
+          if (attempt >= 5 || !(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict")) throw error;
+        }
+      }
     });
     this.#chain = run.catch(() => undefined);
     return run;
@@ -265,6 +273,8 @@ export function buildTarget(c: { name?: unknown; kind?: unknown; location?: unkn
   if (c.credential !== undefined && c.credential !== null) {
     if (kind !== "offsite") invalid("credential", "only an off-machine target uses a credential");
     if (typeof c.credential !== "string" || !CREDENTIAL.test(c.credential)) invalid("credential", "the name of a stored credential (letters, digits, dots, dashes, underscores): never the secret itself");
+    // The backup-signing key stays on this machine (card K01b): it is never sent to a target as its credential.
+    if (c.credential === SIGNING_SECRET_NAME) invalid("credential", "that is the backup-signing key, which never leaves this machine: name the credential of the off-machine store");
   }
   const days = (v: unknown, f: string, lo: number, hi: number): number | null | undefined => (v === undefined ? undefined : v === null ? null : whole(v, f, lo, hi));
   const keepDays = days(c.keepDays, "keepDays", 1, 3650); const daily = days(c.daily, "daily", 1, 365); const weekly = days(c.weekly, "weekly", 0, 520);

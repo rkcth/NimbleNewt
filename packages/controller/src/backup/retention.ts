@@ -52,7 +52,7 @@ const day = (iso: string): string => iso.slice(0, 10);
 /** The Monday (UTC) that starts the week the instant is in. */
 const week = (iso: string): string => { const d = new Date(`${day(iso)}T00:00:00.000Z`); const back = (d.getUTCDay() + 6) % 7; return new Date(d.getTime() - back * 86_400_000).toISOString().slice(0, 10); };
 
-/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, and every pre-upgrade snapshot (a later release decides when those may go). */
+/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, the newest manual or scheduled one (card K01c: a newer snapshot never takes its place), and every pre-upgrade snapshot (a later release decides when those may go). */
 export function chooseKept(backups: readonly BackupInfo[], retention: Retention = DEFAULT_RETENTION, now: Date = new Date()): Set<string> {
   const newestFirst = backups.filter((b) => b.trusted).sort((a, b) => b.at.localeCompare(a.at));
   // Snapshots taken before a restore are counted apart: they fill no daily or weekly slot (a scheduled backup of the same day is still kept) and do not stretch the time untrusted backups are kept for.
@@ -86,10 +86,13 @@ export function chooseKept(backups: readonly BackupInfo[], retention: Retention 
   keepBy(day, retention.daily);
   keepBy(week, retention.weekly);
   // The age limit (card K01c): a backup that is older, goes even when a count would keep it; the newest good one, the newest verified complete one and the snapshots with rules of their own stay.
+  // The newest good backup (a manual or scheduled one) is never deleted by any rule: a newer snapshot taken before an upgrade or a restore does not take its place.
+  const newestGood = newestFirst.find((b) => b.manifest.kind !== "pre-upgrade" && b.manifest.kind !== "pre-restore");
+  if (newestGood !== undefined) kept.add(newestGood.path);
   if (retention.maxAgeDays !== undefined && retention.maxAgeDays !== null) {
     const limit = new Date(now.getTime() - retention.maxAgeDays * 86_400_000).toISOString();
     for (const b of newestFirst) {
-      if (!kept.has(b.path) || b.at >= limit || b.path === first?.path || b.manifest.kind === "pre-upgrade" || b.manifest.kind === "pre-restore") continue;
+      if (!kept.has(b.path) || b.at >= limit || b.path === first?.path || b.path === newestGood?.path || b.manifest.kind === "pre-upgrade" || b.manifest.kind === "pre-restore") continue;
       if (retention.protect?.has(b.path) === true || retention.protect?.has(b.manifest.name) === true) continue;
       kept.delete(b.path);
     }

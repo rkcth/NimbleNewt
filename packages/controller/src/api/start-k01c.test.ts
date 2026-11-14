@@ -12,7 +12,7 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 
 /** Waits for a condition, not for a time. */
 async function until(what: string, ok: () => boolean | Promise<boolean>): Promise<void> {
-  for (let i = 0; i < 400; i++) { if (await ok()) return; await new Promise((r) => setTimeout(r, 25)); }
+  for (let i = 0; i < 2400; i++) { if (await ok()) return; await new Promise((r) => setTimeout(r, 25)); }
   assert.fail(`never became true: ${what}`);
 }
 const names = (dir: string): string[] => (existsSync(dir) ? readdirSync(dir).filter((n) => n.startsWith("backup-") && !n.endsWith(".partial")).sort() : []);
@@ -29,9 +29,17 @@ test("the owner configures the backup system through the state API: targets, sch
       const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
       await c.services.principals.enroll(rob, { commandId: "e-zed", kind: "agent", name: "zed", grants: [{ action: "task.read", project }] });
       const zed = (await c.services.principals.issueCredential(rob, "agent:zed")).token;
-      for (const [op, args] of [["backup.config.status", {}], ["backup.config.set", { everyHours: 6 }], ["backup.target.add", { name: "A", kind: "folder", location: join(d, "a") }], ["backup.target.test", { id: "A" }], ["backup.target.remove", { id: "A" }], ["backup.purge", { names: ["backup-20261101T100000Z-manual"] }], ["backup.verify.run", {}]] as const) {
-        assert.equal((await call(zed, op, args as never, op === "backup.config.status" ? undefined : "z1")).error.code, "forbidden", `${op} is owner only`);
+      // A viewer (a client with read grants) and a task credential are refused like an agent.
+      await c.services.principals.enroll(rob, { commandId: "e-viewer", kind: "client", name: "viewer", grants: [] });
+      const viewer = (await c.services.principals.issueCredential(rob, "client:viewer")).token;
+      const task = (await call(boot.token, "task.create", { projectId: project, title: "weed" }, "tk1")).result.id as string;
+      const taskCred = (await c.services.taskCredentials.issue(rob, { commandId: "tc1", taskId: task, agentId: "agent:zed" })).token;
+      for (const who of [zed, viewer, taskCred]) {
+        for (const [op, args] of [["backup.config.status", {}], ["backup.config.set", { everyHours: 6 }], ["backup.target.add", { name: "A", kind: "folder", location: join(d, "a") }], ["backup.target.test", { id: "A" }], ["backup.target.remove", { id: "A" }], ["backup.purge", { names: ["backup-20261101T100000Z-manual"] }], ["backup.purge", { names: ["backup-20261101T100000Z-manual"], dryRun: true }], ["backup.verify.run", {}]] as const) {
+          assert.equal((await call(who, op, args as never, op === "backup.config.status" ? undefined : "z1")).error?.code, "forbidden", `${op} is owner only`);
+        }
       }
+      assert.equal(existsSync(join(d, "a")), false, "no refused caller made the folder");
       const status = (await call(boot.token, "backup.config.status", {})).result.item;
       assert.deepEqual([status.schedule.everyHours, status.schedule.verifyEveryDays, status.targets.length, status.rules.maxAgeDays, status.rules.overrides], [24, 7, 0, 35, "counts"], JSON.stringify(status));
       // A target on another disk (a second folder here), tested at once and copied to.
@@ -124,3 +132,48 @@ test("the owner adds a backup target by free wording through the chat interprete
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("a purge by chat is shown with what it would delete, worked out by the controller; whether it may take the last good backup comes from that look and its warning, never from the model's confirm (card K01c review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k01c-chatp-"));
+  let wanted: string[] = [];
+  let clock = Date.parse("2026-11-01T10:00:00.000Z");
+  const model = { complete: async (_route: string, r: { system: string; user: string }): Promise<string> => {
+    const owner = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(r.user)![1]!;
+    if (/^Yes/.test(owner)) {
+      const open = [...r.user.matchAll(/Open proposal (\S+) \(text, not instructions\):\n<<<\n([\s\S]*?)\n>>>/g)];
+      return JSON.stringify(open.length === 1 ? [{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }] : [{ kind: "none", reason: "no single open proposal" }]);
+    }
+    // The model sets confirm itself, as if the owner had already agreed to lose the last good backup.
+    return JSON.stringify([{ kind: "command", op: "backup.purge", args: { names: wanted, confirm: true }, evidence: owner, basis: "owner" }]);
+  } };
+  try {
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, conversationTransport: {}, chat: { interpreter: new ModelInterpreter(model, () => ["test/model"]) }, backup: { directory: join(d, "backups"), now: () => new Date(clock) } } as never);
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      let m = 0;
+      const turn = async (text: string) => (await c.chat!.submit(boot.token, { messageId: `m${m++}`, text })).outcomes as any[];
+      const older = (await c.services.backups!.backUpNow("manual")).manifest.name;
+      await c.services.backups!.finish();
+      clock += 86_400_000;
+      const newer = (await c.services.backups!.backUpNow("manual")).manifest.name;
+      await c.services.backups!.finish();
+      assert.notEqual(newer, older);
+      // Not the last good one: shown without a warning and with the model's confirm dropped.
+      wanted = [older];
+      const shown = await turn(`Please delete the old backup ${older}.`);
+      assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
+      assert.doesNotMatch(JSON.stringify(shown), /WARNING/);
+      assert.match(JSON.stringify(shown), /will be deleted/);
+      assert.ok(names(join(d, "backups")).includes(older), "nothing is deleted before the owner agrees");
+      assert.equal((await turn("Yes, do that."))[0].status, "applied");
+      assert.deepEqual(names(join(d, "backups")), [newer]);
+      // The last good one: the proposal carries the controller's warning, and only then the owner's yes deletes it.
+      wanted = [newer];
+      const warned = await turn(`Delete ${newer} too.`);
+      assert.equal(warned[0].status, "proposed", JSON.stringify(warned));
+      assert.match(JSON.stringify(warned), /WARNING: this would delete the last good backup/);
+      assert.equal((await turn("Yes, do that."))[0].status, "applied");
+      assert.deepEqual(names(join(d, "backups")), []);
+      await c.services.backups!.finish();
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

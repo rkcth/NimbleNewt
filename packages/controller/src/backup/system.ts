@@ -13,7 +13,7 @@ import { pruneGenerations, type ExtraKeyUse } from "./generations.js";
 import { RestoreRefused, restoreBackup } from "./restore.js";
 import { chooseKept, describeRules, listBackups, staysUpToDays, type BackupInfo, type Retention } from "./retention.js";
 import type { BackupService } from "./service.js";
-import { FolderDriver, HttpDriver, checkedName, type TargetDriver } from "./targets.js";
+import { FolderDriver, HttpDriver, checkedName, safeMessage, type TargetDriver } from "./targets.js";
 import { readManifest, verifyBackup } from "./verify.js";
 
 type Notify = Pick<NotificationService, "emitFromController" | "settleFromController" | "openRefIds">;
@@ -60,7 +60,9 @@ export interface PurgeAnswer {
 }
 
 const goodKind = (b: BackupInfo): boolean => b.trusted && b.manifest.kind !== "pre-upgrade" && b.manifest.kind !== "pre-restore";
-const msg = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 300);
+const msg = (error: unknown): string => safeMessage(error);
+/** Text without the host's paths: the backups folder itself, and any quoted absolute path a system error put in it. */
+const withoutPaths = (text: string, root: string): string => text.split(root).join("the backups folder").replace(/'(?:\/|[A-Za-z]:\\|\\\\)[^']*'/g, "(a path)");
 
 /**
  * The configurable backup system (card K01c) around `BackupService`: copies of every backup to the owner's targets, each target's own retention, the owner's purge of named backups on every target (an unreachable one stays
@@ -130,10 +132,16 @@ export class BackupSystem {
     await next;
   }
 
+  /** Whether the owner asked for this backup to be purged (any purge, finished or not): such a backup is never copied anywhere again. */
+  async #purged(name: string): Promise<boolean> { return (await this.#o.config.state()).purges.some((p) => p.names.includes(name)); }
+
   async #copyTo(t: TargetRecord, path: string, name: string): Promise<boolean> {
     const driver = this.#driver(t);
     try {
+      if (await this.#purged(name)) return false;
       await driver.put(path, name);
+      // A purge recorded while the copy was being made (here or by another controller) may have found nothing to delete on this target yet: the copy is taken away again, so a purged backup is never copied back.
+      if (await this.#purged(name)) { await driver.remove(name); return false; }
       await this.#targetResult(t, true);
       if (t.kind !== "offsite") { const there = await driver.list().then((l) => l.find((b) => b.manifest.name === name)); if (there !== undefined && (await verifyBackup(there.path).catch(() => ({ ok: false }))).ok) await this.#mark(t.id, name, "checksums", true); }
       return true;
@@ -162,7 +170,8 @@ export class BackupSystem {
       const remote = await driver.list();
       const local = (await listBackups(this.#o.root)).filter((b) => goodKind(b) && (b.manifest.kind === "manual" || b.manifest.kind === "scheduled"));
       const have = new Set(remote.map((b) => b.manifest.name));
-      const missing = local.filter((b) => !have.has(b.manifest.name));
+      const purged = new Set((await this.#o.config.state()).purges.flatMap((p) => p.names));
+      const missing = local.filter((b) => !have.has(b.manifest.name) && !purged.has(b.manifest.name));
       if (missing.length === 0) return;
       const base = await this.#o.retention();
       const kept = chooseKept([...remote, ...missing], this.#rulesFor(t, base, await this.#o.config.state(), remote), this.#now());
@@ -410,7 +419,8 @@ export class BackupSystem {
     const now = this.#now().getTime();
     const base = await this.#o.retention();
     if (good.unreadable !== true) {
-      if (status.lastError !== undefined) put("backup-run", "failed", "A backup failed", status.lastError.message);
+      // The service's own words can carry a system error's path (the backups folder, a file in it): the notice says what failed without it.
+      if (status.lastError !== undefined) put("backup-run", "failed", "A backup failed", withoutPaths(status.lastError.message, this.#o.root));
       else if (good.at !== undefined && now - Date.parse(good.at) > cfg.everyHours * HOUR * 1.5 + HOUR) put("backup-run", "missed", "A scheduled backup was missed", `No new backup for ${Math.floor((now - Date.parse(good.at)) / HOUR)} hours although one is due every ${cfg.everyHours} hours.`);
       if (base.maxAgeDays !== undefined && base.maxAgeDays !== null && good.at !== undefined && now - Date.parse(good.at) > base.maxAgeDays * DAY) put("backup-stale", "age", `Urgent: the newest good backup is older than ${base.maxAgeDays} days`, `Backups are failing: the last good one is ${Math.floor((now - Date.parse(good.at)) / DAY)} days old, past your limit of ${base.maxAgeDays} days. It was kept (the newest good backup is never deleted by age).`, { urgent: true });
     }

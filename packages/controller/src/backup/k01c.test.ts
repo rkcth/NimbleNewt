@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/index.js";
-import { BackupConfigService, BackupService, BackupSystem, FolderDriver, HttpDriver, chooseKept, createBackup, describeRules, generationReport, listBackups, offsiteLocationProblem, parseKeyring, staysUpToDays, type BackupInfo, type BackupRetention, type TargetDriver } from "./index.js";
+import { BackupConfigService, BackupService, BackupSystem, FolderDriver, HttpDriver, chooseKept, safeMessage, createBackup, describeRules, generationReport, listBackups, offsiteLocationProblem, parseKeyring, staysUpToDays, type BackupInfo, type BackupRetention, type TargetDriver } from "./index.js";
 import { runBackupCli } from "./cli.js";
 import { startFakeTarget, type FakeTarget } from "./testing/target-server.js";
 
@@ -119,6 +119,27 @@ test("an off-machine address is checked: https, or plain http for this machine o
   assert.match(offsiteLocationProblem("not an address")!, /not an address/);
 });
 
+test("the newest good backup survives every rule combination: a newer snapshot before an upgrade or a restore never takes its place, by count or by age (card K01c review)", () => {
+  const now = new Date(Date.UTC(2026, 10, 14, 12));
+  const days = (n: number): string => new Date(now.getTime() - n * DAYMS).toISOString();
+  const good = info(days(50), "manual"); const older = info(days(60));
+  for (const snap of [info(days(1), "pre-upgrade"), info(days(1), "pre-restore")]) {
+    for (const rules of [{ daily: 1, weekly: 0 }, { daily: 1, weekly: 0, maxAgeDays: 1 }, { daily: 7, weekly: 4, maxAgeDays: 35 }, { daily: 1, weekly: 0, maxAgeDays: 1, preRestoreKept: 1, preRestoreMaxAgeDays: 1 }]) {
+      const kept = chooseKept([snap, good, older], rules, now);
+      assert.ok(kept.has(good.path), `${snap.manifest.kind} newer than the newest good backup, rules ${JSON.stringify(rules)}`);
+    }
+  }
+});
+
+test("an error put in a record or a notice says what failed, never the host path it carries (card K01c review)", () => {
+  let error: unknown;
+  try { readFileSync(join(tmpdir(), "nn-k01c-no-such-dir", "file")); } catch (e) { error = e; }
+  const text = safeMessage(error);
+  assert.match(text, /not found \(ENOENT/);
+  assert.equal(text.includes("nn-k01c-no-such-dir"), false, text);
+  assert.equal(safeMessage(new Error("the target answered 500")), "the target answered 500");
+});
+
 // ---- the drivers ---------------------------------------------------------------------------------------------------------------------
 
 test("the off-machine driver: a copy is listed only once committed, an unreachable or wrongly credentialled target is an error and not an empty list, a deletion is exact (card K01c)", async () => {
@@ -146,6 +167,13 @@ test("the off-machine driver: a copy is listed only once committed, an unreachab
     await assert.rejects(driver.put(made2.path, made2.manifest.name));
     fake.failPuts = false;
     assert.deepEqual((await driver.list()).map((b) => b.manifest.name), [made.manifest.name]);
+    // A backup the target lists but whose manifest cannot be read makes the list unreadable (never a shorter list a deletion or a key removal could be decided from).
+    const kept = fake.store.get(made.manifest.name)!.get("manifest.json")!;
+    fake.store.get(made.manifest.name)!.delete("manifest.json");
+    await assert.rejects(driver.list(), /manifest could not be read/);
+    fake.store.get(made.manifest.name)!.set("manifest.json", Buffer.from("{not json"));
+    await assert.rejects(driver.list(), /manifest is not readable/);
+    fake.store.get(made.manifest.name)!.set("manifest.json", kept);
     // A wrong credential, and a target that is down, are errors.
     const wrong = new HttpDriver(fake.url, { token: async () => "nope" });
     assert.equal((await wrong.test()).ok, false);
@@ -200,6 +228,10 @@ for (const backend of backends) {
         await assert.rejects(r.config.setSchedule(who, { commandId: "x1", everyHours: 6 }), /may not change the backup schedule/);
         await assert.rejects(r.system.addTarget(who, { commandId: "x2", name: "A", kind: "folder", location: join(r.d, "a") }), /may not add a backup target/);
         await assert.rejects(r.system.purge(who, { commandId: "x3", names: ["backup-20261001T030000Z-manual"] }), /may not purge/);
+        // Even a preview is the owner's: it would list what each target holds.
+        await assert.rejects(r.system.purge(who, { commandId: "x3b", names: ["backup-20261001T030000Z-manual"], dryRun: true }), /may not purge/);
+        await assert.rejects(r.system.testTarget(who, "A"), /may not test a backup target/);
+        await assert.rejects(r.config.removeTarget(who, { commandId: "x4", id: "A" }), /may not remove a backup target/);
         await assert.rejects(r.system.verifyNow(who), /may not run a test restore/);
         await assert.rejects(r.config.get(who), /may not read/);
       }
@@ -214,7 +246,7 @@ for (const backend of backends) {
       assert.match((await r.config.setSchedule(owner, { commandId: "s5", verifyEveryDays: null })).text, /No backup is test-restored automatically/);
       assert.equal(told.length, 3, "three real changes were announced; the repeat and the refusals were not");
       // Targets: bad ones are refused, none is added when the test fails.
-      const bads: Record<string, unknown>[] = [{ name: "", kind: "folder", location: join(r.d, "a") }, { name: "A", kind: "tape", location: "x" }, { name: "A", kind: "folder", location: "relative/path" }, { name: "A", kind: "offsite", location: "http://example.com/" }, { name: "A", kind: "offsite", location: "https://u:p@example.com/" }, { name: "A", kind: "folder", location: join(r.d, "a"), credential: "x" }, { name: "A", kind: "offsite", location: "https://example.com/", credential: "bad credential with spaces" }, { name: "A", kind: "folder", location: join(r.d, "a"), keepDays: 0 }];
+      const bads: Record<string, unknown>[] = [{ name: "", kind: "folder", location: join(r.d, "a") }, { name: "A", kind: "tape", location: "x" }, { name: "A", kind: "folder", location: "relative/path" }, { name: "A", kind: "offsite", location: "http://example.com/" }, { name: "A", kind: "offsite", location: "https://u:p@example.com/" }, { name: "A", kind: "folder", location: join(r.d, "a"), credential: "x" }, { name: "A", kind: "offsite", location: "https://example.com/", credential: "bad credential with spaces" }, { name: "A", kind: "folder", location: join(r.d, "a"), keepDays: 0 }, { name: "A", kind: "offsite", location: "https://example.com/", credential: "backup-signing-key" }];
       for (const [i, bad] of bads.entries()) await assert.rejects(r.system.addTarget(owner, { commandId: `bad${i}`, ...bad }), /name|kind|location|credential|keepDays|http|address/i, JSON.stringify(bad));
       writeFileSync(join(r.d, "afile"), "x");
       await assert.rejects(r.system.addTarget(owner, { commandId: "t0", name: "Broken", kind: "folder", location: join(r.d, "afile", "sub") }), /did not pass its test, so it was not added/);
@@ -306,9 +338,10 @@ for (const backend of backends) {
       // The same command again is the same purge: nothing is done twice.
       const replay = await r.system.purge(owner, { commandId: "p1", names: [a] });
       assert.equal(replay.purgeId, first.purgeId);
-      // It comes back: the retry removes it and the notice closes.
+      // It comes back: the retry (here by a controller started afresh, which knows of the purge only from the database) removes it and the notice closes.
       fake.down = false;
-      await r.system.sweep();
+      const restarted = new BackupSystem({ service: r.service, config: BackupConfigService.withEpoch(world.storage, r.epoch, { clock: () => new Date(r.clock.t).toISOString() }), root: r.root, notifications: r.notes.port, retention: async () => r.retention.value, now: () => new Date(r.clock.t), resolveSecret: async () => fake.token, scratchDirectory: r.d });
+      await restarted.sweep();
       assert.equal(fake.store.has(a), false);
       assert.equal(r.notes.isOpen("backup-purge"), false);
       assert.deepEqual((await r.system.status() as { pendingPurges: unknown[] }).pendingPurges, []);
@@ -337,13 +370,14 @@ for (const backend of backends) {
       const first = await r.backup(0);
       await r.backup(1);
       // Backups start failing (the backups folder cannot take a new one), for 60 days.
-      const broken = new BackupService(Object.create(world.storage, { snapshot: { value: async () => { throw new Error("the disk is full"); } } }), { root: r.root, version: "t", now: () => new Date(r.clock.t), retentionSource: async () => r.retention.value, verifiedSource: () => r.system.verifiedNames(), afterBackup: (m) => r.system.afterBackup(m) });
+      const broken = new BackupService(Object.create(world.storage, { snapshot: { value: async () => { throw new Error(`the disk is full, write '${join(r.root, "x.jsonl")}'`); } } }), { root: r.root, version: "t", now: () => new Date(r.clock.t), retentionSource: async () => r.retention.value, verifiedSource: () => r.system.verifiedNames(), afterBackup: (m) => r.system.afterBackup(m) });
       const failing = new BackupSystem({ service: broken, config: r.config, root: r.root, notifications: r.notes.port, retention: async () => r.retention.value, now: () => new Date(r.clock.t) });
       r.clock.t = T0 + 2 * DAYMS + 3_600_000;
       assert.equal(await broken.runScheduled(), false);
       await failing.sweep();
       assert.equal(r.notes.isOpen("backup-run", "failed"), true, "a failed backup is told");
       assert.match(r.notes.emitted.find((e) => e.ref.id === "failed")!.detail, /disk is full/);
+      assert.equal(r.notes.emitted.find((e) => e.ref.id === "failed")!.detail.includes(r.d), false, "the notice holds no host path");
       r.clock.t = T0 + 60 * DAYMS;
       await broken.prune();
       await failing.sweep();
@@ -427,6 +461,54 @@ for (const backend of backends) {
       assert.equal(await r.service.runScheduled(), true, "07:00: the missed 02:00 run is made up");
       await r.service.finish();
     } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+
+  test(`${backend.name}: a backup purged while a copy of it was being made is taken off that target again, never left copied back; a failing folder target is told without the host's paths (card K01c review)`, async () => {
+    const world = await backend.open();
+    let hook: ((name: string) => Promise<void>) | undefined;
+    const r: Rig = await rig(world.storage, { driverFor: ((t: { location: string; kind: string }) => {
+      if (t.kind === "offsite") return undefined;
+      const inner = new FolderDriver(t.location);
+      return { test: () => inner.test(), list: () => inner.list(), remove: (n: string) => inner.remove(n), fetch: (n: string, into: string) => inner.fetch(n, into),
+        // The copy is read, then the owner's purge lands (it finds nothing on this target yet), then the copy is written.
+        put: async (dir: string, name: string) => { const h = hook; hook = undefined; if (h === undefined) return inner.put(dir, name); const staged = join(r.d, `staged-${name}`); cpSync(dir, staged, { recursive: true }); await h(name); await inner.put(staged, name); } };
+    }) as never });
+    try {
+      await r.system.addTarget(owner, { commandId: "t1", name: "Disk", kind: "disk", location: join(r.d, "disk") });
+      await r.backup(0); await r.backup(1);
+      await r.system.idle();
+      let purged: Awaited<ReturnType<BackupSystem["purge"]>> | undefined;
+      hook = async (name) => { purged = await r.system.purge(owner, { commandId: "p-race", names: [name] }); };
+      const c = await r.backup(2);
+      await r.system.idle();
+      assert.equal(purged?.status, "purged", JSON.stringify(purged));
+      assert.equal(r.names(r.root).includes(c), false, "purged from the main folder");
+      assert.equal(r.names(join(r.d, "disk")).includes(c), false, "and the copy that landed after the purge was taken away again");
+      await r.system.sweep();
+      assert.equal(r.names(join(r.d, "disk")).includes(c), false, "and never copied back by a later look");
+      // The target's folder becomes a file: the copy fails, the owner is told, and neither the record nor the notice holds the host's path.
+      rmSync(join(r.d, "disk"), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      writeFileSync(join(r.d, "disk"), "not a folder");
+      await r.backup(3);
+      await r.system.idle();
+      const state = await r.config.state();
+      const problem = Object.values(state.targets).find((x) => x.lastError !== undefined)?.lastError?.message ?? "";
+      assert.notEqual(problem, "", "the failure is recorded");
+      const told = r.notes.emitted.filter((e) => e.ref.kind === "backup-target").map((e) => `${e.label} ${e.detail}`).join("\n");
+      assert.match(told, /Disk is failing/);
+      for (const text of [problem, told, JSON.stringify(await r.system.status().then((x) => ({ ...x, targets: (x["targets"] as { location: string }[]).map(({ location: _l, ...rest }) => rest) })))]) assert.equal(text.includes(r.d), false, text);
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+
+  test(`${backend.name}: two controllers sharing the database record what happened to the backups without losing each other's updates (card K01c review)`, async () => {
+    const world = await backend.open();
+    try {
+      const epoch = await seed(world.storage);
+      const a = BackupConfigService.withEpoch(world.storage, epoch); const b = BackupConfigService.withEpoch(world.storage, epoch);
+      const mark = (svc: BackupConfigService, n: number) => svc.updateState("verified", (st) => ({ ...st, verified: [...st.verified, { target: "primary", name: `backup-2026100${n}T030000Z-scheduled`, at: new Date(T0).toISOString(), method: "checksums" as const, ok: true }] }));
+      await Promise.all([mark(a, 1), mark(b, 2), mark(a, 3), mark(b, 4)]);
+      assert.deepEqual((await a.state()).verified.map((v) => v.name).sort(), [1, 2, 3, 4].map((n) => `backup-2026100${n}T030000Z-scheduled`));
+    } finally { await world.close(); }
   });
 }
 

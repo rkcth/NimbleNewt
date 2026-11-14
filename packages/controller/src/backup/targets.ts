@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { cp, mkdir, readdir, rename, rm, stat, statfs } from "node:fs/promises";
 import http from "node:http";
@@ -66,11 +67,20 @@ export class FolderDriver implements TargetDriver {
     checkedName(name);
     const final = join(this.#root, name);
     if (await stat(final).then(() => true, () => false)) return;
-    const partial = `${final}${PARTIAL_SUFFIX}`;
-    await rm(partial, { recursive: true, force: true });
     await mkdir(this.#root, { recursive: true });
-    try { await cp(localDir, partial, { recursive: true, errorOnExist: false, force: true }); await rename(partial, final); }
-    catch (error) { await rm(partial, { recursive: true, force: true }).catch(() => undefined); throw error; }
+    // Copies interrupted earlier (a crash) are cleared once they are an hour old; one being written now (by another controller, say) is left alone.
+    for (const e of await readdir(this.#root).catch(() => [] as string[])) {
+      const mine = e === `${name}${PARTIAL_SUFFIX}` || (e.startsWith(`${name}.`) && e.endsWith(PARTIAL_SUFFIX));
+      if (!mine) continue;
+      const old = await stat(join(this.#root, e)).then((st) => Date.now() - st.mtimeMs > 3_600_000, () => false);
+      if (old) await rm(join(this.#root, e), { recursive: true, force: true }).catch(() => undefined);
+    }
+    // Each copy is written under a name of its own, so two copies of one backup at once never write into the same folder; the first rename wins.
+    const partial = `${final}.${process.pid}-${randomBytes(4).toString("hex")}${PARTIAL_SUFFIX}`;
+    try {
+      await cp(localDir, partial, { recursive: true, errorOnExist: false, force: true });
+      try { await rename(partial, final); } catch (error) { if (!await stat(join(final, MANIFEST_FILE)).then(() => true, () => false)) throw error; await rm(partial, { recursive: true, force: true }).catch(() => undefined); }
+    } catch (error) { await rm(partial, { recursive: true, force: true }).catch(() => undefined); throw error; }
   }
 
   async remove(name: string): Promise<boolean> {
@@ -154,11 +164,13 @@ export class HttpDriver implements TargetDriver {
     const out: BackupInfo[] = [];
     for (const name of names) {
       if (typeof name !== "string" || parseBackupName(name) === undefined) continue;
+      // A backup the target lists but whose manifest cannot be read makes the whole list unreadable: what it holds (its key, its age) is unknown, so nothing may be decided from a list without it.
       const r = await this.#send("GET", `backups/${encodeURIComponent(name)}/${MANIFEST_FILE}`);
-      if (r.status !== 200) continue;
+      if (r.status === 401 || r.status === 403) throw new Error("the target refused the credential");
+      if (r.status !== 200) throw new Error(`the target lists ${name} but its manifest could not be read (it answered ${r.status})`);
       let manifest: BackupManifest;
-      try { manifest = JSON.parse(r.body.toString("utf8")) as BackupManifest; } catch { continue; }
-      if (manifest === null || typeof manifest !== "object" || typeof manifest.name !== "string") continue;
+      try { manifest = JSON.parse(r.body.toString("utf8")) as BackupManifest; } catch { throw new Error(`the target lists ${name} but its manifest is not readable`); }
+      if (manifest === null || typeof manifest !== "object" || typeof manifest.name !== "string") throw new Error(`the target lists ${name} but its manifest is not readable`);
       out.push(infoOf(name, name, manifest));
     }
     return out.sort((a, b) => b.at.localeCompare(a.at));
@@ -218,4 +230,14 @@ export async function filesUnder(dir: string, prefix = ""): Promise<string[]> {
   return out.sort();
 }
 
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 300);
+/**
+ * An error in words that can go into a record or a notice: a system error is said by its code and the call that failed, never with the path or address it carries (those are the host's, and a record or notice
+ * is no place for them); any other error by its message.
+ */
+export function safeMessage(error: unknown): string {
+  const e = error as NodeJS.ErrnoException | undefined;
+  if (e instanceof Error && typeof e.code === "string" && /^E[A-Z0-9_]+$/.test(e.code)) return `${SYSTEM_ERRORS[e.code] ?? "a system error"} (${e.code}${typeof e.syscall === "string" ? `, ${e.syscall}` : ""})`;
+  return (error instanceof Error ? error.message : String(error)).slice(0, 300);
+}
+const SYSTEM_ERRORS: Readonly<Record<string, string>> = { ENOENT: "not found", EACCES: "permission denied", EPERM: "not permitted", ENOSPC: "no space left", EROFS: "read-only", ENOTDIR: "not a folder", EEXIST: "already exists", ENOTEMPTY: "not empty", EBUSY: "in use", EIO: "input/output error", ECONNREFUSED: "connection refused", ECONNRESET: "connection reset", ETIMEDOUT: "timed out", ENOTFOUND: "host not found", EHOSTUNREACH: "host unreachable", ENETUNREACH: "network unreachable", EMFILE: "too many open files", EDQUOT: "quota exceeded" };
+const message = safeMessage;
