@@ -222,7 +222,7 @@ export class RetentionService {
       },
     };
     let thinkingComplete = true;
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "thinking-record", "thinking-purge"]) {
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "notification-delivery", "thinking-record", "thinking-purge"]) {
       let n = 0; const extra = tally[kind];
       const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); });
       growth[kind] = complete ? n : `${n}+`;
@@ -614,6 +614,17 @@ export class RetentionService {
         }
       }
     }
+    if (values.deliveryLogDays !== null) {
+      // Card K06b, tier "bulk logs": the record of a message sent to the owner (`notification-delivery`) keeps the whole text of the message. Only a delivered one is a log: it is in none of the notification index's lists
+      // (those name the waiting and the failed ones, which the owner may still need), and the notice it was sent for is a separate record that stays. The age is the record's last change, which is the delivery.
+      const cutoff = now - values.deliveryLogDays * DAY;
+      const complete = await scan(this.#runner, "notification-delivery", (a) => {
+        if (Date.parse(a.updatedAt) >= cutoff || (a.body as { state?: unknown }).state !== "delivered") return;
+        candidates.push({ kind: "notification-delivery", id: a.id, revision: a.revision, projectId: undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+      });
+      if (!complete) partial = true;
+      if (candidates.length > limit) { candidates.length = limit; partial = true; }
+    }
     let incidentsDue: { archive: string[]; purge: string[]; more: boolean } | undefined;
     if (this.#deps.incidents?.due !== undefined && this.#deps.projects !== undefined && (values.incidentArchiveDays !== null || values.incidentPurgeDays !== null)) {
       incidentsDue = { archive: [], purge: [], more: false };
@@ -625,7 +636,7 @@ export class RetentionService {
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null || values.scratchArchiveDays !== null || values.scratchPurgeDays !== null || values.transcriptDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null || values.scratchArchiveDays !== null || values.scratchPurgeDays !== null || values.transcriptDays !== null || values.deliveryLogDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -650,7 +661,7 @@ export class RetentionService {
           if (tier) removedIds.push(`${c.kind}/${c.id}`);
           continue;
         }
-        const done = await this.#removeOne(by, c, c.kind === "chat-turn" ? values.transcriptDays! : c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "chat-turn" ? values.transcriptDays! : c.kind === "notification-delivery" ? values.deliveryLogDays! : c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -767,7 +778,7 @@ export class RetentionService {
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
           // The chat's conversation context keeps a line of each recent turn (the start of the owner's words and the answer) per project: that copy goes with the turn's words, in the same command (review fix).
           if (c.kind === "chat-turn") { const ctx = await this.#contextWithout(fresh.body as { ownerId?: unknown }, c.id); if (ctx !== undefined) changes.push(ctx); }
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "notification-delivery" ? "delivery-log-days" : c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;

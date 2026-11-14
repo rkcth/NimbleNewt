@@ -35,6 +35,8 @@ export interface RetentionValues {
   readonly scratchPurgeDays: number | null;
   /** The owner's own words in old chat turns (the transcript of the conversation with the supervisor) are removed this many days after the turn was completed: the turn stays as a stub (no words, no plan, no answer) so a message sent again is answered as the done turn it was. A turn a decision, an agenda item, an open proposal or a held command still names is kept (tier of card K06b). `null`: kept (default). */
   readonly transcriptDays: number | null;
+  /** Bulk log tier (card K06b): the record of each message sent to the owner (`notification-delivery`, which holds the full text of the message) that was delivered is removed this many days after it was delivered. A delivery still waiting or failed (the owner may need it) is never removed, nor are the notices themselves (the inbox items). `null`: kept (default). */
+  readonly deliveryLogDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;
   /** Stored model thinking is deleted this many days after the task is done (owner decision 2026-10-22: 14). The controller removes what it kept of the thinking the workers reported (card U09b, retention rule thinking-days); removing the conversation store's own copy needs adapter support (card K06c). */
@@ -75,7 +77,7 @@ export interface RetentionValues {
 }
 
 export const RETENTION_DEFAULTS: RetentionValues = {
-  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, noteArchiveDays: null, scratchArchiveDays: null, scratchPurgeDays: null, transcriptDays: null, autoRun: false, thinkingDays: 14, thinkingAuto: true, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
+  derivedDays: null, generationRunDays: null, contextRouteDays: null, checkRecordDays: null, concernDays: null, stallEvidenceDays: null, stallSpeedDays: null, responsibilityHistoryDays: null, noteArchiveDays: null, scratchArchiveDays: null, scratchPurgeDays: null, transcriptDays: null, deliveryLogDays: null, autoRun: false, thinkingDays: 14, thinkingAuto: true, backupDaily: 7, backupWeekly: 4, preRestoreKept: null, preRestoreMaxAgeDays: null, dataLockStaleMinutes: 10, restoreChangeMargin: 200, restoreConfirmMinutes: 30, incidentArchiveDays: null, incidentPurgeDays: null, catalogVersionsKept: null, catalogAutoDrop: false, revokedBytesDays: 90, revokedBytesBlank: false,
   quotaProjectBytes: null, quotaAgentBytes: null, quotaWarnPercent: 80, reserveBytes: 16 * 1024 * 1024,
 };
 
@@ -91,6 +93,7 @@ export const RETENTION_FIELDS: Readonly<Record<keyof RetentionValues, Spec>> = {
   stallSpeedDays: { kind: "days", min: 7, max: 3650, nullable: true },
   responsibilityHistoryDays: { kind: "days", min: 7, max: 3650, nullable: true },
   noteArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
+  deliveryLogDays: { kind: "days", min: 7, max: 3650, nullable: true },
   scratchArchiveDays: { kind: "days", min: 7, max: 3650, nullable: true },
   scratchPurgeDays: { kind: "days", min: 30, max: 3650, nullable: true },
   transcriptDays: { kind: "days", min: 30, max: 3650, nullable: true },
