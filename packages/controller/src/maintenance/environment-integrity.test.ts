@@ -123,6 +123,11 @@ for (const backend of backends) {
       broken = true;
       await assert.rejects(() => env.activate(owner, { commandId: cid("a"), agentId, revision: 1, observed: { "nimblenewt.desk": D("8") } }), (e) => (e as { code?: string }).code === "integrity");
       await assert.rejects(() => env.resume(owner, attemptId), gone);
+      // A detector that throws at once (not only one whose report fails later) changes nothing either: the same error, and a sound call's result is unchanged.
+      const throwing = watchIntegrity(raw, "environments", ["resume", "activate"], () => { throw new Error("the detector is broken"); });
+      await assert.rejects(() => throwing.resume(owner, attemptId), gone);
+      await assert.rejects(() => throwing.activate(owner, { commandId: cid("a"), agentId, revision: 1, observed: { "nimblenewt.desk": D("6") } }), (e) => (e as { code?: string }).code === "integrity" && /was not activated/.test((e as Error).message));
+      assert.equal((await throwing.get(owner, agentId))?.active?.revision, 1);
     } finally { await world.close(); }
   });
 }
