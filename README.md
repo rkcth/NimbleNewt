@@ -624,7 +624,7 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 - [ ] **K03** · P35 · Implement migration recovery and rollback limits _(needs K02, G03)_
 - [ ] **K07** · P35 · Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
 - [x] **K01h** · P36 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01g)_
-- [ ] **K01i** · P37 · Finish backup: PostgreSQL restore, remote Pi state, production wiring _(needs K01h)_
+- [x] **K01i** · P37 · Finish backup: PostgreSQL restore, remote Pi state, production wiring _(needs K01h)_
 - [ ] **K04** · P39 · Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
 - [ ] **K05** · P40 · Implement fenced primary promotion and recovery chat _(needs K04, U06)_
 
