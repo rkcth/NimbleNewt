@@ -10,7 +10,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage, OperationInput } from "../storage/types.js";
-import { LAUNCHER_FILE, Launcher, ReleaseActivationService, ReleaseService, checkManifest, parseCompat, signedText, type ActivationOptions } from "./index.js";
+import { LAUNCHER_FILE, Launcher, ReleaseActivationService, ReleaseService, TRUST_MIRROR_FILE, UpdaterError, checkManifest, parseCompat, signedDigestText, signedText, stageRelease, type ActivationOptions } from "./index.js";
 
 after(stopServer);
 const options = { clock: () => "2026-11-12T12:00:00.000Z", pause: async () => undefined };
@@ -451,5 +451,66 @@ for (const backend of backends) {
     await refuses("invalid_command", () => act.attachSignature(c.owner, { commandId: cid("g"), candidateId: id, signature: "A", signatureFile: "x.sig" }), /exactly one/);
     writeFileSync(join(dir, "junk.pub"), "not a key");
     await refuses("invalid_command", () => act.addTrustedKey(c.owner, { commandId: cid("t"), keyFile: "junk.pub" }), /publicKey/);
+  });
+
+  // ---- K02 finish: the updater's copy of the trust root --------------------------------------------------------------------------------------------------------------------
+
+  suite("the updater's copy of the trust root follows the owner's changes, and the real updater refuses an unsigned release where signatures are required", async (c) => {
+    const act = c.make();
+    const mirror = (): { version: number; required: boolean; keys: string[] } => JSON.parse(readFileSync(join(c.root, TRUST_MIRROR_FILE), "utf8")) as never;
+    assert.equal(existsSync(join(c.root, TRUST_MIRROR_FILE)), false, "no trust root, no copy");
+    await act.noteDatabase();
+    assert.deepEqual(mirror(), { version: 1, required: false, keys: [] }, "written at start, digests alone");
+    const k = keypair(), other = keypair();
+    const added = await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k.publicKey });
+    assert.deepEqual(mirror(), { version: 1, required: true, keys: [k.publicKey] });
+    await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: other.publicKey });
+    assert.deepEqual(mirror().keys, [k.publicKey, other.publicKey]);
+    // The real updater, against a source in the updater's own format.
+    const files: Record<string, string> = { "controller.js": "x\n", "compat.json": compat() };
+    const src = join(c.root, "..", `nn-k02m-src-${process.pid}-${n++}`);
+    mkdirSync(src, { recursive: true });
+    try {
+      const listed: Record<string, { sha256: string; size: number }> = {};
+      for (const [name, body] of Object.entries(files)) { writeFileSync(join(src, name), body); listed[name] = { sha256: sha(body), size: Buffer.byteLength(body) }; }
+      const manifest = JSON.stringify({ candidateId: `rcn-${sha("mirror").slice(0, 24)}`, sourceCommit: "a".repeat(40), files: listed });
+      writeFileSync(join(src, "MANIFEST.json"), manifest);
+      const digest = sha(manifest);
+      await assert.rejects(stageRelease({ root: c.root, source: src, digest }), (e: unknown) => e instanceof UpdaterError && e.code === "signature" && /requires signed/.test(e.message));
+      assert.equal(existsSync(join(c.root, "releases")), false, "nothing installed");
+      const owned = generateKeyPairSync("ed25519");
+      const good = sign(null, signedDigestText(digest), owned.privateKey).toString("base64");
+      await assert.rejects(stageRelease({ root: c.root, source: src, digest, signature: good }), (e: unknown) => e instanceof UpdaterError && e.code === "signature" && /controller trusts/.test(e.message), "an untrusted key's signature");
+      await act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: owned.publicKey.export({ format: "der", type: "spki" }).toString("base64") });
+      assert.equal((await stageRelease({ root: c.root, source: src, digest, signature: good })).reused, false);
+      // A key the owner withdrew no longer counts for the updater either.
+      const ownedId = (await act.trust(c.owner)).keys.find((x) => x.publicKey === owned.publicKey.export({ format: "der", type: "spki" }).toString("base64"))!.keyId;
+      await act.removeTrustedKey(c.owner, { commandId: cid("t"), keyId: ownedId });
+      unlockAll(join(c.root, "releases")); rmSync(join(c.root, "releases"), { recursive: true, force: true });
+      await assert.rejects(stageRelease({ root: c.root, source: src, digest, signature: good }), (e: unknown) => e instanceof UpdaterError && e.code === "signature");
+      // The owner's explicit "digests are enough" reaches the updater.
+      await act.requireSignature(c.owner, { commandId: cid("t"), required: false });
+      assert.equal(mirror().required, false);
+      assert.equal((await stageRelease({ root: c.root, source: src, digest })).reused, false);
+      await act.requireSignature(c.owner, { commandId: cid("t"), required: null });
+      assert.equal(mirror().required, true);
+      // A damaged copy is refused, never guessed at.
+      for (const text of ["{", "[]", JSON.stringify({ version: 2, required: false, keys: [] }), JSON.stringify({ version: 1, required: false, keys: ["nope"] }), JSON.stringify({ version: 1, required: "no", keys: [] })]) {
+        writeFileSync(join(c.root, TRUST_MIRROR_FILE), text);
+        unlockAll(join(c.root, "releases")); rmSync(join(c.root, "releases"), { recursive: true, force: true });
+        await assert.rejects(stageRelease({ root: c.root, source: src, digest, signature: good }), (e: unknown) => e instanceof UpdaterError && e.code === "signature" && /cannot be used/.test(e.message), text);
+      }
+    } finally { rmSync(src, { recursive: true, force: true }); unlockAll(join(c.root, "releases")); }
+  });
+
+  suite("a trust root change whose updater copy cannot be written is recorded and says so; the next change repairs the copy", async (c) => {
+    const act = c.make();
+    mkdirSync(join(c.root, TRUST_MIRROR_FILE)); // a folder where the file belongs: the copy cannot be written
+    const k = keypair();
+    await refuses("unavailable", () => act.addTrustedKey(c.owner, { commandId: cid("t"), publicKey: k.publicKey }), /recorded, but the updater's copy/);
+    assert.equal((await act.trust(c.owner)).keys.length, 1, "the change itself stands");
+    rmSync(join(c.root, TRUST_MIRROR_FILE), { recursive: true });
+    await act.requireSignature(c.owner, { commandId: cid("t"), required: true });
+    assert.deepEqual(JSON.parse(readFileSync(join(c.root, TRUST_MIRROR_FILE), "utf8")), { version: 1, required: true, keys: [k.publicKey] });
   });
 }

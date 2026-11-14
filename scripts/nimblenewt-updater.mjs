@@ -22,7 +22,8 @@ const HELP = `NimbleNewt updater
   --source DIR    A verified release directory: its files plus MANIFEST.json (as release.stage leaves them).
   --digest HEX    The SHA-256 of that MANIFEST.json, from whoever authorised the release. A different manifest is refused.
   --trusted-keys FILE   A file of trusted Ed25519 public keys (base64 DER, one per line). With --signature-file the release is installed only if a listed key signed it.
-  --signature-file FILE A file holding the base64 signature over "nimblenewt-release-digest-v1", a line break, the digest and a line break. Both flags or neither.
+  --signature-file FILE A file holding the base64 signature over "nimblenewt-release-digest-v1", a line break, the digest and a line break. Alone, it is checked against the controller's own
+                  copy of its trust root (trust-root.json in the release root); when that copy says signatures are required, a release without a valid one is refused.
   --announce      Tell the launcher the release may run.
   --switch        With --announce: also move the pointer to it (the launcher follows at its next start).
   --switcher K    pointer (default) or symlink.
@@ -54,19 +55,20 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   if (root === undefined || flags.source === undefined || flags.digest === undefined) { err("--root, --source and --digest are required."); return 1; }
   if (flags.switch === true && flags.announce !== true) { err("--switch needs --announce."); return 1; }
   if (flags.switcher !== undefined && flags.switcher !== "pointer" && flags.switcher !== "symlink") { err("--switcher must be pointer or symlink."); return 1; }
-  if ((flags["trusted-keys"] === undefined) !== (flags["signature-file"] === undefined)) { err("--trusted-keys and --signature-file go together."); return 1; }
+  if (flags["trusted-keys"] !== undefined && flags["signature-file"] === undefined) { err("--trusted-keys needs --signature-file."); return 1; }
   const { stageRelease, announceRelease } = await lib("release/updater.js");
   let trust;
-  if (flags["trusted-keys"] !== undefined) {
+  let signature;
+  if (flags["signature-file"] !== undefined) {
     // Small plain files only: a link, a folder or a large file is refused.
     const plain = async (path) => { const st = await lstat(path); if (!st.isFile() || st.size > 16_384) throw new Error(`${path} must be a plain file of at most 16 KiB`); return readFile(path, "utf8"); };
     try {
-      const keys = (await plain(flags["trusted-keys"])).split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
-      trust = { keys, signature: (await plain(flags["signature-file"])).trim() };
+      signature = (await plain(flags["signature-file"])).trim();
+      if (flags["trusted-keys"] !== undefined) trust = { keys: (await plain(flags["trusted-keys"])).split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#")), signature };
     } catch (error) { err(`refused (invalid_input): ${safeMessage(error, 2000)}`); return 1; }
   }
   try {
-    const staged = await stageRelease({ root, source: flags.source, digest: flags.digest, ...(trust === undefined ? {} : { trust }) });
+    const staged = await stageRelease({ root, source: flags.source, digest: flags.digest, ...(trust === undefined ? {} : { trust }), ...(signature === undefined ? {} : { signature }) });
     io.stdout.write(`${staged.reused ? "already installed" : "installed"} ${staged.id} (${staged.files} files, ${staged.bytes} bytes) at ${staged.dir}\n`);
     if (flags.announce === true) {
       const r = await announceRelease({ root, release: staged, ...(flags.switcher === undefined ? {} : { switcher: flags.switcher }), switchPointer: flags.switch === true });
