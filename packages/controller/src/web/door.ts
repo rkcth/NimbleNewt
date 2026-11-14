@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttp, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttps } from "node:https";
 import { isIP } from "node:net";
-import type { ApplyResult, CallOptions, TurnResult } from "../chat/index.js";
+import type { ApplyResult, CallOptions, HistoryTurn, TurnResult } from "../chat/index.js";
 import { REPLAY_LABELS } from "../activity/replay.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal } from "../security/index.js";
@@ -24,6 +24,8 @@ export interface WebChatBackend {
   discardProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<{ proposalId: string; replayed: boolean }>;
   /** A button on the page (card U08b): the words it stands for and the intents they mean, run through the same chat turn as a typed message (shown first, applied only when the owner says so). */
   decide(token: string, message: { messageId: string; text: string; intents: readonly unknown[] }, options?: CallOptions): Promise<TurnResult>;
+  /** The owner's recorded conversation, newest turns first (`ChatService.history`): what a browser that did not send the messages shows, and what a live-update check compares. Read only. */
+  history(token: string, request: { limit?: number; before?: string }): Promise<{ turns: readonly HistoryTurn[]; next?: string; complete: boolean }>;
   /** The state API's operations the door's fixed routes name, nothing wider: the view queries below, the replay reads, and (card U09b) the owner's recorded look at thinking and the simulation, which carry a `commandId` (the page's Idempotency-Key). */
   query(token: string, op: string, args: Record<string, unknown>, commandId?: string): Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }>;
 }
@@ -39,8 +41,13 @@ export interface WebChatLimits {
   /** Sign-in bodies being read at once, from one client address and in all. */
   readonly loginsReadingPerAddress: number;
   readonly loginsReadingGlobal: number;
+  /** Live-update streams (`GET /web/events`) one session may hold open, and all sessions together. */
+  readonly streamsPerSession: number;
+  readonly streamsTotal: number;
+  /** Milliseconds between the door's looks for a change on an open stream (the stream also carries a keep-alive at each look). */
+  readonly eventsEveryMs: number;
 }
-export const DEFAULT_WEB_LIMITS: WebChatLimits = { bodyBytes: 16 * 1024, perSessionPerMinute: 300, failedLoginsPerAddressPerMinute: 10, failedLoginsGlobalPerMinute: 100, loginsReadingPerAddress: 8, loginsReadingGlobal: 64 };
+export const DEFAULT_WEB_LIMITS: WebChatLimits = { bodyBytes: 16 * 1024, perSessionPerMinute: 300, failedLoginsPerAddressPerMinute: 10, failedLoginsGlobalPerMinute: 100, loginsReadingPerAddress: 8, loginsReadingGlobal: 64, streamsPerSession: 2, streamsTotal: 40, eventsEveryMs: 15_000 };
 
 export interface WebChatOptions {
   readonly backend: WebChatBackend;
@@ -107,6 +114,8 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
 };
 export const WEB_VIEWS: readonly string[] = Object.keys(VIEWS);
 
+/** The page views a change in each fixed read of a live-update stream asks the page to read again. */
+const WATCHED: Readonly<Record<string, readonly string[]>> = { needsYou: ["needs-you", "blockers", "status"], attention: ["blockers", "recovery", "status"], budget: ["cost"], chat: ["chat"] };
 const MESSAGE_ID = /^[A-Za-z0-9._-]{1,100}$/;
 const TASK_ID = /^task-[a-z2-7]{20}$/;
 const REPLAY_FILTERS = ["lane", "actor", "kind", "since", "until"] as const;
@@ -169,6 +178,7 @@ export class WebChatDoor {
   readonly #inflight = new Map<string, Promise<TurnResult>>();
   readonly #proxy: ResolvedProxy | undefined;
   readonly #reading = new Map<string, number>();
+  readonly #streams = new Set<{ handle: string; stop: () => void }>();
   readonly #revoked = new Map<string, { payload: string; result: { readonly revoked: number; readonly labels: readonly string[] } }>();
   #readingAll = 0;
   readonly #secure: boolean;
@@ -211,6 +221,7 @@ export class WebChatDoor {
   }
 
   async close(): Promise<void> {
+    for (const s of [...this.#streams]) s.stop();
     await new Promise<void>((resolve) => { this.#server.close(() => resolve()); this.#server.closeAllConnections(); });
   }
 
@@ -346,7 +357,20 @@ export class WebChatDoor {
     if (a === "settings" && parts.length === 1) {
       allowed("GET");
       const mine = this.#client(req);
-      return this.#reply(res, 200, { ...this.settings(), yourAddress: mine.address, addressFromProxy: mine.viaProxy, browsers: this.#sessions.list(who.id).length });
+      return this.#reply(res, 200, { ...this.settings(), yourAddress: mine.address, addressFromProxy: mine.viaProxy, browsers: this.#sessions.list(who.id).length, liveStreams: this.#streams.size });
+    }
+    if (a === "history" && parts.length === 1) {
+      allowed("GET");
+      const whole = url.searchParams.get("limit");
+      if (whole !== null && !/^\d{1,3}$/.test(whole)) throw new HttpError(400, "invalid_command", "limit must be a whole number from 1 to 50");
+      const before = url.searchParams.get("before");
+      if (before !== null && before.length > 80) throw new HttpError(400, "invalid_command", "before is too long");
+      const page = await this.#o.backend.history(session.token, { ...(whole === null ? {} : { limit: Number(whole) }), ...(before === null ? {} : { before }) });
+      return this.#reply(res, 200, { observedAt: new Date(this.#now()).toISOString(), ...page });
+    }
+    if (a === "events" && parts.length === 1) {
+      allowed("GET");
+      return this.#events(req, res, session);
     }
     if (a === "sessions" && b === "revoke" && c === undefined) {
       allowed("POST");
@@ -490,6 +514,67 @@ export class WebChatDoor {
       try { who = await this.#authenticate(session.token); } catch (error) { if (error instanceof HttpError && error.status === 401) throw ended(); throw error; }
       if (who.kind !== "owner" || !this.#sessions.isLive(session.handle)) throw ended();
     };
+  }
+
+  // ---- live updates --------------------------------------------------------------------------------------------------------------
+
+  /**
+   * One open server-sent-event stream of a signed-in browser (card U07 finish). It carries no data of its own, only a nudge: the door looks, every `eventsEveryMs`, at four fixed reads the page already
+   * has (what needs the owner, what needs a person's eye, open budget requests, the newest chat turns) through the session's own credential, and when the fingerprint of one differs from the last look it
+   * sends `changed` naming the page views to read again. The page then asks for them with its ordinary, authenticated requests; nothing is pushed that the session could not read, and a missed or repeated
+   * nudge changes nothing (a reconnect starts with `ready`, and the page reads what it shows again). At every look the session and its credential are checked again: a revoked, expired or rotated one gets
+   * `ended` and the stream is closed. Streams are limited per session and in all, and end with the door.
+   */
+  #events(req: IncomingMessage, res: ServerResponse, session: WebSession): void {
+    if (this.#streamsOf(session.handle) >= this.#limits.streamsPerSession || this.#streams.size >= this.#limits.streamsTotal) throw new HttpError(429, "too_many_streams", "this browser (or the controller) already holds as many live-update connections as it may; close one", { "retry-after": "10" });
+    res.writeHead(200, { ...this.#headers(), "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-accel-buffering": "no" });
+    const stream: { handle: string; stop: () => void } = { handle: session.handle, stop: () => undefined };
+    this.#streams.add(stream);
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let closed = false;
+    let looking = false;
+    let last: Record<string, string> | undefined;
+    const write = (text: string): void => { if (!closed && !res.destroyed && !res.writableEnded) try { res.write(text); } catch { stop(); } };
+    const stop = (): void => { if (closed) return; closed = true; if (timer !== undefined) clearInterval(timer); this.#streams.delete(stream); try { res.end(); } catch { /* already gone */ } };
+    stream.stop = stop;
+    req.on("close", stop);
+    const look = async (first: boolean): Promise<void> => {
+      if (looking || closed) return;
+      looking = true;
+      try {
+        try { await this.#stillLive(session)(); } catch { write("event: ended\ndata: {}\n\n"); stop(); return; }
+        const now = await this.#fingerprints(session.token, last);
+        if (closed) return;
+        if (first || last === undefined) write(`retry: 5000\nevent: ready\ndata: ${JSON.stringify({ at: new Date(this.#now()).toISOString() })}\n\n`);
+        else {
+          const views = new Set<string>();
+          for (const k of Object.keys(now)) if (now[k] !== last[k]) for (const v of WATCHED[k] ?? []) views.add(v);
+          write(views.size > 0 ? `event: changed\ndata: ${JSON.stringify({ views: [...views] })}\n\n` : ": keepalive\n\n");
+        }
+        last = now;
+      } catch { write(": keepalive\n\n"); } finally { looking = false; }
+    };
+    void look(true);
+    timer = setInterval(() => { void look(false); }, this.#limits.eventsEveryMs);
+    timer.unref();
+  }
+
+  #streamsOf(handle: string): number { let n = 0; for (const s of this.#streams) if (s.handle === handle) n += 1; return n; }
+
+  /** A short fingerprint of each fixed read (without its read-at time). A read that fails keeps its last fingerprint, so an outage is not announced as a change. */
+  async #fingerprints(token: string, before: Record<string, string> | undefined): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const mark = (key: string, value: unknown): void => { out[key] = createHash("sha256").update(JSON.stringify(value, (k, v) => (k === "observedAt" ? undefined : v))).digest("hex").slice(0, 16); };
+    const asks: [string, string, Record<string, unknown>][] = [["needsYou", "status.ask", { request: { kind: "needs_you", limit: 20 } }], ["attention", "status.attention", { limit: 20 }], ["budget", "budget.pending", {}]];
+    for (const [key, op, args] of asks) {
+      const r = await this.#o.backend.query(token, op, args).catch(() => undefined);
+      if (r !== undefined && r.ok) mark(key, r.result); else if (before?.[key] !== undefined) out[key] = before[key]!; else out[key] = "unread";
+    }
+    try {
+      const h = await this.#o.backend.history(token, { limit: 5 });
+      mark("chat", h.turns.map((t) => [t.turnId, t.status, t.completedAt, t.outcomes.map((o) => (o as { proposalState?: string }).proposalState)]));
+    } catch { out["chat"] = before?.["chat"] ?? "unread"; }
+    return out;
   }
 
   // ---- for the owner's chat and the settings view ----------------------------------------------------------------------------------
