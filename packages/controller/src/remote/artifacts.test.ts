@@ -29,7 +29,7 @@ for (const backend of backends) {
     assert.deepEqual(listing[0]!.files.map((f) => f.path), ["README.md", "catalogue/seeds.csv"]);
     await attempt.accept();
     assert.equal(Buffer.from(await attempt.fetchFile(given.id, "catalogue/seeds.csv")).toString(), "tomato,3\nbean,5\n");
-    const raw = await rawRequest(c.transport.url, "GET", `/worker/attempts/${attemptId}/artifacts/${given.id}/file?placement=${offer.placement}&path=README.md`, { token: r1.token, headers: { [SESSION_HEADER]: r1.client.session!.sessionId, [PROTOCOL_HEADER]: "1" } });
+    const raw = await rawRequest(c.transport.url, "GET", `/worker/attempts/${attemptId}/artifacts/${given.id}/file?placement=${offer.placement}&path=README.md`, { token: r1.token, headers: { [SESSION_HEADER]: r1.client.session!.sessionId, [PROTOCOL_HEADER]: String(r1.client.session!.protocol) } });
     assert.equal(raw.status, 200);
     assert.equal(raw.headers["x-newt-digest"], listing[0]!.files[0]!.digest);
     assert.equal(raw.raw.toString(), "# Seeds");
@@ -96,7 +96,7 @@ for (const backend of backends) {
     await wireRefuses("command_conflict", () => attempt.publish("seed order", [{ path: "notes.md", content: bytes("changed") }], "pub-1"), 409);
     // A worker cannot name a project, a task or a creator: those fields are not part of the message.
     const sid = r1.client.session!.sessionId;
-    const headers = { [SESSION_HEADER]: sid, [PROTOCOL_HEADER]: "1", "idempotency-key": "pub-9" };
+    const headers = { [SESSION_HEADER]: sid, [PROTOCOL_HEADER]: String(r1.client.session!.protocol), "idempotency-key": "pub-9" };
     const url = `/worker/attempts/${attemptId}/artifacts`;
     const body = (extra: object) => ({ placement: attempt.placement, name: "x", files: [{ path: "a", content: "QQ==" }], ...extra });
     for (const extra of [{ projectId: "proj-aaaaaaaaaaaaaaaaaaaa" }, { taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, { createdBy: "owner:rob" }]) assert.equal((await rawRequest(c.transport.url, "POST", url, { token: r1.token, headers, body: body(extra) })).status, 400);

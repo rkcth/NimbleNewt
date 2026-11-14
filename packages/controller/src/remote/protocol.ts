@@ -10,7 +10,12 @@ import type { RecipeSummary, WorkerTurnResult } from "../dispatch/ports.js";
  */
 
 /** What this build speaks. A new version is added to the range only when both the controller and the worker code for it; `min` rises when an old version is dropped. */
-export const WORKER_PROTOCOL = { min: 1, max: 1 } as const;
+export const WORKER_PROTOCOL = { min: 1, max: 2 } as const;
+/**
+ * Card T02d (remote script execution): protocol version 2 adds the run order (`run`), the single abort (`abort`) and the revocation (`revoke`) control messages and the two routes that carry a script's order to the host and its outcome back
+ * (`run-fetch`, `run-done`). A session that negotiated 1 (an older worker or controller) never receives or answers them, and the controller runs no catalogue script for an attempt on such a host.
+ */
+export const SCRIPT_PROTOCOL = 2;
 export interface VersionRange { readonly min: number; readonly max: number }
 
 export const PROTOCOL_HEADER = "x-newt-protocol";
@@ -91,7 +96,24 @@ export const REMOTE_LIMITS = {
   piChunkBytes: 512 * 1024,
   piTransferBytes: 4 * 1024 * 1024 * 1024,
   piTransferFiles: 200_001,
+  /**
+   * Catalogue scripts on a remote host (card T02d, protocol 2). A host runs at most `scriptRuns` orders of one attempt at once; the order a host fetches carries the script source (at most `scriptSourceBytes`) and the model's arguments on standard
+   * input (at most `scriptStdinBytes`, the bridge's own argument limit); what it sends back is at most `scriptOutputBytes` of standard output (the bridge's own output limit) in a body of at most `scriptBytes` (escaping can multiply the text),
+   * and an error text of at most `scriptErrorChars`. A run the host does not confirm as stopped after an abort is waited for no longer than the run's own time limit plus `scriptGraceMs`.
+   */
+  scriptRuns: 4,
+  scriptSourceBytes: 256 * 1024,
+  scriptStdinBytes: 64 * 1024,
+  scriptOutputBytes: 64 * 1024,
+  scriptBytes: 512 * 1024,
+  scriptErrorChars: 500,
+  scriptGraceMs: 30_000,
+  /** Run orders kept by the controller for an attempt that was ended or moved (their final states, for a late, repeated report), bounded overall. */
+  scriptRemembered: 256,
 } as const;
+
+/** The ID of a script run ordered of a remote host (card T02d): the controller makes it from the attempt, the call and the placement, so asking again for the same call under the same placement is the same run. */
+export const RUN_ID = /^run-[0-9a-f]{24}$/;
 
 /** The ID of a transfer of conversation stores between a host and the controller (card K01i). */
 export const PI_TRANSFER_ID = /^pst-[a-z2-7]{20}$/;
@@ -108,7 +130,19 @@ export type ControlMessage =
   /** Force Stop (card L02e): kill whatever the sandbox of this attempt still holds, now. A worker that does not know the message ignores it. */
   | { readonly kind: "kill" }
   /** A fresh look (card L02e): report the processes the sandbox holds now, whether or not they changed. A worker that does not know the message ignores it (and never says it can look). */
-  | { readonly kind: "look" };
+  | { readonly kind: "look" }
+  /**
+   * Card T02d (protocol 2): the controller orders a catalogue script run on this host. The message carries only the run's ID and the digest of the order, never the source or the arguments: the host fetches the order (`run-fetch`), checks it
+   * against this digest, runs it in its own sandbox and reports the outcome (`run-done`). A worker that does not know the message ignores it (the controller sends it only to a session that negotiated protocol 2).
+   */
+  | { readonly kind: "run"; readonly runId: string; readonly digest: string }
+  /** Card T02d: stop one run (the call that ordered it ended: its own signal aborted). The host stops the run in its sandbox and reports `aborted` when the process is really gone. */
+  | { readonly kind: "abort"; readonly runId: string }
+  /**
+   * Card T02d: a version of the catalogue was revoked while its scripts may run on this host, with the choice the owner recorded on the revocation (`finish`: let a running call end; `cancel` and `pause`: stop every running call of the version
+   * and start none; the task of a `pause` is paused by the controller). It names no tool body, only the name, the version and the choice.
+   */
+  | { readonly kind: "revoke"; readonly name: string; readonly version: string; readonly choice: "finish" | "cancel" | "pause" };
 export type SequencedControl = ControlMessage & { readonly seq: number };
 
 export interface SessionInfo {
@@ -180,3 +214,27 @@ export type ToolBridgeAnswer = { readonly ok: true; readonly result: JsonObject 
 export interface ThinkingWire { readonly entryId: number; readonly block: number; readonly provider: string; readonly model: string; readonly text: string; readonly opaque: boolean }
 /** The controller's answer to a thinking message: how many blocks it kept (`reason` says why none: the owner's switch is off, the record was removed, the blocks were already kept, the attempt is no longer the task's current one, or the attempt sent more than it may). Never the text. */
 export interface ThinkingAnswer { readonly kept: number; readonly reason?: "off" | "removed" | "nothing-new" | "stale" | "limit" | "unavailable" }
+
+/**
+ * A script order as the host fetches it (card T02d): the controller's `ScriptLaunch`, restated because the worker side imports nothing of the controller. `env` is always empty and the order holds no task credential and no secret: the host
+ * runs the script with an empty environment, whatever it is told.
+ */
+export interface RunOrderWire {
+  readonly runId: string;
+  readonly program: string;
+  readonly argv: readonly string[];
+  readonly stdin: string;
+  readonly source: string;
+  readonly tool: { readonly name: string; readonly version: string; readonly digest: string };
+  readonly interpreterVersion: string;
+  readonly maxOutputBytes: number;
+  readonly limits: { readonly cpus: number; readonly memoryMb: number; readonly seconds: number };
+  readonly env: Readonly<Record<string, string>>;
+}
+/** What a host reports of a run (card T02d). `aborted` is the acknowledgement of an abort or a revocation: the host's process is gone. `failed` is a run that ended without a result (or an order the host could not take). */
+export type RunOutcomeWire =
+  | { readonly state: "done"; readonly text: string; readonly cpuMs?: number; readonly memoryMb?: number }
+  | { readonly state: "failed"; readonly error: string }
+  | { readonly state: "aborted"; readonly choice?: "cancel" | "pause" };
+/** The controller's answer to a run outcome: whether it was taken (`false`: the run was already settled or is not known; the host drops it). */
+export interface RunAck { readonly kept: boolean }

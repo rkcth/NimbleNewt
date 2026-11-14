@@ -108,6 +108,13 @@ export async function startRemoteWorker(setup, config) {
   }
   const git = await worker.GitBridge.create({ scratch: join(base, "git") }).catch(async (error) => { await launcher.stop().catch(() => undefined); throw error; });
   const abilities = await abilitiesOf(worker);
+  // Card T02d (remote script execution, protocol 2): catalogue scripts the controller orders run in THIS host's sandbox (the same launcher, a private folder beside the host's own, an empty environment, no network). A host that cannot
+  // run one (no interpreter offered) still answers every order, as failed with the reason, so the controller never waits out a run nobody can start. The interpreters it offers are announced, so the controller can judge a tool's manifest against them.
+  let scripts;
+  try { scripts = await worker.hostScriptRunner({ launcher, base: join(base, "script-runs"), protectedPaths, requireEnforced: true }); } catch (error) { log(`catalogue scripts are not offered on this host (${describe(error)})`); }
+  const scriptProblem = scripts?.problem();
+  if (scriptProblem !== undefined) log(`catalogue scripts are not offered on this host (${scriptProblem})`);
+  const interpreters = scriptProblem === undefined && scripts !== undefined ? scripts.offered.map((i) => `${i.name}@${i.version}`) : [];
 
   const client = new controller.RemoteWorkerClient({ url: config.url, token: config.token, workerVersion: config.workerVersion ?? "remote-host", ...(config.ca === undefined ? {} : { ca: config.ca }) });
   // A security sign from the workspace host goes to the controller over the host channel (card U11d); it carries a kind, a key and a project ID, never a path or a secret. A failure to send it is logged and never stops the work.
@@ -165,9 +172,10 @@ export async function startRemoteWorker(setup, config) {
     progress: (scope) => workspaces.progress(scope),
     // The check of a done (cards W05, H12a): the state of the checkout this host's port made, and the contract's checks run in the attempt's sandbox here. The controller asks for it over the workspace channel (the responder's `verify`).
     verify: verifyDone,
-    capabilities: () => capabilitiesOf(piAdapter),
+    capabilities: () => capabilitiesOf(piAdapter, interpreters),
   });
-  runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble: (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`) });
+  const onTrouble = (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`);
+  runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble, scripts: new controller.RemoteScriptRuns({ ...(scriptProblem === undefined && scripts !== undefined ? { runner: scripts.runner } : {}), onTrouble }) });
   // The conversation stores of this host's agents (card K01i): the controller asks for them when it makes a backup (`pi-state-send`) and gives them back after a restore (`pi-state-restore`). Each attempt's home is `<base>/attempts/<attemptId>/home`.
   const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" });
   const piState = new controller.PiStateHost({ client, source: stores.source, final: stores.final, busy: () => local.busyAttempts(), scratch: join(base, "pi-state-copies"), purgeThinking: piAdapter.removeStoredThinking });
@@ -175,7 +183,7 @@ export async function startRemoteWorker(setup, config) {
 
   const abort = new AbortController();
   const poller = new controller.HostPoller({
-    client, capabilities: capabilitiesOf(piAdapter),
+    client, capabilities: capabilitiesOf(piAdapter, interpreters),
     ...pollerSettings(config.poller),
     // One offer at a time per attempt: a repeat of an offer already being run is the controller offering again, not a second run.
     onOffers: async (offers) => {
@@ -211,8 +219,8 @@ function pollerSettings(settings) {
   return Object.fromEntries(["waitMs", "heartbeatMs", "spreadMs", "minGapMs", "baseBackoffMs", "maxBackoffMs"].filter((k) => Number.isSafeInteger(settings[k]) && settings[k] >= 0).map((k) => [k, settings[k]]));
 }
 
-function capabilitiesOf(piAdapter) {
-  return { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
+function capabilitiesOf(piAdapter, interpreters = []) {
+  return { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [...interpreters], workspaces: [] };
 }
 
 /** The endpoint of a route from the configuration; the provider key is read from the environment variable the configuration names, at each call, and is in no log. */

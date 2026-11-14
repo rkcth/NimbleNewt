@@ -71,6 +71,14 @@ export interface ScriptLaunch {
 }
 export interface ScriptRunner { run(launch: ScriptLaunch, signal: AbortSignal): Promise<{ readonly text: string; readonly cpuMs?: number; readonly memoryMb?: number }> }
 
+/**
+ * Card T02d (remote script execution): runs a catalogue script on the remote worker host that holds the attempt (`RemoteWorkerService.runScript` implements it). `onRevoke` is handed the function that tells the host a revocation with the
+ * owner's recorded choice (`finish`, `cancel`, `pause`); `signal` stops the run. A refusal (the host speaks protocol 1, is not connected, has no sandbox) is thrown and fails the call with its reason.
+ */
+export interface RemoteScriptRunner {
+  run(call: { readonly attemptId: string; readonly callId: string; readonly hostId: string }, launch: ScriptLaunch, signal: AbortSignal, onRevoke?: (tell: (choice: "finish" | "cancel" | "pause") => void) => void): Promise<{ readonly text: string; readonly cpuMs?: number; readonly memoryMb?: number }>;
+}
+
 const PROGRAM = /^[a-z][a-z0-9._-]{0,63}$/;
 /** The launch of one version for one input. Pure: used by the service and by tests that must show model text never reaches a command line. */
 export function launchOf(version: Pick<VersionBody, "name" | "version" | "digest" | "manifest">, source: string, input: JsonObject): ScriptLaunch {
@@ -122,6 +130,11 @@ export interface ToolExecutionDeps {
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
+  /**
+   * Card T02d: where a catalogue script of an attempt on a remote worker host runs (`tool.invoke` only; a job stays on this machine). Absent: a call from a host that is not this machine is refused, as before. With it, the call is checked
+   * exactly as a local one (the version, the arguments, the access, the host's facts, revocation), the order goes to the host that holds the attempt, and a revocation reaches the run there with the owner's recorded choice.
+   */
+  readonly remoteRuns?: RemoteScriptRunner;
   /** The pause gates (L01): while a task, its agent, its project or the installation is paused, every write through the bridge is refused (reads continue). */
   readonly pauses: PauseGuard;
   readonly desks?: Pick<DeskService, "read" | "write">;
@@ -129,7 +142,10 @@ export interface ToolExecutionDeps {
   readonly state?: Pick<StateApi, "handle">;
   /** Card W13: the read-only memory tool. Absent: the operation answers as unavailable. */
   readonly recall?: Pick<RecallService, "recall">;
-  /** The host's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). */
+  /**
+   * This machine's facts when the composer knows better than `catalogFacts` over the announcement and the declared capacity (the facts always come from the host, never the request). Asked only for a host `isLocalHost` accepts: a remote
+   * worker host (card T02d) is judged by its own announcement and declared capacity.
+   */
   readonly facts?: (hostId: string) => Promise<HostFacts | undefined>;
   /**
    * Whether the host runs attempts on this machine. A script of the catalogue runs through this process's launcher, so a call made from an attempt on any other host (a remote worker, card H02) is refused instead of running on the wrong machine.
@@ -307,7 +323,7 @@ export class ToolExecutionService {
   readonly #calls = new Map<string, Map<string, { digest: string; inFlight: number; answered: boolean }>>();
 
   /** Runs of the catalogue that have been handed to the runner (or are about to be), by `name|version`, so a revocation can cancel them. */
-  readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string }>>();
+  readonly #running = new Map<string, Set<{ readonly ctl: AbortController; readonly attemptId: string; readonly callId: string; readonly taskId: string; readonly agentId: string; readonly told?: { fn?: (choice: "finish" | "cancel" | "pause") => void } }>>();
   readonly #unsubscribe: (() => void) | undefined;
   /** Versions (`name|version`) whose revocation this service has applied to its running calls, by the listener or by the store check; bounded. */
   readonly #applied = new Set<string>();
@@ -426,6 +442,9 @@ export class ToolExecutionService {
     if (policy === undefined && live !== undefined && live.size > 0) { try { policy = await (this.#deps.revocationPolicy?.() ?? "finish"); } catch { policy = "cancel"; } }
     const runs = this.#running.get(key);
     if (runs === undefined || runs.size === 0) return;
+    // A run on a remote host is told the choice (any choice: `finish` is as much an answer as the others) before anything here is aborted, so the host stops it itself and the stop does not depend on this call's own wait.
+    const choiceTold = policy === "finish" ? "finish" : policy === "pause" ? "pause" : "cancel";
+    for (const run of [...runs]) { try { run.told?.fn?.(choiceTold); } catch { /* the revocation stands */ } }
     if (policy === "finish") return;
     const why = new Error(`${name} ${version} was revoked while it ran`);
     // Aborted first and at once: nothing the revoked tool writes from now on reaches the agent. A `pause` pauses the tasks after that, so the agent does nothing further either.
@@ -928,9 +947,11 @@ export class ToolExecutionService {
       { callId: c.callId, tool: { name: pathName, version: v.version, kind: "catalog" }, args: input },
       {
         kind: "local",
-        run: async (signal) => this.#tracked(c, v, async (own) => {
+        run: async (signal) => this.#tracked(c, v, async (own, told) => {
           await this.#authorizeStart(c, v, facts, own);
-          const out = await this.#deps.runner.run(launch, guardedSignal(AbortSignal.any([signal, own.signal])));
+          const stop = guardedSignal(AbortSignal.any([signal, own.signal]));
+          const out = this.#deps.isLocalHost(c.hostId) ? await this.#deps.runner.run(launch, stop)
+            : await this.#deps.remoteRuns!.run({ attemptId: c.attemptId, callId: c.callId, hostId: c.hostId }, launch, stop, (tell) => { told.fn = tell; });
           if (own.signal.aborted) throw new Error(`${v.name} ${v.version} was revoked while it ran`);
           if (Buffer.byteLength(out.text, "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
           let parsed: unknown;
@@ -982,7 +1003,7 @@ export class ToolExecutionService {
   async #prepare(c: Context, gateway: BoundGateway, target: { canonical: string; version?: string }, rawInput: unknown): Promise<{ settled: BridgeResponse } | { v: VersionBody; pathName: string; input: JsonObject; facts: HostFacts; launch: ScriptLaunch }> {
     const input = rawInput ?? {};
     if (!isObject(input)) return invalid("input", "must be a JSON object");
-    if (!this.#deps.isLocalHost(c.hostId)) throw new DomainError("unavailable", "this attempt runs on a host that is not this machine; tools of the catalogue cannot be run for it yet");
+    if (!this.#deps.isLocalHost(c.hostId) && this.#deps.remoteRuns === undefined) throw new DomainError("unavailable", "this attempt runs on a host that is not this machine; tools of the catalogue cannot be run for it yet");
     const pathName = toolPathName(target.canonical);
     // A call that already has a record keeps its version.
     const recorded = await this.#deps.dispatch.toolOperation(this.#deps.principal, c.attemptId, c.callId);
@@ -1012,19 +1033,20 @@ export class ToolExecutionService {
   }
 
   /** Runs `body` as a running call of the version, so a revocation can abort it (`own`), and forgets it when it ends. */
-  async #tracked<T>(c: Context, v: VersionBody, body: (own: AbortController) => Promise<T>): Promise<T> {
+  async #tracked<T>(c: Context, v: VersionBody, body: (own: AbortController, told: { fn?: (choice: "finish" | "cancel" | "pause") => void }) => Promise<T>): Promise<T> {
     const own = new AbortController();
-    const forget = this.#enter(c, v, own);
-    try { return await body(own); } finally { forget(); }
+    const told: { fn?: (choice: "finish" | "cancel" | "pause") => void } = {};
+    const forget = this.#enter(c, v, own, told);
+    try { return await body(own, told); } finally { forget(); }
   }
 
   /**
    * Enters a call in the running set (so a revocation can abort it) and, with `runRecords`, in the durable record other processes read; answers the function that takes it out of both. The durable write is not waited for (a call
    * is never delayed or refused by it); the removal waits for it, so the two are never reordered.
    */
-  #enter(c: Context, v: VersionBody, own: AbortController): () => void {
+  #enter(c: Context, v: VersionBody, own: AbortController, told?: { fn?: (choice: "finish" | "cancel" | "pause") => void }): () => void {
     const key = `${v.name}|${v.version}`;
-    const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id };
+    const entry = { ctl: own, attemptId: c.attemptId, callId: c.callId, taskId: c.taskId, agentId: c.agent.id, ...(told === undefined ? {} : { told }) };
     const set = this.#running.get(key) ?? new Set<typeof entry>();
     set.add(entry); this.#running.set(key, set); this.#noteRunning();
     const records = this.#deps.runRecords;
@@ -1085,6 +1107,7 @@ export class ToolExecutionService {
       if (!same) return refusal("invalid_command", `callId: ${c.callId.slice(0, 40)} already started job ${jobId} with a different request; use a new call ID`);
       return ok({ jobId, state: already.state, tool: target.canonical, version: recorded.tool.version, whenItEnds: JOB_WAKE_RULE });
     }
+    if (!this.#deps.isLocalHost(c.hostId)) throw new DomainError("unavailable", "this attempt runs on a host that is not this machine; a job of the catalogue runs on this machine only, so start it from an attempt here, or call the tool directly");
     const room = runs.room(c.taskId);
     if (room !== undefined) throw new DomainError("unavailable", room);
     const prepared = await this.#prepare(c, gateway, target, args["input"]);
@@ -1160,7 +1183,9 @@ export class ToolExecutionService {
   }
 
   async #facts(hostId: string): Promise<HostFacts | undefined> {
-    if (this.#deps.facts !== undefined) return this.#deps.facts(hostId);
+    // The composer's facts describe this machine (the shipped composition passes the local script runner's, which takes no host): a remote worker host is judged by what it announced and the capacity the owner declared for it,
+    // never by this machine's interpreters (review of T02d remote execution).
+    if (this.#deps.facts !== undefined && this.#deps.isLocalHost(hostId)) return this.#deps.facts(hostId);
     const status = await this.#deps.hosts.status(this.#deps.principal, hostId);
     const capacity = (await this.#deps.admission.snapshot()).capacity[hostId];
     return catalogFacts(status?.capabilities, capacity);

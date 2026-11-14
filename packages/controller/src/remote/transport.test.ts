@@ -52,7 +52,7 @@ for (const backend of backends) {
   suite("a worker connects with its credential: the protocol is negotiated, its capabilities come from its own registration, and every connection has a higher epoch", async (c) => {
     const r1 = await c.host("r1", { connect: false });
     const first = await r1.client.connect({ ...REMOTE_CAPS }, "k-1");
-    assert.deepEqual([first.sessionEpoch, first.protocol, first.controller], [1, 1, WORKER_PROTOCOL]);
+    assert.deepEqual([first.sessionEpoch, first.protocol, first.controller], [1, 2, WORKER_PROTOCOL]);
     const status = (await c.hosts.status(c.owner, r1.id))!;
     assert.deepEqual(status.capabilities, REMOTE_CAPS, "the controller knows what the host announced itself");
     // The same command ID is the same session.
@@ -104,7 +104,7 @@ for (const backend of backends) {
   });
 
   suite("a worker whose protocol the controller cannot speak is refused visibly, and a worker that names the wrong version in a session is told so", async (c) => {
-    const r1 = await c.host("r1", { connect: false, protocol: { min: 2, max: 3 } });
+    const r1 = await c.host("r1", { connect: false, protocol: { min: 3, max: 4 } });
     await wireRefuses("protocol_unsupported", () => r1.client.connect({ ...REMOTE_CAPS }), 426, (e) => {
       assert.deepEqual(e.supported, WORKER_PROTOCOL);
       assert.match(e.message, /controller is too old/);
@@ -112,7 +112,7 @@ for (const backend of backends) {
     // The refusal is a record the owner can read, and the worker has no session.
     const session = (await c.remote.session(c.owner, r1.id))!;
     assert.equal(session.sessionEpoch, 0);
-    assert.equal(session.refusal!.worker.min, 2);
+    assert.equal(session.refusal!.worker.min, 3);
     assert.deepEqual(session.refusal!.controller, WORKER_PROTOCOL);
     assert.deepEqual((await c.remote.refused(c.owner)).items.map((s) => s.hostId), [r1.id]);
     await wireRefuses("not_connected", () => r1.client.heartbeat(1));
@@ -122,12 +122,13 @@ for (const backend of backends) {
     assert.deepEqual(report.started, []);
     assert.equal(report.skipped.length + report.blocked.length, 1);
     // An agreeable range connects and clears the refusal.
+    assert.equal((await new RemoteWorkerClient({ url: c.transport.url, token: r1.token, workerVersion: "w", protocol: { min: 1, max: 1 } }).connect({ ...REMOTE_CAPS })).protocol, 1, "an older worker is admitted at protocol 1");
     const ok = new RemoteWorkerClient({ url: c.transport.url, token: r1.token, workerVersion: "w", protocol: { min: 1, max: 5 } });
     const info = await ok.connect({ ...REMOTE_CAPS });
-    assert.equal(info.protocol, 1, "the highest version both speak");
+    assert.equal(info.protocol, 2, "the highest version both speak (card T02d: protocol 2 carries catalogue scripts to a host; a worker that speaks only 1 still connects, at 1)");
     assert.equal((await c.remote.session(c.owner, r1.id))!.refusal, undefined);
     // Every message of a session names the version it negotiated; another one is a refusal that says what is spoken.
-    const bad = await rawRequest(c.transport.url, "GET", "/worker/session/offers", { token: r1.token, headers: { [SESSION_HEADER]: info.sessionId, [PROTOCOL_HEADER]: "2" } });
+    const bad = await rawRequest(c.transport.url, "GET", "/worker/session/offers", { token: r1.token, headers: { [SESSION_HEADER]: info.sessionId, [PROTOCOL_HEADER]: "3" } });
     assert.equal(bad.status, 426);
     assert.equal(bad.body.error.code, "protocol_mismatch");
     assert.deepEqual(bad.body.error.supported, WORKER_PROTOCOL);
@@ -186,7 +187,7 @@ for (const backend of backends) {
     const secure = await c.listen({ tls });
     assert.match(secure.url, /^https:/);
     const r1 = await c.host("r1", { connect: false, clientOptions: { url: secure.url, ca: tls.cert } });
-    assert.equal((await r1.client.connect({ ...REMOTE_CAPS })).protocol, 1);
+    assert.equal((await r1.client.connect({ ...REMOTE_CAPS })).protocol, 2);
     assert.equal((await rawRequest(secure.url, "GET", "/worker/session/offers", { token: r1.token, ca: tls.cert, headers: { host: "evil.example" } })).status, 421);
     // A client that does not trust the certificate cannot talk to it.
     const untrusting = new RemoteWorkerClient({ url: secure.url, token: r1.token, workerVersion: "w", retries: 0 });

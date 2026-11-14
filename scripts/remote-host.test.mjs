@@ -8,7 +8,7 @@ import { checkRemoteConfig, readRemoteConfig, remoteLandingPolicy, startRemoteWo
 // Card L05e: what the remote worker host wires together, with stand-ins for the packages (the real composition is shown by the integration test with a real process).
 const config = (extra = {}) => ({ url: "https://controller.example:8443", token: "host-credential-0123", base: "/tmp/nn-l05e-base", routes: { "localp/small": { url: "http://127.0.0.1:1/v1", keyEnv: "L05E_STUB_KEY" } }, ...extra });
 
-function packages() {
+function packages(scriptsOptions = {}) {
   const seen = { security: undefined, parts: undefined, reportSecurity: [], poller: undefined, runnerOptions: undefined, bridged: [], verdicts: [], taps: [], relayed: [], workspaceOptions: undefined };
   class RemoteWorkerClient { constructor(options) { seen.clientOptions = options; } async reportSecurity(event) { seen.reportSecurity.push(event); if (event.key === "fails") throw new Error("Bearer abc.def.ghi could not be sent"); return { itemId: "n", held: false }; } }
   class ModelRelay { constructor(options) { seen.relayOptions = options; } forAttempt(options) { seen.taps.push(options.stream); return { relay: async (request) => { seen.relayed.push(request); if (request === "fail") throw new Error("down"); return { ok: true }; } }; } }
@@ -20,15 +20,22 @@ function packages() {
     async verdict(attemptId, verdict) { seen.verdicts.push([attemptId, verdict]); }
     async run(offer) { (seen.ran ??= []).push(offer.order.attemptId); return "completed"; }
   }
+  class RemoteScriptRuns { constructor(options) { seen.scriptRunsOptions = options; } }
   class WorkspaceResponder { constructor(options) { seen.responderOptions = options; } handle() {} }
   class HostPoller { constructor(options) { seen.poller = options; } run() { return new Promise((resolve) => { seen.stopPoller = resolve; }); } }
   class PiStateHost { constructor(options) { seen.piStateOptions = options; } async answer() { return { ok: true, summary: "x" }; } }
-  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, WorkspaceResponder, HostPoller, PiStateHost };
+  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost };
   class LocalConversationStores { constructor(options) { seen.storesOptions = options; this.source = { list: async () => [] }; this.final = () => undefined; } }
   class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
   const worker = {
     SandboxLauncher: { create: async () => ({ capacity: { available: true, backend: "bubblewrap" }, stop: async () => { seen.launcherStopped = true; } }) },
     GitBridge: { create: async () => ({}) },
+    // Card T02d: the host's script sandbox (the worker package's hostScriptRunner), here a stand-in that records how it was made.
+    hostScriptRunner: async (options) => {
+      seen.scriptRunnerOptions = options;
+      if (scriptsOptions.throws) throw new Error(scriptsOptions.throws);
+      return { runner: { run: async () => ({ text: "{}" }) }, problem: () => scriptsOptions.problem, offered: [{ name: "node", version: "22.19.0" }], facts: async () => ({}), stop: async () => undefined };
+    },
     LocalWorkspaces, LocalConversationStores,
     detectLimitCapabilities: async () => ({ platform: "linux" }),
     limitedPlan: () => ({ report: [{ limit: "cpus", enforced: "full" }, { limit: "memoryMb", enforced: "partial" }] }),
@@ -229,4 +236,24 @@ test("the remote host checks a done: its worker is given the check, and so is th
     for (const bad of ["../../etc", "att-short", "", undefined, "att-aaaaaaaaaaaaaaaaaaaa/../x"]) await assert.rejects(seen.responderOptions.verify(bad, scope, req), /not an attempt ID; nothing was checked/);
     assert.equal(seen.verified.length, 2, "a bad attempt ID reached no check");
   } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
+});
+
+test("catalogue scripts (card T02d): the host's script sandbox is the host's own launcher in a private folder, its interpreters are announced as tools, and the runner is handed to the offer runner; a host that cannot run scripts says so and gives the offer runner none", { skip: LINUX_ONLY }, async () => {
+  for (const mode of [{}, { problem: "no interpreter is offered" }, { throws: "the script base directory must be an absolute path" }]) {
+    const lines = [];
+    const { seen, load } = packages(mode);
+    const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ log: (l) => lines.push(l) }));
+    try {
+      assert.equal(seen.scriptRunnerOptions.requireEnforced, true, "limits the sandbox cannot enforce refuse the run");
+      assert.match(seen.scriptRunnerOptions.base, /script-runs$/);
+      assert.ok(seen.scriptRunnerOptions.launcher !== undefined, "the host's own launcher");
+      const offered = mode.problem === undefined && mode.throws === undefined;
+      assert.deepEqual(seen.poller.capabilities.tools, offered ? ["node@22.19.0"] : [], "the interpreters it can really run are announced");
+      assert.equal(seen.localOptions.capabilities().tools.length, offered ? 1 : 0);
+      assert.equal(typeof seen.scriptRunsOptions, "object");
+      assert.equal(seen.scriptRunsOptions.runner !== undefined, offered, "no runner is given when the host cannot run a script");
+      assert.equal(seen.runnerOptions.scripts !== undefined, true);
+      assert.equal(lines.some((l) => /catalogue scripts are not offered on this host/.test(l)), !offered);
+    } finally { seen.stopPoller(); await host.stop(); }
+  }
 });
