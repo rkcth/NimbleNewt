@@ -5,6 +5,7 @@
 // Owner budget across runs on one route: --budget <file> --cap-tokens N [--cap-usd D --price-in P --price-cached C --price-out O (dollars per million)].
 // Mixed roster: --chair pi:gpt-6.1-sol [--members a1=pi:gpt-6-astra,...]; or:<model> is OpenRouter.
 // Scenario fields: absent (ids the chair may read), owner.afterRound1 / owner.duringVote (scripted owner inquiry), scriptedAsks.
+// Local server: --check-slots <base url of the server, e.g. http://127.0.0.1:8002> [--slots-needed N] refuses to start unless N slots are idle and empty.
 // Variant fields: deskRead, directQuestions, askNudge, tieProbe, allowTabling. See also checkpoint.mjs and analyze.mjs.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -20,6 +21,15 @@ const load = (dir, name) => JSON.parse(readFileSync(join(here, dir, `${name}.jso
 const scenario = load("scenarios", args.scenario ?? "tool-adoption");
 const variant = load("variants", args.variant ?? "open-two-rounds");
 const kind = args.provider ?? (args.chair ? "mixed" : "fake");
+// A run against the local server first reads its slot state, so it never evicts someone else's cached conversation (M00, G10).
+// It runs before any provider is built and before the budget file is touched, so a refusal changes nothing.
+if (args["check-slots"]) {
+  const { checkSlots } = await import("./lib/local-slots.mjs");
+  const need = Number(args["slots-needed"] ?? variant.parallel ?? 1);
+  const verdict = await checkSlots(args["check-slots"], need);
+  console.log(`Slot check: ${verdict.ok ? "free" : "REFUSED"} (${verdict.why})`);
+  if (!verdict.ok) process.exit(3);
+}
 
 let provider;
 if (kind === "mixed") provider = undefined;
