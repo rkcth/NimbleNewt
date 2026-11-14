@@ -221,6 +221,8 @@ export interface RemotePiStateOptions {
   readonly ask: (hostId: string, operation: "pi-state-send", requestId: string, transferId: string, waitMs: number) => Promise<RemoteWorkspaceAnswer>;
   /** How long a host may take to send everything (default 10 minutes). */
   readonly waitMs?: number;
+  /** The most all hosts' stores may add up to in one backup (default 8 GiB). A host whose stores would go past it is left out and named in the problems, so a few hosts cannot fill the controller's disk. */
+  readonly maxBytes?: number;
 }
 
 /**
@@ -231,6 +233,7 @@ export class RemotePiState implements PiStateSource {
   readonly #o: RemotePiStateOptions;
   #problems: string[] = [];
   #listed: string[] = [];
+  #staged = 0;
   #lock: Promise<void> = Promise.resolve();
   #unlock: (() => void) | undefined;
   constructor(options: RemotePiStateOptions) { this.#o = options; }
@@ -245,7 +248,7 @@ export class RemotePiState implements PiStateSource {
     this.#lock = new Promise<void>((ok) => { unlock = ok; });
     await before;
     this.#unlock = unlock;
-    this.#problems = []; this.#listed = [];
+    this.#problems = []; this.#listed = []; this.#staged = 0;
     try { return await this.#list(); } catch (error) { await this.release(); throw error; }
   }
 
@@ -287,10 +290,14 @@ export class RemotePiState implements PiStateSource {
     const announced = (detail as { files?: unknown } | undefined)?.files;
     if (typeof announced !== "number" || announced !== parsed.lines.length) throw new Error(`it announced ${String(announced)} files and its index lists ${parsed.lines.length}`);
     if (parsed.lines.length > PI_LIMITS.files) throw new Error("it sent too many files");
+    const size = parsed.lines.reduce((n, l) => n + l.size, 0);
+    const limit = this.#o.maxBytes ?? 8 * 1024 ** 3;
+    if (this.#staged + size > limit) throw new Error(`its stores (${Math.ceil(size / 1024 ** 2)} MiB) would take this backup past the ${Math.floor(limit / 1024 ** 2)} MiB kept for hosts' conversation stores`);
     for (const l of parsed.lines) {
       const f = got.get(l.file!);
       if (f === undefined || f.size !== l.size || f.sha256 !== l.sha256) throw new Error(`a file of its index (${l.store}) did not arrive as listed`);
     }
+    this.#staged += size;
     const trees = join(this.#o.directory, `${transferId}-stores`);
     this.#listed.push(trees);
     const byStore = new Map<string, typeof parsed.lines>();
@@ -332,12 +339,44 @@ export interface RemotePiRestoreOptions {
   readonly held?: () => boolean;
   readonly waitMs?: number;
   readonly now?: () => Date;
+  /** How many delivered and superseded copies of each store are kept (default KEEP_RESTORED_COPIES). */
+  readonly keepCopies?: number;
 }
 export interface RemotePiRestoreState {
   /** Stores waiting for their host, by host, with the last reason they were not delivered. */
   readonly waiting: readonly { readonly hostId: string; readonly stores: number; readonly reason?: string }[];
   readonly delivered: number;
 }
+const STAMP = "\\d{8}T\\d{6}(?:\\d{3})?Z";
+const DASH_STAMP = new RegExp(`^(.+)-(${STAMP})$`);
+/**
+ * Keeps the newest `keep` copies of each store among the folders in `folder` that `split` names as `{ base, stamp }` (the stamp is the compact UTC time a copy was set aside) and removes the older ones. Only real folders are
+ * considered (a link is left alone), only inside `folder`, and a name `split` does not recognise is never removed. Returns how many were removed (card K01i).
+ * At least one copy of each store is always kept, and the names in `protect` (the copies the caller has just made) are never removed and count among those kept: a clock set back must not make the copy just set aside look
+ * like the oldest one and remove the only copy of what a restore replaced (review).
+ */
+export async function pruneAsides(folder: string, keep: number, split: (name: string) => { readonly base: string; readonly stamp: string } | undefined, protect: ReadonlySet<string> = new Set()): Promise<number> {
+  const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
+  const groups = new Map<string, { name: string; stamp: string }[]>();
+  for (const e of entries) {
+    const m = e.isDirectory() ? split(e.name) : undefined;
+    if (m !== undefined) groups.set(m.base, [...(groups.get(m.base) ?? []), { name: e.name, stamp: m.stamp }]);
+  }
+  let removed = 0;
+  for (const list of groups.values()) {
+    list.sort((a, b) => (a.stamp === b.stamp ? (a.name < b.name ? 1 : -1) : a.stamp < b.stamp ? 1 : -1));
+    const kept = list.filter((c) => protect.has(c.name));
+    for (const c of list) if (!protect.has(c.name) && kept.length < Math.max(1, keep)) kept.push(c);
+    for (const old of list) if (!kept.includes(old)) { await rm(join(folder, old.name), { recursive: true, force: true }); removed += 1; }
+  }
+  return removed;
+}
+/** `<store>-<stamp>`: the controller's delivered and superseded copies. */
+export const splitDashStamp = (name: string): { base: string; stamp: string } | undefined => { const m = DASH_STAMP.exec(name); return m === null ? undefined : { base: m[1]!, stamp: m[2]! }; };
+
+/** How many copies of each store are kept of what a restore replaced or superseded (the controller's delivered and superseded copies, a host's `.before-restore-` asides). Older ones are removed. */
+export const KEEP_RESTORED_COPIES = 3;
+
 const RESTORED = "restored-pi-state";
 const DELIVERED = "restored-pi-state-delivered";
 
@@ -390,6 +429,7 @@ export class RemotePiRestore {
 
   async #sweep(): Promise<RemotePiRestoreState> {
     if (this.#o.held?.() === true || await this.#restoreRecorded()) return this.state();
+    const made = new Set<string>();
     for (const [hostId, ids] of await this.#waiting()) {
       if (this.#o.held?.() === true) break;
       const transferId = newPiId("pst");
@@ -405,7 +445,7 @@ export class RemotePiRestore {
         // Delivered: the host has them in place (its own aside keeps what they replaced). The copies here are moved, not deleted.
         const stamp = (this.#o.now?.() ?? new Date()).toISOString().replace(/[-:.]/g, "");
         await mkdir(join(this.#o.dataDirectory, DELIVERED), { recursive: true, mode: 0o700 });
-        for (const id of ids) await rename(join(this.#o.dataDirectory, RESTORED, id), join(this.#o.dataDirectory, DELIVERED, `${id}-${stamp}`));
+        for (const id of ids) { await rename(join(this.#o.dataDirectory, RESTORED, id), join(this.#o.dataDirectory, DELIVERED, `${id}-${stamp}`)); made.add(`${id}-${stamp}`); }
         this.#delivered += ids.length;
         this.#reasons.delete(hostId);
       } catch (error) {
@@ -415,7 +455,15 @@ export class RemotePiRestore {
         await rm(stage, { recursive: true, force: true }).catch(() => undefined);
       }
     }
+    // Not while a restore is being prepared or applied (it moves folders into the superseded copies), and never the copies this sweep just made.
+    if (this.#o.held?.() !== true && !await this.#restoreRecorded()) await this.#prune(made);
     return this.state();
+  }
+
+  /** The copies a restore replaced are kept (newest few per store) and older ones are removed, so the data directory does not grow with every restore. */
+  async #prune(made: ReadonlySet<string>): Promise<void> {
+    const keep = this.#o.keepCopies ?? KEEP_RESTORED_COPIES;
+    for (const f of [DELIVERED, "restored-pi-state-superseded"]) await pruneAsides(join(this.#o.dataDirectory, f), keep, splitDashStamp, made).catch(() => undefined);
   }
 }
 
@@ -437,6 +485,8 @@ export interface PiStateHostOptions {
   /** Removes the stored model thinking from one conversation store folder (the Pi adapter's `removeStoredThinking`); answers `pi-thinking-purge` (card K06c). Absent: such a request is refused and nothing is done. */
   readonly purgeThinking?: (dir: string) => Promise<{ readonly blocks: number }>;
   readonly now?: () => Date;
+  /** How many `.before-restore-<stamp>` copies of a store this host keeps beside it after a restore (default 2: the one just made and the one before). Older ones are removed. */
+  readonly keepAsides?: number;
 }
 
 /** The host's answer to `pi-state-send` and `pi-state-restore`. Nothing here is run on a guess: every refusal says why and changes nothing. */
@@ -582,6 +632,11 @@ export class PiStateHost {
         // Put back what was moved: the stores swapped so far go away again and their asides come back.
         for (const d of done.reverse()) { await rm(d.target, { recursive: true, force: true }).catch(() => undefined); if (d.aside !== undefined) await rename(d.aside, d.target).catch(() => undefined); }
         throw error;
+      }
+      // The old asides pile up (one per restore): only the newest few stay beside each store. A failure to remove one never fails a restore that is done.
+      for (const s of staged) {
+        const prefix = `${basename(s.target)}.before-restore-`;
+        await pruneAsides(dirname(s.target), this.#o.keepAsides ?? 2, (n) => (n.startsWith(prefix) && new RegExp(`^${STAMP}$`).test(n.slice(prefix.length)) ? { base: prefix, stamp: n.slice(prefix.length) } : undefined), new Set([`${prefix}${stamp}`])).catch(() => undefined);
       }
       return { ok: true, summary: "restored", detail: { stores: stores.length, files: parsed.lines.length } };
     } finally {
