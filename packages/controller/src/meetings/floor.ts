@@ -264,6 +264,7 @@ export class MeetingFloorService {
   async #ask(b: FloorBody, input: { kind: import("./floor-types.js").TurnKind; agent: string; prompt: import("./floor-text.js").Prompt; visible: number; round?: number; deliveredUpTo: number; owner?: boolean }): Promise<StoredReply["items"][number]> {
     const zero = { visible: 0, hidden: 0, input: 0, cached: 0 };
     const budget = await this.#deps.budget?.(input.agent, b.projectId).catch(() => ({ ok: false as const, reason: "the budget could not be read" }));
+    if (budget !== undefined && !budget.ok) await this.#deps.notifyOwner?.({ recordId: b.recordId, kind: "budget", text: `${input.agent} could not take its turn in a meeting: the budget is reached (${budget.reason}).` }).catch(() => undefined);
     if (budget !== undefined && !budget.ok) return { agent: input.agent, text: "", noResponse: `budget reached: ${budget.reason}`, usage: zero, deliveredUpTo: input.deliveredUpTo };
     const ac = new AbortController();
     const cancel = (this.#deps.timer ?? defaultTimer)(this.#hangMs(b), () => ac.abort());

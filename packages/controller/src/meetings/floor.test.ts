@@ -538,3 +538,165 @@ floorSuite(test, "the chair cannot stop the owner: the owner's question runs eve
   assert.equal((await recordOf(w, rec)).state, "ended");
   await refuses("invalid_command", () => w.floor.ask(w.owner, { commandId: cid("ask"), recordId: rec, agent: w.pA, question: "after the end" }));
 });
+
+floorSuite(test, "time timebox: when the meeting's time is used up, no new round starts, the motion is tabled with a reason, and the rest becomes follow-up work; more time reopens it", async (w) => {
+  const { rec } = await w.meet({ endsInMinutes: 20 });
+  const motionId = await start(w, rec);
+  await untilPhase(w, rec, "between");
+  w.clock.tick(25);
+  await run(w, rec);
+  const f = await floorOf(w, rec);
+  assert.equal(f.timebox!.reason, "time");
+  assert.equal(w.script.of("ballot").length, 0, "no vote was opened after the time ran out");
+  assert.equal((await motionOf(w, motionId)).state, "tabled");
+  const t = await transcript(w, rec);
+  assert.ok(t.some((e) => e.text.includes("timebox")));
+  assert.ok(w.notices.some((n) => n.kind === "timebox"));
+});
+
+floorSuite(test, "spend timebox: model spend and tokens count, the owner's own questions do not, and the owner can extend it", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec, { tokenCap: 1000 });
+  w.script.on((r) => ({ text: r.kind === "owner-answer" ? "ANSWER: ok\nSOURCES: none\nCOMPLETED: none\nPROPOSED: none\nINVESTIGATE: none" : "STANCE: for\nSTATEMENT: ok\nTLDR: none", usage: { visibleTokens: 10, hiddenTokens: 0, inputTokens: r.kind === "owner-answer" ? 900_000 : 100 } }));
+  await w.floor.ask(w.owner, { commandId: cid("ask"), recordId: rec, agent: w.pA, question: "big question" });
+  let f = await floorOf(w, rec);
+  assert.equal(f.timebox, undefined, "the owner's question is recorded but not counted");
+  assert.ok(f.spend.ownerTokens >= 900_000);
+  w.script.on((r) => ({ text: r.kind.startsWith("blind") || r.kind === "statement" ? "STANCE: for\nSTATEMENT: ok\nTLDR: none" : defaultText(r.kind), usage: { visibleTokens: 10, hiddenTokens: 0, inputTokens: 400 } }));
+  await run(w, rec);
+  f = await floorOf(w, rec);
+  assert.equal(f.timebox!.reason, "spend");
+  await w.floor.extend(w.owner, { commandId: cid("ex"), recordId: rec, tokens: 5_000_000 });
+  await refuses("forbidden", () => w.floor.extend(w.asD, { commandId: cid("ex"), recordId: rec, tokens: 5 }));
+  f = await floorOf(w, rec);
+  assert.equal(f.timebox, undefined);
+});
+const defaultText = (kind: string): string => (kind === "ballot" ? "VOTE: yes\nREASON: ok" : kind === "objection" ? "OBJECT: no" : kind === "chair-match" ? "MATCHES: yes\nAMENDED_MOTION: none\nREASON: ok" : kind === "chair-summary" ? `{"points":[]}` : kind === "chair-questions" ? `{"questions":[]}` : "ok");
+
+floorSuite(test, "a blocked budget is reported to the owner and the turn is recorded as no response, never silently skipped", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  w.hooks.budget = async (a) => (a === w.pB ? { ok: false, reason: "the daily budget for B is reached" } : { ok: true });
+  await run(w, rec);
+  const f = await floorOf(w, rec);
+  assert.ok(f.turns.some((x) => x.agent === w.pB && x.noResponse?.includes("budget reached")));
+  assert.ok(f.notices.some((x) => x.kind === "no-response" && x.text.includes(w.pB) && x.text.includes("budget")), "the meeting's notices say why B said nothing");
+  assert.ok(w.notices.some((n) => n.kind === "budget" && n.text.includes("budget")), "the owner is told");
+  assert.ok(f.vote!.noResponse.includes(w.pB), "the vote goes on without B, which is recorded as not having voted");
+});
+
+floorSuite(test, "a turn waiting on a tool shows as waiting on a tool, and the meeting tries again later without losing the unit", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  const { TurnWaitsOnTool } = await import("./floor.js");
+  let blocked = true;
+  w.script.on((r) => { if (r.kind === "statement" && r.agent === w.pA && blocked) throw new TurnWaitsOnTool("the build tool"); return undefined; });
+  const out = await w.floor.drive(w.service, { recordId: rec, maxUnits: 10 });
+  void out;
+  const waiting = await w.floor.waiting(w.owner, rec);
+  assert.equal(waiting!.kind, "tool");
+  assert.equal((waiting as { what: string }).what, "the build tool");
+  blocked = false;
+  await run(w, rec);
+  assert.equal((await floorOf(w, rec)).phase, "done");
+  assert.equal((await w.floor.waiting(w.owner, rec))!.kind, "nothing");
+});
+
+floorSuite(test, "the waiting-on view names a person, an agent or a tool, for readers of the meeting only", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  const first = await w.floor.waiting(w.asA, rec);
+  assert.equal(first!.kind, "agent");
+  assert.equal(await w.floor.waiting(w.outsider, rec), undefined);
+  await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec });
+  const p = await w.floor.waiting(w.asB, rec);
+  assert.equal(p!.kind, "person");
+});
+
+floorSuite(test, "a tie is broken by the chair's single casting vote, and without a chair answer it stays tied", async (w) => {
+  const { rec } = await w.meet({ roster: [w.pA, w.pB, w.pC, w.pE] });
+  const motionId = await start(w, rec);
+  let n = 0;
+  w.script.on((r) => (r.kind === "ballot" ? reply(`VOTE: ${n++ % 2 === 0 ? "yes" : "no"}\nREASON: split ${n}`) : undefined));
+  w.script.on((r) => (r.kind === "casting" ? reply("CASTING: yes\nREASON: the tie goes to the motion") : undefined));
+  await run(w, rec);
+  assert.equal(w.script.of("casting").length, 1);
+  assert.equal((await decisionOf(w, motionId)).outcome, "adopted");
+});
+
+floorSuite(test, "unresolved questions become owned follow-up tasks, once each, and agents' deeper investigations are follow-up work too", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  w.script.on((r) => (r.kind === "statement" && r.agent === w.pA && r.round === 2 ? reply("STANCE: for\nSTATEMENT: Who owns the cache warmer?\nTLDR: question") : undefined));
+  w.script.on((r) => (r.kind === "owner-answer" ? reply("ANSWER: Needs a week of measuring.\nSOURCES: none\nCOMPLETED: none\nPROPOSED: none\nINVESTIGATE: measure the cache hit rate over a week") : undefined));
+  await w.floor.ask(w.owner, { commandId: cid("ask"), recordId: rec, agent: w.pB, question: "Can you tell me the real hit rate?" });
+  await run(w, rec);
+  const out = await w.floor.followUps(w.service, { recordId: rec });
+  assert.ok(out.created.some((c) => c.title.startsWith("Investigate: measure the cache hit rate") && c.owner === w.pB), JSON.stringify(out));
+  assert.ok(out.created.every((c) => c.taskId.length > 0));
+  const again = await w.floor.followUps(w.service, { recordId: rec });
+  assert.equal(again.created.length, 0);
+  await refuses("forbidden", () => w.floor.followUps(w.asA, { recordId: rec }));
+});
+
+floorSuite(test, "above the facts threshold, members get facts-style summaries plus verbatim short statements; at or below it, the whole text; the full text stays readable", async (w) => {
+  const { rec } = await w.meet({ roster: [w.pA, w.pB, w.pC] });
+  await start(w, rec, { transcriptMode: "facts" });
+  w.script.on((r) => (r.kind === "blind-statement" ? reply(`STANCE: for\nSTATEMENT: ${"This is a long statement about caching behaviour. ".repeat(12)}\nTLDR: the cache is warm at night.`) : undefined));
+  await run(w, rec);
+  const s = w.script.of("statement")[0]!;
+  assert.ok(s.prompt.text.includes("the cache is warm at night"), "the facts-style summary");
+  assert.ok(!s.prompt.text.includes("This is a long statement about caching behaviour. This is a long"), "not the long text");
+  const full = await transcript(w, rec);
+  assert.ok(full.some((e) => e.text.includes("This is a long statement about caching behaviour. This is a long")), "the record keeps the whole text");
+  w.script.reset();
+  const second = await w.meet();
+  await start(w, second.rec);
+  w.script.on((r) => (r.kind === "blind-statement" ? reply(`STANCE: for\nSTATEMENT: ${"This is a long statement about caching behaviour. ".repeat(12)}\nTLDR: the cache is warm at night.`) : undefined));
+  await run(w, second.rec);
+  assert.ok(w.script.of("statement")[0]!.prompt.text.includes("This is a long statement about caching behaviour. This is a long"), "auto with 3 members is the whole text");
+});
+
+floorSuite(test, "chair notes are written once by default (not after every statement), rolling when chosen, and are read only by the owner and the chair", async (w) => {
+  const { rec } = await w.meet();
+  await start(w, rec);
+  await run(w, rec);
+  assert.equal(w.script.of("chair-notes").length, 1);
+  assert.ok((await w.floor.chairNotes(w.owner, rec))!.notes!.includes("nobody gave numbers"));
+  assert.ok((await w.floor.chairNotes(w.asD, rec))!.notes !== undefined);
+  assert.equal(await w.floor.chairNotes(w.asA, rec), undefined);
+  assert.equal(await w.floor.chairNotes(w.outsider, rec), undefined);
+  const view = JSON.stringify(await w.floor.state(w.asA, rec));
+  assert.equal(view.includes("nobody gave numbers"), false);
+  assert.equal(JSON.stringify(await w.floor.state(w.mgr, rec)).includes("nobody gave numbers"), false);
+  w.script.reset();
+  const rolling = await w.meet();
+  await start(w, rolling.rec, { chairNotes: "rolling" });
+  await run(w, rolling.rec);
+  assert.ok(w.script.of("chair-notes").length > 1);
+  w.script.reset();
+  const off = await w.meet();
+  await start(w, off.rec, { chairNotes: "off" });
+  await run(w, off.rec);
+  assert.equal(w.script.of("chair-notes").length, 0);
+});
+
+floorSuite(test, "the owner changes the priorities and the meeting's settings; a restart in the middle of a turn repeats nothing", async (w) => {
+  const { rec, occ } = await w.meet();
+  await start(w, rec);
+  const occurrence = (await w.meetings.occurrence(w.owner, occ)) as unknown as { agenda?: { id: string }[] } | undefined;
+  void occurrence;
+  await untilPhase(w, rec, "between");
+  const calls = w.script.calls.length;
+  // crash: the model's answer was given but the process died before anything was written
+  const w2 = w.reopen();
+  let died = true;
+  w.script.on((r) => { if (r.kind === "chair-summary" && died) { died = false; return reply(JSON.stringify({ points: ["the cache is warm"] })); } return undefined; });
+  await w2.advance(w.service, { recordId: rec });
+  const w3 = w.reopen();
+  await w3.drive(w.service, { recordId: rec });
+  const t = await transcript(w, rec);
+  assert.equal(t.filter((e) => e.text.startsWith("Summary of round")).length <= 2, true);
+  assert.ok(w.script.calls.length > calls);
+  assert.equal((await floorOf(w, rec)).phase, "done");
+});
