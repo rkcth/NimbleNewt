@@ -161,3 +161,32 @@ export class SecurityDetectors {
 
 /** The key of a task credential used on another task: the two task IDs only (the same pair is one event; the credential and its token are never part of it). */
 export const wrongTaskKey = (credentialTask: string, targetTask: unknown): string => `task:${credentialTask.slice(0, 80)}>${String(targetTask).slice(0, 80)}`;
+
+/** Errors already told to the detectors by a store's own guard, so the state API's door does not tell the same damage a second time as it passes through. */
+export const TOLD_INTEGRITY: WeakSet<object> = new WeakSet();
+
+/** The key of a failed integrity check: where it was met and the message with its IDs and numbers taken out, so the same damage met again is one event. */
+export const integrityKey = (where: string, message: string): string =>
+  `${where.slice(0, 60)}:${hash(message.replace(/[A-Za-z0-9_:.-]{10,}|\d+/g, "#").slice(0, 300))}`;
+
+/**
+ * Wraps a store so that an `integrity` error thrown by one of the named methods (a damaged setting read on the way to a decision, in the dispatcher or in a worker's start, where no operation of the state API is
+ * involved) is told to the detectors (card U11d, source `integrity`) before it goes on. The error and the call are unchanged; a failing detector changes nothing. The store's other members are the store's own.
+ */
+export function watchIntegrity<T extends object>(store: T, where: string, methods: readonly string[], detect: (source: string, event: DetectedSecurity) => void): T {
+  return new Proxy(store, {
+    get(target, prop) {
+      const member = Reflect.get(target, prop, target) as unknown;
+      if (typeof prop !== "string" || !methods.includes(prop) || typeof member !== "function") return typeof member === "function" ? (member as (...a: unknown[]) => unknown).bind(target) : member;
+      return async (...args: unknown[]): Promise<unknown> => {
+        try { return await Reflect.apply(member, target, args); } catch (error) {
+          if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "integrity" && !TOLD_INTEGRITY.has(error)) {
+            TOLD_INTEGRITY.add(error);
+            try { detect("integrity", { kind: "integrity-check-failed", key: integrityKey(where, String((error as { message?: unknown }).message ?? "")), subject: `store:${where}` }); } catch { /* telling the owner never changes the call */ }
+          }
+          throw error;
+        }
+      };
+    },
+  });
+}

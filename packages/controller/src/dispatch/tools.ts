@@ -444,7 +444,8 @@ export class ToolPath {
       if (by === undefined || !by.startsWith("owner:")) return this.#closeParked(ready, `the policy sent this to the owner and ${by ?? "an agent"} decided; only the owner's approval counts`);
     }
     const verdict = await this.#judge(ready, { policy: false });
-    if (verdict.kind === "refused") return this.#closeParked(ready, verdict.reason);
+    // A grant the agent no longer holds is its own refusal, counted as on the first path (card U11d); the approval itself does not change that. Told only by the call that closes the parked operation.
+    if (verdict.kind === "refused") return this.#closeParked(ready, verdict.reason, verdict.denied === true ? () => { void Promise.resolve(this.#deps.denied?.({ attemptId: ready.d.attemptId, callId: ready.c.callId, agentId: ready.d.agentId, projectId: ready.d.projectId })).catch(() => undefined); } : undefined);
     if (verdict.kind !== "allow") return this.#closeParked(ready, "the call could not be judged");
     try {
       await reviews.admit(ready.agent, { commandId: `adm:${ready.opId}`, requestId: op.reviewId!, operation: await this.#operation(ready) });
@@ -457,10 +458,12 @@ export class ToolPath {
     return { done: false, ready };
   }
 
-  async #closeParked(ready: { readonly d: DispatchBody; readonly ref: AggregateRef; readonly opId: string }, reason: string): Promise<Prepared> {
+  async #closeParked(ready: { readonly d: DispatchBody; readonly ref: AggregateRef; readonly opId: string }, reason: string, written?: () => void): Promise<Prepared> {
     const op = (await this.#runner.get(ready.ref.kind, ready.ref.id))!.body as unknown as ToolOperationBody;
+    const wasOpen = op.state !== "refused";
     const next: ToolOperationBody = { ...op, state: "refused", endedAt: this.#runner.now(), diagnostics: [...op.diagnostics, clip(redactText(reason), DISPATCH_LIMITS.diagnostic)].slice(-DISPATCH_LIMITS.diagnostics), usage: { durationMs: 0, outputBytes: 0 } };
     await this.#rewrite(ready, next, (b) => ({ ...b, parked: b.parked.filter((p) => p !== ready.opId), inFlight: b.inFlight.filter((p) => p !== ready.opId) }), []);
+    if (wasOpen) written?.();
     return { done: true, result: this.#resultOf(ready.opId, next) };
   }
 

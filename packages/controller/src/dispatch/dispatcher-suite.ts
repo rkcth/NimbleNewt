@@ -782,6 +782,38 @@ for (const backend of backendsNamed(backendName)) {
     // The approval was used up by the run: the same call is not run a second time.
   });
 
+  suite("a call the owner approved is refused when the agent no longer holds the grant, and that refusal is told to the denial hook once, like any other no-grant refusal (card U11d, approved-call path)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    await c.task("push", ann);
+    const log = { applied: 0, reconciled: 0 };
+    const told: { callId?: string; agentId: string; projectId: string }[] = [];
+    c.dispatcher = c.restart({ denied: async (d) => { told.push(d); } });
+    const go = deferred();
+    const parked = deferred<ToolResult>();
+    const again: ToolResult[] = [];
+    c.worker.script = async ({ gateway }) => {
+      const call = () => gateway.call(effectCall("push2", pushBridge(log)), { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: pushBridge(log) });
+      parked.resolve(await call());
+      await go.promise;
+      again.push(await call());
+      again.push(await call());
+      return { status: "completed", text: "x" };
+    };
+    await c.dispatcher.tick();
+    const first = await parked.promise;
+    assert.equal(first.state, "awaiting-approval");
+    const review = (await c.reviews.get(c.owner, (first as { reviewId: string }).reviewId))!;
+    await c.reviews.decide(c.owner, { commandId: "dec", requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "ok" });
+    // The grant is taken away between the owner's approval and the agent making the call again.
+    await setGrants(c, "ann", workGrants(c.project, []));
+    go.resolve();
+    await c.dispatcher.idle();
+    assert.deepEqual(again.map((r) => r.state), ["refused", "refused"], JSON.stringify(again));
+    assert.equal(log.applied, 0, "nothing ran");
+    assert.match((again[0] as { reason: string }).reason, /holds no grant/);
+    assert.deepEqual(told.map((t) => t.callId), ["push2"], JSON.stringify(told));
+  });
+
   const openBlockers = async (c: Ctx) => (await c.storage.listAggregates("blocker", { limit: 100 })).map((a) => a.body as unknown as { type: string; summary: string; state: string; resolver: string });
 
   suite("the checks before a start run in a fixed order; a passing reason skips the attempt, a lasting one opens a blocker that names who can change it", async (c) => {
