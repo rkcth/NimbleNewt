@@ -40,7 +40,9 @@ export class AgentMounts {
     const ref: AggregateRef = { kind: KIND, id: rowId(agentId) };
     const now = this.#runner.now();
     let added = false;
-    await this.#runner.command("maintenance.mount.add", { commandId: `amt-add:${requestId}`, actor: this.#service.id }, async () => ({
+    // The record's revision is part of the command ID, so an add after an earlier add and end of the same request is carried out rather than answered from the first add (see `AgentSiteAllowances.allow`).
+    const seen = (await this.#runner.get(KIND, ref.id))?.revision ?? 0;
+    await this.#runner.command("maintenance.mount.add", { commandId: `amt-add:${requestId}:${seen}`, actor: this.#service.id }, async () => ({
       payload: { requestId, agentId, resource, mountPath },
       build: async () => {
         const found = await this.#runner.get(KIND, ref.id);
@@ -61,8 +63,9 @@ export class AgentMounts {
     if (!REQUEST_ID.test(requestId)) bad("requestId", "must be a maintenance request ID");
     const ref: AggregateRef = { kind: KIND, id: rowId(agentId) };
     const now = this.#runner.now();
-    const standing = ((await this.#runner.get(KIND, ref.id))?.body as unknown as AgentMountsBody | undefined)?.entries.some((e) => e.requestId === requestId) === true;
-    if (standing) await this.#runner.command("maintenance.mount.end", { commandId: `amt-end:${requestId}`, actor: this.#service.id }, async () => ({
+    const before = await this.#runner.get(KIND, ref.id);
+    const standing = (before?.body as unknown as AgentMountsBody | undefined)?.entries.some((e) => e.requestId === requestId) === true;
+    if (standing) await this.#runner.command("maintenance.mount.end", { commandId: `amt-end:${requestId}:${before?.revision ?? 0}`, actor: this.#service.id }, async () => ({
       payload: { requestId, agentId },
       build: async () => {
         const found = await this.#runner.get(KIND, ref.id);

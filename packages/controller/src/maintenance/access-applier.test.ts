@@ -157,6 +157,46 @@ for (let i = 0; i < backends.length; i++) {
     });
   });
 
+  test(`${name}: an application that ends unclearly after it was written is reverted and applied again, and the site and the mount are really there afterwards; a revoke then ends them`, async () => {
+    const open = await backends[i]!.open();
+    try {
+      const options = { pause: async () => undefined };
+      const projects = await ProjectService.open(open.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(open.storage, projects.epoch, options);
+      const agents = AgentService.withEpoch(open.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const sites = AgentSiteAllowances.withEpoch(open.storage, projects.epoch, MAINTENANCE_PRINCIPAL, options);
+      const mounts = AgentMounts.withEpoch(open.storage, projects.epoch, MAINTENANCE_PRINCIPAL, options);
+      // The first write of each succeeds and then the applier throws, as if the answer was lost: the state is unknown to the service.
+      let siteFails = 1, mountFails = 1;
+      const flakySites = { allow: async (...a: Parameters<AgentSiteAllowances["allow"]>) => { const r = await sites.allow(...a); if (siteFails-- > 0) throw new Error("the answer was lost"); return r; }, end: (...a: Parameters<AgentSiteAllowances["end"]>) => sites.end(...a) } as unknown as AgentSiteAllowances;
+      const flakyMounts = { add: async (...a: Parameters<AgentMounts["add"]>) => { const r = await mounts.add(...a); if (mountFails-- > 0) throw new Error("the answer was lost"); return r; }, end: (...a: Parameters<AgentMounts["end"]>) => mounts.end(...a) } as unknown as AgentMounts;
+      const resources: MountResources = { check: async () => ({ ok: true }) };
+      const m = MaintenanceService.withEpoch(open.storage, projects.epoch, { applier: new AccessChangeApplier({ inner: new FakeApplier(), sites: flakySites, mounts: flakyMounts, resources }), heartbeatMs: 0 }, options);
+      const created = await agents.create(owner, { commandId: cid("a"), friendlyName: "Ann" });
+      const ann = { id: `agent:${created.id}`, key: created.id, principal: await principals.authenticate((await principals.issueCredential(owner, `agent:${created.id}`)).token) };
+      const statusOf = async (id: string) => (await open.storage.getAggregate({ kind: "maintenance", id }))!.body as unknown as MaintenanceBody;
+      const req = async (kind: string, spec: unknown) => (await m.request(ann.principal, { commandId: cid("r"), kind, spec, reason: "needed", rollbackPlan: "take it back" })).maintenanceId;
+      const settle = async (id: string) => { for (let k = 0; k < 6 && (await statusOf(id)).status !== "applied"; k++) { await m.tick(); await m.idle(); } };
+      const netId = await req("network", net());
+      await m.decide(owner, { commandId: cid("d"), maintenanceId: netId, verdict: "approve", specDigest: (await statusOf(netId)).specDigest }); await m.idle();
+      await settle(netId);
+      assert.equal((await statusOf(netId)).status, "applied");
+      assert.equal(siteFails < 0, true, "the unclear ending happened");
+      assert.equal((await sites.check(ann.id, "docs.example.com", 443)).live, true, "applied means the site is allowed");
+      const own = `${ann.key}.data`;
+      const mntId = await req("mount", mnt(own));
+      await m.decide(owner, { commandId: cid("d"), maintenanceId: mntId, verdict: "approve", specDigest: (await statusOf(mntId)).specDigest }); await m.idle();
+      await settle(mntId);
+      assert.equal((await statusOf(mntId)).status, "applied");
+      assert.deepEqual(await mounts.reachNames(ann.id), [mountReachName(own)], "applied means the mount is recorded");
+      for (const id of [netId, mntId]) { await m.revoke(owner, { commandId: cid("v"), maintenanceId: id, reason: "not needed" }); await m.idle(); assert.equal((await statusOf(id)).status, "revoked"); }
+      assert.equal((await sites.check(ann.id, "docs.example.com", 443)).live, false, "the revoke ended the site");
+      assert.deepEqual(await mounts.reachNames(ann.id), [], "the revoke ended the mount");
+      await m.idle();
+    } finally { await open.close(); }
+  });
+
   test(`${name}: with no resource store an approved mount waits; a repeat of the same request records one mount; the per-agent bound holds`, async () => {
     await world(i, { resources: false }, async (w) => {
       const id = await ask(w, w.ann, "mount", mnt(`${w.ann.key}.data`));

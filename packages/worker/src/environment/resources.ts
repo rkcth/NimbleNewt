@@ -3,7 +3,7 @@ import { join, resolve, sep } from "node:path";
 
 /**
  * The host's named resources (card A09, mount application): a private directory `<root>` holding one sub-directory for each resource an agent's environment may mount, read-only, in its sandbox. The controller knows a resource only by its name;
- * the host path never leaves this class. A resource is mountable when it is a real directory directly inside the root (not a link, not reached through one), holds no link, device or other special file anywhere inside it, and is not larger than the
+ * the host path never leaves this class. A resource is mountable when it is a real directory directly inside the root (not a link, not reached through one), holds no link (symbolic or hard), device or other special file anywhere inside it, and is not larger than the
  * walk limit (a resource with more entries than that is refused rather than half-checked). The check is made when a mount is applied and again each time an attempt starts, because the directory can change in between.
  */
 export const RESOURCE_NAME = /^[a-z][a-z0-9._-]{0,79}$/;
@@ -44,6 +44,8 @@ export class LocalResourceStore {
         if (cs.isSymbolicLink()) return "the resource holds a link, which a mount does not follow";
         if (cs.isDirectory()) { const why = await walk(child); if (why !== undefined) return why; }
         else if (!cs.isFile()) return "the resource holds a file that is neither a plain file nor a directory";
+        // A hard link is a plain file with a second name, which may be outside the resource directory: the mount would show that other file. Refused like a symbolic link.
+        else if (cs.nlink > 1) return "the resource holds a file with more than one name (a hard link), which a mount does not take";
       }
       return undefined;
     };

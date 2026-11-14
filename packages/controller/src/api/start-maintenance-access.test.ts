@@ -157,5 +157,9 @@ test("without a relay or a resource store the access kinds stay pending and the 
     const access = await call("maintenance.access", { agentId: `agent:${ann}` });
     assert.match(access.result.sites.unavailable, /no network relay/);
     assert.match(access.result.mounts.unavailable, /no host resource store/);
+    // Owner only even here: an agent is refused, not told what this controller enforces.
+    const annToken = (await s.principals.issueCredential(owner, `agent:${ann}`)).token;
+    const asAnn = await (c.api.handle(annToken, { v: 1, op: "maintenance.access", args: { agentId: `agent:${ann}` } } as never) as Promise<Reply>);
+    assert.equal(asAnn.error?.code, "forbidden");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });

@@ -80,7 +80,10 @@ export class AgentSiteAllowances {
     const ref: AggregateRef = { kind: KIND, id };
     const now = this.#runner.now();
     let created = false;
-    await this.#runner.command("network.agent-site.allow", { commandId: `nas-allow:${requestId}`, actor: this.#service.id }, async () => ({
+    // The command ID carries the revision the record had: a retry of this step is the same command, but an allow after an earlier allow and end of the same request (an application that ended unclearly, was reverted and is
+    // applied again) is a new command and is carried out, instead of being answered from the first one with nothing written.
+    const seen = (await this.#runner.get(KIND, id))?.revision ?? 0;
+    await this.#runner.command("network.agent-site.allow", { commandId: `nas-allow:${requestId}:${seen}`, actor: this.#service.id }, async () => ({
       payload: { requestId, agentId, host: d.host, port: d.port },
       build: async () => {
         const found = await this.#runner.get(KIND, id);
@@ -115,8 +118,10 @@ export class AgentSiteAllowances {
     const id = siteId(agentId, d.host, d.port);
     const ref: AggregateRef = { kind: KIND, id };
     const now = this.#runner.now();
-    const standing = ((await this.#runner.get(KIND, id))?.body as unknown as AgentSiteBody | undefined)?.requests.some((r) => r.id === requestId) === true;
-    if (standing) await this.#runner.command("network.agent-site.end", { commandId: `nas-end:${requestId}`, actor: this.#service.id }, async () => ({
+    const before = await this.#runner.get(KIND, id);
+    const standing = (before?.body as unknown as AgentSiteBody | undefined)?.requests.some((r) => r.id === requestId) === true;
+    // As for `allow`: the revision in the command ID makes a second end of the same request (after it was allowed again) a new command, so it is never answered from the first end while the site stays allowed.
+    if (standing) await this.#runner.command("network.agent-site.end", { commandId: `nas-end:${requestId}:${before?.revision ?? 0}`, actor: this.#service.id }, async () => ({
       payload: { requestId, agentId, host: d.host, port: d.port },
       build: async () => {
         const found = await this.#runner.get(KIND, id);

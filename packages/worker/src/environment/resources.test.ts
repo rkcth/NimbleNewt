@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -47,12 +48,24 @@ test("a resource that is a link, reached through a link, or holding a link anywh
   assert.match(((await store.check("vialink")) as { reason: string }).reason, /not a real directory/);
   assert.equal(link(outside, join(root, "deep", "inner", "escape")), true);
   assert.match(((await store.check("deep")) as { reason: string }).reason, /holds a link/);
-  assert.equal(link(join(outside, "secret"), join(root, "ok.one", "file-link"), "file"), true);
-  assert.match(((await store.check("ok.one")) as { reason: string }).reason, /holds a link/);
+  // A file link needs a right Windows may not give (directory junctions do not): checked where it can be made.
+  if (link(join(outside, "secret"), join(root, "ok.one", "file-link"), "file")) assert.match(((await store.check("ok.one")) as { reason: string }).reason, /holds a link/);
   // A root that is itself a link is refused.
   const rootLink = join(fresh(), "r");
   assert.equal(link(root, rootLink), true);
   assert.match(((await new LocalResourceStore(rootLink).check("deep")) as { reason: string }).reason, /not a real directory/);
+});
+
+test("a resource holding a hard link to a file elsewhere, or a special file, is refused", async (t) => {
+  const root = fresh(); const outside = fresh();
+  writeFileSync(join(outside, "secret"), "s");
+  mkdirSync(join(root, "hard.one")); mkdirSync(join(root, "fifo.one", "in"), { recursive: true });
+  const store = new LocalResourceStore(root);
+  try { linkSync(join(outside, "secret"), join(root, "hard.one", "copy")); } catch { return t.skip("this machine does not allow hard links here"); }
+  assert.match(((await store.check("hard.one")) as { reason: string }).reason, /hard link/);
+  // A named pipe is neither a plain file nor a directory (made with the system's mkfifo where there is one).
+  if (process.platform === "win32" || spawnSync("mkfifo", [join(root, "fifo.one", "in", "pipe")]).status !== 0) return t.skip("no mkfifo on this machine");
+  assert.match(((await store.check("fifo.one")) as { reason: string }).reason, /neither a plain file nor a directory/);
 });
 
 test("a resource with more entries than the walk limit is refused, never half checked", async () => {

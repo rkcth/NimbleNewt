@@ -72,6 +72,15 @@ for (const backend of backends) {
     await tunnel.write(Buffer.from("hello"));
     await until("the echo", () => Buffer.concat(got).toString() === "hello");
     assert.deepEqual(c.dials, [{ address: PUBLIC, port: 443 }], "the one checked address");
+    // The relay judges the open connection again and again (every 20 ms here) with the agent: it stays open while the request stands.
+    let rechecks = 0;
+    const real = c.grants.check.bind(c.grants);
+    c.grants.check = async (...a: Parameters<NetworkGrantService["check"]>) => { rechecks++; return real(...a); };
+    await until("three rechecks", () => rechecks >= 3);
+    got.length = 0;
+    await tunnel.write(Buffer.from("still"));
+    await until("the echo after the rechecks", () => Buffer.concat(got).toString() === "still");
+    assert.equal(relay.open, 1, "the connection is still open");
     tunnel.close(); await closed;
     await until("close logged", async () => (await c.grants.connections(c.owner, c.ctx.taskId)).every((x) => x.outcome !== "open"));
     const [rec] = await c.grants.connections(c.owner, c.ctx.taskId);
@@ -171,5 +180,16 @@ for (const backend of backends) {
     assert.equal((await c.sites.list(c.owner, ANN)).length, 0);
     const check = await c.grants.check(c.ctx.taskId, "docs.example.com", 443, ANN);
     assert.equal(check.live, false);
+  });
+
+  suite("the same request allowed again after its end is allowed again, and its second end ends it (no step is answered from an earlier one)", async (c) => {
+    for (let round = 0; round < 2; round++) {
+      await c.sites.allow(REQ(12), ANN, "docs.example.com", 443);
+      assert.equal((await c.grants.check(c.ctx.taskId, "docs.example.com", 443, ANN)).live, true, `allowed in round ${round}`);
+      await c.sites.allow(REQ(12), ANN, "docs.example.com", 443); // a retry of the same step changes nothing
+      assert.equal((await c.sites.list(c.owner, ANN))[0]!.requests.length, 1);
+      assert.deepEqual(await c.sites.end(REQ(12), ANN, "docs.example.com", 443), { stillAllowed: false });
+      assert.equal((await c.grants.check(c.ctx.taskId, "docs.example.com", 443, ANN)).live, false, `ended in round ${round}`);
+    }
   });
 }
