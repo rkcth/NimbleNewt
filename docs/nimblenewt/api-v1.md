@@ -2491,6 +2491,46 @@ Arguments:
 
 Result: `{ item: { revision, requireApproval, maxStagedBytes, keepStaged, startupWindowSeconds, startFailureLevel, set } }`.
 
+#### `migration.status`
+
+Owner only: how the database schema stands (card K03): the schema version, each migration this version knows (additive or destructive; applied, pending or deferred), the upgrades on record (when, from which schema to which, whether every migration was additive), the tested pairs (a release and the schema it really started healthy on), the rollback period (days, whether it is open, when it ends), the destructive migrations that wait for your approval and why one cannot be allowed yet, and the policy. The recovery guide is docs/nimblenewt/migration-recovery.md.
+
+Arguments:
+
+- none
+
+Result: `{ item: { schemaVersion, latestKnown, migrations, deferred, upgrades, testedPairs, rollbackPeriod, contract, policy, recovery } }`.
+
+#### `migration.policy.get`
+
+Owner only: the rollback period and the rollout health thresholds in force, their defaults and bounds, and the revision to quote when changing them.
+
+Arguments:
+
+- none
+
+Result: `{ item: { revision, values, defaults, bounds, chosen } }`.
+
+#### `release.rollback.check`
+
+Owner, or an agent granted exactly `release.manage`: whether an earlier release could be rolled back to on the data as it is now (card K03): it must have started healthy here (a tested pair), every migration since must be additive, and the rollback period must be open. Says why not in plain words. `release.rollback` makes the same check.
+
+Arguments:
+
+- `releaseId`: the release to go back to
+
+Result: `{ releaseId, ok, reasons, guarded }`.
+
+#### `release.rollout.status`
+
+Owner, or an agent granted exactly `release.manage`: the watch over the current release (its probation: state, when it ends, the earlier release kept as the way back, the failures counted against it), the health thresholds the launcher holds, and any open run of starts that failed because of the machine or a provider rather than the release.
+
+Arguments:
+
+- none
+
+Result: `{ probation, policy, external, current, lastKnownGood }` (null where there is none).
+
 #### `agenda.get`
 
 One agenda item with its state, owner, deferral and outcome link.
@@ -6921,6 +6961,63 @@ Arguments:
 - `commandId`: required
 
 Result: `{ acknowledged }`: how many notices were closed.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `migration.policy.set`
+
+Owner only: sets how long an earlier release may come back over additive migrations (`rollbackPeriodDays`), how long a newly activated release is watched (`probationMinutes`, 0 = not watched; off until you set it), how many failures of the release itself end that watch as failed and fall back (`maxReleaseFailures`), and how many starts in a row may fail because of the machine or a provider before you are told (`hostRetries`). Only the fields given change; null puts the default back. Failures of the machine or a provider never count against a release.
+
+Arguments:
+
+- `rollbackPeriodDays` (optional): 1 to 365 (default 14)
+- `probationMinutes` (optional): 0 to 1440 (default 30 once on; 0 = no probation)
+- `maxReleaseFailures` (optional): 1 to 20 (default 3)
+- `hostRetries` (optional): 1 to 50 (default 5)
+- `expectedRevision` (optional): the revision of the policy you read
+- `commandId`: required
+
+Result: `{ revision, values }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `migration.contract.approve`
+
+Owner only: allows the destructive migrations (those that drop or reshape data the previous release reads) up to the number you name to run at the NEXT start. Refused while the rollback period after the latest upgrade is still open, when no pre-upgrade snapshot would be made (backups not set up), or when nothing destructive waits up to that number. A snapshot is taken first; after the migration the previous release can no longer come back and the way back is restoring the snapshot.
+
+Arguments:
+
+- `through`: the number of the destructive migration to allow (see migration.status)
+- `expectedRevision` (optional): the revision of the migration record
+- `commandId`: required
+
+Result: `{ revision, through, appliesAt }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `migration.contract.withdraw`
+
+Owner only: takes back an approval for destructive migrations that has not run yet.
+
+Arguments:
+
+- `expectedRevision` (optional): the revision of the migration record
+- `commandId`: required
+
+Result: `{ withdrawn }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.rollout.stop`
+
+Owner only: stops the rollout of the current release: its watch ends (nothing is judged any more, so a run of failures no longer sets it aside) and it stays running. Recorded in the release history. To go back to the earlier release use `release.rollback` (checked by `release.rollback.check`).
+
+Arguments:
+
+- `reason` (optional): a short reason (up to 200 characters)
+- `commandId`: required
+
+Result: `{ stopped, releaseId }` (stopped false when no watch was open).
 
 Completion: finished when accepted (`completed: true`).
 

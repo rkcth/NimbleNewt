@@ -51,6 +51,7 @@ import type { SwarmLimitsService } from "../swarm/limits.js";
 import type { StreamSettingsService } from "../generation/index.js";
 import type { CleanupSettingsService } from "../work-end/cleanup-settings.js";
 import type { PlacementSettingsService } from "../remote/placement-settings.js";
+import type { MigrationGuardService } from "../migration/index.js";
 import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { RemoteWorkerService } from "../remote/service.js";
@@ -131,7 +132,9 @@ export interface StateApiDeps {
   readonly responsibilities?: ResponsibilityService;
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
   readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
-  readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify" | "confirm" | "acknowledgeStart" | "trust" | "addTrustedKey" | "removeTrustedKey" | "requireSignature" | "attachSignature">;
+  readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify" | "confirm" | "acknowledgeStart" | "trust" | "addTrustedKey" | "removeTrustedKey" | "requireSignature" | "attachSignature" | "rolloutStatus" | "stopRollout" | "rollbackCheck">;
+  /** Migration recovery and rollback limits (card K03). */
+  readonly migrationGuard?: Pick<MigrationGuardService, "status" | "policy" | "setPolicy" | "approveContract" | "withdrawContract" | "rollbackVerdict">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
@@ -372,6 +375,7 @@ export class StateApi {
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.activation === undefined ? {} : { activation: this.#deps.activation }),
+        ...(this.#deps.migrationGuard === undefined ? {} : { migrationGuard: this.#deps.migrationGuard }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),

@@ -25,13 +25,23 @@ export interface Migration {
   readonly statements: readonly string[];
   /** Default true. See above for what false requires. */
   readonly transactional?: boolean;
+  /**
+   * `additive` (the default): the change only adds (a table, a nullable or defaulted column, an index), so the previous release's code still runs on the result. `destructive` (card K03): the change removes
+   * or reshapes something the previous release reads (drop, rename, narrowing, a rewrite of data). A destructive migration is **deferred**: it does not run when a database is opened unless the opener
+   * allows it (`contractThrough`), which the controller does only after the owner's approval once the rollback period has passed. Everything after a deferred migration waits too (numbering stays gapless).
+   * A destructive migration is written so that the release that ships it already works with the old and the new layout (expand, then contract).
+   */
+  readonly kind?: "additive" | "destructive";
 }
 
 export type JournalState = "running" | "done";
 export interface JournalEntry { readonly version: number; readonly name: string; readonly checksum: string; readonly state: JournalState }
 
 /** The identity of a migration's content. */
-export const migrationChecksum = (m: Migration): string => sha256(canonicalJson({ version: m.version, name: m.name, statements: m.statements, transactional: m.transactional !== false }));
+export const migrationChecksum = (m: Migration): string => sha256(canonicalJson({ version: m.version, name: m.name, statements: m.statements, transactional: m.transactional !== false, ...(m.kind === "destructive" ? { kind: "destructive" } : {}) }));
+
+/** Whether a migration is destructive (card K03). */
+export const isDestructive = (m: Migration): boolean => m.kind === "destructive";
 
 /** Checks a list of migrations for the mistakes a programmer can make; throws a plain Error (these are bugs, not runtime conditions). */
 export function assertValidMigrations(migrations: readonly Migration[]): void {
@@ -42,6 +52,7 @@ export function assertValidMigrations(migrations: readonly Migration[]): void {
     if (!/^[a-z][a-z0-9_]{0,60}$/.test(m.name)) throw new Error(`migration ${m.version}: name "${m.name}" must be lower-case words joined by underscores`);
     if (names.has(m.name)) throw new Error(`migration ${m.version}: name "${m.name}" is used twice`);
     names.add(m.name);
+    if (m.kind !== undefined && m.kind !== "additive" && m.kind !== "destructive") throw new Error(`migration ${m.version} (${m.name}): kind must be additive or destructive`);
     if (m.statements.length === 0 || m.statements.some((s) => s.trim() === "")) throw new Error(`migration ${m.version} (${m.name}) has an empty statement`);
   });
 }
@@ -51,8 +62,29 @@ export interface MigrationPlan {
   readonly applied: number;
   /** A migration journaled as `running` by an interrupted earlier start: run it again first. */
   readonly resume: Migration | undefined;
-  /** Migrations still to apply, in order (not including `resume`). */
+  /** Migrations still to apply now, in order (not including `resume`). */
   readonly pending: readonly Migration[];
+  /** Migrations that are due but wait (card K03): the first destructive one the opener did not allow, and every migration after it. Absent when nothing waits. */
+  readonly deferred?: readonly Migration[];
+}
+
+export interface PlanOptions {
+  /** The highest destructive migration the opener allows to run (default 0: none). A destructive migration above it, and everything after it, is deferred. */
+  readonly contractThrough?: number;
+}
+
+/**
+ * How far an opener would bring a database that has applied `applied` migrations: the number of the last migration that would run now (card K03). Used by the pre-upgrade snapshot so a start that
+ * only finds deferred work takes no snapshot. Pure.
+ */
+export function runnableThrough(migrations: readonly Migration[], applied: number, options: PlanOptions = {}): number {
+  const allowed = options.contractThrough ?? 0;
+  let through = applied;
+  for (const m of migrations.slice(applied)) {
+    if (isDestructive(m) && m.version > allowed) break;
+    through = m.version;
+  }
+  return through;
 }
 
 const refuse = (message: string): never => { throw new StorageError("unavailable", message); };
@@ -62,7 +94,7 @@ const refuse = (message: string): never => { throw new StorageError("unavailable
  * message saying what to do) a database that is newer than this build, whose journal has a gap or a second interrupted migration, or
  * in which an applied migration's name or content differs from this build's.
  */
-export function planMigrations(migrations: readonly Migration[], journal: readonly JournalEntry[]): MigrationPlan {
+export function planMigrations(migrations: readonly Migration[], journal: readonly JournalEntry[], options: PlanOptions = {}): MigrationPlan {
   assertValidMigrations(migrations);
   const latest = migrations.length;
   const entries = [...journal].sort((a, b) => a.version - b.version);
@@ -80,5 +112,9 @@ export function planMigrations(migrations: readonly Migration[], journal: readon
   const last = entries[entries.length - 1];
   const resume = last?.state === "running" ? migrations[last.version - 1] : undefined;
   const applied = last === undefined ? 0 : last.state === "done" ? last.version : last.version - 1;
-  return { applied, resume, pending: migrations.slice(resume === undefined ? applied : applied + 1) };
+  const due = migrations.slice(resume === undefined ? applied : applied + 1);
+  const allowed = options.contractThrough ?? 0;
+  const wait = due.findIndex((m) => isDestructive(m) && m.version > allowed);
+  if (wait < 0) return { applied, resume, pending: due };
+  return { applied, resume, pending: due.slice(0, wait), deferred: due.slice(wait) };
 }

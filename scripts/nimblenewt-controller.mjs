@@ -221,6 +221,8 @@ export async function main(argv, io = { stderr: process.stderr, env: process.env
     // The start-up check has already printed why (through `print`); it is not said twice.
     if (error?.name !== "UnsupportedEnvironmentError") err(`could not start: ${safeMessage(error, 2000)}`);
     if (launched !== undefined) await launched.close().catch(() => undefined);
+    // Card K03: when the machine or a provider stopped the start (a full disk, a database server that is down), say so with the exit code the launcher reads (76, 77), so a good release is not set aside for it.
+    try { const { classifyError, CONTROLLER_TROUBLE } = await lib("release/diagnosis.js"); const d = classifyError(error); if (d !== undefined) { err(`the ${d.cause === "host" ? "machine" : "provider"}, not the release, stopped this start: ${d.reason}`); return CONTROLLER_TROUBLE[d.cause]; } } catch { /* an older build without the diagnosis: exit 1 as before */ }
     return 1;
   } finally {
     if (outer === undefined) for (const [s, h] of handlers) process.removeListener(s, h);

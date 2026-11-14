@@ -11085,3 +11085,22 @@ Reviewed `a09-finish` at b61c5896 (origin/main 3f6142d7 was already its base; no
 **Left, and accurate.** The implementer's list stands. Two more: when two requests stand behind one site and the newer one ends, connections opened under it are closed although the site stays allowed (the next connection works; a conservative close); and the cap of 200 sites per agent is counted inside the command, so two controllers adding at the same moment can pass it by one.
 
 **Runs (Linux, base origin/main 3f6142d7, `npx tsc --build --force` clean, no stale dist tests, `api:docs:write` unchanged, `check:deps` ok, task plan regenerated unchanged; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, `/tmp/nn-slot.sh`, `--test-timeout=600000`):** controller shard 1/3 4,621 of 4,621, 2/3 4,996 of 4,996, 3/3 4,408 of 4,408; worker 487 (2 skipped), pi-adapter 252, contracts 19, config 52 (24 skipped), ui 34, registry 15, integration 179 (10 skipped), `scripts/*.test.mjs` 161 (1 skipped). No failures and no flakes.
+
+## K03 finish (Claude agent, Sonnet 5.5, 2026-11-14): migration recovery and rollback limits
+
+Guide for owners: docs/nimblenewt/migration-recovery.md.
+
+What was lacking: migrations had a journal but no notion of what could be undone; any rollback inside the declared schema range was allowed; a failed start was always blamed on the release; there was no watch over a new release, and a restore preview did not say what happened outside after the backup.
+
+What is built (all storage touches run on the reference store, SQLite, the SQLite worker thread and PostgreSQL):
+- `Migration.kind` (additive or destructive), `contractThrough`, and deferral of the first unallowed destructive migration and everything after it. A start that finds only deferred work takes no snapshot. The checksum includes the kind only for destructive migrations, so every existing checksum is unchanged.
+- `MigrationGuardService` (migration/): upgrades on record, tested pairs, rollback period, approval kept in `migration-gate.json` (read before the database opens), policy. Wired in api/start.ts: `noteStart` after open, `notePair` after a confirmed start, the verdict and safe-back line into ReleaseActivationService.
+- `release.rollback` enforces the guard; `release.rollback.check`, `release.rollout.status`, `release.rollout.stop`, `migration.status`, `migration.policy.get/set`, `migration.contract.approve/withdraw` are API operations and chat commands (propose for policy and approval, apply for the rest), described in the interpreter prompt; the release status view shows the schema, the period, the watch and machine trouble.
+- Launcher: policy mirror, probation with the prior known-good kept, host/provider trouble counted and never quarantined, a db safe-back line. Supervisor blames each ended run with `diagnoseFailure`. The controller entry exits 76/77 through `classifyError`; the launcher script takes `--data-dir` and `--min-free-mb` for disk and write probes.
+- Restore preview: `externalSinceBackup` and a warning naming the targets.
+
+ASSUMPTION: the rollback period defaults to 14 days, the watch to 30 minutes when switched on, 3 release failures and 5 host retries. The launcher's own default is the watch OFF until the owner sets `probationMinutes`, so existing installations behave as before.
+ASSUMPTION: confirmation still promotes a release to known-good immediately (as before); probation keeps the previous known-good so a breach can revert.
+ASSUMPTION: the "tested pair" is a release plus schema version confirmed healthy by a real start; a release never confirmed on this installation cannot be rolled back to when a guard is wired.
+
+What is NOT done: real macOS and Windows runs (CI gate only); long real-time probation behaviour (tested with a fake clock); a real production upgrade path (production has only migration 1, so destructive migrations exist only in test registries); the probes only see disk, write access and memory, not a provider or database server reachability beyond the controller's own exit code; the guard's rollback verdict is not applied to the launcher's automatic fall-back beyond the safe-back line.

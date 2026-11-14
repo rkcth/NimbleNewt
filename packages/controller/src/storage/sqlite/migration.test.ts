@@ -9,9 +9,11 @@ import { test } from "node:test";
 import { StorageError } from "../errors.js";
 import { registry, type RegistryName } from "../qualification/migration-registry.js";
 import {
-  cannotLoopForever, concurrentOpensApplyOnce, refusals, resumesRunningMigrations, upgradeCrashMatrix, upgradePreservesState, type Description, type MigrationOutcome, type MigrationRig, type MigrationWorld,
+  cannotLoopForever, concurrentOpensApplyOnce, destructiveMigrationsAreJournaled, destructiveMigrationsWait, refusals, resumesRunningMigrations, upgradeCrashMatrix, upgradePreservesState, type Description, type MigrationOutcome, type MigrationRig, type MigrationWorld,
 } from "../qualification/migrations-suite.js";
+import type { BeforeUpgrade } from "../snapshot.js";
 import { SqliteStorage } from "./index.js";
+import { SqliteWorkerStorage } from "./worker-storage.js";
 
 const child = fileURLToPath(new URL("./testing/child.js", import.meta.url));
 const guard = pathToFileURL(fileURLToPath(new URL("../../../../../scripts/offline-guard.mjs", import.meta.url))).href;
@@ -33,9 +35,14 @@ function runChild(path: string, name: RegistryName, point?: { when: string; ordi
   });
 }
 
-const rig: MigrationRig = {
-  name: "sqlite",
+type Opener = (path: string, migrations: RegistryName, options?: { contractThrough?: number; beforeUpgrade?: BeforeUpgrade }) => Promise<SqliteStorage | SqliteWorkerStorage>;
+const direct: Opener = (path, migrations, options) => SqliteStorage.open({ path, migrations: registry("sqlite", migrations), ...(options?.contractThrough === undefined ? {} : { contractThrough: options.contractThrough }), ...(options?.beforeUpgrade === undefined ? {} : { beforeUpgrade: options.beforeUpgrade }) });
+/** The storage that runs on a worker thread takes the same option (the controller's own `beforeUpgrade` is not forwarded to a worker, so its tests leave it out). */
+const threaded: Opener = (path, migrations, options) => SqliteWorkerStorage.open({ path, migrations: registry("sqlite", migrations), ...(options?.contractThrough === undefined ? {} : { contractThrough: options.contractThrough }) });
+const makeRig = (name: string, opener: Opener, upgradeHook = true): MigrationRig => ({
+  name,
   dialect: "sqlite",
+  upgradeHook,
   open: async () => {
     const dir = mkdtempSync(join(tmpdir(), "nn sqlite-migration-"));
     const path = join(dir, "controller.sqlite");
@@ -52,8 +59,8 @@ const rig: MigrationRig = {
           throw error;
         }
       },
-      withStorage: async (migrations, fn) => {
-        const storage = await SqliteStorage.open({ path, migrations: registry("sqlite", migrations) });
+      withStorage: async (migrations, fn, options) => {
+        const storage = await opener(path, migrations, options);
         try { return await fn(storage); } finally { await storage.close(); }
       },
       describe: async (): Promise<Description> => {
@@ -77,7 +84,9 @@ const rig: MigrationRig = {
     };
     return world;
   },
-};
+});
+const rig = makeRig("sqlite", direct);
+const workerRig = makeRig("sqlite-worker", threaded, false);
 
 test("SQLite: an upgrade preserves a populated database and the adapter keeps working on the new layout", () => upgradePreservesState(rig));
 test("SQLite: a database from a newer version, an edited migration and a journal gap are refused and left untouched", () => refusals(rig));
@@ -90,3 +99,8 @@ test("SQLite: an upgrade killed before or after every statement leaves a recover
 });
 
 test("SQLite: a migration that cannot be journaled stops the runner with an error instead of repeating forever", { timeout: 90_000 }, () => cannotLoopForever(rig));
+
+test("SQLite: a destructive migration waits until it is allowed; what follows it waits too; the snapshot is taken before it runs", () => destructiveMigrationsWait(rig));
+test("SQLite on a worker thread: a destructive migration waits until it is allowed", () => destructiveMigrationsWait(workerRig));
+test("SQLite: a destructive migration is journaled like any other and a build that does not know it refuses the database", () => destructiveMigrationsAreJournaled(rig));
+test("SQLite on a worker thread: a destructive migration is journaled and a build that does not know it refuses the database", () => destructiveMigrationsAreJournaled(workerRig));
