@@ -6,6 +6,7 @@ import { ACTIVATION_LIMITS, PROCESS_TOKEN, PointerSwitcher, SimulatedCrash, Syml
 import { Launcher, parseCompat } from "./launcher.js";
 import type { VersionRange } from "../remote/protocol.js";
 import { checkDigestSignature } from "./trust.js";
+import { readTrustMirror } from "./trust-mirror.js";
 
 /**
  * The updater (card K02, follow-up): installs a release that is already built and verified, from a SOURCE DIRECTORY on this machine, into the release root, and tells the launcher about it. It is a library plus the
@@ -60,6 +61,11 @@ export interface StageReleaseOptions {
    * public keys the installer trusts, supplied by the caller (the updater has no database; the CLI reads them from a file). An empty list refuses everything.
    */
   readonly trust?: { readonly keys: readonly string[]; readonly signature: string };
+  /**
+   * The controller's copy of its trust root (`trust-root.json` under the release root, K02 finish) is read by default. When it says a signature is needed, the release is installed only with a `signature` (base64
+   * Ed25519, over the same digest text) from one of its keys; a present but damaged copy refuses everything. `trust` given as well must also pass. No copy means no trust root was ever written: digests alone.
+   */
+  readonly signature?: string;
 }
 export interface InstalledRelease {
   readonly id: string;
@@ -199,6 +205,13 @@ export async function stageRelease(o: StageReleaseOptions): Promise<InstalledRel
   const manifestText = manifestBytes.toString("utf8");
   if (sha256(manifestBytes) !== o.digest) fail("digest_mismatch", `${MANIFEST_FILE} is not the one the release was authorised with`);
   if (o.trust !== undefined && checkDigestSignature(o.trust.keys, o.digest, o.trust.signature) === undefined) fail("signature", "the release has no valid signature over its digest from a trusted key");
+  let mirror;
+  try { mirror = await readTrustMirror(root); } catch (error) { return fail("signature", `the controller's trust root copy cannot be used: ${(error as Error).message}`); }
+  if (mirror?.required === true) {
+    if (o.signature === undefined && o.trust === undefined) fail("signature", "the controller requires signed releases (trust-root.json): give the release's signature");
+    const sig = o.signature ?? o.trust!.signature;
+    if (checkDigestSignature(mirror.keys, o.digest, sig) === undefined) fail("signature", "the release has no valid signature over its digest from a key the controller trusts");
+  }
   const manifest = parseManifest(manifestText, maxFiles, maxFileBytes);
   const id = manifest.candidateId;
   const problems = await verifyReleaseDirectory(source, o.digest);

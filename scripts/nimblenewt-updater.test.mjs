@@ -94,9 +94,7 @@ test("--trusted-keys and --signature-file: installed only when a listed key sign
     writeFileSync(bad, signed(a, sha("something else")));
     const base = ["stage", "--root", f.root, "--source", f.source, "--digest", f.digest];
     let r = await run([...base, "--trusted-keys", keys]);
-    assert.deepEqual([r.code, /go together/.test(r.err)], [1, true]);
-    r = await run([...base, "--signature-file", good]);
-    assert.deepEqual([r.code, /go together/.test(r.err)], [1, true]);
+    assert.deepEqual([r.code, /needs --signature-file/.test(r.err)], [1, true]);
     r = await run([...base, "--trusted-keys", keys, "--signature-file", bad]);
     assert.deepEqual([r.code, /refused \(signature\)/.test(r.err)], [1, true], r.err);
     r = await run([...base, "--trusted-keys", join(f.base, "missing"), "--signature-file", good]);
@@ -106,6 +104,31 @@ test("--trusted-keys and --signature-file: installed only when a listed key sign
     assert.deepEqual([r.code, /16 KiB/.test(r.err)], [1, true]);
     assert.equal(existsSync(join(f.root, "releases")), false, "nothing installed by a refusal");
     r = await run([...base, "--trusted-keys", keys, "--signature-file", good]);
+    assert.equal(r.code, 0, r.err);
+    assert.ok(existsSync(join(f.root, "releases", ID)));
+  } finally { f.done(); }
+});
+
+test("--signature-file alone is checked against the controller's copy of its trust root; a required root refuses an unsigned or untrusted release (K02 finish)", async () => {
+  const f = fixture();
+  try {
+    const a = generateKeyPairSync("ed25519"), b = generateKeyPairSync("ed25519");
+    const der = (k) => k.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    const signed = (k, d) => sign(null, Buffer.from(`nimblenewt-release-digest-v1\n${d}\n`), k.privateKey).toString("base64");
+    const goodA = join(f.base, "a.sig"), goodB = join(f.base, "b.sig");
+    writeFileSync(goodA, signed(a, f.digest)); writeFileSync(goodB, signed(b, f.digest));
+    writeFileSync(join(f.root, "trust-root.json"), JSON.stringify({ version: 1, required: true, keys: [der(a)] }));
+    const base = ["stage", "--root", f.root, "--source", f.source, "--digest", f.digest];
+    let r = await run(base);
+    assert.deepEqual([r.code, /requires signed/.test(r.err)], [1, true], r.err);
+    r = await run([...base, "--signature-file", goodB]);
+    assert.deepEqual([r.code, /controller trusts/.test(r.err)], [1, true], r.err);
+    // Explicit keys do not widen the controller's root.
+    const keys = join(f.base, "keys.txt"); writeFileSync(keys, `${der(b)}\n`);
+    r = await run([...base, "--trusted-keys", keys, "--signature-file", goodB]);
+    assert.deepEqual([r.code, /controller trusts/.test(r.err)], [1, true], r.err);
+    assert.equal(existsSync(join(f.root, "releases")), false);
+    r = await run([...base, "--signature-file", goodA]);
     assert.equal(r.code, 0, r.err);
     assert.ok(existsSync(join(f.root, "releases", ID)));
   } finally { f.done(); }

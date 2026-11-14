@@ -14,6 +14,7 @@ import { negotiateProtocol, type VersionRange } from "../remote/protocol.js";
 import { Launcher, LauncherStateError, DEFAULT_STARTUP_WINDOW_SECONDS, STARTUP_WINDOW_BOUNDS, parseCompat, type LauncherNotice } from "./launcher.js";
 import { DEFAULT_START_FAILURE_LEVEL, type StartFailureLevel, type StartNoticeSink } from "./start-notices.js";
 import { ReleaseTrust, type TrustedKey } from "./trust.js";
+import { writeTrustMirror } from "./trust-mirror.js";
 import { RELEASE_KINDS, candidateIdOf, type ApprovalBody, type CandidateBody, type Cell } from "./release.js";
 
 /**
@@ -921,19 +922,42 @@ export class ReleaseActivationService {
     wholeRev(command.expectedRevision);
     const { keyFile, ...rest } = command;
     if ((command.publicKey === undefined) === (keyFile === undefined)) bad("publicKey", "give exactly one of publicKey and keyFile");
-    return this.#trust.add(owner, (keyFile === undefined ? rest : { ...rest, publicKey: await this.#trustFile(keyFile, "keyFile") }) as never, this.#runner.now());
+    const r = await this.#trust.add(owner, (keyFile === undefined ? rest : { ...rest, publicKey: await this.#trustFile(keyFile, "keyFile") }) as never, this.#runner.now());
+    await this.#mirrorTrust();
+    return r;
   }
   /** Owner only: withdraws a key; everything only it signed stops counting at once. */
   async removeTrustedKey(owner: Principal, command: NoActor & { keyId: unknown; expectedRevision?: number }): Promise<{ revision: number; keyId: string }> {
     strictOwner(owner, "stop trusting a release signing key");
     wholeRev(command.expectedRevision);
-    return this.#trust.remove(owner, command, this.#runner.now());
+    const r = await this.#trust.remove(owner, command, this.#runner.now());
+    await this.#mirrorTrust();
+    return r;
   }
   /** Owner only: `true` always needs a signature, `false` never (digests only), `null` follows the trust root (needed once any key is trusted). */
   async requireSignature(owner: Principal, command: NoActor & { required: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     strictOwner(owner, "change whether releases must be signed");
     wholeRev(command.expectedRevision);
-    return this.#trust.setRequired(owner, command, this.#runner.now());
+    const r = await this.#trust.setRequired(owner, command, this.#runner.now());
+    await this.#mirrorTrust();
+    return r;
+  }
+  /**
+   * Writes the updater's copy of the trust root (`trust-root.json`, see trust-mirror.ts) from the stored root. After a change that is already recorded a failure is reported, not hidden: the copy may be stale
+   * until the next change or start, and a stale copy that still lists a withdrawn key must not go unnoticed.
+   */
+  async #mirrorTrust(): Promise<void> {
+    // One copy write at a time in this process. Another controller on the same database can change the root between our read and our write; the root is read again after the write and the copy rewritten
+    // until the revision it was written from is still the stored one, so a late write of an older root (one that still lists a withdrawn key) does not stay. A change still racing after that writes its own copy.
+    await this.#serial("trust-mirror", async () => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const t = await this.#trust.list();
+        try { await writeTrustMirror(this.#o.root, { required: t.required, keys: t.keys.map((k) => k.publicKey) }); } catch (error) {
+          throw new DomainError("unavailable", `the trust root change is recorded, but the updater's copy of it (trust-root.json) could not be written (${(error as NodeJS.ErrnoException).code ?? "error"}); it is written again at the next trust change or start`);
+        }
+        if ((await this.#trust.list()).revision === t.revision) return;
+      }
+    });
   }
   /** Owner or a holder of release.manage: keeps a signature after checking it against the trust root. Changes nothing that runs; a signature by an untrusted key is refused. */
   async attachSignature(by: Principal, command: NoActor & { candidateId: string; signature?: unknown; signatureFile?: unknown }): Promise<{ keyId: string; replayed: boolean }> {
@@ -970,6 +994,8 @@ export class ReleaseActivationService {
    * Without a `schemaVersion` option nothing is recorded. Never throws: an unreadable launcher file leaves the old record and the next start tries again.
    */
   async noteDatabase(): Promise<number | undefined> {
+    // The updater's copy of the trust root is brought up to date at every start (best effort here; a change made later reports its own failure).
+    await this.#mirrorTrust().catch(() => undefined);
     if (this.#o.schemaVersion === undefined) return undefined;
     try { const v = await this.#o.schemaVersion(); await this.#launcher.noteDatabase(v, this.#o.runningRelease ?? "controller"); return v; } catch { return undefined; }
   }

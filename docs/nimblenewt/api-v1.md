@@ -6774,7 +6774,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.trust.add`
 
-Owner only: trusts an Ed25519 public key (base64 DER SubjectPublicKeyInfo) as a release publisher. From then on staging, activating and rolling back need a valid signature by a trusted key over the candidate (unless the owner set `release.trust.require` to false). At most 20 keys. The private key never reaches the controller.
+Owner only: trusts an Ed25519 public key (base64 DER SubjectPublicKeyInfo) as a release publisher. From then on staging, activating and rolling back need a valid signature by a trusted key over the candidate (unless the owner set `release.trust.require` to false). At most 20 keys. The private key never reaches the controller. The controller then rewrites the updater's copy of the trust root (`trust-root.json` in the release root); if that write fails the change still stands and the answer is `unavailable`, saying the updater's copy is stale until the next trust change or controller start.
 
 Arguments:
 
@@ -6790,7 +6790,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.trust.remove`
 
-Owner only: stops trusting a key. A release signed only by it stops counting as signed at once (a running release is not touched; the next staging, activation or rollback is refused unless another trusted key signed it).
+Owner only: stops trusting a key. A release signed only by it stops counting as signed at once (a running release is not touched; the next staging, activation or rollback is refused unless another trusted key signed it). The controller then rewrites the updater's copy of the trust root (`trust-root.json` in the release root); if that write fails the change still stands and the answer is `unavailable`, saying the updater's copy is stale until the next trust change or controller start.
 
 Arguments:
 
@@ -6804,7 +6804,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.trust.require`
 
-Owner only: `true` always needs a trusted signature (even with no key trusted yet, which then blocks staging), `false` never does (digests alone are the owner's word), `null` follows the trust root (needed once any key is trusted, the default).
+Owner only: `true` always needs a trusted signature (even with no key trusted yet, which then blocks staging), `false` never does (digests alone are the owner's word), `null` follows the trust root (needed once any key is trusted, the default). The controller then rewrites the updater's copy of the trust root (`trust-root.json` in the release root); if that write fails the change still stands and the answer is `unavailable`, saying the updater's copy is stale until the next trust change or controller start.
 
 Arguments:
 
