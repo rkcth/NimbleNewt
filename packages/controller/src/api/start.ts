@@ -1437,6 +1437,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         decide: (token, message, options) => owned.submit(token, { messageId: message.messageId, text: message.text }, { ...options, secrets: false, fixedIntents: message.intents }),
         applyProposal: (token, request, options) => owned.applyProposal(token, request, { ...options, secrets: false }),
         discardProposal: (token, request, options) => owned.discardProposal(token, request, options),
+        history: (token, request) => owned.history(token, request),
         query: async (token, op, args, commandId) => {
           const r = await api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
           return r.ok ? { ok: true, result: r.result } : { ok: false, error: { code: r.error.code, message: r.error.message } };

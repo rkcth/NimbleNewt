@@ -164,6 +164,8 @@ export const APP_JS = String.raw`(function (root) {
         return flushing;
       },
       view: function (name) { return call('GET', '/web/views/' + encodeURIComponent(name)); },
+      /** The conversation as the controller recorded it (newest page, or the page before the cursor). */
+      history: function (before) { return call('GET', '/web/history' + (before ? '?before=' + encodeURIComponent(before) : '')); },
       /** The replay of one task (card U09b): reads, plus the owner's recorded look at thinking and the simulation, each under its own Idempotency-Key so a retry runs once. */
       replay: function (taskId, filters) { var q = Object.keys(filters || {}).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(filters[k]); }).join('&'); return call('GET', '/web/replay/' + encodeURIComponent(taskId) + (q ? '?' + q : '')); },
       replayStep: function (taskId, seq) { return call('GET', '/web/replay/' + encodeURIComponent(taskId) + '/steps/' + encodeURIComponent(String(seq))); },
@@ -226,11 +228,51 @@ export const APP_JS = String.raw`(function (root) {
     net.className = 'pill ' + (client.state.online ? 'ok' : 'warn');
   }
 
+  // What the controller has recorded of the conversation (card U07 finish): turns made from this phone's outbox are shown from the outbox, every other recorded turn (another browser, the terminal chat, an
+  // earlier session whose local copy is gone) from the server, in time order. Chips that answer a question are offered only on the newest line, so an old question is never answered by a stale button.
+  var served = [];
+  var proposalState = {};
+  var olderCursor = null;
+  var historyNote = '';
+  function merged() {
+    var mine = client.outbox.items();
+    var ids = {};
+    mine.forEach(function (i) { ids[i.id] = true; });
+    var extra = served.filter(function (t) { return !ids[t.messageId]; }).map(function (t) {
+      return { id: t.messageId, kind: 'message', text: t.text, at: Date.parse(t.createdAt) || 0, state: t.status === 'done' ? 'done' : 'sending', result: { reply: t.reply, outcomes: t.outcomes }, fromServer: true };
+    });
+    var all = mine.map(function (i, n) { return { item: i, at: i.at || 0, n: n }; }).concat(extra.map(function (i, n) { return { item: i, at: i.at, n: 1e6 + n }; }));
+    // Oldest first by time; two items of the same moment keep the outbox's own order.
+    all.sort(function (a, b) { return a.at - b.at || a.n - b.n; });
+    return all.map(function (x) { return x.item; });
+  }
+
+  function loadHistory(older) {
+    return client.history(older ? olderCursor : null).then(function (r) {
+      if (r.status !== 200 || !r.body) return;
+      var turns = r.body.turns || [];
+      turns.forEach(function (t) { (t.outcomes || []).forEach(function (o) { if (o.proposalId && o.proposalState) proposalState[o.proposalId] = o.proposalState; }); });
+      var have = {};
+      var next = older ? served.slice() : [];
+      next.forEach(function (t) { have[t.turnId] = true; });
+      turns.forEach(function (t) { if (!have[t.turnId]) { have[t.turnId] = true; next.push(t); } });
+      if (!older) served.forEach(function (t) { if (!have[t.turnId]) { have[t.turnId] = true; next.push(t); } });
+      served = next;
+      if (older || olderCursor === null) olderCursor = r.body.next || null;
+      historyNote = r.body.complete === false ? 'This conversation is too long to read in full here: some messages, recent ones included, may be missing from this list.' : '';
+      if (tab === 'chat') renderChat();
+    }, function () { /* offline: what is on the phone still shows */ });
+  }
+
   function renderChat() {
     var list = $('log');
     var stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
     clear(list);
-    client.outbox.items().forEach(function (item) {
+    if (olderCursor) { var more = el('button', 'btn', 'Show older messages'); more.type = 'button'; more.addEventListener('click', function () { loadHistory(true); }); list.appendChild(more); }
+    if (historyNote) list.appendChild(el('div', 'meta', historyNote));
+    var all = merged();
+    all.forEach(function (item, at) {
+      var newest = at === all.length - 1;
       if (item.kind === 'message' || item.kind === 'approval' || item.kind === 'thinking') {
         list.appendChild(el('div', 'msg me', item.kind !== 'message' && item.result && typeof item.result.text === 'string' ? item.result.text : item.text));
         var meta = el('div', 'meta', item.state === 'done' ? '' : item.state === 'failed' ? 'Not sent: ' + (item.error || 'refused') : item.state === 'sending' ? 'Sending...' : 'Waiting to send');
@@ -239,7 +281,7 @@ export const APP_JS = String.raw`(function (root) {
           (item.result.reply || []).forEach(function (line) { list.appendChild(el('div', 'msg bot', line)); });
           (item.result.outcomes || []).forEach(function (o) {
             if (o.status === 'proposed' && o.proposalId) renderProposal(list, o);
-            else if (o.status === 'asked' && o.options && o.options.length) { var row = el('div', 'chips'); o.options.slice(0, 6).forEach(function (opt) { var b = el('button', 'chip', opt); b.type = 'button'; b.addEventListener('click', function () { client.say(opt); }); row.appendChild(b); }); list.appendChild(row); }
+            else if (o.status === 'asked' && o.options && o.options.length && newest) { var row = el('div', 'chips'); o.options.slice(0, 6).forEach(function (opt) { var b = el('button', 'chip', opt); b.type = 'button'; b.addEventListener('click', function () { client.say(opt); }); row.appendChild(b); }); list.appendChild(row); }
           });
         }
       } else {
@@ -256,7 +298,9 @@ export const APP_JS = String.raw`(function (root) {
     var card = el('div', 'card');
     card.appendChild(el('div', 'card-title', 'Proposal - nothing has changed yet'));
     (o.preview || []).forEach(function (p) { card.appendChild(el('div', 'card-line', p)); });
-    if (decided(o.proposalId)) card.appendChild(el('div', 'meta', 'Decision sent'));
+    var st = proposalState[o.proposalId] || o.proposalState;
+    if (st === 'applied' || st === 'discarded') card.appendChild(el('div', 'meta', st === 'applied' ? 'Already applied' : 'Already discarded'));
+    else if (decided(o.proposalId)) card.appendChild(el('div', 'meta', 'Decision sent'));
     else {
       var row = el('div', 'row');
       var apply = el('button', 'btn primary', 'Apply'); apply.type = 'button';
@@ -617,7 +661,84 @@ export const APP_JS = String.raw`(function (root) {
     });
     sec.appendChild(b); sec.appendChild(out);
   }
-  var PAGES = { approvals: pageApprovals, models: pageModels, replay: pageReplay };
+  // ---- the cost and blockers pages (card U07 finish) ---------------------------------------------------------------------------------
+  // Cost: what was spent in total and by project, agent, task, category and activity, as a table with a meter on every row (a native, labelled element: no inline style, and the figures are text as well), the
+  // cache figures, and the open requests for more budget. Blockers: what is waiting for the owner, ranked by the controller, and what needs a person's eye. Everything is the controller's own reading, drawn
+  // as text; an amount is in millionths of the cost unit, shown as the unit ("1.25").
+  function money(micros) { return !isNum(micros) ? '-' : (micros / 1000000).toFixed(6).replace(/0+$/, '').replace(/\.$/, '.0'); }
+  function share(table, caption, map, whole) {
+    var rows = Object.keys(map || {}).map(function (k) { var a = obj(map[k]) || {}; return [k, isNum(a.costMicros) ? a.costMicros : 0, isNum(a.computeMs) ? a.computeMs : 0]; }).sort(function (a, b) { return b[1] - a[1] || b[2] - a[2]; });
+    if (!rows.length) return;
+    var top = rows.slice(0, 10);
+    var t = el('table', 'grid');
+    t.appendChild(el('caption', 'sr', caption));
+    var head = el('thead'), hr = el('tr');
+    ['Name', 'Spent', 'Compute', 'Share'].forEach(function (h) { var th = el('th', null, h); th.setAttribute('scope', 'col'); hr.appendChild(th); });
+    head.appendChild(hr); t.appendChild(head);
+    var body = el('tbody');
+    top.forEach(function (r) {
+      var tr = el('tr');
+      var th = el('th', null, clip(r[0], 60)); th.setAttribute('scope', 'row'); tr.appendChild(th);
+      tr.appendChild(el('td', null, money(r[1])));
+      tr.appendChild(el('td', null, Math.round(r[2] / 1000) + ' s'));
+      var td = el('td'); var m = el('meter');
+      var pct = whole > 0 ? Math.round(100 * r[1] / whole) : 0;
+      m.setAttribute('min', '0'); m.setAttribute('max', '100'); m.setAttribute('value', String(Math.min(100, pct))); m.setAttribute('aria-label', clip(r[0], 60) + ': ' + pct + ' percent of the total');
+      td.appendChild(m); td.appendChild(el('span', null, ' ' + pct + '%')); tr.appendChild(td);
+      body.appendChild(tr);
+    });
+    t.appendChild(body);
+    var wrap = el('div', 'tablewrap'); wrap.appendChild(t); table.appendChild(wrap);
+    if (rows.length > top.length) note(table, (rows.length - top.length) + ' more not shown; ask the chat for a narrower view.');
+  }
+  function pageCost(box, parts) {
+    box.appendChild(el('h2', null, 'Cost'));
+    var u = itemOf(parts.usage);
+    var sec = region(box, 'Spent so far');
+    if (!u || !obj(u.totals)) { var ue = obj(parts.usage) && obj(parts.usage.error); if (ue) sec.appendChild(el('p', 'error', 'Could not load: ' + clip(ue.message || ue.code, 300))); else note(sec, 'No spending is recorded yet.'); }
+    else {
+      var tot = u.totals;
+      sec.appendChild(el('p', 'card-line', money(tot.costMicros) + ' cost units spent, ' + Math.round((tot.computeMs || 0) / 1000) + ' s of compute, over ' + (isNum(u.entries) ? u.entries : 0) + ' records.'));
+      if (u.truncated) note(sec, 'More records matched than were read: these figures are a lower bound.');
+      var cache = obj(u.cache);
+      if (cache && isNum(cache.calls) && cache.calls > 0) { var all = (cache.cachedTokens || 0) + (cache.computedTokens || 0); sec.appendChild(el('p', 'card-line', 'Cache: ' + (cache.cachedTokens || 0) + ' of ' + all + ' input tokens were read from a cache, over ' + cache.calls + ' calls.')); }
+      [['byProject', 'By project'], ['byAgent', 'By agent'], ['byTask', 'By task'], ['byCategory', 'Work and shared overhead'], ['byActivity', 'By activity']].forEach(function (g) {
+        var m = obj(u[g[0]]);
+        if (!m || !Object.keys(m).length) return;
+        var s2 = region(box, g[1]);
+        share(s2, g[1], m, tot.costMicros);
+      });
+      if (list(u.overheadRules, 10).length) { var rs = region(box, 'How shared overhead is charged'); list(u.overheadRules, 10).forEach(function (r) { rs.appendChild(el('p', 'card-line', clip(r, 300))); }); }
+    }
+    var pend = obj(parts.pending);
+    var ps = region(box, 'Requests for more budget');
+    if (pend && pend.error) ps.appendChild(el('p', 'error', 'Could not load: ' + clip(obj(pend.error).message || obj(pend.error).code, 300)));
+    else {
+      var reqs = list(pend && pend.requests, 50);
+      if (!reqs.length) note(ps, 'Nobody is waiting for you to raise a budget.');
+      else {
+        table(ps, 'Open requests for more budget', ['Task', 'Asked by', 'Amount', 'Why'], reqs.map(function (r) { r = obj(r) || {}; return [r.taskId, r.requestedBy, money(r.costMicros) + ' and ' + Math.round((r.computeMs || 0) / 1000) + ' s', r.reason]; }));
+        note(ps, 'To decide one, tell the chat which request and what you want; it shows you the change first.');
+      }
+      if (pend && pend.truncated) note(ps, 'Some older requests may be missing.');
+    }
+  }
+  function pageBlockers(box, parts) {
+    box.appendChild(el('h2', null, 'Blockers'));
+    var n = region(box, 'Waiting for you');
+    if (obj(parts.needsYou) && parts.needsYou.error) n.appendChild(el('p', 'error', 'Could not load: ' + clip(parts.needsYou.error.message || parts.needsYou.error.code, 300)));
+    else { var lines = linesOf(parts.needsYou); if (!lines.length) note(n, 'Nothing is waiting for you.'); lines.slice(0, 60).forEach(function (l) { n.appendChild(el('div', 'card-line', clip(l, 400))); }); }
+    var a = region(box, 'Needs a person\'s eye');
+    var att = obj(parts.attention);
+    if (att && att.error) a.appendChild(el('p', 'error', 'Could not load: ' + clip(att.error.message || att.error.code, 300)));
+    else {
+      var items = list(att && att.items, 60);
+      if (!items.length) note(a, 'Nothing needs a closer look.');
+      else table(a, 'Work that needs a person\'s eye', ['What', 'Task', 'State', 'Since', 'Detail'], items.map(function (i) { i = obj(i) || {}; return [String(i.kind || '').replace(/_/g, ' '), i.title, i.taskState, i.at, i.summary]; }));
+      if (att && att.scanLimited) note(a, 'The search stopped early: ask the chat for more.');
+    }
+  }
+  var PAGES = { approvals: pageApprovals, models: pageModels, replay: pageReplay, cost: pageCost, blockers: pageBlockers };
 
   function renderView(name) {
     var box = $('view');
@@ -667,6 +788,7 @@ export const APP_JS = String.raw`(function (root) {
         'Host names: ' + ((b.publicHosts || []).join(', ') || 'none'),
         proxy,
         'Your connection arrives as ' + b.yourAddress + (b.addressFromProxy ? ' (from the proxy header)' : ''),
+        (isNum(b.liveStreams) ? 'Live-update connections open now: ' + b.liveStreams + ' (each browser may hold ' + (b.limits.streamsPerSession || 2) + ')' : 'Live updates: not reported'),
         'Sign-in limits: ' + b.limits.failedLoginsPerAddressPerMinute + ' failures a minute per address, ' + b.limits.failedLoginsGlobalPerMinute + ' in all',
         'The address, the network and the proxy are set when the controller starts.'
       ].forEach(function (l) { card.appendChild(el('div', 'card-line', l)); });
@@ -703,8 +825,50 @@ export const APP_JS = String.raw`(function (root) {
     });
   }
 
+  // ---- live updates (card U07 finish) -----------------------------------------------------------------------------------------------
+  // The controller sends a nudge over one server-sent-event stream when something the page shows changed (what needs the owner, what needs attention, open budget requests, the newest chat turns). The nudge
+  // carries no data: the page reads what it shows again with its ordinary requests. Without EventSource the page asks for the history every half minute while it is in front. A repeated or missed nudge
+  // changes nothing.
+  var live = null, livePoll = null, readies = 0;
+  var QUIET = { replay: true, sessions: true };
+  function tabButton(name) { return Array.prototype.filter.call(doc.querySelectorAll('[data-tab]'), function (b) { return b.getAttribute('data-tab') === name; })[0]; }
+  function markTab(name, on) {
+    var b = tabButton(name);
+    if (!b) return;
+    if (on) { b.setAttribute('data-changed', 'true'); b.setAttribute('aria-label', (VIEW_TABS[name] || name) + ' - updated'); } else { b.setAttribute('data-changed', 'false'); b.setAttribute('aria-label', VIEW_TABS[name] || (name === 'chat' ? 'Chat' : 'Settings')); }
+  }
+  function onChanged(views) {
+    views.forEach(function (v) {
+      if (v === 'chat') { loadHistory(false); if (tab !== 'chat') markTab('chat', true); return; }
+      if (v === tab && !QUIET[v]) renderView(v); else if (VIEW_TABS[v]) markTab(v, true);
+    });
+  }
+  function stopLive() {
+    if (live) { try { live.close(); } catch (e) { /* closed */ } live = null; }
+    if (livePoll) { if (typeof root.clearInterval === 'function') root.clearInterval(livePoll); livePoll = null; }
+  }
+  function startLive() {
+    if (live || livePoll || !client.state.signedIn) return;
+    if (typeof root.EventSource === 'function') {
+      var src = new root.EventSource('/web/events');
+      live = src;
+      src.addEventListener('ready', function () {
+        // After a dropped stream comes back, what was missed is read again.
+        loadHistory(false);
+        if (readies++ > 0 && tab !== 'chat' && !QUIET[tab]) renderView(tab);
+      });
+      src.addEventListener('changed', function (e) { var v = []; try { v = JSON.parse(e.data).views || []; } catch (x) { v = []; } onChanged(v); });
+      src.addEventListener('ended', function () { stopLive(); client.session().then(function () { renderGate(); }); });
+      src.addEventListener('error', function () { if (src.readyState === 2) { stopLive(); client.session().then(function () { renderGate(); }); } });
+    } else {
+      if (typeof root.setInterval !== 'function') return;
+      livePoll = root.setInterval(function () { if (doc.visibilityState === 'visible') loadHistory(false); }, 30000);
+    }
+  }
+
   function show(name) {
     tab = name;
+    markTab(name, false);
     $('chat').hidden = name !== 'chat';
     $('view').hidden = name === 'chat';
     Array.prototype.forEach.call(doc.querySelectorAll('[data-tab]'), function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-tab') === name)); });
@@ -742,8 +906,12 @@ export const APP_JS = String.raw`(function (root) {
       $('gate-error').textContent = '';
       client.login(credential).then(function (r) { if (r.status !== 200) $('gate-error').textContent = r.status === 429 ? 'Too many attempts. Wait a minute.' : 'That was not accepted.'; else show('chat'); }, function () { $('gate-error').textContent = 'Could not reach the controller.'; });
     });
-    client.onChange(function () { renderGate(); if (tab === 'chat' && client.state.signedIn) renderChat(); });
-    doc.addEventListener('visibilitychange', function () { if (doc.visibilityState === 'visible') client.resume(); });
+    client.onChange(function () {
+      renderGate();
+      if (client.state.signedIn) { if (!live && !livePoll) { startLive(); loadHistory(false); } } else { stopLive(); served = []; proposalState = {}; olderCursor = null; readies = 0; }
+      if (tab === 'chat' && client.state.signedIn) renderChat();
+    });
+    doc.addEventListener('visibilitychange', function () { if (doc.visibilityState === 'visible') { client.resume(); if (client.state.signedIn) loadHistory(false); } });
     root.addEventListener('online', function () { client.resume(); });
     root.addEventListener('offline', function () { client.state.online = false; renderGate(); });
     root.addEventListener('pageshow', function () { client.resume(); });

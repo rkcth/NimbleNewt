@@ -48,6 +48,8 @@ h3.card-title,h4.card-title{margin:.1em 0 .25rem;font-size:1rem;overflow-wrap:an
 .lane{flex:1 0 15rem;min-width:0}
 .lane .btn{display:block;width:100%;text-align:left;margin:.3rem 0 .1rem}
 .faded{opacity:.65}
+.tab[data-changed=true]::after{content:" \\25CF";color:var(--accent)}
+meter{width:6rem;height:.9rem;vertical-align:middle}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 @media (prefers-reduced-motion:no-preference){.log{scroll-behavior:smooth}}
 @media (min-width:700px){.msg{max-width:70%}}

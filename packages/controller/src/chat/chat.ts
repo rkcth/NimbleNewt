@@ -199,6 +199,20 @@ const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const PROPOSAL_ID = /^prop-[0-9a-f]{32}$/;
+/** Chat turns `history` reads at most in one call, and the shape of its page cursor (an ISO time, a bar, a turn ID). */
+const HISTORY_SCAN = 4000;
+const HISTORY_CURSOR = /^[0-9TZ:.+-]{10,40}\|turn-[0-9a-f]{32}$/;
+/** One turn of the owner's recorded conversation, as `history` returns it. An outcome that proposes something also says whether the proposal is still `open`. */
+export interface HistoryTurn {
+  readonly turnId: string;
+  readonly messageId: string;
+  readonly text: string;
+  readonly status: "planned" | "done";
+  readonly createdAt: string;
+  readonly completedAt?: string;
+  readonly reply: readonly string[];
+  readonly outcomes: readonly Outcome[];
+}
 const hash = (...parts: string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 32);
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const asJson = (value: unknown): JsonObject => JSON.parse(JSON.stringify(value)) as JsonObject;
@@ -334,6 +348,50 @@ export class ChatService {
     const owner = await this.#owner(token);
     const turn = await this.#turn(turnId);
     return turn === undefined || turn.ownerId !== owner.id ? undefined : turn;
+  }
+
+  /**
+   * The owner's recent conversation as recorded (card U07 finish): the newest turns first, each with the words said, what came of them in plain lines and its outcomes, and for every proposal in them
+   * whether it is still open, applied or discarded (so a second browser never offers a button for a decision that was already made). Read only: it runs no command, calls no model and writes nothing.
+   * The turns are found by a bounded scan (at most `HISTORY_SCAN` records, ordered by identity, not time), so a very long history reports `complete: false`: the turns it then gives are the newest of those it read, which need not be the newest the owner made (no time index exists; one would remove the bound).
+   * `before` is the `next` of the previous page.
+   */
+  async history(token: unknown, request: { limit?: number; before?: string } = {}): Promise<{ turns: readonly HistoryTurn[]; next?: string; complete: boolean }> {
+    const owner = await this.#owner(token);
+    onlyKnown(request, ["limit", "before"]);
+    const limit = request.limit === undefined ? 20 : Number.isInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be a whole number from 1 to 50");
+    if (request.before !== undefined && (typeof request.before !== "string" || !HISTORY_CURSOR.test(request.before))) invalid("before", "must be the next of an earlier history page");
+    const mine: { id: string; body: TurnBody }[] = [];
+    let complete = true;
+    let scanned = 0;
+    for (let after: string | undefined; ;) {
+      const chunk = await this.#runner.list("chat-turn", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of chunk) { const b = a.body as unknown as TurnBody; if (b.ownerId === owner.id) mine.push({ id: a.id, body: b }); }
+      scanned += chunk.length;
+      if (chunk.length < 200) break;
+      if (scanned >= HISTORY_SCAN) { complete = false; break; }
+      after = chunk[chunk.length - 1]!.id;
+    }
+    // Newest first; the cursor is the time and ID of the last turn shown, so turns made meanwhile never shift a page.
+    mine.sort((a, b) => (a.body.createdAt === b.body.createdAt ? (a.id < b.id ? 1 : -1) : a.body.createdAt < b.body.createdAt ? 1 : -1));
+    const bar = request.before === undefined ? undefined : request.before.indexOf("|");
+    const cursor = request.before === undefined || bar === undefined ? undefined : { at: request.before.slice(0, bar), id: request.before.slice(bar + 1) };
+    const older = cursor === undefined ? mine : mine.filter((t) => t.body.createdAt < cursor.at || (t.body.createdAt === cursor.at && t.id < cursor.id));
+    const page = older.slice(0, limit);
+    const state = new Map<string, "open" | "applied" | "discarded" | "unknown">();
+    const turns: HistoryTurn[] = [];
+    for (const t of page) {
+      const outcomes: Outcome[] = [];
+      for (const o of t.body.outcomes ?? []) {
+        if (o.status === "proposed" && o.proposalId !== undefined) {
+          if (!state.has(o.proposalId)) { const p = await this.getProposal(token, o.proposalId).catch(() => undefined); state.set(o.proposalId, p === undefined ? "unknown" : p.status); }
+          outcomes.push({ ...o, proposalState: state.get(o.proposalId) } as Outcome);
+        } else outcomes.push(o);
+      }
+      turns.push({ turnId: t.id, messageId: t.body.messageId, text: t.body.text, status: t.body.status, createdAt: t.body.createdAt, ...(t.body.completedAt === undefined ? {} : { completedAt: t.body.completedAt }), reply: replyOf(outcomes).map((l) => (l.length > 2000 ? `${l.slice(0, 1997)}...` : l)), outcomes });
+    }
+    const last = page[page.length - 1];
+    return { turns, ...(older.length > page.length && last !== undefined ? { next: `${last.body.createdAt}|${last.id}` } : {}), complete };
   }
 
   // ---- proposals -------------------------------------------------------------------------------------------------------------
