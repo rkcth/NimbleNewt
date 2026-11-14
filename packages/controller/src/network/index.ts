@@ -3,3 +3,4 @@ export { canonicalHost, canonicalPort, isPrivate, neverReachable, parseDestinati
 export { admit, NetworkRefused, type Admitted, type GrantSource, type NetworkContext } from "./admit.js";
 export { NetworkRelay, NETWORK_RELAY_DEFAULTS, type NetworkOpener, type NetworkRelayOptions, type Tunnel, type TunnelEvents } from "./relay.js";
 export { WebFetch, WEB_FETCH_TOOL, WEB_LIMITS, type WebFetchOptions, type WebFetchResult } from "./web-tool.js";
+export { AgentSiteAllowances, AGENT_SITE_LIMITS, type AgentSiteBody, type AgentSiteView, type AgentSiteOptions } from "./agent-sites.js";

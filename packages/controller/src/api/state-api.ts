@@ -43,7 +43,8 @@ import type { NetworkGrantService } from "../network/index.js";
 import type { ContextRouteSettingsService } from "../context/route-settings.js";
 import type { StartSizeService } from "../context/start-size.js";
 import type { EnvironmentService } from "../environments/index.js";
-import type { MaintenanceService } from "../maintenance/index.js";
+import type { AgentMounts, MaintenanceService } from "../maintenance/index.js";
+import type { AgentSiteAllowances } from "../network/index.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
 import type { SwarmLimitsService } from "../swarm/limits.js";
@@ -190,6 +191,8 @@ export interface StateApiDeps {
   readonly dispatchLimits?: Pick<DispatchLimitsSettingsService, "get" | "change">;
   /** Network grants for tasks and their connection log (card H12i). */
   readonly networkGrants?: Pick<NetworkGrantService, "grant" | "decide" | "revoke" | "forTask" | "connections">;
+  /** What approved maintenance requests gave agents (card A09): network sites the relay allows and resources mounted in the sandbox. Read by `maintenance.access`. */
+  readonly agentAccess?: { readonly sites?: Pick<AgentSiteAllowances, "list">; readonly mounts?: Pick<AgentMounts, "list"> };
   readonly maintenance?: Pick<MaintenanceService, "request" | "get" | "list" | "decide" | "revoke" | "apply" | "settings" | "change" | "toggle" | "site" | "catalogue">;
   readonly environments?: Pick<EnvironmentService, "get">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
@@ -407,6 +410,7 @@ export class StateApi {
         ...(this.#deps.recoveryStep === undefined ? {} : { recoveryStep: this.#deps.recoveryStep }),
         ...(this.#deps.dispatchLimits === undefined ? {} : { dispatchLimits: this.#deps.dispatchLimits }),
         ...(this.#deps.networkGrants === undefined ? {} : { networkGrants: this.#deps.networkGrants }),
+        ...(this.#deps.agentAccess === undefined ? {} : { agentAccess: this.#deps.agentAccess }),
         ...(this.#deps.maintenance === undefined ? {} : { maintenance: this.#deps.maintenance }),
         ...(this.#deps.environments === undefined ? {} : { environments: this.#deps.environments }),
         ...(this.#deps.capacityLimits === undefined ? {} : { capacityLimits: this.#deps.capacityLimits }),

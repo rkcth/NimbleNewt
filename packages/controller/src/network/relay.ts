@@ -109,7 +109,7 @@ export class NetworkRelay {
         touch();
         // The grant is judged again while the connection is open: a revoke made in another process, or the end of the task, is noticed here.
         timer = setInterval(() => {
-          void o.grants.check(ctx.taskId, admitted.host, admitted.port).then((c) => {
+          void o.grants.check(ctx.taskId, admitted.host, admitted.port, ctx.agentId).then((c) => {
             if (!c.live) live.close(c.grant?.state === "granted" ? "ended" : "revoked");
           }, () => live.close("error"));
         }, o.recheckMs ?? NETWORK_RELAY_DEFAULTS.recheckMs);

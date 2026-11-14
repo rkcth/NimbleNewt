@@ -918,6 +918,16 @@ export class MaintenanceService {
     return "applying";
   }
 
+  /**
+   * Whether the owner's rule denies this site now (card A09, network application): read by the relay at every connection an agent makes under an approved site, so a deny written after the approval counts at once, before the controller's
+   * loop has reverted the change. A rule that cannot be read counts as a denial (fail closed). A site is judged as the requests are: a name and a port.
+   */
+  async siteDenied(site: string, port: number): Promise<boolean> {
+    const s = await this.#settings();
+    if (!s.readable) return true;
+    return siteRule(s.body?.sites, site.toLowerCase(), port) === "deny";
+  }
+
   /** After an application: a denial written while it ran counts at once. */
   async #recheckSite(id: string): Promise<void> {
     const found = await this.#runner.get(REQ, id);

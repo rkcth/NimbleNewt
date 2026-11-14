@@ -1512,6 +1512,43 @@ for (const backend of backendsNamed(backendName)) {
     assert.deepEqual(startOf(b2.attemptId!).map((o) => o.environmentRevision), [1]);
   });
 
+  suite("the mounts an agent's approved requests give it are named in the recipe of each attempt that starts; a restart keeps its recorded mounts minus any no longer approved and never adds one; a failing read starts with none (card A09, mount application)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, ["git-push"]));
+    const bob = await c.agent("bob", workGrants(c.project, ["git-push"]));
+    let approved: Record<string, string[]> = { "agent:ann": ["mount:ann.data", "mount:shared.docs"] };
+    let broken = false;
+    c.dispatcher = c.restart({ agentReach: async (agent: string) => { if (broken) throw new Error("the record cannot be read"); return approved[agent] ?? []; } });
+    const calls = new Map<string, ToolResult>();
+    c.worker.script = async ({ order, gateway }) => {
+      if (order.resumeNote !== undefined) return { status: "completed", text: "resumed" };
+      calls.set(order.agentId, await gateway.call({ callId: "push", tool: { name: "git-push", version: "1" }, args: { b: order.agentId } }, { kind: "effect", effectKind: "git-push", target: "repo", input: {}, bridge: { idempotent: true, execute: async () => ({}) } }));
+      return { status: "completed", text: "waiting", checkpoint: { saved: order.agentId } };
+    };
+    const a = await c.task("a", ann);
+    const b = await c.task("b", bob);
+    for (let i = 0; i < 4; i++) await c.run();
+    const startOf = (attemptId: string) => c.worker.starts.filter((o) => o.attemptId === attemptId);
+    assert.deepEqual(startOf(a.attemptId!).map((o) => o.recipe.reach), [["mount:ann.data", "mount:shared.docs"]], "the agent's approved mounts are in the recipe");
+    assert.deepEqual(startOf(b.attemptId!).map((o) => o.recipe.reach), [[]], "an agent with none gets none");
+    // While the attempts wait: one mount is revoked and another approved. The restart keeps what is still approved and adds nothing.
+    approved = { "agent:ann": ["mount:shared.docs", "mount:new.thing"], "agent:bob": ["mount:bob.data"] };
+    for (const result of calls.values()) {
+      const review = (await c.reviews.get(c.owner, (result as { reviewId: string }).reviewId))!;
+      await c.reviews.decide(c.owner, { commandId: `dec-${review.id}`, requestId: review.id, expectedRevision: review.revision, verdict: "allow", reason: "fine" });
+    }
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.deepEqual(startOf(a.attemptId!).map((o) => o.recipe.reach), [["mount:ann.data", "mount:shared.docs"], ["mount:shared.docs"]], "the revoked mount is gone on the restart and the new one is not added");
+    assert.deepEqual(startOf(b.attemptId!).map((o) => o.recipe.reach), [[], []], "an attempt that began with none does not get one by restarting");
+    // A later attempt gets what is approved now; a read that fails gives the narrower recipe.
+    const a2 = await c.task("a2", ann);
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.deepEqual(startOf(a2.attemptId!).map((o) => o.recipe.reach), [["mount:shared.docs", "mount:new.thing"]]);
+    broken = true;
+    const b2 = await c.task("b2", bob);
+    for (let i = 0; i < 4; i++) await c.run();
+    assert.deepEqual(startOf(b2.attemptId!).map((o) => o.recipe.reach), [[]], "an unreadable record starts the attempt with no mount");
+  });
+
   suite("the inbox names the harness at every admission: with the recovery gate on, an admission that names none is refused with the reason, and one that names Pi is admitted", async (c) => {
     const { InboxService } = await import("../domain/inbox.js");
     const ann = await c.agent("ann", workGrants(c.project, []));
