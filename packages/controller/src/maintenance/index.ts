@@ -1,3 +1,5 @@
 export { MAINTENANCE_LIMITS, MaintenanceService, checkSpec, checkSource, siteRule, noApplier, type ApplyOutcome, type ArtifactInspection, type StoredInspection, type CatalogueEntry, type MaintenanceApplier, type MaintenanceBody, type MaintenanceClass, type MaintenanceKind, type MaintenanceNotice, type MaintenanceOptions, type MaintenanceStatus, type MaintenanceView, type RevertOutcome } from "./maintenance.js";
 export { FakeApplier } from "./fake-applier.js";
 export { EnvironmentChangeApplier, MAINTENANCE_PRINCIPAL, MemoryJournal, StorageJournal, type ApplierJournal, type EnvironmentApplierDeps, type EnvironmentRuntime, type JournalBody, type ReloadInput, type ReloadResult, type TrialInput, type TrialResult, type ValidateInput, type ValidateResult } from "./environment-applier.js";
+export { AccessChangeApplier, type AccessApplierDeps, type MountResources } from "./access-applier.js";
+export { AgentMounts, AGENT_MOUNT_LIMITS, mountGuestPath, mountReachName, type AgentMountEntry, type AgentMountsBody } from "./mounts.js";

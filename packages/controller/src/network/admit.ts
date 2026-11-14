@@ -7,14 +7,14 @@ import { neverReachable, parseDestination } from "./destination.js";
 
 /** What admission needs from the grant service and the connection log (the `NetworkGrantService` is what is passed). */
 export interface GrantSource {
-  check(taskId: string, host: string, port: number): Promise<GrantCheck>;
+  check(taskId: string, host: string, port: number, agentId?: string): Promise<GrantCheck>;
   logOpen(entry: Omit<ConnectionBody, "outcome" | "bytesToTarget" | "bytesFromTarget" | "startedAt"> & { outcome: "open" | "refused" | "failed" }): Promise<string>;
   logClose(taskId: string, id: string, ended: { readonly outcome: "closed" | "failed"; readonly endedBy: NonNullable<ConnectionBody["endedBy"]>; readonly bytesToTarget: number; readonly bytesFromTarget: number; readonly reason?: string }): Promise<void>;
   loggedFor(taskId: string, attemptId: string): Promise<number>;
 }
 
 /** The attempt a connection is made for. */
-export interface NetworkContext { readonly taskId: string; readonly projectId: string; readonly attemptId: string }
+export interface NetworkContext { readonly taskId: string; readonly projectId: string; readonly attemptId: string; /** The agent working the attempt: sites its environment holds through approved maintenance requests (card A09) count as grants. Absent: only the task's own grants. */ readonly agentId?: string }
 
 /** A connection that was refused: the text goes back to the task as the reason (it never names another task's grants or the controller's addresses). */
 export class NetworkRefused extends Error {
@@ -52,7 +52,7 @@ export async function admit(source: GrantSource, ctx: NetworkContext, rawHost: u
   try { logged = await source.loggedFor(ctx.taskId, ctx.attemptId); } catch { throw new NetworkRefused("the connection log could not be read, so no connection is made"); }
   if (logged >= (options.maxLogged ?? 1000)) throw new NetworkRefused("this attempt has made as many connections (and refused attempts) as its log holds; no more are made");
   let check: GrantCheck;
-  try { check = await source.check(ctx.taskId, host, port); } catch { return refuse(host, port, "the grant could not be checked, so the connection is refused"); }
+  try { check = await source.check(ctx.taskId, host, port, ctx.agentId); } catch { return refuse(host, port, "the grant could not be checked, so the connection is refused"); }
   if (!check.live || check.grant === undefined) return refuse(host, port, `${check.why ?? "the task holds no grant for that destination"} (${host}:${port})`, check.grant?.id);
   const grant = check.grant;
   // The name is looked up once. A name that gives no address, or any address no grant reaches, is refused; so is a private address unless the grant names it.

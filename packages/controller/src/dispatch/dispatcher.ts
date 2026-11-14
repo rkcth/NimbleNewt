@@ -192,6 +192,11 @@ export interface DispatcherDeps {
   readonly replaySafe?: (tool: ToolIdentity, agent: Principal, attemptId: string, callId: string) => Promise<boolean>;
   readonly environments?: Pick<EnvironmentService, "pin" | "resume">;
   /**
+   * The named reaches (`mount:<resource>`) the agent's approved environment access adds to a recipe (card A09, mount application), read when an attempt starts. A new attempt starts with them; a resumed, moved or restarted attempt keeps its recorded
+   * reach minus any mount that is no longer approved (a revoke narrows a restart, it never widens one). A read that fails starts the attempt with no mount (the narrower recipe is the safe one). Absent: no mount is ever added.
+   */
+  readonly agentReach?: (agentId: string) => Promise<readonly string[]>;
+  /**
    * The installation's limits for an agent launched now (card A08d): the owner's setting over the start-up configuration, read at each launch. Cut against the figures of the agent's environment manifest, the smaller wins. It may throw
    * (the setting is unreadable): the attempt is then refused, never started without the limits. Absent: only the environment's figures apply.
    */
@@ -2690,7 +2695,14 @@ export class DispatcherService {
       return { kind: "skipped", check: "host", reason: `the worker did not start: ${limitRefusal}` };
     }
     // The recipe the attempt holds now: a resumed, moved or restarted attempt keeps the narrowed (or widened) recipe its record names, never the defaults.
-    const recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
+    let recipe: RecipeSummary = b.recipe !== undefined ? { revision: b.recipe.revision, reach: [...b.recipe.reach], ...(b.recipe.limits === undefined ? {} : { limits: { ...b.recipe.limits } }) } : { revision: `r-${b.attemptId.slice(4, 16)}`, reach: [] };
+    if (this.#deps.agentReach !== undefined) {
+      let approved: readonly string[] = [];
+      try { approved = await this.#deps.agentReach(b.agentId); } catch { approved = []; }
+      const now = new Set(approved);
+      const kept = recipe.reach.filter((n) => !n.startsWith("mount:") || now.has(n));
+      recipe = { ...recipe, reach: b.recipe === undefined ? [...new Set([...kept, ...approved])] : kept };
+    }
     // Card C07i: what the first prompt is made of goes with the order, so the starting-size watch can name the largest contributors; the records the hand-off paragraph names are where their originals are kept.
     const taskText = await this.#contentOf(b.taskId);
     const rules = (await this.#policyNote(b)) + (await this.#doneNote(b));

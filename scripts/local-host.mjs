@@ -88,7 +88,7 @@ export function localHostBuilder(setup) {
         scripts: worker.sandboxInstallScripts({ launcher, interpreter: { root: nodeRoot, executable: "bin/node" }, base: join(worker.hostEnvironmentsBase(dataDir), "install-runs") }),
       });
       if (environments.problem !== undefined) { ctx.print(`Agents' environments cannot be changed here: ${environments.problem}`); environments = undefined; }
-      else { mkdirSync(join(environments.runtime.root, "mirror"), { recursive: true, mode: 0o700 }); mkdirSync(join(environments.runtime.root, "install-runs"), { recursive: true, mode: 0o700 }); await environments.runtime.recover(); }
+      else { mkdirSync(join(environments.runtime.root, "mirror"), { recursive: true, mode: 0o700 }); mkdirSync(join(environments.runtime.root, "install-runs"), { recursive: true, mode: 0o700 }); mkdirSync(join(environments.runtime.root, "resources"), { recursive: true, mode: 0o700 }); await environments.runtime.recover(); }
     }
     let git;
     try { git = await worker.GitBridge.create({ scratch: join(base, "git") }); } catch (error) {
@@ -142,7 +142,7 @@ export function localHostBuilder(setup) {
       tools,
       // This computer's host is the only one that can carry a backup or a restore (a remote worker host cannot over the worker protocol yet): a task that works elsewhere is refused with that reason.
       wipBackup: { port: wipHost, localHostId: LOCAL_HOST_ID },
-      ...(environments?.runtime === undefined ? {} : { maintenance: { environmentRuntime: environments.runtime } }),
+      ...(environments?.runtime === undefined ? {} : { maintenance: { environmentRuntime: environments.runtime, ...(environments.resources === undefined ? {} : { mountResources: environments.resources }) } }),
       dispatch: {
         local: {
           // The routing table's context size for the route is used (the host states none of its own).

@@ -280,6 +280,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups and the latest one, whether and when stored model thinking is removed (counts only), and the latest deletions and retention runs (counts and record IDs only). Use it for how much room is left, which quotas are near their limit, which backups are kept, whether the model's stored thinking is being removed and what retention deleted lately" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
+  access: { keys: ["agent|agentName"], about: "what approved environment requests give one agent right now: the network sites its attempts may reach through the relay and the host resources mounted read-only for its next attempts, each with the request behind it; a part this controller does not enforce is said so (owner only)" },
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
@@ -380,6 +381,7 @@ export type StatusRequest =
   | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
+  | { readonly kind: "access"; readonly agent?: string }
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "jobs"; readonly limit?: number }
@@ -505,6 +507,8 @@ export interface StatusDeps {
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
   readonly environments?: Pick<EnvironmentService, "get">;
   readonly maintenance?: Pick<MaintenanceService, "list" | "get">;
+  /** What approved network and mount requests give an agent (card A09): `sites` / `mounts` are absent when this controller does not enforce them. Owner only. */
+  readonly agentAccess?: (by: Principal, agentId: string) => Promise<{ readonly sites?: readonly { readonly host: string; readonly port: number; readonly requests: readonly { readonly id: string }[] }[]; readonly mounts?: readonly { readonly resource: string; readonly mountPath: string; readonly requestId: string }[] }>;
   readonly jobs?: Pick<JobService, "live"> & Partial<Pick<JobService, "recentlyEnded">>;
   /** Past revocations of catalogue tool versions (card T02c). Absent: the view is not offered. */
   readonly revocations?: { list(by: Principal, query: { name?: string; limit?: number }): Promise<{ readonly items: readonly { name: string; version: string; reason: string; revokedBy: string; at: string }[]; readonly total: number; readonly partial?: boolean }> };
@@ -826,6 +830,7 @@ export class StatusService {
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
       case "environment": { onlyKnown(request, ["kind", "agent"]); return this.environmentLines(by, request.agent); }
       case "maintenance": { onlyKnown(request, ["kind", "maintenanceId", "agent", "status", "limit"]); return this.maintenanceLines(by, request); }
+      case "access": { onlyKnown(request, ["kind", "agent"]); return this.accessLines(by, request); }
       case "jobs": { onlyKnown(request, ["kind", "limit"]); return this.jobLines(by, request.limit); }
       case "model_routes": { onlyKnown(request, ["kind", "level", "name"]); return this.modelRouteLines(by, request); }
       case "reconnect": { onlyKnown(request, ["kind", "limit"]); return this.reconnectLines(by, request); }
@@ -1085,6 +1090,20 @@ export class StatusService {
       const tail = m["status"] === "failed" && failure?.reason !== undefined ? ` - ${failure.reason}` : m["pendingReason"] !== undefined ? ` - waiting: ${String(m["pendingReason"])}` : m["status"] === "applied" && effect?.environmentRevision !== undefined ? ` - now revision ${effect.environmentRevision}` : "";
       return line(`${String(m["id"])}: ${String(m["agentId"])} asked for ${what}; ${String(m["status"])}${tail}`.slice(0, 400), cite("maintenance", String(m["id"]), typeof m["revision"] === "number" ? m["revision"] : undefined));
     });
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  async accessLines(by: Principal, q: { agent?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const read = this.#deps.agentAccess;
+    if (by.kind !== "owner" || read === undefined || q.agent === undefined) return undefined;
+    const got = await read(by, q.agent);
+    const lines: Line[] = [];
+    if (got.sites === undefined) lines.push(line("This controller has no network relay, so approved network sites are not enforced.", cite("access", q.agent)));
+    else if (got.sites.length === 0) lines.push(line(`${q.agent} may reach no network site through an approved request.`, cite("access", q.agent)));
+    else for (const x of got.sites) lines.push(line(`${q.agent} may reach ${x.host}:${x.port} through the relay (request ${x.requests.map((r) => r.id).join(", ")}).`.slice(0, 400), cite("access", `${q.agent}:${x.host}:${x.port}`)));
+    if (got.mounts === undefined) lines.push(line("This controller has no host resource store, so approved mounts are not made.", cite("access", q.agent)));
+    else if (got.mounts.length === 0) lines.push(line(`${q.agent} has no mounted resource.`, cite("access", q.agent)));
+    else for (const x of got.mounts) lines.push(line(`${q.agent} gets ${x.resource} read-only at ${x.mountPath} in attempts that start from now on (request ${x.requestId}).`.slice(0, 400), cite("access", `${q.agent}:${x.resource}`)));
     return { observedAt: this.#runner.now(), lines };
   }
 

@@ -10,6 +10,7 @@ import { redactText } from "../security/redact.js";
 import { scanSecrets } from "../security/secret-scan.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { canonicalHost, canonicalPort, neverReachable } from "./destination.js";
+import type { AgentSiteAllowances } from "./agent-sites.js";
 
 /**
  * Network grants for tasks (card H12i). A worker runs in a sandbox with no network; the only way out for a task is a route through the controller's relay, and the relay lets a connection through only for a destination this service holds a
@@ -35,7 +36,7 @@ export interface GrantBody {
   readonly reason?: string;
   readonly approvedBy?: string;
   /** `owner`: the owner approved it; `policy`: the approval policy allowed it through a standing approval grant. */
-  readonly via?: "owner" | "policy";
+  readonly via?: "owner" | "policy" | "maintenance";
   readonly decidedAt?: string;
   readonly endedAt?: string;
   readonly endedBy?: string;
@@ -96,6 +97,8 @@ export interface NetworkGrantOptions extends RunnerOptions {
   readonly judge?: NetworkJudge;
   /** Tells that a grant ended (revoked, or its task ended is noticed lazily by the relay); the relay closes the open connections of that grant at once (it also checks again on a timer, so another controller process's revoke is noticed). */
   readonly onEnded?: (grant: GrantView) => void;
+  /** The sites an agent's environment holds through approved maintenance requests (card A09). When given, a connection of an attempt whose agent holds an approved site for the destination is allowed although the task has no grant of its own. */
+  readonly agentSites?: AgentSiteAllowances;
 }
 
 export class NetworkGrantService {
@@ -104,7 +107,13 @@ export class NetworkGrantService {
   readonly #onEnded: ((grant: GrantView) => void) | undefined;
   readonly #listeners = new Set<(grant: GrantView) => void>();
 
-  private constructor(runner: CommandRunner, options: NetworkGrantOptions) { this.#runner = runner; this.#judge = options.judge; this.#onEnded = options.onEnded; }
+  readonly #agentSites: AgentSiteAllowances | undefined;
+
+  private constructor(runner: CommandRunner, options: NetworkGrantOptions) {
+    this.#runner = runner; this.#judge = options.judge; this.#onEnded = options.onEnded; this.#agentSites = options.agentSites;
+    // An allowance that a maintenance revoke ended closes the connections it allowed, the same way a revoked grant does.
+    this.#agentSites?.onEnded((grant) => this.#told(grant));
+  }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: NetworkGrantOptions = {}): NetworkGrantService {
     return new NetworkGrantService(new CommandRunner(storage, epoch, options), options);
@@ -293,7 +302,19 @@ export class NetworkGrantService {
    * What the relay asks at every connection and again while one is open: whether the task holds a live grant for exactly this destination. A grant is live while it is granted and its task has not ended. This is a read, not a command: it
    * writes nothing, so a refused connection costs the store only the log entry the relay writes.
    */
-  async check(taskId: string, host: string, port: number): Promise<GrantCheck> {
+  async check(taskId: string, host: string, port: number, agentId?: string): Promise<GrantCheck> {
+    const own = await this.#checkTask(taskId, host, port);
+    if (own.live || agentId === undefined || this.#agentSites === undefined) return own;
+    // No live grant of the task's own: the agent's environment may hold the site through an approved maintenance request (card A09). The task must still be running, and the owner's deny rule for the site wins.
+    const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
+    if (task === undefined || task.state === "done" || task.state === "cancelled") return own;
+    const site = await this.#agentSites.check(agentId, host, port);
+    if (site.live && site.grant !== undefined) return { live: true, grant: { ...site.grant, taskId, projectId: task.projectId } };
+    // A site the environment holds but the owner's rule now denies is said so; anything else keeps the task's own answer.
+    return site.why !== undefined && /rule denies/.test(site.why) ? { live: false, why: site.why } : own;
+  }
+
+  async #checkTask(taskId: string, host: string, port: number): Promise<GrantCheck> {
     const found = await this.#runner.get(GRANT_KIND, grantId(taskId, host, port));
     if (found === undefined) return { live: false, why: "the task holds no grant for that destination" };
     const grant = this.#view(found);

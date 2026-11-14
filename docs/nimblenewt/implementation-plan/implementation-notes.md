@@ -11011,3 +11011,69 @@ Branch `u11d-finish3` at `90612ccc`, merged with origin/main `8c2723d7` (no conf
 ### P06 fence and P04h merge note (card P06 follow-up, P04)
 
 ASSUMPTION: when the loop fence (live project list) and P04h (one lease scan per tick) met, `leaseExpiryLoops` got an optional fifth argument, the live project list: the told notices (expiry and long-blocking) are filtered to live projects after the single scan, while closing a notice that moved on stays running for every project. The real-tick test now supplies one expired lease per project and checks the archived one is not told and is told again after the restore (a breakage of the wiring fails it).
+## A09 eighth slice: network sites and mounts are applied (Claude agent, Sonnet 5.5, 2026-11-14)
+
+Built on origin/main 3f6142d7. Nothing was pushed, deployed or flipped; no model and no real network were used. The card is not flipped.
+
+**What was lacking.** Every acceptance clause of A09 was met for packages and extensions (earlier slices). An approved `network` or `mount` request was recorded and then waited forever: nothing enforced it. The seventh slice also left the link between an applied network request and the relay (H12i) undone.
+
+**Network (done, in plain words).**
+- An approved and applied network request now allows the named host and port for that agent's attempts, through the controller's relay (the only way out of the sandbox). The record is `AgentSiteAllowances` (`network/agent-sites.ts`, kind `net-agent-site`): one record for each agent, host and port, listing the maintenance requests that stand behind it. The site stays allowed while one stands.
+- The relay and the web tool read it as a grant: `NetworkGrantService.check(task, host, port, agentId)` answers the task's own grant first, then the agent's site (the task must still be running). The grant's ID is the maintenance request ID, so the connection log names the request that allowed each connection (item d of the seventh slice's list).
+- Revoking the request ends the allowance and tells the relay at once; open connections that request allowed are closed (`revoked`), and new ones are refused. Other controller processes find it at the relay's recheck.
+- The owner's deny rule for a site wins at every connection, at once, before the controller's loop has reverted anything: `MaintenanceService.siteDenied` is read by the allowance check, and a rule that cannot be read counts as a denial. The loop then reverts the applied request as before.
+- Only a public destination can be allowed this way: no private, loopback or never-reachable address (169.254.x, multicast, mapped or translated forms), no wildcard, no scheme or path. A name that resolves to a private address is refused at the connection exactly as for a task grant without `allowPrivate`. The owner can still give a task a private destination with `network.grant`.
+- Wired in `startController` only when `dispatch.network` is given (the relay exists then). Without it the request stays approved and pending with the reason "no network relay is wired", never claimed.
+
+**Mounts (done, in plain words).**
+- There is now a resource store: the host keeps named resources as directories in `<environments>/resources/<name>` (`worker/environment/resources.ts`, `LocalResourceStore`). The controller knows only the name. A resource is mountable only if it is a real directory directly in that folder and holds no link or special file anywhere inside (bounded walk, 20,000 entries).
+- An approved mount request is checked again when applied (own or shared resource, read only, the exact path, the host holds it) and recorded in `AgentMounts` (kind `agent-mounts`, per agent, at most 20). Failures are `failed` with the reason and leave nothing behind. A revoke removes the record.
+- At each attempt start the dispatcher (`DispatcherDeps.agentReach`) puts `mount:<resource>` in the recipe's reach. The local host answers that name with a read-only mount of its own directory at `/inputs/mounts/<resource>`, checked again at that moment (a link planted after approval refuses the start). A restarted attempt keeps its recorded mounts minus any no longer approved, and never gains one; a failing read starts with none.
+- A real bubblewrap test shows the resource readable, writes, replacement and removal refused (EROFS), no other resource and no host resource folder visible.
+- The local-host launcher creates the folder and passes the store when environments are on (`--local-host-environments`); without a store approved mounts stay pending.
+
+**Owner controls.** `maintenance.revoke` (already in chat: the owner's verb and the request ID) takes either back. New: the query `maintenance.access` and the chat status kind `access` (by the agent's name, in any words) say what an agent holds now, and say "not enforced here" when this controller has no relay or store, never an empty list. The interpreter prompt is built from the same tables, so both appear in it. `api-v1.md` was regenerated.
+
+**Tests.** `network/agent-sites.test.ts` (7 tests x 4 backends: loopback relay, request in the log, private resolution, push on end, deny rule and unreadable rule, task end, destination forms and bounds), `maintenance/access-applier.test.ts` (5 x 4 backends, through the real `MaintenanceService`), `api/start-maintenance-access.test.ts` (2: through `startController`, API and chat), the dispatcher suite test (4 backends), `worker/environment/resources.test.ts` (5) and `mount-sandbox.test.ts` (real bubblewrap).
+
+**Mutations (each applied alone to the built file, a test failed, restored).** Deny rule ignored at connection (hung/cancelled); deny ignored at allow (4 failures); site lookup skipped in `check` (20 failures); agent ID not passed by `admit` (20); revoke push removed (hung); write access not refused (3); mount path not checked (3); revoked mounts kept on restart (1); mounts added on restart (1); link check removed from the resource walk (2); host reach not re-checking the directory (1).
+
+**Not done, and why.**
+1. macOS and Windows: a route needs the sandbox's own loopback, which only bubblewrap gives (H12i); other backends refuse a recipe with a route, so a network request cannot take effect there. Mounts work only through the Linux local host. H12i's macOS/Windows route stays H12i's.
+2. The real launcher does not turn the relay on: `dispatch.network` needs a real name resolver, a deployment input (H12i's recorded choice). A switch for it would use real DNS; not built.
+3. Writable mounts are not offered (a named reach adds read-only inputs only). A mount appears only at `/inputs/mounts/<resource>`; a request for another path is failed with that text.
+4. A mount change reaches attempts that start afterwards; an attempt already running keeps what it started with (a revoke is not pushed into a running sandbox). Remote hosts have no resource store: an attempt of an agent with an approved mount placed on one would be refused by the host ("cannot provide the reach").
+5. An applier passed in `StartOptions.maintenance.applier` carries every kind itself and is not wrapped.
+6. Windows and macOS CI for these tests was not run here; the new tests use no signals or fixed pauses, links are skipped where a machine does not allow them, the sandbox ones skip off Linux.
+7. Reference to earlier lists: the review-outage test with a real review service (item 4 of the third slice) and an administrator role for host policy and the base remain open.
+
+ASSUMPTION: an agent-level network approval covers every attempt of that agent in every project, because an environment belongs to an agent, not a project; it still needs a running task.
+ASSUMPTION: one request per site is the normal case; several requests for the same site share one record and the site stays allowed until the last ends (at most 20 requests, 200 sites per agent).
+ASSUMPTION: the owner's deny rule is read at each connection (a small read), not cached, so it wins at once; an unreadable rule denies.
+ASSUMPTION: a mount is read-only at `/inputs/mounts/<resource>` and applies to attempts started afterwards, because the sandbox's named reach can only add read-only inputs under /inputs or /opt and a running sandbox is not changed.
+ASSUMPTION: a request that cannot be honoured as asked (write mode, another path, a resource the host lacks) fails with a reason instead of staying pending, because waiting would never change the answer; an absent relay or store leaves it pending because installing one would.
+
+### A09 eighth slice review (Claude agent, Opus, clean context, 2026-11-14)
+
+Reviewed `a09-finish` at b61c5896 (origin/main 3f6142d7 was already its base; nothing to merge). Linux only, loopback and disposable data only.
+
+**Checked and holding.**
+- Destinations: every form tried at the allowance (mapped, compatible, NAT64 and 6to4 forms of private and loopback addresses, ULA, link-local with zone, CGNAT, benchmark and documentation ranges, octal, hex, short and dotted-decimal spellings, `localhost.`, `*.localhost`, `.local`, `.internal`, multicast, broadcast, unspecified) is refused; a public name that resolves to a private address (`127.0.0.1.nip.io`-style) is refused at the connection, and the relay dials the one address it checked (the name is resolved once and pinned), so a different answer at connect time cannot be used.
+- The deny rule is read at every connection and at each recheck of an open one; a throw counts as a deny; the composed controller treats a missing maintenance service as a deny.
+- The agent ID the relay and the web tool use comes from the controller's own work order, never from the agent; another agent, another port and an attempt with no agent are refused. An agent's mount entitlement (own `agt-…` prefix with the dot, or `shared.` read-only) is checked again when applied; agent IDs carry no dots, so one agent's prefix cannot cover another's.
+- Revoke: the relay closes connections at once in the same process, at its next recheck (1 s by default) in another; a revoked request is never re-applied by the service. A mount revoke reaches attempts that start afterwards (documented).
+- Mount confinement: only Linux hosts have a resource store; names are lowercase `[a-z][a-z0-9._-]`, so no separators or case variants; the host re-checks at each attempt start; the bubblewrap test shows EROFS for write, replace and remove.
+- No secret, path or credential reaches records, request text or errors (host paths stay in the worker; reasons pass through `redactText`).
+
+**Problems found and fixed.**
+1. *An allow or mount after an earlier allow and end of the same request did nothing* (and, had only that been fixed, a second end would have been answered from the first and left the site allowed). The command IDs were `nas-allow:<request>`, `nas-end:<request>`, `amt-add:<request>`, `amt-end:<request>`, so the command runner answered a repeat from the first command. The service reaches this path when an application ends unclearly (applier throws or times out): it reverts, sets the request back to approved and applies again, ending at `applied` with nothing in force. Fix: each of the four command IDs carries the record revision read just before it; a retry of the same step still finds "already there / already gone". Tests: the cycle twice (4 backends), and through `MaintenanceService` with an allow and an add that write and then throw (4 backends: applied means the site and mount are really there; the revoke ends both).
+2. *`maintenance.access` was not owner only when nothing was wired*: an agent got the "unavailable" answers instead of `forbidden`. Added `ownerOnly`, with a test.
+3. *A hard link inside a resource was accepted* (a plain file with a second name, possibly a host file outside the resource folder). The walk now refuses a file with more than one link; test added (skipped where hard links cannot be made).
+4. Windows test robustness: the resource test asserted that a file symbolic link could be made; now checked only where it can be.
+5. Added tests for two gaps: an agent-site connection stays open across the relay's rechecks (a recheck that dropped the agent closed every such connection at the first recheck, unnoticed), and a named pipe in a resource is refused.
+
+**Mutations (built files, one at a time, restored):** allow command ID without revision (8 failures); end command ID without revision (4); mount add command ID without revision (4); unreadable deny rule counted as allowed (4); agent site live after the task ended (hung at the close wait: caught by timeout only); private site accepted (8); another agent's resource accepted (4); a restart gains new mounts (1); `maintenance.access` not owner only (1); relay recheck without the agent (survived, test added, then 2); special files accepted (survived, test added, then 1); hard links accepted (1).
+
+**Left, and accurate.** The implementer's list stands. Two more: when two requests stand behind one site and the newer one ends, connections opened under it are closed although the site stays allowed (the next connection works; a conservative close); and the cap of 200 sites per agent is counted inside the command, so two controllers adding at the same moment can pass it by one.
+
+**Runs (Linux, base origin/main 3f6142d7, `npx tsc --build --force` clean, no stale dist tests, `api:docs:write` unchanged, `check:deps` ok, task plan regenerated unchanged; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, `/tmp/nn-slot.sh`, `--test-timeout=600000`):** controller shard 1/3 4,621 of 4,621, 2/3 4,996 of 4,996, 3/3 4,408 of 4,408; worker 487 (2 skipped), pi-adapter 252, contracts 19, config 52 (24 skipped), ui 34, registry 15, integration 179 (10 skipped), `scripts/*.test.mjs` 161 (1 skipped). No failures and no flakes.

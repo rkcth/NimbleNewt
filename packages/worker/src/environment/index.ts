@@ -6,3 +6,4 @@ export { sandboxInstallScripts, type SandboxInstallScriptsOptions } from "./scri
 export { directoryArtifactSource, httpsArtifactSource, SourceError, type ArtifactSource, type HttpsSourceOptions } from "./sources.js";
 export { LocalEnvironmentRuntime, hostEnvironmentsBase, privateRoot, type LocalEnvironmentRuntimeOptions, type WorkerHooks, type RuntimeManifest, type RuntimeReloadInput, type RuntimeInspection, type RuntimeInspectResult, type RuntimeReloadResult, type RuntimeTrialInput, type RuntimeTrialResult, type RuntimeValidateResult } from "./runtime.js";
 export { localEnvironmentHost, type LocalEnvironmentHost, type LocalEnvironmentHostOptions } from "./host.js";
+export { LocalResourceStore, RESOURCE_NAME, RESOURCE_WALK_LIMIT, type ResourceCheck } from "./resources.js";
