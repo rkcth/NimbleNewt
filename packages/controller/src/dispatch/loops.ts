@@ -366,6 +366,30 @@ export function responsibilityLoops(checks: { generate(by: Principal, projectId:
   } }];
 }
 
+/** A lease that ran out unreleased, as far as the notice needs it. */
+export interface ExpiredLeaseLike { readonly leaseId: string; readonly resourceId: string; readonly projectId: string; readonly responsibilityId: string; readonly holderId: string; readonly expiredAt: string; readonly generation: number; readonly blockedCount: number }
+
+/**
+ * P04g: a maintenance lease that ran out with nobody releasing it is told once (per holding), because it keeps the resource from the other agents until one takes it over. A notice is marked told only after it was sent (an
+ * already-sent id counts as sent), so a failure is offered again next tick. One lease or project failing does not skip the others; the first error is raised after all were tried.
+ */
+export function leaseExpiryLoops(leases: { expiredUntold(by: Principal, projectId: string): Promise<readonly ExpiredLeaseLike[] | undefined>; markExpiryTold(by: Principal, resourceId: string, generation: number): Promise<unknown> }, projects: () => Promise<readonly string[]>, notify: (expired: ExpiredLeaseLike) => Promise<void>): DispatcherLoop[] {
+  return [{ name: "responsibilities.lease-expiry", run: async (by) => {
+    let failure: unknown;
+    for (const projectId of await projects()) {
+      try {
+        for (const l of (await leases.expiredUntold(by, projectId)) ?? []) {
+          try {
+            try { await notify(l); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; /* already told under this id */ }
+            await leases.markExpiryTold(by, l.resourceId, l.generation);
+          } catch (error) { failure ??= error; }
+        }
+      } catch (error) { failure ??= error; }
+    }
+    if (failure !== undefined) throw failure;
+  } }];
+}
+
 /**
  * P04f: what happens to the checks that came due, after they were recorded. Events that arrived wake the responsibilities that named their source (one check per look), then each owed check is taken as a recorded observation or a
  * bounded task. One project's failure does not skip the others; the first error is raised after all were tried.
