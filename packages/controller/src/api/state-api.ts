@@ -280,6 +280,8 @@ export interface StateApiDeps {
   readonly decisions?: Pick<DecisionService, "record" | "resolveDispute" | "ask" | "dismissQuestion" | "link" | "revalidate" | "closeFollowUp" | "get" | "history" | "authoritative" | "context" | "reliance" | "propagation">;
   /** When present, a task credential (`tcr-…`) is accepted too and acts for its one task (card A10b). */
   readonly taskCredentials?: TaskCredentialService;
+  /** The reviews and blockers `needs-you.answer` reaches (card U11d). */
+  readonly needsYouAnswers?: Context["needsYouAnswers"];
   /** Told when the API answers `forbidden` to an agent (card U11d, refusal counting): the agent's ID and, for a task credential, its project. Never throws into the answer; what it returns is not waited for. */
   readonly onDenied?: (denial: { readonly agentId: string; readonly projectId?: string }) => unknown;
   /** Called with errors that are not part of the contract (so they are not shown to the client). */
@@ -460,6 +462,7 @@ export class StateApi {
         ...(this.#deps.critical === undefined ? {} : { critical: this.#deps.critical }),
         ...(this.#deps.security === undefined ? {} : { security: this.#deps.security }),
         ...(this.#deps.detect === undefined ? {} : { detect: this.#deps.detect }),
+        ...(this.#deps.needsYouAnswers === undefined ? {} : { needsYouAnswers: this.#deps.needsYouAnswers }),
         ...(this.#deps.budgets === undefined ? {} : { budgets: this.#deps.budgets }),
         ...(this.#deps.difficulty === undefined ? {} : { difficulty: this.#deps.difficulty }),
         ...(this.#deps.commands === undefined ? {} : { commands: this.#deps.commands }),

@@ -1010,6 +1010,26 @@ export class MeetingService {
     return { open: await read(index.open), answered: await read([...index.answered].reverse()) };
   }
 
+  /**
+   * The open questions meetings asked the owner, across projects, oldest first (card U11d: the Needs-you list shows them). Owner only (not a task credential). Up to `limit` are returned; `truncated` says more were
+   * open than that or than could be read (at most 20 pages of 500 records).
+   */
+  async openOwnerQuestions(by: Principal, limit: number): Promise<{ items: View<OwnerQuestionBody>[]; truncated: boolean }> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list the questions meetings asked the owner`);
+    const cap = Number.isSafeInteger(limit) && limit >= 1 && limit <= 200 ? limit : invalid("limit", "must be 1 to 200");
+    const open: View<OwnerQuestionBody>[] = [];
+    let after: string | undefined; let truncated = false;
+    for (let reads = 0; ; reads++) {
+      if (reads >= 20) { truncated = true; break; }
+      const page = await this.#runner.list("owner-question", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of page) { after = a.id; if ((a.body as unknown as OwnerQuestionBody).state === "open") open.push(view<OwnerQuestionBody>(a)); }
+      if (page.length < 500) break;
+    }
+    open.sort((x, y) => (x.askedAt < y.askedAt ? -1 : x.askedAt > y.askedAt ? 1 : x.id < y.id ? -1 : 1));
+    if (open.length > cap) truncated = true;
+    return { items: open.slice(0, cap), truncated };
+  }
+
   /** One question, for whoever may read its project's meetings. */
   async ownerQuestion(by: Principal, questionId: string): Promise<View<OwnerQuestionBody> | undefined> {
     const id = typeof questionId === "string" && OWNER_QUESTION_ID.test(questionId) ? questionId : invalid("questionId", "is not an owner question ID");

@@ -15,7 +15,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
-import { ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -643,7 +643,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
@@ -741,7 +741,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", questionId: "questionTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", questionId: "questionTopic", id: "itemTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -1191,6 +1191,33 @@ export class ChatService {
         if (matches.length > 1) return { ok: false, kind: "ask", question: "Which question are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["inquiryId"])} (${String(m["question"]).slice(0, 60)})`), field: "inquiryId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["inquiryId"])) };
         args["inquiryId"] = String(matches[0]!["inquiryId"]);
       }
+    }
+    // An item of the Needs-you list answered where it stands (card U11d), named by the owner's words for it (any part of what the list says about it) or the only one that waits; the item's kind, ID and project come from the list.
+    // The choice (allow, deny, agree, ...) or the words are the owner's own; an approval and a blocker, which no other command answers, are shown first.
+    if (intent.op === "needs-you.answer") {
+      const named = args["itemTopic"];
+      delete args["itemTopic"];
+      if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "itemTopic must be text");
+      // An ID is only ever one the owner just picked from the choices offered (it is checked against the list below); a kind is never given.
+      if (args["kind"] !== undefined) return refuse("invalid_command", "an item of the Needs-you list is named in your words (itemTopic), not by a kind");
+      const picked = args["id"];
+      if (picked !== undefined && typeof picked !== "string") return refuse("invalid_command", "id must be text");
+      const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "status.ask", args: { request: { kind: "needs_you", limit: 50 } } });
+      if (!listed.ok) return refuse(listed.error.code, listed.error.message);
+      const all = ((((listed.result["item"] ?? listed.result) as Record<string, unknown>)["items"] ?? []) as { kind: string; id: string; projectId?: string; taskId?: string; text: string; answer: { kind: string; choices?: string[] } }[]);
+      const words = typeof named === "string" ? named.trim().toLowerCase() : "";
+      const given = typeof args["answer"] === "string" ? args["answer"] : "";
+      // Only an item the owner's answer can mean: a choice the item offers, or the owner's own words for an item that takes words (a bare "allow" explains nothing, so it fits no blocker or question).
+      const fits = all.filter((i) => (i.answer.kind === "words" ? given.length > 0 && !NEED_CHOICES.has(given) : (i.answer.choices ?? []).includes(given)));
+      const matches = fits.filter((i) => (picked === undefined ? words === "" || i.text.toLowerCase().includes(words) : i.id === picked));
+      showFirst = "the item it answers is shown to you first";
+      if (matches.length === 0) return refuse("not_found", words === "" ? "nothing in your Needs-you list can be answered that way" : `no item in your Needs-you list that ${given.length > 0 ? "takes that answer " : ""}is about ${quotedText(words, 80)}`);
+      if (matches.length > 1) return { ok: false, kind: "ask", question: "Which item are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.text.slice(0, 60)})`), field: "id", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+      const one = matches[0]!;
+      args["kind"] = one.kind; args["id"] = one.id;
+      if (one.projectId !== undefined && one.kind === "meeting-question") args["projectId"] = one.projectId;
+      if (one.taskId !== undefined && one.kind === "held-resume") args["taskId"] = one.taskId;
+      labels[one.id] = one.text.slice(0, 80);
     }
     // A question a stand-up asked the owner (card M03h), named by any part of the topic or the words asked, or the only one waiting. The answer is the owner's own words (the text guard below holds them to the message); an unclear name asks.
     if (intent.op === "standup.answer-question") {

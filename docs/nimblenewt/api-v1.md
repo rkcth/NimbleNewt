@@ -5144,6 +5144,24 @@ Result: `{ revision, changed, marks }`: the list's revision, whether the marks c
 
 Completion: finished when accepted (`completed: true`).
 
+#### `needs-you.answer`
+
+Owner only: answers one item of the Needs-you list (the `items` of the `needs_you` status request say what each is and how it is answered) without leaving the list. `kind` is `question` (an agent's question: `answer` is your words), `approval` (a review only you decide: `allow` or `deny`, with an optional `reason`), `meeting-decision` (`agree` or `decline`; to choose another way, use meeting.record.owner-respond), `meeting-question` (a question a meeting asked: your words; `projectId` of the item), `held-resume` (`approve` or `decline`; `taskId` of the item) or `blocker` (a blocker only you can resolve: your words say how it was resolved). It does what the item's own operation does, as you, and nothing else.
+
+Arguments:
+
+- `kind`: question, approval, meeting-decision, meeting-question, held-resume or blocker
+- `id`: the item's ID from the Needs-you list
+- `itemTopic` (optional): in chat: the owner's own words for the item, instead of kind and id (the system finds the item and asks when several fit)
+- `answer`: the choice the item offers, or your own words
+- `reason` (optional): for an approval: why (default: answered from the Needs-you list)
+- `taskId` (optional): for a held resume: the item's task
+- `projectId` (optional): for a question a meeting asked: the item's project
+
+Result: `{ ... }`: what was answered.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `notifications.configure`
 
 Owner only: sets how notifications reach the owner; only the fields given change, and they count from the next notification.
