@@ -16,7 +16,8 @@ jobs:
     name: ${{ matrix.os }} / node ${{ matrix.node }} / shard ${{ matrix.shard }}
     runs-on: ${{ matrix.os }}
     # 75: the suite grew, and Windows jobs took 45-50 minutes in run 43086209106 (one was cancelled at 50 while its tests were still passing).
-    timeout-minutes: 75
+    # 100: Windows jobs now take 43-60 minutes and one (Windows, Node 22, shard 1) hit the 75-minute limit while its tests were still passing in run 43645565325.
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
