@@ -1008,3 +1008,46 @@ test("a stream ends with `ended` when its session is signed out or its credentia
     await open.closed;
   } finally { await w.c.close().catch(() => undefined); }
 });
+
+test("a stream the browser drops gives its place back at once, and a stream whose session expired ends at the next look", async () => {
+  const w = await world({ session: { idleMs: 60_000, maxMs: 3_600_000 }, limits: { eventsEveryMs: 40, streamsPerSession: 2, streamsTotal: 2 } });
+  try {
+    const phone = await w.signIn();
+    const a = await stream(w, phone); const b = await stream(w, phone);
+    await a.waitFor((e) => e.some((x) => x.event === "ready")); await b.waitFor((e) => e.some((x) => x.event === "ready"));
+    assert.equal((await stream(w, phone)).status, 429, "both places are taken");
+    // The browser goes away (a closed tab, a lost network): the door notices the closed connection and frees the place.
+    a.close(); await a.closed;
+    for (let n = 0; (await w.call("GET", "/web/settings", { cookie: phone.cookie })).body.liveStreams !== 1; n++) { assert.ok(n < 250, "the dropped stream was never let go"); await new Promise((r) => setTimeout(r, 100)); }
+    const c = await stream(w, phone);
+    assert.equal(c.status, 200, "the freed place can be used again");
+    await c.waitFor((e) => e.some((x) => x.event === "ready"));
+    // Idle past the limit (the stream's looks do not keep a session alive): both remaining streams end.
+    w.now.t += 61_000;
+    await b.waitFor((e) => e.some((x) => x.event === "ended")); await c.waitFor((e) => e.some((x) => x.event === "ended"));
+    await b.closed; await c.closed;
+    assert.equal((await w.call("GET", "/web/session", { cookie: phone.cookie })).status, 401);
+  } finally { await w.c.close(); }
+});
+
+test("a proposal decided elsewhere (the terminal chat) nudges an open page to read the chat again, so its buttons go", async () => {
+  const script = new ScriptedInterpreter((input: { text: string }) => [{ kind: "command", op: "task.create", args: { title: "Weed", projectName: "garden" }, evidence: input.text, basis: "owner" }]);
+  const w = await world({ limits: { eventsEveryMs: 40 } }, script);
+  try {
+    const owner = await w.c.services.principals.authenticate(w.token);
+    await w.c.services.projects.createProject({ commandId: "p-live", actor: owner.id, name: "Garden" });
+    const phone = await w.signIn();
+    const said = await w.call("POST", "/web/chat", { cookie: phone.cookie, csrf: phone.csrf, body: { messageId: "prop-live", text: "add task Weed to garden" } });
+    const proposalId = said.body.outcomes[0].proposalId as string;
+    assert.equal(said.body.outcomes[0].status, "proposed", said.text);
+    const s = await stream(w, phone);
+    await s.waitFor((e) => e.some((x) => x.event === "ready"));
+    await s.waitFor(() => s.comments >= 2);
+    assert.equal(s.events.filter((x) => x.event === "changed").length, 0);
+    await w.c.chat!.applyProposal(w.token, { commandId: "apply-live", proposalId });
+    await s.waitFor((e) => e.some((x) => x.event === "changed" && (JSON.parse(x.data).views as string[]).includes("chat")));
+    const seen = await w.call("GET", "/web/history", { cookie: phone.cookie });
+    assert.equal(seen.body.turns[0].outcomes[0].proposalState, "applied");
+    s.close(); await s.closed;
+  } finally { await w.c.close(); }
+});

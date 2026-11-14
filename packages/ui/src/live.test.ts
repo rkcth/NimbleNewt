@@ -91,6 +91,16 @@ test("a proposal that was already applied or discarded elsewhere has no buttons;
   assert.deepEqual(names.filter((n) => n === "Apply" || n === "Discard"), ["Apply", "Discard"], "only the open proposal can be decided");
 });
 
+test("a history the controller could not read in full says some messages may be missing; a complete one says nothing", async () => {
+  const page = boot({ history: () => ({ observedAt: "x", complete: false, turns: [turn(1)] }) });
+  await settle();
+  assert.match(log(page.doc), /too long to read in full here: some messages, recent ones included, may be missing/);
+  page.setHistory(() => ({ observedAt: "x", complete: true, turns: [turn(1)] }));
+  FakeSource.all[0]!.send("changed", JSON.stringify({ views: ["chat"] }));
+  await settle();
+  assert.doesNotMatch(log(page.doc), /may be missing/);
+});
+
 test("hostile text in a recorded turn is shown as text, never as markup", async () => {
   const page = boot({ history: () => ({ observedAt: "x", complete: true, turns: [turn(1, { text: HOSTILE, reply: [HOSTILE], outcomes: [{ status: "proposed", proposalId: "prop-z", preview: [HOSTILE], proposalState: "open" }] })] }) });
   await settle();

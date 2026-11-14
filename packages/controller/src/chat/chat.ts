@@ -353,7 +353,7 @@ export class ChatService {
   /**
    * The owner's recent conversation as recorded (card U07 finish): the newest turns first, each with the words said, what came of them in plain lines and its outcomes, and for every proposal in them
    * whether it is still open, applied or discarded (so a second browser never offers a button for a decision that was already made). Read only: it runs no command, calls no model and writes nothing.
-   * The turns are found by a bounded scan (at most `HISTORY_SCAN` records, ordered by identity, not time), so a very long history reports `complete: false` and names the newest turns it saw.
+   * The turns are found by a bounded scan (at most `HISTORY_SCAN` records, ordered by identity, not time), so a very long history reports `complete: false`: the turns it then gives are the newest of those it read, which need not be the newest the owner made (no time index exists; one would remove the bound).
    * `before` is the `next` of the previous page.
    */
   async history(token: unknown, request: { limit?: number; before?: string } = {}): Promise<{ turns: readonly HistoryTurn[]; next?: string; complete: boolean }> {

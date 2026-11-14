@@ -259,7 +259,7 @@ export const APP_JS = String.raw`(function (root) {
       if (!older) served.forEach(function (t) { if (!have[t.turnId]) { have[t.turnId] = true; next.push(t); } });
       served = next;
       if (older || olderCursor === null) olderCursor = r.body.next || null;
-      historyNote = r.body.complete === false ? 'Only the newest part of a very long history could be read.' : '';
+      historyNote = r.body.complete === false ? 'This conversation is too long to read in full here: some messages, recent ones included, may be missing from this list.' : '';
       if (tab === 'chat') renderChat();
     }, function () { /* offline: what is on the phone still shows */ });
   }

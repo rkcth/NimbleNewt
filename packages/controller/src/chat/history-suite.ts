@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
@@ -97,6 +98,28 @@ export function defineHistoryTests(backendName: string): void {
       for (let i = 0; i < 3; i++) await chat.history(w.ownerToken, { limit: 5 });
       assert.equal(await audit(), before);
       assert.equal(w.interpreter.calls.length, calls);
+    });
+
+    suite("a history longer than the scan bound says it is incomplete, still answers a page, and another owner's turns never show", async (w) => {
+      // Recorded turns written straight into the store (as a long-used installation would have them): 4100 of the owner's and 50 of someone else's.
+      const at = (i: number): string => new Date(Date.parse("2026-01-01T00:00:00.000Z") + i * 1000).toISOString();
+      const turn = (ownerId: string, i: number) => {
+        const id = `turn-${createHash("sha256").update(`${ownerId}\0${i}`).digest("hex").slice(0, 32)}`;
+        return { type: "create" as const, ref: { kind: "chat-turn", id }, body: { ownerId, messageId: `seed-${i}`, text: `seeded ${i}`, quotedCount: 0, status: "done", plan: [], outcomes: [], createdAt: at(i), completedAt: at(i) } as never };
+      };
+      const all = [...Array.from({ length: 4100 }, (_, i) => turn(w.owner.id, i)), ...Array.from({ length: 50 }, (_, i) => turn("owner:someone-else", 10_000 + i))];
+      for (let k = 0; k < all.length; k += 100) {
+        await w.world.storage.applyOperation({ operationId: `seed-turns-${k}`, epoch: w.projects.epoch, actor: "owner:rob", correlationId: `seed-turns-${k}`, at: at(0), changes: all.slice(k, k + 100), audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+      }
+      const page = await w.chat().history(w.ownerToken, { limit: 50 });
+      assert.equal(page.complete, false, "more turns than the scan reads");
+      assert.equal(page.turns.length, 50);
+      assert.ok(page.turns.every((t) => /^seeded \d+$/.test(t.text) && Number(t.text.slice(7)) < 4100), "only the owner's own turns");
+      for (let i = 1; i < page.turns.length; i++) assert.ok(page.turns[i - 1]!.createdAt >= page.turns[i]!.createdAt, "newest first among those read");
+      assert.equal(typeof page.next, "string");
+      const older = await w.chat().history(w.ownerToken, { limit: 50, before: page.next! });
+      assert.equal(older.turns.length, 50);
+      assert.ok(older.turns[0]!.createdAt <= page.turns[49]!.createdAt, "the next page is older");
     });
   }
 }
