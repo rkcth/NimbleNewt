@@ -81,6 +81,7 @@ function fakeProvider(cfg) {
       if (task === "ballot") text = `VOTE: ${stance === "for" ? "yes" : stance === "against" ? "no" : "abstain"}\nREASON: ${words(12)}`;
       else if (task === "objection") text = `OBJECT: ${n % 11 === 0 ? "yes" : "no"}\nREASON: ${words(8)}`;
       else if (task === "chair-ruling") text = `RULING: proceed\nREASON: ${words(6)}`;
+      else if (task === "digest") text = `Digest: ${words(30)}`;
       else if (task === "casting") text = `CASTING: no\nREASON: ${words(6)}`;
       else if (task === "correction") text = `CORRECTION: ${n % 2 ? "none" : "That note was an early draft, not my view. " + words(4)}\nCONTRADICTS: ${n % 4 === 0 ? "yes" : "no"}`;
       else if (task === "chair-desk-read") { const m = /FILE (\S+) \(desk of [^)]*\):\n([^\n]{20,60})/.exec(user); const who = /absent\)/.test(user); text = JSON.stringify({ excerpts: m ? [{ member: hint?.absent ?? "a3", file: m[1], quote: m[2].slice(0, 30), bears_on: "relevant" }] : [] }); }

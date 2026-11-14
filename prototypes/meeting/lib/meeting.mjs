@@ -4,6 +4,19 @@
 import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
+// The chair's fact-finding question check. "words" is the original keyword filter (it refused 8 of 157 legitimate questions on the
+// word "support"); "structural" refuses a question with any field beyond the three allowed (a position or vote field) and one that
+// asks how someone will vote or whether they are for or against, and leaves the rest to the challenge ruling.
+const QUESTION_FIELDS = new Set(["to", "topic", "experience_sought"]);
+export function chairQuestionRefused(q, mode = "words") {
+  const text = `${q.topic ?? ""} ${q.experience_sought ?? ""}`;
+  if (mode === "structural") {
+    if (Object.keys(q).some((k) => !QUESTION_FIELDS.has(k))) return true;
+    return /\b(how (will|would|do) (you|they|she|he) vote|(do|would|will) you (support|oppose|back|favou?r)|are you (for|against|in favou?r)|your (vote|position|stance)|vote (yes|no)|for or against)\b/i.test(text);
+  }
+  return /\b(vote|support|oppose|in favou?r|for or against)\b/i.test(text);
+}
+
 const words = (tokens) => Math.max(20, Math.round(tokens * 0.7));
 
 const PREAMBLE = [
@@ -29,8 +42,16 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   const common = () => `${PREAMBLE}\n\nMOTION (version ${motion.version}): ${motion.text}\n\n${scenario.context ?? ""}`.trim();
   const personaOf = (a) => `You are ${a.name}, ${a.role}. ${a.persona}${variant.richPersonas && a.temperament ? ` Your temperament: ${a.temperament}. Your habits: ${a.habits}.` : ""}`;
 
+  // Digest mode: the chair writes one running digest at the end of a round; later speakers read the digest in place of everything
+  // up to it, then the full text of what came after. The full text is kept (transcript.md and transcript.json) and the chair reads it.
+  let digest; // { upTo: seq of the last entry it covers, text }
   function view(mode = variant.transcriptMode ?? "full") {
     if (transcript.length === 0) return "(Nothing has been said yet.)";
+    if (mode === "digest" && digest) {
+      const rest = transcript.filter((e) => e.seq > digest.upTo).map((e) => `[#${e.seq} ${e.who}${e.label ? ` — ${e.label}` : ""}] ${e.text}`);
+      return [`DIGEST of #1 to #${digest.upTo}, written by the chair (the full text is kept and the chair can quote it):\n${digest.text}`, ...rest].join("\n");
+    }
+    if (mode === "digest") mode = "full";
     const tail = variant.fullTail ?? 0;
     return transcript.map((e, i) => {
       const recent = i >= transcript.length - tail;
@@ -203,7 +224,7 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
     let qs = [];
     try { qs = JSON.parse(/\{[\s\S]*\}/.exec(r.text)?.[0] ?? "{}").questions ?? []; } catch { qs = []; }
     for (const q of qs.slice(0, maxQ)) {
-      const bad = !byId.has(q.to) || !q.topic || !q.experience_sought || /\b(vote|support|oppose|in favou?r|for or against)\b/i.test(`${q.topic} ${q.experience_sought}`);
+      const bad = !byId.has(q.to) || !q.topic || !q.experience_sought || chairQuestionRefused(q, variant.chairQuestionCheck);
       if (bad) { stats.rejectedChairQuestions.push(q); continue; }
       if (absentIds.has(q.to)) { stats.skippedAbsent.push(`chair question to ${q.to}`); push("Chair", "chair-question", `Question to ${byId.get(q.to).name} skipped: absent (recorded).`, { label: "skipped" }); continue; }
       stats.chairQuestions.push(q);
@@ -311,6 +332,22 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   }
   if (variant.chairSummary) await chairSummaryStep(); else await chairReminderStep("before-round-2");
 
+  // Digest (variant transcriptMode "digest"): one chair call after each round that rewrites the digest from the old digest plus what came
+  // since, from the full text. A reply that is empty or too long is refused and the speakers keep reading the full text.
+  async function digestStep(stepName) {
+    if (variant.transcriptMode !== "digest" || transcript.length === 0) return;
+    const upTo = transcript.at(-1).seq;
+    const limit = variant.digestWords ?? 180;
+    const { system, user } = prompt(chairPersona, `Write one neutral digest of the meeting so far for members who will not read every statement: at most ${limit} words, attributed by name, keeping every number and condition that was stated, giving both sides fairly, never recommending a position or saying anything about how to vote.${digest ? `\n\nYOUR EARLIER DIGEST (up to #${digest.upTo}):\n${digest.text}` : ""}`, { transcriptText: view("full") });
+    const r = await call({ phase: "digest", agent: chairPersona, task: "digest", system, user, maxTokens: Math.ceil(limit * 1.6), hint: {} });
+    const text = r.text.trim();
+    const n = text ? text.split(/\s+/).length : 0;
+    if (!text || n > limit * 1.5) { (stats.rejectedDigests ??= []).push({ step: stepName, upTo, words: n }); return; }
+    digest = { upTo, text };
+    (stats.digests ??= []).push({ step: stepName, upTo, words: n });
+  }
+  await digestStep("after-round-1");
+
   // Round 2: open, everyone has heard round 1; a member may bring in notes from its own desk.
   if ((variant.rounds ?? 2) >= 2) {
     const r2 = `You have now heard the others. Respond to what was said; you may confirm, correct or reverse your earlier view, and you may cite your notes if you have any. At most ${words(tokenLimit)} words. ${FORMAT}`;
@@ -338,6 +375,8 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
       }
     }
   }
+
+  if ((variant.rounds ?? 2) >= 2) await digestStep("after-round-2");
 
   // Objection check: a bounded call, not a floor turn. Only the motion and a summary are sent.
   if (variant.objectionCheck !== false) {
@@ -464,6 +503,7 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
   };
   if (variant.chairNotes === "rolling") writeFileSync(join(outDir, "chair-notes.md"), `# Chair's private notes (rolling)\n\n${chairNotes}\n`);
   writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
+  writeFileSync(join(outDir, "transcript.json"), JSON.stringify(transcript, null, 1)); // the full text of every entry, whatever later speakers were shown
   writeFileSync(join(outDir, "ballots.json"), JSON.stringify({ ballots, ballotHistory, result }, null, 2));
   writeFileSync(join(outDir, "transcript.md"), [
     `# ${scenario.title}`, `Variant: ${JSON.stringify(variant)}`, `Model: ${provider.name}`, "",

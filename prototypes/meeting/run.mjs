@@ -5,6 +5,7 @@
 // Owner budget across runs on one route: --budget <file> --cap-tokens N [--cap-usd D --price-in P --price-cached C --price-out O (dollars per million)].
 // Mixed roster: --chair pi:gpt-6.1-sol [--members a1=pi:gpt-6-astra,...]; or:<model> is OpenRouter.
 // Scenario fields: absent (ids the chair may read), owner.afterRound1 / owner.duringVote (scripted owner inquiry), scriptedAsks.
+// Local server: --check-slots <base url of the server, e.g. http://127.0.0.1:8002> [--slots-needed N] refuses to start unless N slots are idle and empty.
 // Variant fields: deskRead, directQuestions, askNudge, tieProbe, allowTabling. See also checkpoint.mjs and analyze.mjs.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -53,6 +54,14 @@ const prior = budgetFile && existsSync(budgetFile) ? JSON.parse(readFileSync(bud
 ledger.tokens = prior.tokens; ledger.spent = prior.usd;
 const saveBudget = () => { if (budgetFile) writeFileSync(budgetFile, JSON.stringify({ tokens: ledger.tokens, usd: ledger.spent, runs: prior.runs + 1, capTokens: ledger.capTokens, capUsd: ledger.capUsd }, null, 1)); };
 process.on("exit", saveBudget);
+// A run against the local server first reads its slot state, so it never evicts someone else's cached conversation (M00, G10).
+if (args["check-slots"]) {
+  const { checkSlots } = await import("./lib/local-slots.mjs");
+  const need = Number(args["slots-needed"] ?? variant.parallel ?? 1);
+  const verdict = await checkSlots(args["check-slots"], need);
+  console.log(`Slot check: ${verdict.ok ? "free" : "REFUSED"} (${verdict.why})`);
+  if (!verdict.ok) process.exit(3);
+}
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const outDir = join(here, "runs", `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);
