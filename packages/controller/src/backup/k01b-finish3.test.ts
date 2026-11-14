@@ -83,6 +83,35 @@ for (const backend of backends) {
       assert.ok(!/passcode|recovery|private/i.test(text.replace(/"approved"|"pinned"/g, "")), "no key material is in what the hooks get");
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: a key switch stays marked until the owner was told, so a start cut off before its notice tells at the next one (card K01b review)`, async () => {
+    const w = await backend.open();
+    try {
+      const first = (await createKeyring({ passcode: fake("pw"), scrypt: FAST })).keyring;
+      const second = (await createKeyring({ passcode: fake("pw"), scrypt: FAST })).keyring;
+      const pin = BackupKeyPinService.withEpoch(w.storage, await epochOf(w.storage));
+      await pin.check(first);
+      assert.equal(await pin.announceReplacement(async () => { throw new Error("must not be called"); }), false, "nothing to tell before a switch");
+      await pin.rekey(owner, { commandId: "r1", fingerprint: keyringFingerprint(second) });
+      assert.equal((await pin.check(second)).approved, true);
+      await assert.rejects(pin.announceReplacement(async () => { throw new Error("inbox unavailable"); }), /inbox unavailable/);
+      const told: { fingerprint: string; from: string; revision: number }[] = [];
+      assert.equal(await pin.announceReplacement(async (r) => { told.push(r); }), true, "the failed notice is tried again");
+      assert.deepEqual([told[0]!.fingerprint, told[0]!.from], [keyringFingerprint(second), keyringFingerprint(first)]);
+      assert.equal(await pin.announceReplacement(async (r) => { told.push(r); }), false, "told once");
+      assert.equal(told.length, 1);
+      // Switching back to the first key and then to the second again is a new switch each time, with its own revision.
+      await pin.rekey(owner, { commandId: "r2", fingerprint: keyringFingerprint(first) });
+      await pin.check(first);
+      await pin.announceReplacement(async (r) => { told.push(r); });
+      await pin.rekey(owner, { commandId: "r3", fingerprint: keyringFingerprint(second) });
+      await pin.check(second);
+      await pin.announceReplacement(async (r) => { told.push(r); });
+      assert.equal(told.length, 3);
+      assert.equal(new Set(told.map((t) => t.revision)).size, 3, "each switch is its own notice");
+      assert.equal(told[2]!.fingerprint, keyringFingerprint(second));
+    } finally { await w.close(); }
+  });
 }
 
 const PASS = fake("pass");
@@ -188,7 +217,21 @@ for (const kind of ["sqlite", "postgres"] as const) {
       } finally { await c2.close(); }
       // A third start with the same key says nothing more.
       const c3 = await r.start({ encryption: { keyringFile: r.keyringFile }, signing: { store } });
-      try { assert.equal((await inboxOf(c3, token!)).filter((i) => i.label === "The backup key was replaced").length, 1); } finally { await c3.close(); }
+      try {
+        assert.equal((await inboxOf(c3, token!)).filter((i) => i.label === "The backup key was replaced").length, 1);
+        // Back to the first key: that switch is announced too (its own notice, not a replay of the first switch's).
+        assert.ok((await c3.api.handle(token!, { v: 1, op: "backup.encryption.rekey", commandId: "rk2", args: { fingerprint: keyringFingerprint(k1) } } as never) as { ok: boolean }).ok);
+      } finally { await c3.close(); }
+      r.useKeyring(k1);
+      const c4 = await r.start({ encryption: { keyringFile: r.keyringFile }, signing: { store } });
+      try { assert.ok((await c4.api.handle(token!, { v: 1, op: "backup.encryption.rekey", commandId: "rk3", args: { fingerprint: keyringFingerprint(k2) } } as never) as { ok: boolean }).ok); } finally { await c4.close(); }
+      r.useKeyring(k2);
+      const c5 = await r.start({ encryption: { keyringFile: r.keyringFile }, signing: { store } });
+      try {
+        const switched = (await inboxOf(c5, token!)).filter((i) => i.label === "The backup key was replaced");
+        assert.ok(switched.length >= 1);
+        assert.match(JSON.stringify(switched.at(-1)), new RegExp(keyringFingerprint(k2).slice(0, 16)), "the latest notice names the key now in use, not the one before");
+      } finally { await c5.close(); }
     } finally { rmSync(r.d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   });
 }

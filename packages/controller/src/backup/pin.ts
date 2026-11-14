@@ -14,6 +14,8 @@ export interface BackupKeyPinBody {
   readonly pinnedAt: string;
   /** A key the owner approved for the next start: it replaces the pin when a keyring with that fingerprint is loaded. */
   readonly approved?: { readonly fingerprint: string; readonly by: string; readonly at: string };
+  /** The key this pin replaced at a start, kept until the owner was told (card K01b): a start that fails after the switch, before its inbox notice, tells the owner at the next start. */
+  readonly replaced?: { readonly from: string; readonly by: string; readonly at: string };
 }
 
 /** What the owner approved: the fingerprint of a new key (`null`: an earlier approval was withdrawn), who and the fingerprint then pinned. Never any key material. */
@@ -59,12 +61,29 @@ export class BackupKeyPinService {
     const pin = found.body as unknown as BackupKeyPinBody;
     if (pin.fingerprint === fingerprint) return { fingerprint, first: false, approved: false };
     if (pin.approved?.fingerprint !== fingerprint) throw new KeyPinMismatch(pin.fingerprint, fingerprint);
-    const body: BackupKeyPinBody = { fingerprint, keyId: keyring.keyId, pinnedAt: now };
+    const body: BackupKeyPinBody = { fingerprint, keyId: keyring.keyId, pinnedAt: now, replaced: { from: pin.fingerprint, by: pin.approved.by, at: now } };
     await this.#runner.command("backup.key.repin", { commandId: `backup-key-repin-${fingerprint.slice(0, 16)}-${found.revision}`, actor: pin.approved.by }, async () => ({
       payload: { fingerprint, from: pin.fingerprint },
       build: async () => ({ ref: REF, creates: false, changes: [{ type: "update", ref: REF, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { fingerprint, from: pin.fingerprint, approvedBy: pin.approved!.by } }),
     }));
     return { fingerprint, first: false, approved: true };
+  }
+
+  /**
+   * Controller side (the start): tells the owner about a key switch not yet announced, then marks it told. The notice's own command ID carries the pin revision, so a switch back to a key used before is
+   * announced again, and a start cut off between the notice and the mark repeats the same notice (a replay), never a second one. A failing `tell` leaves the mark for the next start.
+   */
+  async announceReplacement(tell: (r: { fingerprint: string; from: string; by: string; revision: number }) => Promise<void>): Promise<boolean> {
+    const found = await this.#runner.get(REF.kind, REF.id);
+    const pin = found?.body as unknown as BackupKeyPinBody | undefined;
+    if (found === undefined || pin?.replaced === undefined) return false;
+    await tell({ fingerprint: pin.fingerprint, from: pin.replaced.from, by: pin.replaced.by, revision: found.revision });
+    const { replaced: _told, ...rest } = pin; void _told;
+    await this.#runner.command("backup.key.announced", { commandId: `backup-key-announced-${found.revision}`, actor: "controller" }, async () => ({
+      payload: { revision: found.revision },
+      build: async () => ({ ref: REF, creates: false, changes: [{ type: "update" as const, ref: REF, expectedRevision: found.revision, body: rest as unknown as JsonObject }], detail: { fingerprint: pin.fingerprint } }),
+    }));
+    return true;
   }
 
   /** Controller side (the start): whether this installation has ever pinned a backup key, that is, ever made encrypted backups. */
