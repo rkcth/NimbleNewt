@@ -304,7 +304,9 @@ for (const backend of backends) {
     // The same call asked again is the same run: no second order.
     const again = c.remote.runScript(c.dispatcherPrincipal, callOf(attemptId, r1.id, "call-0"), input(), sig());
     again.catch(() => undefined);
-    await sleepMs(50);
+    // The orders are committed to the placement one by one (a slower store takes longer): wait until all four are there, and a moment more to see that no fifth comes.
+    await until(async () => (await c.remote.placement(c.dispatcherPrincipal, attemptId))!.control.filter((m) => m.kind === "run").length === REMOTE_LIMITS.scriptRuns, "the four orders");
+    await sleepMs(100);
     const orders = (await c.remote.placement(c.dispatcherPrincipal, attemptId))!.control.filter((m) => m.kind === "run");
     assert.equal(orders.length, REMOTE_LIMITS.scriptRuns);
     assert.equal(new Set(orders.map((m) => (m as { runId: string }).runId)).size, REMOTE_LIMITS.scriptRuns);

@@ -89,12 +89,12 @@ for (const backend of backends) {
     assert.equal((await post(r1, `/worker/session/workspace/${x.requestId}`, { outcome: { ok: false, reason: "no", summary: "mixed" } })).status, 400);
     assert.equal((await post(r1, `/worker/session/workspace/${x.requestId}`, { outcome: { ok: true, summary: "x" }, requestId: "wsr-other" })).status, 400);
     assert.equal((await post(r1, "/worker/session/workspace/..%2F..%2Fetc", { outcome: { ok: true, summary: "x" } })).status, 404);
-    assert.equal((await rawRequest(url, "POST", `/worker/session/workspace/${x.requestId}`, { token: r1.token, body: { outcome: { ok: true, summary: "x" } }, headers: { [SESSION_HEADER]: r1.client.session!.sessionId, [PROTOCOL_HEADER]: "1" } })).status, 400, "a change needs an idempotency key");
+    assert.equal((await rawRequest(url, "POST", `/worker/session/workspace/${x.requestId}`, { token: r1.token, body: { outcome: { ok: true, summary: "x" } }, headers: { [SESSION_HEADER]: r1.client.session!.sessionId, [PROTOCOL_HEADER]: String(r1.client.session!.protocol) } })).status, 400, "a change needs an idempotency key");
     assert.equal((await rawRequest(url, "GET", "/worker/session/workspace?x=1", { token: r1.token, headers: withSession(r1) })).status, 400);
     // A session that is not the host's current one is fenced.
     const stale = r1.client.session!;
     await r1.client.connect({ os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: ["garden"] } as never, "again");
-    assert.equal((await rawRequest(url, "POST", `/worker/session/workspace/${x.requestId}`, { token: r1.token, body: { outcome: { ok: true, summary: "late" } }, headers: { [SESSION_HEADER]: stale.sessionId, [PROTOCOL_HEADER]: "1", "idempotency-key": "k2" } })).status, 409);
+    assert.equal((await rawRequest(url, "POST", `/worker/session/workspace/${x.requestId}`, { token: r1.token, body: { outcome: { ok: true, summary: "late" } }, headers: { [SESSION_HEADER]: stale.sessionId, [PROTOCOL_HEADER]: String(stale.protocol), "idempotency-key": "k2" } })).status, 409);
     // The right host, once: it stands; the same again is a repeat; another answer is a conflict.
     await r1.client.answerWorkspace(x.requestId, { ok: true, summary: "the real answer", detail: { n: 1 } });
     assert.deepEqual(await pending, { ok: true, summary: "the real answer", detail: { n: 1 } });
