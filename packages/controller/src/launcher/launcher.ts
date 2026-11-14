@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
@@ -125,6 +125,11 @@ export interface Launched {
   close(): Promise<void>;
 }
 
+/** Where the owner's backup keyring and the proof files live, beside the data directory's contents (card K01b). */
+export const BACKUP_KEYRING_FILE = "backup-keyring.json";
+export const BACKUP_PASSCODE_FILE = "backup-passcode";
+export const BACKUP_RECOVERY_FILE = "backup-recovery.json";
+
 const loopback = (url: string): boolean => { try { const h = new URL(url).hostname; return h === "localhost" || h === "::1" || h === "[::1]" || /^127(\.\d{1,3}){3}$/.test(h); } catch { return false; } };
 
 /** Starts the controller from `config`, makes the owner the first time, and lets the chat reach the providers the owner has recorded. */
@@ -193,7 +198,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   };
   // The secret values in use (card P02b): looked for in files before a work-in-progress backup leaves the machine. Names come from the configuration and the owner's records only; the owner's own credential is included
   // (it must never reach a remote either), the store is never listed, and an unreadable or missing secret is left out rather than failing the backup's scan (the shapes of credentials are still checked).
-  const secretValues = async (): Promise<readonly { readonly name: string; readonly value: string }[]> => {
+  const secretNames = async (): Promise<Set<string>> => {
     const names = new Set<string>([ownerSecretName(dataDir)]);
     for (const p of Object.values(config.models.providers)) if (p.credential?.secret !== undefined) names.add(p.credential.secret);
     if (config.controller.storage.kind === "postgres") names.add(config.controller.storage.url.secret);
@@ -202,6 +207,10 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
       for (const e of await live.services.setupProviders.endpoints().catch(() => [])) if (e.credentialName !== undefined) names.add(e.credentialName);
       for (const n of await live.services.wipBackup.credentialNames().catch(() => [])) names.add(n);
     }
+    return names;
+  };
+  const secretValues = async (): Promise<readonly { readonly name: string; readonly value: string }[]> => {
+    const names = await secretNames();
     const out: { name: string; value: string }[] = [];
     for (const name of [...names].sort()) { const value = await secrets.resolve(name).catch(() => undefined); if (typeof value === "string" && value.length > 0) out.push({ name, value }); }
     return out;
@@ -232,8 +241,19 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   // means the data directory's, not whatever the process was started in (the release launcher starts it in the release directory). `~` is not expanded (as for the data directory), so it is said.
   const configuredWorkspaces = options.start?.workspaceRoots !== undefined ? [] : Object.entries(config.installation.workspaces ?? {}).map(([name, w]) => ({ name, path: resolve(dataDir, w.path), given: w.path }));
   for (const w of configuredWorkspaces) if (w.given.startsWith("~")) print(`The workspace folder ${w.given} (installation.workspaces.${w.name}) starts with ~, which is not expanded; ${w.path} is checked.`);
+  // Backups (card K01b): when the host turns the built-in backup on, the launcher gives it the secret store the rest of the product uses, so the three things the card requires are not left to each host: every backup is signed by a
+  // key held in that store, the secret values in use go into encrypted backups, and the keyring the owner made on this host is used. An option the host gave itself wins. The keyring is looked for beside the data (never inside the
+  // backups folder, which is what a lost disk would take); with none, backups are plain and the owner is told how to set it up. The passcode and recovery files are only the names the owner puts a file under for the moment of a proof.
+  const backup = options.start?.backup === undefined ? undefined : ((): NonNullable<StartOptions["backup"]> => {
+    const given = options.start!.backup!;
+    const keyringFile = join(dataDir, BACKUP_KEYRING_FILE);
+    const encryption = given.encryption ?? (existsSync(keyringFile) ? { keyringFile, passcodeFile: join(dataDir, BACKUP_PASSCODE_FILE), recoveryFile: join(dataDir, BACKUP_RECOVERY_FILE) } : undefined);
+    if (encryption === undefined) print(`Backups are written in plain: there is no backup keyring at ${keyringFile}. Make one with: node scripts/nimblenewt.mjs backup encryption-setup ${keyringFile} --passcode-file <file> --recovery-out <file>, and restart.`);
+    return { ...given, ...(encryption === undefined ? {} : { encryption }), signing: given.signing ?? { store: secrets }, secrets: given.secrets ?? { store: secrets, names: async () => [...(await secretNames())] } };
+  })();
   const baseStart: StartOptions = {
     ...(options.start ?? {}),
+    ...(backup === undefined ? {} : { backup }),
     ...(configuredWorkspaces.length === 0 ? {} : { workspaceRoots: configuredWorkspaces.map((w) => w.path) }),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),

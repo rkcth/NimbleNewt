@@ -5,7 +5,7 @@ export { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js"
 export { DEFAULT_RETENTION, chooseKept, listBackups, pruneBackups, type BackupInfo, type Retention as BackupRetention } from "./retention.js";
 export { BackupService, type BackupServiceOptions, type BackupStatus } from "./service.js";
 export { BackupCipher, BackupKey, PasscodeRefused, RecoveryCodeInvalid, SealedFileBad, UnlockFailed, addPasscode, checkPasscode, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, recoveryKeyFromCode, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, type BackupSeal, type Keyring, type RecoveryFile } from "./crypto.js";
-export { BackupKeyPinService, KeyPinMismatch } from "./pin.js";
+export { BackupKeyPinService, KeyPinMismatch, type PinChange } from "./pin.js";
 export { SecretFileRefused, readSecretFile } from "./secret-file.js";
 export { BackupEncryption, ProofRefused, readKeyringFile, type EncryptionOptions, type EncryptionStatus, type ProofStore, type UnlockMethod } from "./encryption.js";
 export { MaintenanceBarrier, NamedWork, BarrierRefused, type BarrierParticipant, type BarrierState } from "./barrier.js";

@@ -16,6 +16,9 @@ export interface BackupKeyPinBody {
   readonly approved?: { readonly fingerprint: string; readonly by: string; readonly at: string };
 }
 
+/** What the owner approved: the fingerprint of a new key (`null`: an earlier approval was withdrawn), who and the fingerprint then pinned. Never any key material. */
+export interface PinChange { readonly approved: string | null; readonly pinned: string; readonly by: string; readonly revision: number }
+
 /** The keyring file names a different backup key than the one this installation pinned, and the owner has not approved the change. */
 export class KeyPinMismatch extends Error {
   constructor(readonly pinned: string, readonly found: string) {
@@ -30,7 +33,11 @@ export class KeyPinMismatch extends Error {
  */
 export class BackupKeyPinService {
   readonly #runner: CommandRunner;
+  readonly #hooks: ((change: PinChange) => Promise<void>)[] = [];
   private constructor(runner: CommandRunner) { this.#runner = runner; }
+
+  /** Called after the owner approved or withdrew a new backup key (the owner is told, card U11). A failing hook never undoes the approval. The key switch at start is announced by the host from `check`'s answer. */
+  onApproval(hook: (change: PinChange) => Promise<void>): void { this.#hooks.push(hook); }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): BackupKeyPinService {
     return new BackupKeyPinService(new CommandRunner(storage, epoch, options));
@@ -80,6 +87,7 @@ export class BackupKeyPinService {
     const fp = command.fingerprint;
     if (fp !== null && !(typeof fp === "string" && /^[0-9a-f]{64}$/.test(fp))) throw new DomainError("invalid_command", "fingerprint: must be the 64 hexadecimal characters `backup encryption-setup` printed, or null to withdraw an approval", { field: "fingerprint" });
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) throw new DomainError("invalid_command", "expectedRevision: must be a whole number", { field: "expectedRevision" });
+    let change: PinChange | undefined;
     const result = await this.#runner.command("backup.encryption.rekey", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { fingerprint: fp as string | null, expectedRevision: command.expectedRevision ?? null },
       build: async () => {
@@ -90,9 +98,12 @@ export class BackupKeyPinService {
         if (fp === pin.fingerprint) throw new DomainError("invalid_command", "that is the key already in use", { field: "fingerprint" });
         const { approved: _old, ...rest } = pin; void _old;
         const body: BackupKeyPinBody = fp === null ? rest : { ...rest, approved: { fingerprint: fp as string, by: owner.id, at: this.#runner.now() } };
+        if (fp !== null || pin.approved !== undefined) change = { approved: fp as string | null, pinned: pin.fingerprint, by: owner.id, revision: current.revision + 1 };
         return { ref: REF, creates: false, changes: [{ type: "update" as const, ref: REF, expectedRevision: current.revision, body: body as unknown as JsonObject }], detail: { approved: fp as string | null } };
       },
     }));
+    // A replay of an earlier command has no change of its own and announces nothing again.
+    if (change !== undefined) for (const hook of this.#hooks) await hook(change).catch(() => undefined);
     return { revision: result.revision };
   }
 }
