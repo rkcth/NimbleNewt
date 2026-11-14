@@ -96,4 +96,45 @@ for (const backend of backends) {
       assert.deepEqual((await projectIds(w.projects)).sort(), [...ids].sort());
     } finally { await store.close(); }
   });
+
+  test(`${backend.name}: the live list reads past a full page whose last project is archived`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      // 101 projects in all (a page is 100): the 100th and the 101st by ID are archived, so the first page ends on an archived project and the second holds only one.
+      for (let n = 0; n < 100; n++) await w.projects.createProject({ commandId: `pg${n}`, actor: w.owner.id, name: `P${n}` });
+      const ids = (await projectIds(w.projects)).sort();
+      assert.equal(ids.length, 101);
+      for (const id of [ids[99]!, ids[100]!]) {
+        const cur = (await w.projects.getProject(id))!;
+        await w.projects.updateProject({ commandId: `pga-${id}`, actor: w.owner.id, projectId: id, expectedRevision: cur.revision, state: "archived" } as never);
+      }
+      assert.deepEqual((await liveProjectIds(w.projects)).sort(), ids.slice(0, 99), "every live project, none twice, the archived ones left out");
+    } finally { await store.close(); }
+  });
 }
+
+/** Card P06 (reviews fence) review: the live list is never cut short or repeated by paging, whatever the archived projects at the page ends (a loop handed a partial list would serve nobody in the rest, for ever). */
+test("the live list pages correctly for every size around the page and every archived position at the page ends", async () => {
+  for (const size of [0, 1, 99, 100, 101, 199, 200, 201, 350]) {
+    for (const archivedAt of [[], [99], [100], [99, 100], [199, 200], "all", "first-page"] as const) {
+      const rows = Array.from({ length: size }, (_, n) => ({ id: `p${String(n).padStart(4, "0")}`, state: "active" as string }));
+      if (archivedAt === "all") for (const r of rows) r.state = "archived";
+      else if (archivedAt === "first-page") for (const r of rows.slice(0, 100)) r.state = "archived";
+      else for (const at of archivedAt) if (rows[at] !== undefined) rows[at]!.state = "archived";
+      let reads = 0;
+      const port = {
+        listProjects: async (page: { afterId?: string; limit: number }) => {
+          reads++;
+          assert.ok(reads <= Math.floor(size / 100) + 1, "no more reads than pages");
+          const from = page.afterId === undefined ? 0 : rows.findIndex((r) => r.id === page.afterId) + 1;
+          assert.ok(page.afterId === undefined || from > 0, "the cursor is a project that was read");
+          return rows.slice(from, from + page.limit) as never;
+        },
+      };
+      const want = rows.filter((r) => r.state !== "archived").map((r) => r.id);
+      assert.deepEqual(await liveProjectIds(port), want, `${size} projects, archived ${JSON.stringify(archivedAt)}`);
+      assert.equal(reads, Math.floor(size / 100) + 1, "one read per page and one that finds the end");
+    }
+  }
+});
