@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
 import { describe, proposalReason, acceptedArgs, CHAT_OPS } from "./commands.js";
-import { MeetingDeskReadService, MeetingRecordService, taskUpdateApplier, type ChangeApplier } from "../meetings/index.js";
+import { MeetingDeskReadService, MeetingFloorService, MeetingRecordService, taskUpdateApplier, type ChangeApplier } from "../meetings/index.js";
 import { DomainError } from "../domain/errors.js";
 import { GrantService } from "../security/index.js";
 import type { ChatService, Outcome } from "./index.js";
@@ -15,12 +15,18 @@ const TABLE = "meeting.record.table";
 const FINISH = "meeting.record.finish";
 const APPLY = "meeting.record.apply";
 const OUTCOMES = "meeting.record.outcomes";
+const ASK = "meeting.floor.ask";
+const ADDRESS = "meeting.floor.address";
+const INQ_OPEN = "meeting.floor.inquiry-open";
+const INQ_END = "meeting.floor.inquiry-end";
+const FLOOR_END = "meeting.floor.end";
+const PRIORITIES = "meeting.floor.priorities";
 
 interface Room {
   records: MeetingRecordService;
   crash: { n: number };
   /** A meeting with the three agents joined; returns the record's ID. */
-  meeting(title: string, project?: string): Promise<{ recordId: string; project: string }>;
+  meeting(title: string, project?: string, extra?: readonly string[]): Promise<{ recordId: string; project: string }>;
   /** A motion moved in that meeting (one retitling change when `change` is set). */
   motion(recordId: string, text: string, o?: { topic?: string; change?: string; agendaItemId?: string }): Promise<{ id: string; taskId?: string }>;
   vote(motionId: string, value?: "yes" | "no"): Promise<void>;
@@ -40,9 +46,11 @@ export function defineMeetingControlTests(backendName: string): void {
         const script: Record<string, unknown> = {};
         const holder: { r?: MeetingRecordService } = {};
         const lazy = new Proxy({}, { get: (_t, k) => async (...a: unknown[]) => (holder.r as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>)[k as string]!(...a) }) as MeetingRecordService;
+        const floorHolder: { f?: MeetingFloorService } = {};
+        const lazyFloor = new Proxy({}, { get: (_t, k) => async (...a: unknown[]) => (floorHolder.f as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>)[k as string]!(...a) }) as MeetingFloorService;
         const deskHolder: { d?: MeetingDeskReadService } = {};
         const lazyDesk = new Proxy({}, { get: (_t, k) => async (...a: unknown[]) => (deskHolder.d as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>)[k as string]!(...a) }) as MeetingDeskReadService;
-        const w = await openWorld(backend, script, undefined, { records: lazy, deskReads: lazyDesk });
+        const w = await openWorld(backend, script, undefined, { records: lazy, deskReads: lazyDesk, floor: lazyFloor });
         deskHolder.d = MeetingDeskReadService.withEpoch(w.world.storage, w.projects.epoch, options);
         const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
         const authority = async (id: string) => { const p = await w.principals.get(id); return p === undefined ? undefined : grants.effective({ id, kind: p.kind, name: p.name, grants: p.grants }, options.clock()); };
@@ -53,14 +61,20 @@ export function defineMeetingControlTests(backendName: string): void {
         const records = holder.r;
         const project = await w.project("A");
         const mgr = await w.agent("mgr", [{ action: "meeting.manage", project: "*" }]);
+        floorHolder.f = MeetingFloorService.withEpoch(w.world.storage, w.projects.epoch, {
+          records, meetings: w.meetings, service: { id: "service:meeting-floor", kind: "service", name: "meeting-floor", asOf: "2026-01-01T00:00:00.000Z", grants: [{ action: "meeting.manage", project: "*" }, { action: "meeting.read", project: "*" }] } as never, deskReads: deskHolder.d!,
+          runner: { turn: async (r) => ({ text: r.kind === "owner-answer" ? `ANSWER: ${r.agent.slice(-4)} says the cache is warm at one.\nSOURCES: none\nCOMPLETED: none\nPROPOSED: none\nINVESTIGATE: none` : "ok", usage: { visibleTokens: 20, hiddenTokens: 0 } }) },
+          principalOf: async (id) => { const p = await w.principals.get(id); return p === undefined ? undefined : authority(id) as never; },
+        }, options);
         const grantsOf = (extra: string[]) => [{ action: "task.read", project: "*" }, ...extra.map((action) => ({ action, project: "*" }))];
         const crew = [await w.agent("ann", grantsOf(["meeting.attend", "task.update"])), await w.agent("bob", grantsOf(["meeting.attend", "task.update"])), await w.agent("cyd", grantsOf(["meeting.attend", "task.update"]))];
         const room: Room = {
           records, crash, project, agentToken: crew[0]!.token,
-          meeting: async (title, p = project) => {
-            const occ = (await w.meetings.callUrgent(mgr.principal, { commandId: cid("urg"), projectId: p, title, reason: "decide", roster: crew.map((c) => c.principal.id) })).id;
+          meeting: async (title, p = project, extra = []) => {
+            const occ = (await w.meetings.callUrgent(mgr.principal, { commandId: cid("urg"), projectId: p, title, reason: "decide", roster: [...crew.map((c) => c.principal.id), ...extra] })).id;
             const rec = (await records.open(mgr.principal, { commandId: cid("open"), occurrenceId: occ })).id;
             for (const c of crew) await records.join(c.principal, { commandId: cid("j"), recordId: rec });
+            for (const id of extra) await records.join(await w.principals.authenticate((await w.principals.issueCredential(w.owner, id)).token), { commandId: cid("j"), recordId: rec });
             return { recordId: rec, project: p };
           },
           motion: async (recordId, text, o = {}) => {
@@ -85,7 +99,7 @@ export function defineMeetingControlTests(backendName: string): void {
       });
     const say = (w: World, chat: ChatService, text: string) => chat.submit(w.ownerToken, { messageId: cid("m"), text });
     const only = (outcomes: readonly Outcome[]): Outcome => { assert.equal(outcomes.length, 1); return outcomes[0]!; };
-    const call = async (w: World, token: string, op: string, args: Record<string, unknown>) => w.api.handle(token, { v: 1, op, args } as never) as Promise<any>;
+    const call = async (w: World, token: string, op: string, args: Record<string, unknown>, commandId?: string) => w.api.handle(token, { v: 1, op, args, ...(commandId === undefined ? {} : { commandId }) } as never) as Promise<any>;
 
     suite("the owner opens the vote on a motion by its words; the version is read, the proposal is shown first, nothing changes until confirmed", async (w, script, room) => {
       const { recordId } = await room.meeting("Infrastructure sync");
@@ -343,6 +357,54 @@ export function defineMeetingControlTests(backendName: string): void {
       assert.ok(!acceptedArgs(OPEN)!.includes("limitMinutes"), "the length of a vote is not chat's to set");
       assert.ok(acceptedArgs(TABLE)!.includes("motionTopic") && acceptedArgs(FINISH)!.includes("meetingTopic") && acceptedArgs(APPLY)!.includes("decisionTopic"));
       assert.ok(acceptedArgs(OUTCOMES)!.includes("meetingTopic") && acceptedArgs(OUTCOMES)!.includes("askOwner") && acceptedArgs(OUTCOMES)!.includes("recordId"));
+    });
+
+    suite("the owner asks one agent a question, opens and ends an inquiry and changes the priorities in free words, and ending the meeting is shown first", async (w, script, room) => {
+      // An agent with a name the owner can say, on the roster and in the room.
+      const ann = await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "ann" });
+      const { recordId } = await room.meeting("Infrastructure sync", undefined, [`agent:${ann.id}`]);
+      await room.motion(recordId, "Move the nightly build to one in the morning.");
+      { const st = await call(w, w.ownerToken, "meeting.floor.start", { recordId }, cid("fs")); assert.equal(st.ok, true, JSON.stringify(st)); }
+      const chat = w.chat();
+      // A question to one agent, by its name and the meeting's words; it applies at once because it is only the owner's own words.
+      script["Ask ann why one in the morning for the infrastructure sync."] = [cmd(ASK, { meetingTopic: "infrastructure sync", agentName: "ann", question: "why one in the morning" }, "Ask ann why one in the morning for the infrastructure sync.")];
+      const asked = only((await say(w, chat, "Ask ann why one in the morning for the infrastructure sync.")).outcomes);
+      assert.equal(asked.status, "applied", JSON.stringify(asked));
+      const transcript = await call(w, w.ownerToken, "meeting.record.discussion", { recordId, limit: 50 });
+      const text = JSON.stringify(transcript);
+      assert.match(text, /why one in the morning/);
+      assert.match(text, /says the cache is warm at one/);
+      // An inquiry is opened and closed in plain words.
+      script["I have a few questions, pause the infrastructure sync."] = [cmd(INQ_OPEN, { meetingTopic: "infrastructure sync" }, "I have a few questions, pause the infrastructure sync.")];
+      assert.equal(only((await say(w, chat, "I have a few questions, pause the infrastructure sync.")).outcomes).status, "applied");
+      const waiting = await call(w, w.ownerToken, "meeting.floor.waiting", { recordId });
+      assert.equal(waiting.result?.item?.kind ?? waiting.item?.kind ?? JSON.stringify(waiting).match(/"kind":"(\w+)"/)?.[1], "person");
+      script["That is all my questions on the infrastructure sync."] = [cmd(INQ_END, { meetingTopic: "infrastructure sync" }, "That is all my questions on the infrastructure sync.")];
+      assert.equal(only((await say(w, chat, "That is all my questions on the infrastructure sync.")).outcomes).status, "applied");
+      // The agent's name is not in the room's roster, or is not an agent at all: refused, nothing is recorded.
+      script["Ask zed about the infrastructure sync."] = [cmd(ASK, { meetingTopic: "infrastructure sync", agentName: "zed", question: "anything" }, "Ask zed about the infrastructure sync.")];
+      assert.equal(only((await say(w, chat, "Ask zed about the infrastructure sync.")).outcomes).status, "refused");
+      // Ending it cannot be taken back: shown first.
+      script["Wrap up the infrastructure sync now."] = [cmd(FLOOR_END, { meetingTopic: "infrastructure sync" }, "Wrap up the infrastructure sync now.")];
+      const proposed = only((await say(w, chat, "Wrap up the infrastructure sync now.")).outcomes);
+      assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
+      assert.equal(await room.recordState(recordId), "open");
+      await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: proposed.proposalId! });
+      assert.equal(await room.recordState(recordId), "ended");
+    });
+
+    suite("the floor's operations are all reachable from chat words and owner-only ones are refused for an agent", async (w, _script, room) => {
+      const { recordId } = await room.meeting("Infrastructure sync");
+      await room.motion(recordId, "Move the nightly build to one in the morning.");
+      for (const op of [ASK, ADDRESS, INQ_OPEN, INQ_END, FLOOR_END, PRIORITIES, "meeting.floor.extend", "meeting.floor.configure", "meeting.floor.start", "meeting.floor.follow-ups"]) {
+        assert.ok(CHAT_OPS[op] !== undefined, `${op} is a chat command`);
+        assert.ok(acceptedArgs(op)!.includes("meetingTopic"), `${op} names its meeting by words`);
+      }
+      assert.ok(acceptedArgs(ASK)!.includes("agentName") && acceptedArgs(PRIORITIES)!.includes("agendaTopic"));
+      { const st = await call(w, w.ownerToken, "meeting.floor.start", { recordId }, cid("fs")); assert.equal(st.ok, true, JSON.stringify(st)); }
+      const crew = room.agentToken;
+      const refused = await call(w, crew, ASK, { recordId, agent: "agent:x", question: "hi" }, cid("ask")).catch((e: unknown) => e);
+      assert.ok(JSON.stringify(refused).match(/forbidden|not allowed|may not/i), JSON.stringify(refused));
     });
   }
 }
