@@ -1,4 +1,5 @@
-export { BACKUP_FORMAT, BACKUP_KINDS, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
+export { BACKUP_FORMAT, BACKUP_KINDS, BACKUP_NOTES, MANIFEST_FILE, PARTIAL_SUFFIX, type BackupFileEntry, type BackupKind, type BackupManifest, type BackupScopeLine, type BackupScopeRecord } from "./format.js";
+export { BACKUP_SCOPE_OFF, BackupScopeSettingService, LEAVE_OUT_KINDS, SCOPE_MAX_DAYS, SCOPE_MIN_DAYS, describeScope, planLeaveOut, scopeIsOn, type BackupScopeChange, type BackupScopeValues, type LeaveOutPlan } from "./scope.js";
 export { backupName, createBackup, type BackupOptions } from "./write.js";
 export { readManifest, verifyBackup, type BackupCheck } from "./verify.js";
 export { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js";

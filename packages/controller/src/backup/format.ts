@@ -34,6 +34,21 @@ export const filesSealed = (m: { readonly encryption?: { readonly scope: string 
 /** The file a table is kept in: sealed backups add `.enc`. */
 export const tableFile = (table: string, sealed: boolean): string => `${table}.jsonl${sealed ? SEALED_SUFFIX : ""}`;
 
+/**
+ * What a backup made under the owner's backup scope (card K01d) left out, so that nobody mistakes it for a full copy. Present only when at least one scope rule was in force when the backup was made.
+ * `leftOut` has one line per kind: `left` records whose content is not in the backup (`stubbed` of them are still there as an empty shell, so a message sent again is still answered as the turn it was);
+ * `heldBack` are records that matched the rule but are kept in full because a resumable task or a replay still refers to them. `referenceCheckComplete` false means the check of what is still referred to did
+ * not finish (too many records), so nothing at all was left out.
+ */
+export interface BackupScopeLine { readonly tier: "scratch" | "transcripts" | "logs"; readonly kind: string; readonly olderThanDays: number; readonly left: number; readonly stubbed: number; readonly heldBack: number }
+export interface BackupScopeRecord {
+  readonly rules: { readonly scratchDays: number | null; readonly transcriptDays: number | null; readonly logDays: number | null };
+  readonly leftOut: readonly BackupScopeLine[];
+  readonly referenceCheckComplete: boolean;
+  /** The plain-words account, for the notes and the restore report. */
+  readonly text: string;
+}
+
 export interface BackupManifest {
   readonly format: typeof BACKUP_FORMAT;
   readonly product: "nimblenewt";
@@ -57,6 +72,8 @@ export interface BackupManifest {
   readonly encryption?: BackupSeal;
   /** Present on an encrypted backup, written last: the keyed MAC over every other field of this manifest. */
   readonly mac?: string;
+  /** Present when the owner's backup scope (card K01d) was on: what it left out. Absent: the backup holds everything the store held. */
+  readonly contentScope?: BackupScopeRecord;
   /** What the owner should know about what is and is not in the copy. */
   readonly notes: readonly string[];
   readonly complete: true;

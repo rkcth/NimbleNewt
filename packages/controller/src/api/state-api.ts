@@ -63,7 +63,7 @@ import type { WorkingNoteService } from "../context/notes.js";
 import type { WorkEndService } from "../work-end/index.js";
 import type { PauseService } from "../lifecycle/pause.js";
 import type { StopService } from "../lifecycle/stop.js";
-import type { BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupSystem, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
+import type { BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupScopeSettingService, BackupSystem, BackupKeyPinService, BackupService, BackupSigningService } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { MeetingFloorService } from "../meetings/floor.js";
@@ -257,6 +257,7 @@ export interface StateApiDeps {
   readonly backupEncryption?: Pick<BackupEncryption, "status" | "verify" | "generations">;
   readonly backupKeyPin?: Pick<BackupKeyPinService, "get" | "rekey">;
   readonly backupEncryptionSetting?: Pick<BackupEncryptionSettingService, "get" | "set" | "text">;
+  readonly backupScope?: Pick<BackupScopeSettingService, "get" | "set">;
   readonly backupSigning?: Pick<BackupSigningService, "status" | "rotate">;
   /** The configurable backup system (card K01c): targets, schedule, purge, test restore. */
   readonly backupSystem?: Pick<BackupSystem, "status" | "addTarget" | "testTarget" | "purge" | "verifyNow">;
@@ -448,6 +449,7 @@ export class StateApi {
         ...(this.#deps.backupEncryption === undefined ? {} : { backupEncryption: this.#deps.backupEncryption }),
         ...(this.#deps.backupKeyPin === undefined ? {} : { backupKeyPin: this.#deps.backupKeyPin }),
         ...(this.#deps.backupEncryptionSetting === undefined ? {} : { backupEncryptionSetting: this.#deps.backupEncryptionSetting }),
+        ...(this.#deps.backupScope === undefined ? {} : { backupScope: this.#deps.backupScope }),
         ...(this.#deps.backupSigning === undefined ? {} : { backupSigning: this.#deps.backupSigning }),
         ...(this.#deps.backupSystem === undefined ? {} : { backupSystem: this.#deps.backupSystem }),
         ...(this.#deps.backupConfig === undefined ? {} : { backupConfig: this.#deps.backupConfig }),

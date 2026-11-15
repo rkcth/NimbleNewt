@@ -10,6 +10,7 @@ import type { SecretsSource } from "./secrets.js";
 import type { BackupSigner } from "./signing.js";
 import { createBackup } from "./write.js";
 import type { PiStateSource } from "./pi-state.js";
+import type { BackupScopeValues } from "./scope.js";
 
 export interface BackupServiceOptions {
   readonly root: string;
@@ -46,6 +47,8 @@ export interface BackupServiceOptions {
    * so the automatic copy (on by default in the production entry, card K01i) cannot fill the disk the controller writes to; the owner's own "back up now" is not held back by it (review).
    */
   readonly freeBytes?: (dir: string) => Promise<number | undefined>;
+  /** The owner's backup scope now in force (card K01d), read at each manual or scheduled backup; `undefined`, or a source that fails, gives a whole backup (never less than was asked for). Safety copies (before an upgrade or a restore) are always whole. */
+  readonly scopeSource?: () => Promise<BackupScopeValues | undefined>;
   /** Tests only: passed to `createBackup` (the rename that puts a finished backup in place). */
   readonly renameFolder?: (from: string, to: string) => Promise<void>;
 }
@@ -115,7 +118,9 @@ export class BackupService {
     if (this.#running !== undefined) return this.#running;
     const run = (async () => {
       try {
-        const made = await createBackup(this.#storage, { root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
+        // The owner's backup scope applies to the backups the owner and the schedule ask for; a source that fails gives a whole backup.
+        const leaveOut = kind === "manual" || kind === "scheduled" ? await this.#options.scopeSource?.().catch(() => undefined) : undefined;
+        const made = await createBackup(this.#storage, { ...(leaveOut === undefined ? {} : { leaveOut }), root: this.#options.root, kind, version: this.#options.version, ...(this.#options.now === undefined ? {} : { now: this.#options.now }), ...(this.#options.pageSize === undefined ? {} : { pageSize: this.#options.pageSize }), ...(this.#options.blobs === undefined ? {} : { blobs: this.#options.blobs }), ...(await this.#sealing()), ...(this.#options.piState === undefined ? {} : { piState: this.#options.piState }) });
         this.#lastError = undefined;
         await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.rules() }).catch((error) => { this.#lastError = { at: this.#now().toISOString(), message: `old backups could not be removed: ${error instanceof Error ? error.message : String(error)}` }; });
         // The copies to the targets run beside the next backups, not inside this one: a slow off-machine target never holds up the answer to "back up now" (the next backup waits for it, and shutdown does).

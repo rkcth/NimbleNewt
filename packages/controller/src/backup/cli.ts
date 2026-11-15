@@ -146,6 +146,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if ((done.secrets?.refused ?? 0) > 0) print(`${done.secrets!.refused} entries of the backup named the backup-signing key, which a backup never carries: they were refused (check where this backup came from)`);
       if (done.secretsLeftOut !== undefined) print(`the secret values were left out: ${done.secretsLeftOut}`);
       for (const n of done.notes ?? []) print(n);
+      if (done.leftOutByScope !== undefined) print(`NOT A FULL COPY: ${done.leftOutByScope.leftOut.reduce((n, l) => n + l.left, 0)} records were left out of this backup by the backup scope that was set when it was made${done.leftOutByScope.leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind})`).join("")}, so the restored data is not complete`);
       if (done.signature !== undefined) print(done.signature.text);
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
       if (done.piFilesRestored > 0) print(`${done.piFilesRestored} conversation files of ${done.piStoresRestored} agent stores were put back`);
