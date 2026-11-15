@@ -363,6 +363,8 @@ interface Reserved {
   foldedMs: number;
   /** The loader configuration as last looked at (card U11d). */
   loaderSeen?: readonly LoaderPathState[];
+  /** The look at it running now, if any: the next waits for it. */
+  loaderLook?: Promise<void>;
   /** Contract checks running in this sandbox now (card W05): ended with it. */
   readonly checkRuns: Set<{ kill(): void }>;
 }
@@ -424,17 +426,22 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
     tell(order, { kind: "sandbox-escape-attempt", key: `sbx:${error.containment.what}:${error.containment.id}` });
   };
   /** Looks at the loader configuration and reports a difference from the last look (card U11d). A look that cannot be made says nothing. */
-  const lookLoader = async (entry: Reserved): Promise<void> => {
+  // The looks of one attempt run one after another (a close during a turn's look waits for it), so a slower, older look never replaces a newer state and reports a change back that did not happen.
+  const lookLoader = (entry: Reserved): Promise<void> => {
     const paths = options.loaderConfig?.paths;
-    if (paths === undefined || paths.length === 0) return;
-    try {
-      const now = await lookAtLoaderConfig(paths);
-      if (now === undefined) return;
-      const before = entry.loaderSeen;
-      entry.loaderSeen = now;
-      const changed = before === undefined ? undefined : loaderChange(before, now);
-      if (changed !== undefined) tell(entry.order, { kind: "protected-path-touched", key: changed.key });
-    } catch { /* never changes the answer */ }
+    if (paths === undefined || paths.length === 0) return Promise.resolve();
+    const next = (entry.loaderLook ?? Promise.resolve()).then(async () => {
+      try {
+        const now = await lookAtLoaderConfig(paths);
+        if (now === undefined) return;
+        const before = entry.loaderSeen;
+        entry.loaderSeen = now;
+        const changed = before === undefined ? undefined : loaderChange(before, now);
+        if (changed !== undefined) tell(entry.order, { kind: "protected-path-touched", key: changed.key });
+      } catch { /* never changes the answer */ }
+    });
+    entry.loaderLook = next;
+    return next;
   };
 
   /** The mounts and environment the recipe's named reaches stand for. Every name must be known to this host; a name twice, a bad name or too many are refused. */
@@ -473,13 +480,13 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       return {
         revision: normalized.revision,
         close: async () => {
-          await lookLoader(entry);
           entry.closed = true;
           if (reserved.get(order.attemptId) === entry) reserved.delete(order.attemptId);
           try { entry.network?.closeAll("the attempt's sandbox was closed"); } catch { /* the relay is gone */ }
           for (const r of entry.checkRuns) r.kill();
           // A process the OS could not end is not taken as gone (card L02d): the close says so, and the sandbox keeps listing it.
-          await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; });
+          // The last look is made once the attempt's process has ended (or failed to), so a write in its last moments is seen too.
+          try { await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; }); } finally { await lookLoader(entry); }
         },
         work: () => heldBy(entry.launched, entry.foldedMs),
         end: async () => { for (const r of entry.checkRuns) r.kill(); await Promise.all(entry.launched.map((p) => p.forceEnd())); },

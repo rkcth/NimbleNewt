@@ -225,3 +225,47 @@ test("a launch the launcher refuses with the containment marker is reported from
   assert.equal(quiet.got.length, 0);
   await s2.close();
 });
+
+test("a write the attempt's process makes in its last moments, while the sandbox closes, is seen: the last look is made after the process has ended", async () => {
+  const w = fresh(); const e = eventsOf();
+  let finish!: (r: RunResult) => void;
+  const result = new Promise<RunResult>((ok) => { finish = ok; });
+  const exit = () => finish({ exitCode: 0, signal: null, timedOut: false, killed: false, stdout: "", stderr: "", stdoutTruncated: false } as RunResult);
+  let emit!: (m: FromChild) => void;
+  const run = { result, kill: exit, endInput: () => undefined, write: async (text: string) => {
+    for (const m of text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as ToChild)) {
+      if (m.t === "start") queueMicrotask(() => emit({ t: "ready", v: WORKER_CHANNEL_VERSION }));
+      // The process writes the loader configuration as it is told to close, then ends.
+      if (m.t === "close") { writeFileSync(join(w.ext, "loader.json"), "written at the end"); exit(); }
+    }
+  } } as unknown as SandboxRun;
+  const launcher = { launch: async (request: LaunchRequest) => { emit = (m) => request.stream!.onStdout(Buffer.from(encodeMessage(m))); return run; } };
+  const p = build(w, e.sink, {}, launcher);
+  const session = await p.sandbox.open(order().recipe, order());
+  await p.runtimes.open(order(), {}, undefined);
+  assert.equal(e.got.length, 0);
+  await session.close();
+  assert.equal(e.got.length, 1, "the write made while the process ended is reported at the close");
+  assert.match(e.got[0]!.key, /^loader:changed:/);
+});
+
+test("a look that cannot be made (a folder the host cannot read, more than the bounds) opens and closes the attempt as before and reports nothing", async (t) => {
+  const w = fresh(); const e = eventsOf();
+  const many = dir(`w${counter}/extensions/many`);
+  // More entries than the bound: every look is given up, so nothing is ever compared.
+  for (let i = 0; i < 2001; i++) writeFileSync(join(many, `f${i}`), "");
+  const p = build(w, e.sink);
+  const s = await p.sandbox.open(order().recipe, order());
+  writeFileSync(join(w.ext, "loader.json"), "changed but not seen");
+  await s.close();
+  assert.equal(e.got.length, 0);
+  if (process.platform === "win32" || process.getuid?.() === 0) return t.skip("permission bits do not stop this user here");
+  const w2 = fresh();
+  const { chmodSync } = await import("node:fs");
+  const locked = dir(`w${counter}/extensions/locked`);
+  const p2 = build(w2, e.sink);
+  const s2 = await p2.sandbox.open(order().recipe, order());
+  chmodSync(locked, 0o000);
+  try { await s2.close(); } finally { chmodSync(locked, 0o755); }
+  assert.equal(e.got.length, 0, "a failed look is not a change");
+});

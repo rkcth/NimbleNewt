@@ -109,3 +109,57 @@ test("when several paths differ, the most serious kind is named (a removal over 
   unlinkSync(second);
   assert.equal(loaderChange(before, await look(x.file, second))?.change, "removed");
 });
+
+test("a named path that is itself a link (a deployment's current link) is looked at through it: a write behind the link is a change, the same bytes are not, and the link's own target counts too", async (t) => {
+  const x = fresh();
+  const named = join(root, `current-${n}`);
+  if (!link(x.dir, named, true)) return t.skip("this system refuses to make a link here");
+  const first = await look(named);
+  assert.equal(first[0]!.type, "link");
+  assert.equal(loaderChange(first, await look(named)), undefined, "nothing changed");
+  writeFileSync(x.file, '{"extensions":["tools"]}');
+  assert.equal(loaderChange(first, await look(named)), undefined, "the same bytes");
+  writeFileSync(x.sub, "export const a = 99;");
+  assert.equal(loaderChange(first, await look(named))?.change, "changed", "a write behind the link");
+  const fileLink = join(root, `current-file-${n}`);
+  if (link(x.file, fileLink, false)) {
+    const one = await look(fileLink);
+    writeFileSync(x.file, "other bytes");
+    assert.equal(loaderChange(one, await look(fileLink))?.change, "changed", "a write to the file a named file link points to");
+  }
+});
+
+test("a link inside the folder that loops back is not followed, and a pipe in the folder is not read (the look ends)", async (t) => {
+  const x = fresh();
+  if (!link(x.dir, join(x.dir, "tools", "loop"), true)) return t.skip("this system refuses to make a link here");
+  const first = await lookAtLoaderConfig([x.dir]);
+  assert.ok(first !== undefined, "a loop of links is one entry, not a walk");
+  if (process.platform === "win32") return;
+  const { execFileSync } = await import("node:child_process");
+  try { execFileSync("mkfifo", [join(x.dir, "pipe")], { stdio: "ignore" }); } catch { return t.skip("no mkfifo here"); }
+  const withPipe = await lookAtLoaderConfig([x.dir]);
+  assert.ok(withPipe !== undefined);
+  assert.equal(loaderChange(first!, withPipe!)?.change, "changed", "a new special entry is a change, by its type only");
+});
+
+test("a folder that cannot be read says nothing (no guess), and is not taken for a change", async (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) return t.skip("permission bits do not stop this user here");
+  const x = fresh();
+  const { chmodSync } = await import("node:fs");
+  const first = await look(x.dir);
+  chmodSync(join(x.dir, "tools"), 0o000);
+  try { assert.equal(await lookAtLoaderConfig([x.dir]), undefined); } finally { chmodSync(join(x.dir, "tools"), 0o755); }
+  assert.equal(loaderChange(first, await look(x.dir)), undefined, "readable again and unchanged");
+});
+
+test("the byte bound counts what is read, across files, and the entry bound counts the names of a folder before they are walked", async () => {
+  const x = fresh();
+  writeFileSync(join(x.dir, "big.bin"), Buffer.alloc(3000, 1));
+  assert.equal(await lookAtLoaderConfig([x.dir], { entries: 100, bytes: 2999 }), undefined, "beyond the bytes");
+  assert.ok(await lookAtLoaderConfig([x.dir], { entries: 100, bytes: 4000 }) !== undefined, "within them");
+  const many = join(root, `many-${n}`);
+  mkdirSync(many);
+  for (let i = 0; i < 30; i++) writeFileSync(join(many, `f${i}`), "");
+  assert.equal(await lookAtLoaderConfig([many], { entries: 20, bytes: 1000 }), undefined, "too many names");
+  assert.ok(await lookAtLoaderConfig([many], { entries: 31, bytes: 1000 }) !== undefined);
+});
