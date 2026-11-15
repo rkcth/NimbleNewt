@@ -9252,12 +9252,26 @@
       ],
       "deliverable": "Migration journal, compatibility checks and recovery guide",
       "acceptance_and_verification": "Interrupted migration recovers; incompatible schema downgrade blocked; restore distinguishes external effects since snapshot; a defined rollback period with additive schema; code rollback only to a tested compatible pair; destructive migrations deferred; the watchdog distinguishes release defects from provider or host failures; health thresholds and probation are configurable and a rollout can be stopped",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "312d2430",
+          "a924f3be",
+          "34fe0871",
+          "64016992"
+        ],
+        "ci_runs": [
+          "43672690406"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Migrations are additive or destructive; a destructive one and everything after it are deferred until the owner approves it after the rollback period, and the approval file counts only when it agrees with the approval recorded in the database. An upgrade cut before or after every statement recovers to the uninterrupted state, an interrupted non-transactional migration is finished by the next start, and a database newer than the build is refused untouched. MigrationGuardService records upgrades and tested pairs (a release plus schema confirmed healthy by a real start); release.rollback goes only to a tested pair over additive migrations inside the rollback period (default 14 days). The restore preview lists what happened outside after the backup. The launcher and supervisor tell release defects from host or provider trouble (probes for disk, write access and memory, the controller's exits 76/77, which a release cannot use to avoid being set aside); rollback period, probation, release-failure and host-retry limits are owner settings, and the owner can stop a rollout. Owner guide: docs/nimblenewt/migration-recovery.md. Left: production has only migration 1, so destructive migrations exist only in test registries and the start.ts call of openApprovedContract is not tested through startController; probation timing is tested with a fake clock, not real time; the launcher's automatic fall-back uses the last known good and the safe-back line (declared schema range while the period is open), not the full guard verdict, because it cannot read the database; provider and database-server reachability are seen only through the controller's exit code; not run on a real installed macOS or Windows machine (CI runners only)."
+      }
     },
     {
       "id": "K04",
