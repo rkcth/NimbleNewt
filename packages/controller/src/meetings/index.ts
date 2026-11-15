@@ -19,3 +19,8 @@ export { MeetingDeskReadService, REFUSED_OPERATIONS, type DeskReadBody, type Des
 export { FLOOR_DEFAULTS, FLOOR_SETTING_NAMES, FLOOR_SETTINGS, applyFloorChange, checkFloorValue, floorSettingsFrom, type FloorSettings } from "./floor-settings.js";
 export { MeetingFloorService, FLOOR_LIMITS, TurnWaitsOnTool, type FloorBody, type FloorDeps, type AdvanceResult, type TurnRequest, type TurnReply, type TurnRunner, type TurnKind, type WaitingOn, type ChairQuestionRecord } from "./floor.js";
 export { PREAMBLE, QUESTION_FIELDS, accountTurn, buildPrompt, chairQuestionRefusal, estimateTokens, parseJsonObject, parseObjection, parseStatement, parseVote, quoteOccurs, recordText, transcriptView, usesFacts, wrapCheckpointAnswer, type Prompt, type TurnUsage as FloorTurnUsage } from "./floor-text.js";
+export {
+  MeetingProcedureService, PROCEDURE_DEFAULTS, PROCEDURE_KIND, PROCEDURE_LIMITS, PROCEDURE_SETTINGS, PROCEDURE_SETTING_KEYS, looksLikeEcho, noteOf, quotesBallot, roundSummary, seatOrder,
+  type BallotRequest, type ChairFloor, type CommentRequest, type MeetingDelivered, type FollowUp, type MeetingFloor, type ObjectionAnswer, type ObjectionRequest, type ProcedureBody, type ProcedureOptions, type ProcedureSettings, type ProcedureStage,
+  type RevisionRequest, type RulingInput, type RulingRequest, type SeatTraits, type StepResult, type Waiting, type CastingRequest,
+} from "./procedure.js";

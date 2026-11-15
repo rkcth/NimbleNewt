@@ -241,6 +241,22 @@ export interface SummaryDecision {
 export interface SummaryItem { readonly entryId: string; readonly seq: number; readonly speaker: string; readonly text: string; readonly verifiable: boolean; readonly assignee?: string; readonly taskId?: string }
 
 /** The meeting summary, built from the records alone. */
+/** What the summary says about how one motion was run (card M06): rounds, absent members skipped, objection dissent, a tabling with its follow-up work, and whether the meeting looked like an echo. */
+export interface ProcedureNote {
+  readonly motionId: string;
+  readonly number: number;
+  readonly rounds: number;
+  /** Fresh passes started by a material amendment after the comment rounds. */
+  readonly fresh: number;
+  readonly objectionRuns: number;
+  readonly skipped: readonly string[];
+  readonly noResponse: readonly string[];
+  readonly dissent: readonly { readonly agent: string; readonly reason: string }[];
+  readonly tabled?: { readonly reason: string; readonly followUps: readonly { readonly agent: string; readonly text: string; readonly taskId?: string }[] };
+  /** Every first-round stance and every ballot was the same (at least three voters): the meeting added little beyond one view. */
+  readonly echo: boolean;
+}
+
 export interface SummaryContent {
   readonly occurrenceId: string;
   readonly recordId: string;
@@ -267,6 +283,8 @@ export interface SummaryContent {
   readonly plan: readonly SummaryItem[];
   /** The owner's answers to the questions this meeting put to them about deferred decisions (card M03i), as the record carries them; absent when there are none. */
   readonly ownerAnswers?: readonly OwnerAnswerNote[];
+  /** How each motion was run (card M06); absent when no motion went through the procedure. */
+  readonly procedure?: readonly ProcedureNote[];
   /** The summary agrees with the decision records it was built from (every counted change is in exactly one list). */
   readonly consistent: boolean;
   /** Some conclusions rest on private records the readers cannot see: they are shown as claims, marked unverifiable. */

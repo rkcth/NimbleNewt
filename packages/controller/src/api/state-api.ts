@@ -68,6 +68,7 @@ import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { MeetingFloorService } from "../meetings/floor.js";
 import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
+import type { MeetingProcedureService } from "../meetings/procedure.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { CoordinatorService } from "../chat/coordinator.js";
@@ -239,6 +240,8 @@ export interface StateApiDeps {
   readonly deskReads?: Pick<MeetingDeskReadService, "reads" | "attempts">;
   /** The meeting floor (card M05). */
   readonly floor?: Pick<MeetingFloorService, "start" | "advance" | "drive" | "ask" | "address" | "openInquiry" | "endInquiry" | "setPriorities" | "extend" | "configure" | "end" | "requestChairQuestion" | "challengeQuestion" | "ruleOnChallenge" | "followUps" | "ownerPending" | "state" | "waiting" | "chairNotes">;
+  /** The meeting procedure (card M06): rounds, the objection check, rulings, tabling and the owner's messages during a vote. */
+  readonly procedure?: Pick<MeetingProcedureService, "begin" | "advance" | "run" | "rule" | "amend" | "overruleTabling" | "ownerMessage" | "status" | "ownerControls">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "learnedPatterns" | "ownerPending">;
   readonly attendance?: Pick<AttendanceService, "admission" | "openRoom" | "callNow" | "status" | "beginDiscussion" | "prepare" | "reportBlocked" | "join" | "joinAsOwner" | "authorizeWake" | "wakes" | "stopWake" | "leave" | "keepPaused" | "deferReturn" | "endMeeting" | "returnToWork" | "acknowledge" | "revalidation" | "saveBrief" | "briefOf">;
   readonly standups?: Pick<StandupService, "configure" | "update" | "standup" | "prepare" | "prepared" | "brief" | "briefs" | "addStatement" | "agenda" | "deliverOutcomes" | "list" | "recent" | "ownerQuestions" | "answerQuestion">;
@@ -457,6 +460,7 @@ export class StateApi {
         ...(this.#deps.records === undefined ? {} : { records: this.#deps.records }),
         ...(this.#deps.floor === undefined ? {} : { floor: this.#deps.floor }),
         ...(this.#deps.deskReads === undefined ? {} : { deskReads: this.#deps.deskReads }),
+        ...(this.#deps.procedure === undefined ? {} : { procedure: this.#deps.procedure }),
         ...(this.#deps.policyContext === undefined ? {} : { policyContext: this.#deps.policyContext }),
         ...(this.#deps.deliverables === undefined ? {} : { deliverables: this.#deps.deliverables }),
         ...(this.#deps.activity === undefined ? {} : { activity: this.#deps.activity }),
