@@ -6722,12 +6722,30 @@
       ],
       "deliverable": "Split from U11c (2026-10-31). Remaining: owner-marked critical tasks (chat-settable) and the goal-based critical path computed from the task dependency records; ranking the Needs-you view by critical path first, then the number of tasks held up, then age; the Urgent trigger for a blocked critical path; the controller-down watchdog that sends straight to the configured external channel and is raised again by the controller when it returns; hooks that report A08 integrity failures, sandbox escape attempts, a credential used from the wrong task or host and a touched protected path (.git, loader configuration) into the existing UrgentWatch.reportSecurity; escalation when an agent or project has nothing else to do while an item waits (H12 view of available work) and de-escalation by the dispatcher when the work has resumed; the plain 09:00 UTC digest only when no stand-up is scheduled; answering each Needs-you item in place from the view; deferred meeting items from M03; the denial hook also from the other refusal points (not only the tool approval policy)",
       "acceptance_and_verification": "Only the controller raises Urgent; a Needs-you item that has stopped work (a critical-path task is blocked, or an agent or project has nothing else to do while it waits) is raised to Urgent with its reason and the dispatcher returns it to Needs you on the next dispatch if work has resumed; the Needs-you view is sorted by critical path, then the number of tasks held up, then age, and each item can be answered in place; the controller being down is told on the external channel by a watchdog and again when it returns; a sandbox escape attempt, a credential used from the wrong task or host, a protected path touched and a failed integrity check each raise Urgent; the plain 09:00 digest is sent only when no stand-up is scheduled; deferred meeting items appear in the view",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "98b0929c",
+          "29452285",
+          "e38a7f45",
+          "f99edc44",
+          "be874821",
+          "f9d3f322",
+          "201218ab",
+          "932292af"
+        ],
+        "ci_runs": [
+          "43672690406"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Owner-marked critical path (task, goal through dependency records, project; critical.mark owner only, chat-settable, shown first) ranks the Needs-you view first, then tasks held up, then age; a decision holding up the path or waiting while its project or its agent has nothing else to do is raised to Urgent with its reason and put back to Needs you by the dispatcher's urgent sweep when work resumes; needs-you.answer answers each item in place by chat (questions, reviews, blockers, held resumes, meeting decisions and deferred meeting questions, which are listed in the view); a separate watchdog process tells the owner's webhook when the controller is down and the controller raises the outage once when it returns; wrong-task and wrong-host credentials, Git data and loader configuration changes, launcher containment refusals and integrity failures (API door, settings reads, artifact digests, environment resume and activation) each raise one Urgent item; refusals of the approved-call path, missing grants and forbidden API answers count as denials; the default 09:00 digest gives way to a stand-up that covers its items. Limits: the web door's Needs-you tab lists items without answer buttons (answers go through the chat); the watchdog was tested with a loopback webhook and a fake clock, not a real external channel, separate host or killed controller; the bubblewrap, Seatbelt and Windows refusals inside the sandbox are not observed as escape signals (only the host's own recipe checks are); the remote worker program does not name loaderConfig; the startup restore and a rollback's own activation are not hooked; idle and onset clocks are in memory (a restart delays a page); no run against a real model checked the chat wording."
+      }
     },
     {
       "id": "U12",
