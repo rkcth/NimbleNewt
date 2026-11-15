@@ -673,6 +673,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 
 - [Full design and document guide](docs/nimblenewt/README.md)
 - [Agent state and conversation API design](docs/nimblenewt/agent-apis.md)
+- [Contributing](CONTRIBUTING.md), [security policy](SECURITY.md), [architecture](docs/nimblenewt/architecture.md), [API guide](docs/nimblenewt/api-guide.md), [troubleshooting](docs/nimblenewt/troubleshooting.md) and [notices](docs/nimblenewt/notices.md)
 - [Accepted decisions and open questions](docs/nimblenewt/design-decisions.md)
 - [Harness evaluation results](docs/nimblenewt/harness-test-results.md)
 - [Reproducible harness experiments](benchmarks/nimblenewt-harness/README.md)
