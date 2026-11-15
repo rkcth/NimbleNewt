@@ -250,6 +250,10 @@ for (const backend of backends) {
     // Only the chair and the owner rule.
     await refuses("forbidden", () => rule(c, c.asA, motion, { ruling: "proceed" }));
     await refuses("forbidden", () => rule(c, c.host, motion, { ruling: "proceed" }));
+    // An amendment or a tabling goes through record commands a host may use for itself; as a ruling it is still the chair's or the owner's.
+    await refuses("forbidden", () => rule(c, c.host, motion, { ruling: "uphold", addressed: "amend", text: "Move the build to 03:00 instead." }));
+    await refuses("forbidden", () => rule(c, c.mgr, motion, { ruling: "uphold", addressed: "amend", text: "Move the build to 03:00 instead." }));
+    assert.equal((await motionBody(c, motion)).version, 1, "nothing was amended");
     await rule(c, c.asD, motion, { ruling: "proceed", text: "The backup moves." });
     const state = await c.state(motion);
     assert.deepEqual(state.dissent.map((d) => d.agent), [c.pB], "the remaining objection is recorded as dissent");
@@ -533,16 +537,30 @@ for (const backend of backends) {
     await begin(c, motion);
     await refuses("invalid_command", () => begin(c, motion), (e) => assert.match(e.message, /already has a procedure/));
     for (const who of [c.asA, c.asD, c.mgr, c.outsider]) await refuses("forbidden", () => c.procedure.advance(who, { motionId: motion }));
-    await c.pump(motion, 10);
+    // At the objection check and during the vote too, where a step writes nothing on a member's behalf: a member still cannot move it.
+    for (let i = 0; i < 40 && (await c.state(motion)).stage === "comment"; i++) await c.procedure.advance(c.host, { motionId: motion });
+    assert.equal((await c.state(motion)).stage, "check");
+    const atCheck = (await c.procedure.status(c.owner, motion))!["revision"];
+    for (const who of [c.asA, c.asD, c.mgr, c.outsider, { ...c.host, taskScope: { taskId: "task-x", projectId: c.project } } as Principal]) await refuses("forbidden", () => c.procedure.advance(who, { motionId: motion }));
+    await refuses("forbidden", () => c.procedure.run(c.asD, { motionId: motion }));
+    assert.equal((await c.procedure.status(c.owner, motion))!["revision"], atCheck, "nothing moved");
     await untilBallots(c, motion, 2);
-    // The owner and the chair see who has voted; a member sees the stage but not the vote's progress; outsiders see nothing.
+    for (const who of [c.asA, c.asD, c.mgr]) await refuses("forbidden", () => c.procedure.advance(who, { motionId: motion }));
+    assert.equal(c.script.ballots.length, 2, "no ballot was asked for by a member");
+    // The owner sees who has voted; the chair (usually a voter too) and a member see the stage but not the vote's progress; outsiders see nothing.
     const owner = (await c.procedure.status(c.owner, motion))!;
     assert.equal((owner["voteAsked"] as string[]).length, 2);
     const chair = (await c.procedure.status(c.asD, motion))!;
-    assert.equal((chair["voteAsked"] as string[]).length, 2);
+    assert.equal(chair["stage"], "voting");
+    for (const key of ["voteAsked", "ballotSeq", "noBallot", "offers", "offersCapped", "stances", "echo"]) assert.equal(key in chair, false, `the chair does not see ${key}`);
     const member = (await c.procedure.status(c.asC, motion))!;
     assert.equal(member["stage"], "voting");
-    for (const key of ["voteAsked", "ballotSeq", "noBallot", "offers", "stances", "echo"]) assert.equal(key in member, false, `a member does not see ${key}`);
+    for (const key of ["voteAsked", "ballotSeq", "noBallot", "offers", "offersCapped", "stances", "echo"]) assert.equal(key in member, false, `a member does not see ${key}`);
+    // A task credential of another project is not the chair: it may neither begin nor rule.
+    const elsewhere = { ...c.asD, taskScope: { taskId: "task-x", projectId: "proj-elsewhere" } } as Principal;
+    const { rec: rec2 } = await c.meet({ chair: c.pD });
+    await refuses("forbidden", () => c.procedure.begin(elsewhere, { commandId: cid("pb"), motionId: motion }));
+    void rec2;
     assert.equal(await c.procedure.status(c.outsider, motion), undefined);
     // Credential-shaped text never lands in a record.
     c.script.onComment = async () => ({ text: "the token is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH" });
@@ -645,5 +663,159 @@ for (const backend of backends) {
     const step = await bare.advance(c.host, { motionId: motion });
     assert.equal(step.waiting!.on, "nobody");
     assert.equal(c.script.comments.length, 0);
+  });
+
+  suite("review M06: while a vote is open nobody learns from the summary or the chair's view who has or has not voted; it is told once the vote is over", async (c) => {
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    // The first seated member gives no ballot.
+    let first: string | undefined;
+    c.script.onBallot = async (r) => { first ??= r.agent; return r.agent === first ? undefined : { value: "yes", reason: `${r.agent} agrees with the slot` }; };
+    await begin(c, motion);
+    await untilBallots(c, motion, 2);
+    await c.procedure.advance(c.host, { motionId: motion });
+    assert.deepEqual((await c.state(motion)).noBallot, [first], "the owner's full view has it");
+    for (const who of [c.owner, c.asA, c.asD]) {
+      const note = (await c.records.summary(who, rec))!.content.procedure![0]!;
+      assert.equal(note.noResponse.includes(first!), false, `the live summary does not tell ${who.id} who gave no ballot`);
+    }
+    assert.equal(JSON.stringify(await c.procedure.status(c.asD, motion)).includes("noBallot"), false);
+    minutes(11);
+    const done = await c.pump(motion);
+    assert.equal(done.done, true, done.did);
+    assert.ok((await c.records.summary(c.owner, rec))!.content.procedure![0]!.noResponse.includes(first!), "after the vote it is part of the record");
+  });
+
+  suite("review M06: an objection's reason or a stance that looks like a credential is not kept; control characters are folded", async (c) => {
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    const secret = ["sk-ant-api03", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"].join("-");
+    c.script.onComment = async (r) => ({ text: `${r.agent} speaks`, stance: r.agent === c.pA ? secret : "for" });
+    c.script.onObjection = async (r) => (r.agent === c.pB ? { answer: "objection", reason: `use ${secret}` } : r.agent === c.pC ? { answer: "objection", reason: "line one\u0000\u001b[31m\nline two" } : { answer: "none" });
+    await begin(c, motion);
+    const held = await c.pump(motion);
+    assert.equal(held.stage, "ruling");
+    const state = await c.state(motion);
+    assert.equal(JSON.stringify(state).includes("sk-ant"), false, "nothing credential-shaped in the procedure's record");
+    assert.equal(state.check.answers.find((a) => a.agent === c.pB)!.answer, "no-response");
+    assert.equal(state.check.answers.find((a) => a.agent === c.pC)!.reason, "line one [31m line two");
+    assert.equal(state.stances.some((s) => s.agent === c.pA), false);
+    assert.equal(JSON.stringify(await statements(c, rec)).includes("sk-ant"), false);
+    assert.equal(JSON.stringify((await c.records.summary(c.owner, rec))!.content).includes("sk-ant"), false);
+  });
+
+  suite("review M06: a model chair's ruling that the rules refuse holds the vote instead of failing every step; the owner can still rule", async (c) => {
+    c.withChair = true;
+    c.procedure = c.reopen();
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    c.script.onObjection = async (r) => (r.agent === c.pB ? { answer: "objection", reason: "the backup window" } : { answer: "none" });
+    // An objection is not a request for research, so the chair may not table; and a ruling with unknown fields.
+    c.script.onRule = async () => ({ ruling: "table", reason: "I would rather not", extra: "ignored" }) as never;
+    await begin(c, motion);
+    assert.equal((await c.pump(motion)).stage, "ruling");
+    let asked = 0;
+    c.script.onRule = async () => { asked++; return ({ ruling: "table", reason: "I would rather not", extra: "ignored" }) as never; };
+    // The chair is asked at the next step, and asked again later: each time the refused ruling leaves the vote held.
+    for (let i = 0; i < 2; i++) {
+      const held = await c.pump(motion);
+      assert.equal(held.stage, "ruling");
+      assert.equal(held.waiting!.on, "chair");
+    }
+    assert.equal(asked, 2);
+    assert.equal((await motionBody(c, motion)).state, "proposed", "nothing was tabled");
+    c.script.onRule = async () => undefined;
+    await rule(c, c.owner, motion, { ruling: "proceed" });
+    assert.equal((await c.pump(motion)).done, true);
+    assert.equal((await motionBody(c, motion)).state, "adopted");
+  });
+
+  suite("review M06: a material amendment made on the record itself during the vote starts the fresh pass; the procedure does not call the motion concluded", async (c) => {
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    await begin(c, motion);
+    await untilBallots(c, motion, 2);
+    await c.records.amend(c.asD, { commandId: cid("am"), motionId: motion, expectedVersion: 1, text: "Move the build to 02:00 instead.", material: true });
+    assert.equal((await motionBody(c, motion)).state, "proposed");
+    const step = await c.procedure.advance(c.host, { motionId: motion });
+    assert.equal(step.done, false, step.did);
+    const state = await c.state(motion);
+    assert.deepEqual([state.stage, state.version, state.fresh, state.voteAsked.length], ["comment", 2, 1, 0]);
+    const done = await c.pump(motion);
+    assert.equal(done.done, true, done.did);
+    const m = await motionBody(c, motion);
+    assert.deepEqual([m.state, m.version], ["adopted", 2]);
+    assert.equal(c.script.ballots.length, 5, "three fresh ballots on the new version");
+  });
+
+  suite("review M06: a tie whose casting time is over fails at the next step without waiting for a sweep; the chair is told only that it is tied", async (c) => {
+    const { rec } = await c.meet({ roster: [c.pA, c.pB], chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    c.script.onBallot = async (r) => ({ value: r.agent === c.pA ? "yes" : "no", reason: `${r.agent} has a view` });
+    const asked: unknown[] = [];
+    c.script.onCasting = async (r) => { asked.push(r); return undefined; };
+    c.withChair = true;
+    c.procedure = c.reopen();
+    await begin(c, motion);
+    assert.equal((await c.pump(motion)).waiting!.on, "chair");
+    assert.equal(asked.length, 1);
+    assert.equal(JSON.stringify(asked[0]).match(/"(yes|no)"/), null, "no counts in the casting request");
+    minutes(60);
+    const done = await c.procedure.advance(c.host, { motionId: motion });
+    assert.equal(done.done, true, done.did);
+    assert.equal((await motionBody(c, motion)).state, "failed");
+    assert.equal((await c.state(motion)).stage, "concluded");
+  });
+
+  suite("review M06: crash windows: a revision turn answered before a restart and an upheld amendment made before a restart are not lost or repeated", async (c) => {
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    await begin(c, motion);
+    await untilBallots(c, motion, 3);
+    const said = await c.procedure.ownerMessage(c.owner, { commandId: cid("om"), recordId: rec, text: "Note that the backup job also runs at 01:00." });
+    const procId = (await c.procedure.status(c.owner, motion))!["id"] as string;
+    const first = c.script.ballots[0]!.agent;
+    const asFirst = [c.asA, c.asB, c.asC].find((p) => p.id === first)!;
+    // The revision was cast, then the controller stopped before saving its state.
+    await c.records.castBallot(asFirst, { commandId: `mpr:${procId}:r:${first}:${said.seq}`, motionId: motion, version: 1, value: "no", reason: "the backup job collides", ownerMessageEntryId: `mte-${rec.slice(4)}-${said.seq}` });
+    c.procedure = c.reopen();
+    c.script.onRevision = async () => ({ value: "no", reason: "a different answer after the restart" });
+    await c.procedure.advance(c.host, { motionId: motion });
+    assert.deepEqual((await c.state(motion)).offers.map((o) => `${o.agent}:${o.outcome}`), [`${first}:revised`]);
+    // An upheld amendment written before a restart: the same ruling again does not fail and does not amend twice.
+    const { rec: rec2 } = await c.meet({ chair: c.pD });
+    const second = await c.motion(rec2, c.asA);
+    c.script.onObjection = async (r) => (r.agent === c.pB && r.run === 1 ? { answer: "objection", reason: "the backup window" } : { answer: "none" });
+    await begin(c, second);
+    await c.pump(second);
+    const ruling = cid("ru");
+    await c.records.amend(c.owner, { commandId: `${ruling}:amend`, motionId: second, expectedVersion: 1, text: "Move the build to 01:30 instead.", material: true });
+    await c.procedure.rule(c.owner, { commandId: ruling, motionId: second, ruling: "uphold", addressed: "amend", text: "Move the build to 01:30 instead." } as never);
+    const state = await c.state(second);
+    assert.deepEqual([state.stage, state.version, state.check.run], ["check", 2, 2]);
+    assert.equal((await motionBody(c, second)).version, 2, "amended once");
+    assert.equal((await c.pump(second)).done, true);
+  });
+
+  suite("review M06: two controllers driving the same procedure at once write every statement and ballot once and finish it", async (c) => {
+    const { rec } = await c.meet({ chair: c.pD });
+    const motion = await c.motion(rec, c.asA);
+    await begin(c, motion);
+    const one = c.reopen();
+    const two = c.reopen();
+    const drive = async (p: typeof one): Promise<void> => {
+      for (let i = 0; i < 200; i++) { const step = await p.advance(c.host, { motionId: motion }); if (step.done || step.waiting !== undefined) return; }
+    };
+    await Promise.all([drive(one), drive(two)]);
+    await drive(one);
+    const m = await motionBody(c, motion);
+    assert.equal(m.state, "adopted");
+    const said = (await statements(c, rec)).filter((e) => e.kind === "statement");
+    assert.equal(said.length, 6, "two rounds of three, each once");
+    const decision = (await c.records.decision(c.owner, m.decisionId!)) as unknown as { table: unknown[] };
+    assert.equal(decision.table.length, 3);
+    const state = await c.state(motion);
+    assert.equal(new Set(state.voteAsked).size, state.voteAsked.length, "nobody is in the vote twice");
+    assert.equal(state.stage, "concluded");
   });
 }

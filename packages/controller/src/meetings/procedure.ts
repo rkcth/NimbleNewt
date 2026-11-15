@@ -3,7 +3,9 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import { inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { redactText } from "../security/redact.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
 import type { MeetingRecordService } from "./record.js";
@@ -28,7 +30,8 @@ export interface ObjectionRequest { readonly agent: string; readonly run: number
 export interface BallotRequest { readonly agent: string; readonly motion: MotionView; readonly transcript: readonly MeetingDelivered[] }
 export interface RevisionRequest { readonly agent: string; readonly motion: MotionView; readonly ballot: { readonly value: BallotValue; readonly reason: string }; readonly ownerMessage: MeetingDelivered; /** What was said since the member's ballot. */ readonly since: readonly MeetingDelivered[] }
 export interface RulingRequest { readonly motion: MotionView; readonly run: number; readonly canUphold: boolean; readonly canTable: boolean; readonly answers: readonly ObjectionAnswer[] }
-export interface CastingRequest { readonly motion: MotionView; readonly yes: number; readonly no: number }
+/** The vote is tied; its counts stay unrevealed until it concludes (M02), so the chair is told only that it is tied. */
+export interface CastingRequest { readonly motion: MotionView; readonly castingDeadline?: string }
 
 /**
  * What the procedure asks the members. The real members (floor control, bounded model turns) are M05's runtime: here the port is injected, and the tests give it scripted members. A member that gives no answer (undefined, or the
@@ -74,6 +77,15 @@ const known = <T>(a: Aggregate | undefined): T | undefined => (a === undefined ?
 const forbidden = (by: Principal, what: string): DomainError => new DomainError("forbidden", `${by.id} may not ${what}`);
 const json = (value: object): import("../storage/types.js").JsonObject => JSON.parse(JSON.stringify(value)) as import("../storage/types.js").JsonObject;
 const cutText = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max - 3)}...`);
+/** A member's short free text (an objection's reason, a stance) kept in the procedure's own record: cut to size with control characters folded to spaces; text that looks like a credential is not kept at all (undefined). */
+const memberText = (value: unknown, max: number): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const folded = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  if (folded === "" || redactText(folded) !== folded) return undefined;
+  const out = cutText(folded, max);
+  return redactText(out) === out ? out : undefined;
+};
+const chairOf = (by: Principal, rec: RecordBody): boolean => by.kind === "agent" && by.asOf !== undefined && rec.chair !== undefined && by.id === rec.chair && inTaskScope(by, rec.projectId);
 
 export type Waiting = { readonly on: "chair" | "owner" | "time" | "nobody"; readonly why: string };
 export interface StepResult { readonly stage: ProcedureStage; readonly did: string; readonly waiting?: Waiting; readonly done: boolean }
@@ -118,7 +130,7 @@ export class MeetingProcedureService {
     const motion = known<MotionBody>(found);
     if (motion === undefined) throw forbidden(by, "begin that procedure");
     const rec = known<RecordBody>(await this.#runner.get("meeting-record", motion.recordId));
-    if (rec === undefined || !(isService(by) || (by.kind === "agent" && by.asOf !== undefined && rec.chair === by.id))) throw forbidden(by, "begin that procedure");
+    if (rec === undefined || !(isService(by) || chairOf(by, rec))) throw forbidden(by, "begin that procedure");
     const settings = await this.#settings();
     const present = rec.roster.filter((a) => !rec.withheld.includes(a));
     const seats = seatOrder(present, settings.seating, this.#options.traits);
@@ -157,6 +169,11 @@ export class MeetingProcedureService {
     const body = proc.body;
     const m = await this.#motion(motionId);
     if (FINAL.has(m.state) && body.stage !== "concluded" && body.stage !== "tabled" && body.stage !== "void") return this.#settled(proc, m);
+    // A material amendment made on the record itself (the record's own amend, not this service's) gives a new version and puts an open vote back to proposed: the procedure starts its fresh pass here, as `amend` would have.
+    if (!FINAL.has(m.state) && m.version !== body.version && (body.stage === "comment" || body.stage === "check" || body.stage === "ruling" || body.stage === "ready" || body.stage === "voting")) {
+      await this.#save(proc, await this.#freshPass(body, m.version), "fresh pass after a material amendment on the record");
+      return { stage: "comment", did: `motion ${m.number} was materially amended (version ${m.version}); a fresh round begins`, done: false };
+    }
     switch (body.stage) {
       case "comment": return this.#comment(by, proc, m);
       case "check": return this.#check(by, proc, m);
@@ -206,7 +223,7 @@ export class MeetingProcedureService {
     const next: ProcedureBody = {
       ...body, asked: [...body.asked, agent],
       ...(wrote === undefined ? { skipped: [...body.skipped, { stage: "comment" as const, round: body.round, agent, reason: "no answer" }] } : { spoken: [...body.spoken, { round: body.round, agent, seq: wrote.seq }] }),
-      ...(wrote !== undefined && typeof reply?.stance === "string" && body.round === 1 && body.fresh === 0 ? { stances: [...body.stances, { round: 1, agent, stance: cutText(reply.stance, 40) }] } : {}),
+      ...(wrote !== undefined && body.round === 1 && body.fresh === 0 && memberText(reply?.stance, 40) !== undefined ? { stances: [...body.stances, { round: 1, agent, stance: memberText(reply?.stance, 40)! }] } : {}),
     };
     await this.#save(proc, next, `comment ${agent}`);
     return { stage: "comment", did: wrote === undefined ? `${agent} gave no comment` : `${agent} spoke in round ${body.round}`, done: false };
@@ -244,7 +261,7 @@ export class MeetingProcedureService {
     try { reply = await floor.objection({ agent, run: body.check.run, motion: this.#view(m, motionIdOf(proc)), summary: body.summaries.length === 0 ? summary : body.summaries.map((s) => s.text).join("\n") }); } catch { reply = undefined; }
     const kind = reply?.answer === "none" || reply?.answer === "objection" || reply?.answer === "research" ? reply.answer : "no-response";
     // An objection needs its reason and a request for research what it would look into; without it the answer is not usable and counts as no response.
-    const reason = typeof reply?.reason === "string" ? cutText(reply.reason.trim(), PROCEDURE_LIMITS.text) : "";
+    const reason = memberText(reply?.reason, PROCEDURE_LIMITS.text) ?? "";
     const usable = kind === "none" || kind === "no-response" ? kind : reason === "" ? "no-response" : kind;
     const answer: ObjectionAnswer = { agent, answer: usable, ...(usable === "objection" || usable === "research" ? { reason } : {}) };
     // An objection and a request for research enter the transcript, for the chair's ruling and for those who speak later.
@@ -290,8 +307,14 @@ export class MeetingProcedureService {
       let ruling: RulingInput | undefined;
       try { ruling = await chair.rule({ motion: this.#view(m, motionIdOf(proc)), run: body.check.run, canUphold: body.check.run <= body.settings.objectionReruns, canTable: this.#canTable(body, false), answers: body.check.answers }); } catch { ruling = undefined; }
       if (ruling !== undefined) {
-        await this.rule(asChair, { commandId: `mpr:${proc.id}:rule:${body.fresh}:${body.check.run}`, motionId: motionIdOf(proc), ...ruling });
-        return { stage: (await this.#load(motionIdOf(proc))).body.stage, did: "the chair ruled", done: false };
+        try {
+          await this.rule(asChair, { commandId: `mpr:${proc.id}:rule:${body.fresh}:${body.check.run}`, motionId: motionIdOf(proc), ...pickRuling(ruling) } as never);
+          return { stage: (await this.#load(motionIdOf(proc))).body.stage, did: "the chair ruled", done: false };
+        } catch (error) {
+          // A ruling the rules do not allow (table with no request for research, uphold past the limit, unusable text) is not taken: the vote stays held for a proper ruling by the chair or the owner.
+          if (!(error instanceof DomainError) || !["invalid_command", "forbidden", "command_conflict"].includes(error.code)) throw error;
+          return { stage: "ruling", did: "the chair's ruling was not allowed", waiting: this.#waitingRuling(body), done: false };
+        }
       }
     }
     return { stage: "ruling", did: "waiting for a ruling", waiting: this.#waitingRuling(body), done: false };
@@ -313,7 +336,7 @@ export class MeetingProcedureService {
     const body = proc.body;
     const rec = await this.#rec(body.recordId);
     const owner = by.kind === "owner" && by.taskScope === undefined;
-    const chair = by.kind === "agent" && by.asOf !== undefined && rec.chair !== undefined && by.id === rec.chair;
+    const chair = chairOf(by, rec);
     if (!owner && !chair) throw forbidden(by, "rule on the objections of that motion");
     if (body.stage !== "ruling") throw new DomainError("invalid_command", `motion ${motionIdOf(proc)} is at the ${body.stage} stage; there is nothing to rule on`, { field: "motionId" });
     const m = await this.#motion(motionId);
@@ -350,7 +373,12 @@ export class MeetingProcedureService {
       let version = m.version;
       let entryId: string | undefined;
       if (command.addressed === "amend") {
-        version = (await this.#records.amend(by, { commandId: `${command.commandId}:amend`, motionId, expectedVersion: m.version, text: text!, material: true })).version;
+        try {
+          version = (await this.#records.amend(by, { commandId: `${command.commandId}:amend`, motionId, expectedVersion: m.version, text: text!, material: true })).version;
+        } catch (error) {
+          // The same ruling repeated after a restart: its amendment is already on record (the motion is at the version it made).
+          if (!(error instanceof DomainError) || error.code !== "command_conflict" || m.version <= body.version) throw error;
+        }
       } else {
         entryId = await ruled(`Objection upheld on motion ${m.number}; clarified: ${text}`);
       }
@@ -469,6 +497,8 @@ export class MeetingProcedureService {
             outcome = "revised";
           } catch (error) {
             if (!(error instanceof DomainError) || !["invalid_command", "command_conflict"].includes(error.code)) throw error;
+            // The same revision turn was answered before a restart: the revision is already on record.
+            if (error.code === "command_conflict") outcome = "revised";
           }
         }
       }
@@ -514,12 +544,23 @@ export class MeetingProcedureService {
     const body = this.#body(proc);
     const chair = this.#options.chair;
     const rec = await this.#rec(body.recordId);
+    // The time for the casting vote is over: the tie fails (M02), and the procedure says so instead of waiting for a sweep.
+    if (m.castingDeadline !== undefined && Date.parse(this.#runner.now()) > Date.parse(m.castingDeadline)) {
+      await this.#records.closeVote(by, { commandId: `mpr:${proc.id}:tie-over:${body.version}`, motionId: motionIdOf(proc) });
+      return this.#settled(proc, await this.#motion(motionIdOf(proc)));
+    }
     const who = rec.chair === undefined || this.#options.actAs === undefined ? undefined : await this.#options.actAs(rec.chair);
     if (chair === undefined || who === undefined) return { stage: "voting", did: "the vote is tied", waiting: { on: "chair", why: "the vote is tied and waits for the chair's casting vote; with no chair able to cast it the tie fails when its time is up" }, done: false };
     let reply: Awaited<ReturnType<ChairFloor["castingVote"]>>;
-    try { reply = await chair.castingVote({ motion: this.#view(m, motionIdOf(proc)), yes: 0, no: 0 }); } catch { reply = undefined; }
+    try { reply = await chair.castingVote({ motion: this.#view(m, motionIdOf(proc)), ...(m.castingDeadline === undefined ? {} : { castingDeadline: m.castingDeadline }) }); } catch { reply = undefined; }
     if (reply === undefined) return { stage: "voting", did: "the chair gave no casting vote", waiting: { on: "chair", why: "the chair has not cast its casting vote; the tie fails when the time is up" }, done: false };
-    await this.#records.castingVote(who, { commandId: `mpr:${proc.id}:cast:${body.version}`, motionId: motionIdOf(proc), value: reply.value, reason: reply.reason });
+    try {
+      await this.#records.castingVote(who, { commandId: `mpr:${proc.id}:cast:${body.version}`, motionId: motionIdOf(proc), value: reply.value, reason: reply.reason });
+    } catch (error) {
+      // A casting vote the record refuses (an unusable reason, the time just ran out) is not one: the tie waits, then fails when its time is up.
+      if (!(error instanceof DomainError) || !["invalid_command", "forbidden"].includes(error.code)) throw error;
+      return { stage: "voting", did: "the chair's casting vote was not accepted", waiting: { on: "chair", why: "the chair's casting vote was refused; the tie fails when its time is up" }, done: false };
+    }
     return this.#settled(proc, await this.#motion(motionIdOf(proc)));
   }
 
@@ -553,7 +594,7 @@ export class MeetingProcedureService {
     const body = proc.body as unknown as ProcedureBody;
     if (body.stage === "concluded" || body.stage === "tabled" || body.stage === "void") return { version: out.version, fresh: false };
     if (body.version === out.version) return { version: out.version, fresh: false };
-    await this.#save(proc, { ...body, version: out.version, stage: "comment", round: 1, rounds: 1, roundSince: (await this.#rec(body.recordId)).nextSeq, asked: [], check: { run: 1, answers: [] }, dissent: [], fresh: body.fresh + 1, voteAsked: [], ballotSeq: [], noBallot: [], offers: [], offersCapped: [] }, "fresh pass after a material amendment");
+    await this.#save(proc, await this.#freshPass(body, out.version), "fresh pass after a material amendment");
     return { version: out.version, fresh: true };
   }
 
@@ -583,6 +624,10 @@ export class MeetingProcedureService {
     return { id: wrote.id, seq: wrote.seq, ...(warning === undefined ? {} : { warning }) };
   }
 
+  async #freshPass(body: ProcedureBody, version: number): Promise<ProcedureBody> {
+    return { ...body, version, stage: "comment", round: 1, rounds: 1, roundSince: (await this.#rec(body.recordId)).nextSeq, asked: [], check: { run: 1, answers: [] }, dissent: [], fresh: body.fresh + 1, voteAsked: [], ballotSeq: [], noBallot: [], offers: [], offersCapped: [] };
+  }
+
   // ---- reading ------------------------------------------------------------------------------------------------------------------------------
 
   /**
@@ -596,7 +641,9 @@ export class MeetingProcedureService {
     if (proc === undefined || body === undefined) return undefined;
     if ((await this.#records.record(viewer, body.recordId)) === undefined) return undefined;
     const rec = await this.#rec(body.recordId);
-    const full = isService(viewer) || (viewer.kind === "agent" && viewer.id === rec.chair && viewer.asOf !== undefined);
+    // The chair is usually a voter too, so it sees what a member sees: never who has voted, revised or stayed silent while a vote is open.
+    const full = isService(viewer);
+    void rec;
     const { voteAsked: _a, ballotSeq: _b, noBallot: _n, offers: _o, offersCapped: _c, stances: _s, echo: _e, ...open } = body;
     void _a; void _b; void _n; void _o; void _c; void _s; void _e;
     const waiting = body.stage === "ruling" ? this.#waitingRuling(body) : undefined;
@@ -711,5 +758,13 @@ export class MeetingProcedureService {
   #motionId(value: unknown): string { return typeof value === "string" && MOTION_ID.test(value) ? value : invalid("motionId", "is not a motion ID"); }
 }
 
+/** Only the fields of a ruling, whatever else a model chair's answer carries. */
+const pickRuling = (r: RulingInput): Record<string, unknown> => {
+  const out: Record<string, unknown> = { ruling: r.ruling };
+  if ("text" in r && r.text !== undefined) out["text"] = r.text;
+  if ("reason" in r && r.reason !== undefined) out["reason"] = r.reason;
+  if ("addressed" in r && r.addressed !== undefined) out["addressed"] = r.addressed;
+  return out;
+};
 const entryIdOf = (recordId: string, seq: number): string => `mte-${recordId.slice(4)}-${seq}`;
 const motionIdOf = (proc: Aggregate): string => (proc.body as unknown as ProcedureBody).motionId;

@@ -2322,7 +2322,7 @@ export class MeetingRecordService {
     for (const m of motions) if (m.decisionId !== undefined) for (const v of rec.roster) if ((await this.#runner.get("meeting-ballot", derivedId("mbl", `${m.id}:${v}`))) !== undefined) ballotVoters.add(v);
     const merged: RecordBody = { ...rec, attended: [...new Set([...rec.attended, ...ballotVoters])] };
     const procedure: ProcedureNote[] = [];
-    for (const m of motions) { const p = known<ProcedureBody>(await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", m.id))); if (p !== undefined) procedure.push(noteOf(m.number, m.id, p)); }
+    for (const m of motions) { const p = known<ProcedureBody>(await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", m.id))); if (p !== undefined) procedure.push(noteOf(m.number, m.id, p, FINAL_MOTION_STATES.includes(m.state))); }
     return buildSummary({ recordId, record: merged, participants: occ?.participants ?? [], motions, decisions, procedure, shared: (c) => cites.get(`${c.kind}\0${c.id}`) === true });
   }
 

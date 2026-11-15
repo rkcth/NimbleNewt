@@ -65,11 +65,12 @@ export interface ProcedureBody {
 }
 
 /** What the summary says about one motion's procedure. */
-export function noteOf(number: number, motionId: string, p: ProcedureBody): ProcedureNote {
+export function noteOf(number: number, motionId: string, p: ProcedureBody, voteClosed: boolean): ProcedureNote {
   return {
     motionId, number, rounds: p.rounds, fresh: p.fresh, objectionRuns: p.check.run,
     skipped: [...new Set(p.skipped.map((s) => s.agent))],
-    noResponse: [...new Set([...p.check.answers.filter((a) => a.answer === "no-response").map((a) => a.agent), ...p.noBallot])],
+    // Who gave no ballot is told only once the vote is over: while it is open that would tell the readers who has voted.
+    noResponse: [...new Set([...p.check.answers.filter((a) => a.answer === "no-response").map((a) => a.agent), ...(voteClosed ? p.noBallot : [])])],
     dissent: p.dissent.map((d) => ({ agent: d.agent, reason: d.reason })),
     ...(p.tabled === undefined ? {} : { tabled: { reason: p.tabled.reason, followUps: p.followUps.map((f) => ({ agent: f.agent, text: f.text, ...(f.taskId === undefined ? {} : { taskId: f.taskId }) })) } }),
     echo: p.echo === true,
