@@ -76,6 +76,7 @@ export function canonical(value: unknown): string {
 }
 export const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
+const AGENT_PLACES: ReadonlySet<string> = new Set(["workdir", "home", "scratch"]);
 const bad = (message: string): never => { throw new SandboxError("invalid_recipe", message); };
 
 const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
@@ -92,7 +93,13 @@ function checkHostPath(label: string, path: unknown, protectedPaths: readonly st
   if (!isAbsolute(path) || normalize(path) !== path || (path.length > 1 && path.endsWith(sep))) return bad(`${label}: must be an absolute, normalised path (no "..", "//" or trailing slash): ${path}`);
   let real: string;
   try { real = realpathSync(path); } catch (error) { return bad(`${label}: ${path} does not exist (${(error as NodeJS.ErrnoException).code ?? "unreadable"})`); }
-  if (real !== path) return bad(`${label}: ${path} passes through a symbolic link (its real path is ${real}); give the real path`);
+  if (real !== path) {
+    // A place the host made for the attempt (checkout, home, scratch) that is itself a link was swapped by someone who could write there: the agent's own files. A link further up (a system's own, such as a temporary folder) is a configuration matter.
+    let leaf = false;
+    try { leaf = lstatSync(path).isSymbolicLink(); } catch { leaf = false; }
+    if (leaf && AGENT_PLACES.has(label)) throw new SandboxError("invalid_recipe", `${label}: ${path} passes through a symbolic link (its real path is ${real}); give the real path`, { containment: { what: "mount-is-link", id: sha256(path).slice(0, 24) } });
+    return bad(`${label}: ${path} passes through a symbolic link (its real path is ${real}); give the real path`);
+  }
   const stats = lstatSync(path);
   if (kind === "directory" && !stats.isDirectory()) return bad(`${label}: ${path} must be a directory`);
   if (!stats.isDirectory() && !stats.isFile()) return bad(`${label}: ${path} must be a file or directory`);
@@ -167,7 +174,7 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   for (const name of protectedSubpaths) {
     let stats;
     try { stats = lstatSync(join(workdir, name)); } catch { unprotectedSubpaths.push(name); continue; }
-    if (stats.isSymbolicLink()) return bad(`protectedSubpaths: ${join(workdir, name)} is a symbolic link`);
+    if (stats.isSymbolicLink()) throw new SandboxError("invalid_recipe", `protectedSubpaths: ${join(workdir, name)} is a symbolic link`, { containment: { what: "protected-entry-is-link", id: sha256(join(workdir, name)).slice(0, 24) } });
   }
   // With a route the standard proxy variables name it, so every client that honours them goes through the forwarder and nothing else is told of a way out. The loopback is never proxied around: the variables carry no exceptions.
   const proxyUrl = route === undefined ? undefined : `http://127.0.0.1:${route.proxyPort}`;
