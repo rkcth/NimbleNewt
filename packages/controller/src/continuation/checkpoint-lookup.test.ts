@@ -86,6 +86,9 @@ for (const backend of backends) {
     const other = await second();
     const otherCap = await svc.capture(owner, { commandId: cid("c"), taskId: other, ...input(1, true, "conv-2") });
     const first = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1000, true) });
+    // A resume recorded against the capture that will be pruned later.
+    const resumeCommand = { commandId: cid("r"), taskId: task, model: { provider: "local", id: "m1" }, after: "continue" as const };
+    assert.equal((await svc.resume(owner, resumeCommand)).continuation.id, first.id);
     const mid = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1001, false) });
     // Many incomplete captures after the one complete capture: it must survive them all.
     for (let i = 0; i < CONTINUATION_KEEP + 5; i++) await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2000 + i, false) });
@@ -102,9 +105,17 @@ for (const backend of backends) {
     assert.equal(await storage.getAggregate({ kind: "continuation", id: first.id }), undefined, "the capture that lost its place as latest complete was pruned next");
     assert.equal((await svc.latest(owner, task))?.id, newer.id);
     assert.ok(await storage.getAggregate({ kind: "continuation", id: otherCap.id }), "another task's capture is untouched");
+    // Every deleted record has its own audit entry naming it, its task and the keep limit; nothing of another task is named.
+    // 57 captures of the task went to 50 (seven pruned), then the newer complete one took the old complete one's place (one more).
+    const pruned = (await storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((r) => r.type === "continuation.pruned");
+    assert.equal(pruned.length, 8, JSON.stringify(pruned.map((r) => r.detail)));
+    assert.ok(pruned.some((r) => r.subject?.id === mid.id) && pruned.some((r) => r.subject?.id === first.id));
+    assert.ok(pruned.every((r) => r.subject?.kind === "continuation" && r.detail["taskId"] === task && r.detail["keep"] === CONTINUATION_KEEP && r.subject.id !== otherCap.id));
+    // The same resume command again, its capture now pruned: answered as not found, not as a failure on a missing record.
+    await assert.rejects(svc.resume(owner, resumeCommand), (e: Error & { code?: string }) => e.code === "not_found" && /pruned/.test(e.message));
   });
 
-  suite("a resume check follows the capture of the checkpoint the attempt restores, and the latest when that checkpoint has no complete capture", async ({ storage, svc, owner, task, epoch }) => {
+  suite("a resume check follows the capture of the checkpoint the attempt restores, and the latest when that checkpoint has no complete capture", async ({ storage, svc, owner, stranger, task, epoch }) => {
     const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(40, true) });
     const b = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(41, true) });
     const ports: ResumePorts = { observe: async () => ({}), missingContext: async () => [], uncertainEffects: async () => [], review: async () => ({}) };
@@ -123,16 +134,24 @@ for (const backend of backends) {
     const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(40) });
     assert.equal(own.continuationId, a.id, "the check follows the checkpoint the attempt restores");
     assert.equal(own.phase, "ready");
+    // A newer capture between the review and the commit does not make a check of an older checkpoint stale: it still names the one it was made against.
+    const late = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(42, true) });
+    assert.ok(late.id !== a.id);
     // Committing resumes from that capture, not the latest.
     const done = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
-    assert.equal(done.phase, "done");
+    assert.equal(done.phase, "done", JSON.stringify(done.history));
     assert.ok(done.history.some((h) => h.note === `resumed from ${a.id}`), "the resume was recorded against the checkpoint's own capture");
     assert.equal((await checks.capturedCheckpoint(owner, task, dg(40)))?.digest, dg(40));
     assert.equal(await checks.capturedCheckpoint(owner, task, dg(99)), undefined);
-    // A newer capture does not make a check of an older checkpoint stale: it still names the one it was made against.
-    const late = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(42, true) });
-    assert.ok(late.id !== a.id);
+    await assert.rejects(checks.capturedCheckpoint(stranger, task, dg(40)), (e: Error & { code?: string }) => e.code === "forbidden" || e.code === "not_found", "a caller without the right learns nothing");
+    // By contrast, a check that names no checkpoint follows the latest, so a newer capture after its review does make it stale.
+    const follows = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue" });
+    assert.equal(follows.continuationId, late.id);
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(43, true) });
+    const stale = await checks.commit(owner, { commandId: cid("k"), checkId: follows.id });
+    assert.notEqual(stale.phase, "done", "a check of the latest is not committed once a newer capture exists");
+    await checks.cancel(owner, { checkId: stale.id }).catch(() => undefined);
     const unknown = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(77) });
-    assert.equal(unknown.continuationId, late.id, "a checkpoint with no complete capture falls back to the latest");
+    assert.equal(unknown.continuationId, (await svc.latest(owner, task))?.id, "a checkpoint with no complete capture falls back to the latest");
   });
 }
