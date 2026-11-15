@@ -65,12 +65,12 @@ test("every default is a setting the owner can change; values are checked; unusa
   assert.equal(FLOOR_DEFAULTS.firstRound, "blind");
   assert.equal(FLOOR_DEFAULTS.chairNotes, "once");
   assert.equal(FLOOR_DEFAULTS.turnTokens, 220);
-  assert.equal(checkFloorValue("commentRounds", 3), 3);
-  assert.throws(() => checkFloorValue("commentRounds", 9));
+  assert.equal(checkFloorValue("chairQuestionCap", 3), 3);
+  assert.throws(() => checkFloorValue("chairQuestionCap", 99));
   assert.throws(() => checkFloorValue("firstRound", "sideways"));
   assert.throws(() => checkFloorValue("spendCapUsd", "five"));
-  assert.equal(floorSettingsFrom({ "meeting.floor.commentRounds": { value: 4 }, "meeting.floor.firstRound": "open", "meeting.floor.tabling": "nope" }).commentRounds, 4);
-  assert.equal(floorSettingsFrom({ "meeting.floor.tabling": "nope" }).tabling, true);
+  assert.equal(floorSettingsFrom({ "meeting.floor.chairQuestionCap": { value: 4 }, "meeting.floor.firstRound": "open", "meeting.floor.directQuestions": "nope" }).chairQuestionCap, 4);
+  assert.equal(floorSettingsFrom({ "meeting.floor.directQuestions": "nope" }).directQuestions, 1);
   assert.equal(floorSettingsFrom(undefined).firstRound, "blind");
   assert.equal(applyFloorChange(FLOOR_DEFAULTS, { turnTokens: 300 }).turnTokens, 300);
   assert.throws(() => applyFloorChange(FLOOR_DEFAULTS, { nonsense: 1 }));
@@ -88,14 +88,14 @@ for (const backend of backends) {
       const config = ConfigurationService.withEpoch(world.storage, epoch, { clock: () => "2026-11-14T08:00:00.000Z", settings: MEETING_SETTINGS });
       const read = async () => floorSettingsFrom(await config.installationValues(FLOOR_SETTINGS.map((d) => d.key)));
       assert.equal((await read()).firstRound, "blind");
-      await assert.rejects(() => config.stage(owner, { commandId: "c-bad", layer: "installation", set: { "meeting.floor.commentRounds": 99 } }));
+      await assert.rejects(() => config.stage(owner, { commandId: "c-bad", layer: "installation", set: { "meeting.floor.chairQuestionCap": 99 } }));
       const staged = await config.stage(owner, { commandId: "c-st", layer: "installation", set: { "meeting.floor.firstRound": "open", "meeting.floor.chairQuestionCap": 3, "meeting.floor.spendCapUsd": 10 } });
       await config.apply(owner, { commandId: "c-ap", layer: "installation", expectedRevision: staged.revision });
       const now = await read();
       assert.equal(now.firstRound, "open");
       assert.equal(now.chairQuestionCap, 3);
       assert.equal(now.spendCapUsd, 10);
-      assert.equal(now.commentRounds, 2, "the rest keep their defaults");
+      assert.equal(now.directQuestions, 1, "the rest keep their defaults");
     } finally { await world.close(); }
   });
 }

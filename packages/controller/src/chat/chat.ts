@@ -658,6 +658,27 @@ export class ChatService {
             request["agent"] = String(found[0]!["principalId"]);
           }
         }
+        // Where a motion's procedure stands, and what a meeting waits on, asked for in the owner's words: the motion or meeting is the one the words fit among those the owner may act on; several ask, none says so. A read is answered at once.
+        if (request["kind"] === "meeting_procedure" || request["kind"] === "meeting_waiting") {
+          const forMotion = request["kind"] === "meeting_procedure";
+          const wordsKey = forMotion ? "motionTopic" : "meetingTopic";
+          const idKey = forMotion ? "motionId" : "recordId";
+          const topic = request[wordsKey];
+          delete request[wordsKey];
+          if (topic !== undefined && typeof topic !== "string") { push({ i, kind: "refused", code: "invalid_command", message: `${wordsKey} must be text` }); continue; }
+          if (typeof request[idKey] !== "string") {
+            const listed = await this.#get(token, "meeting.owner-controls", {});
+            const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string }[] }[] | undefined) ?? [];
+            const here = currentFocus.projectId === undefined ? meetings : meetings.filter((m) => m.projectId === currentFocus.projectId);
+            const all = forMotion ? here.flatMap((m) => m.motions.map((x) => ({ id: x.id, text: `${x.text} ${x.topic ?? ""} ${m.title}`, label: `motion ${x.number} in ${m.title.slice(0, 40)}: ${x.text.slice(0, 60)}` }))) : here.map((m) => ({ id: m.id, text: m.title, label: m.title.slice(0, 80) }));
+            const typed = typeof topic === "string" ? topic : "";
+            let matches = typed.trim() === "" ? all : all.filter((c) => decisionWordsMatch(typed, c.text, true));
+            if (matches.length === 0) matches = all.filter((c) => decisionWordsMatch(typed, c.text, false));
+            if (matches.length === 0) { push({ i, kind: "refused", code: "not_found", message: all.length === 0 ? `there is no ${forMotion ? "motion" : "open meeting"} you can ask about` : `no ${forMotion ? "motion" : "meeting"} is about ${quotedText(typed, 80)}` }); continue; }
+            if (matches.length > 1) { push({ i, kind: "asked", question: `Which ${forMotion ? "motion" : "meeting"} do you mean?`, options: matches.slice(0, CHAT_LIMITS.options).map((c) => c.label) }); continue; }
+            request[idKey] = matches[0]!.id;
+          }
+        }
         if (!isObject(request) || hasRefMarker(request)) { push({ i, kind: "refused", code: "invalid_command", message: "that question is not understood" }); continue; }
         push({ i, kind: "status", request: asJson(request) });
         continue;
@@ -844,7 +865,7 @@ export class ChatService {
     const meetings = (listed?.["meetings"] as { id: string; projectId: string; title: string; motions: { id: string; number: number; text: string; topic?: string; state: string; version: number; deferred?: boolean }[] }[] | undefined) ?? [];
     const unfinished = (listed?.["unfinished"] as { id: string; projectId: string; text: string; topic?: string; left: number; applying: number }[] | undefined) ?? [];
     // The states the operation acts on, as the records service checks them: a vote opens on a proposed motion, closes when open, and only a motion not yet put to a vote can be tabled.
-    const states = op === "meeting.record.close-vote" ? ["voting"] : ["proposed"];
+    const states = op === "meeting.record.close-vote" ? ["voting"] : op === "meeting.proc.advance" ? ["proposed", "voting"] : ["proposed"];
     const procItems = (listed as { rulings?: { motionId: string; projectId: string; number: number; text: string; why: string }[]; tabled?: { motionId: string; projectId: string; number: number; text: string; reason: string }[] } | undefined) ?? {};
     const all: Candidate[] = proc
       ? (op === "meeting.proc.rule" ? (procItems.rulings ?? []).map((r) => ({ id: r.motionId, projectId: r.projectId, text: r.text, label: `motion ${r.number}: ${r.text.slice(0, 60)} (${r.why.slice(0, 80)})` })) : (procItems.tabled ?? []).map((r) => ({ id: r.motionId, projectId: r.projectId, text: `${r.text} ${r.reason}`, label: `tabled motion ${r.number}: ${r.text.slice(0, 60)}` })))
@@ -886,6 +907,24 @@ export class ChatService {
     labels[chosen.id] = chosen.label;
     if (outcomes && args["askOwner"] === true && !(meetings.find((m) => m.id === chosen!.id)?.motions ?? []).some((m) => m.deferred === true)) return refuse("invalid_command", "that meeting deferred nothing, so there is no question to ask you; the outcomes can be handed back without one.");
     if (op === "meeting.record.open-vote") args["expectedVersion"] = chosen.version;
+    // Overruling a challenged chair question: the challenged questions of that meeting are read from its floor; the owner's words pick one, a single one is taken, several ask.
+    if (op === "meeting.floor.cq-rule") {
+      const state = await this.#get(token, "meeting.floor.state", { recordId: chosen.id });
+      const asked = (((state?.["chairQuestions"]) ?? []) as { id: string; to: string; topic: string; challenge?: { by: string; reason: string; ruling?: string } }[]).filter((q) => q.challenge !== undefined && q.challenge.ruling === undefined);
+      if (asked.length === 0) return refuse("not_found", "no chair question of that meeting is waiting for a ruling on a challenge");
+      const label = (q: (typeof asked)[number]): string => `${q.id} (question to ${q.to} about ${q.topic.slice(0, 50)}; challenged by ${q.challenge!.by}: ${q.challenge!.reason.slice(0, 60)})`;
+      let one = typeof args["questionId"] === "string" ? asked.find((q) => q.id === args["questionId"]) : undefined;
+      if (typeof args["questionId"] === "string" && one === undefined) return refuse("not_found", "that chair question is not waiting for a ruling on a challenge");
+      if (one !== undefined && asked.length > 1 && !words.includes(one.id)) one = undefined;
+      if (one === undefined) {
+        const fits = asked.filter((q) => decisionWordsMatch(words, `${q.topic} ${q.to} ${q.challenge!.reason}`, false));
+        const pickFrom = asked.length === 1 ? asked : fits.length === 1 ? fits : asked;
+        if (pickFrom.length > 1) return { ok: false, kind: "ask", question: "Which challenged chair question do you mean?", options: pickFrom.slice(0, CHAT_LIMITS.options).map(label), field: "questionId", choices: pickFrom.slice(0, CHAT_LIMITS.options).map((q) => q.id) };
+        one = pickFrom[0]!;
+      }
+      args["questionId"] = one.id;
+      labels[one.id] = `chair question to ${one.to} about ${one.topic.slice(0, 50)}`;
+    }
     // The owner's own words are what is asked, said or ended with: the meeting's end is the reason they gave.
     if (op === "meeting.floor.end" && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) args["reason"] = words.trim().slice(0, 400);
     // A motion is tabled for a reason: the owner's own words when they gave one, else their message.

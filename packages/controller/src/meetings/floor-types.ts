@@ -5,7 +5,7 @@ import type { FloorSettings } from "./floor-settings.js";
 /** What kind of turn a model is asked for. Every turn is its own tool-less call; the controller reads the reply and writes what it means into the meeting record. */
 export type TurnKind =
   | "statement" | "blind-statement" | "direct-answer" | "direct-continue" | "chair-answer" | "reply" | "owner-answer" | "checkpoint-answer" | "revision" | "ballot" | "correction" | "objection"
-  | "chair-notes" | "chair-questions" | "desk-offer" | "desk-excerpts" | "chair-summary" | "chair-reminders" | "chair-ruling" | "chair-match" | "casting";
+  | "chair-notes" | "chair-questions" | "desk-offer" | "desk-excerpts" | "chair-summary" | "chair-reminders" | "chair-ruling" | "casting";
 
 /** One model call, as the facilitator asks for it. The runner may not use tools, and must stop at `signal`. */
 export interface TurnRequest {
@@ -36,21 +36,26 @@ export class TurnWaitsOnTool extends Error {
   constructor(tool: string) { super(`waiting on ${tool}`); this.name = "TurnWaitsOnTool"; this.tool = tool; }
 }
 
+/**
+ * The units of work the floor runs itself: the owner's questions, answers to the members' and the chair's questions, the chair's work between rounds, the correction of a member whose desk was read, and the timebox's wrap-up. Rounds,
+ * the objection check, rulings, ballots, revision turns and the casting vote are the meeting procedure's (card M06); the floor only supplies the model turns for them.
+ */
 export type UnitKind =
-  | "round-blind" | "round-turn" | "direct-answer" | "direct-continue" | "chair-answer" | "reply" | "owner-ask" | "revision"
-  | "chair-notes" | "chair-questions" | "desk-offer" | "desk-excerpts" | "correction" | "chair-summary" | "chair-reminders"
-  | "objection" | "chair-ruling" | "chair-match" | "open-vote" | "ballot" | "close-vote" | "casting" | "wrap-up";
+  | "direct-answer" | "direct-continue" | "direct-skip" | "chair-answer" | "reply" | "owner-ask"
+  | "chair-notes" | "chair-questions" | "desk-offer" | "desk-excerpts" | "correction" | "chair-summary" | "chair-reminders" | "wrap-up";
 
 /** A step waiting its turn in front of the rest. Owner questions come first. */
 export interface QueueItem {
   readonly id: string;
-  readonly kind: "owner-ask" | "revision" | "chair-answer" | "reply" | "direct-answer" | "direct-continue" | "chair-notes";
+  readonly kind: "owner-ask" | "chair-answer" | "reply" | "direct-answer" | "direct-continue" | "direct-skip" | "chair-notes";
   readonly agent: string;
   /** owner-ask: the owner's question entry; revision: the owner message revised for; direct-answer / continue: the asker. */
   readonly entryId?: string;
   readonly question?: string;
   readonly from?: string;
   readonly chairQuestionId?: string;
+  /** direct-skip: the target of the skipped question. */
+  readonly target?: string;
   /** The owner's question went to an agent that is not in the room: answered from its checkpoint. */
   readonly checkpoint?: true;
   readonly asOfSeq?: number;
@@ -104,25 +109,8 @@ export interface TurnLog {
 
 export interface Notice { readonly at: string; readonly kind: string; readonly text: string }
 
-export type FloorPhase = "round" | "between" | "objection" | "ruling" | "match" | "vote" | "done";
-
-export interface VoteState {
-  readonly motionId: string;
-  readonly version: number;
-  readonly order: readonly string[];
-  readonly opened: boolean;
-  readonly cast: Readonly<Record<string, number>>;
-  readonly noResponse: readonly string[];
-  readonly revisions: Readonly<Record<string, number>>;
-  /** The latest owner message entry the voters were asked to revise for, and who was owed a turn for it. */
-  readonly trigger?: string;
-  readonly closed?: boolean;
-  readonly tie?: boolean;
-  readonly decisionId?: string;
-  readonly castingAsked?: boolean;
-  /** `<owner message>:<voter>` pairs already offered a revision turn. */
-  readonly offered?: readonly string[];
-}
+/** Where the meeting procedure has a motion (card M06), as the floor shows it; `none` when no motion is on the floor. */
+export type FloorPhase = "none" | "comment" | "check" | "ruling" | "ready" | "voting" | "concluded" | "tabled" | "void";
 
 export interface InquiryState {
   readonly openedAt: string;
@@ -171,34 +159,32 @@ export interface StoredReply {
   readonly costUsd: number;
 }
 
+/** The floor's own state for one meeting: its queue, clock and spend, the chair's notes and desk reads, the owner's inquiry and what the members and the chair said to the owner. Never a motion's rounds, ballots or rulings: those are the procedure's. */
 export interface FloorBody {
   readonly recordId: string;
   readonly occurrenceId: string;
   readonly projectId: string;
   readonly state: "running" | "ended";
   readonly settings: FloorSettings;
-  readonly phase: FloorPhase;
-  readonly round: number;
-  readonly fresh: boolean;
-  readonly order: readonly string[];
-  readonly spoken: readonly string[];
-  readonly turn: number;
-  readonly todo: readonly string[];
   readonly queue: readonly QueueItem[];
+  /** The motion the floor was started with (informational; the procedure runs it). */
   readonly motionId?: string | undefined;
-  readonly motionVersion?: number | undefined;
-  readonly objection: { readonly attempt: number; readonly objectors: readonly { readonly agent: string; readonly reason: string; readonly research?: true }[]; readonly noResponse: readonly string[] };
-  readonly vote?: VoteState | undefined;
   readonly inflight?: Inflight | undefined;
   readonly unitSeq: number;
+  /** The chair's work between two comment rounds, one step at a time (the procedure asks for it at the end of each round). */
+  readonly between?: BetweenState | undefined;
+  readonly lastBetween?: { readonly key: string; readonly summary?: string | undefined } | undefined;
+  /** What the members and the chair were asked for the procedure, answered and not yet used up: a repeat after a restart writes the same words and spends nothing more. Newest last, a window. */
+  readonly replies: Readonly<Record<string, PortReply>>;
+  /** Asks in flight (key to the time they began): another driver asking the same thing waits, a claim whose asker died is taken over. */
+  readonly claims: Readonly<Record<string, string>>;
   readonly clock: { readonly startedAt: string; readonly durationMs: number; readonly extraMs: number; readonly pausedMs: number; readonly pausedAt?: string | undefined };
   readonly spend: { readonly usd: number; readonly tokens: number; readonly calls: number; readonly hiddenTokens: number; readonly ownerUsd: number; readonly ownerTokens: number; readonly extraUsd: number; readonly extraTokens: number };
   readonly timebox?: { readonly reason: "time" | "spend"; readonly at: string } | undefined;
   readonly turns: readonly TurnLog[];
   readonly deliveries: number;
+  /** TLDR summaries of long statements, by the speaker and the words (the statement is written by the procedure, so its entry is looked up by what it says). */
   readonly summaries: Readonly<Record<string, string>>;
-  readonly stances: Readonly<Record<string, Readonly<Record<string, string>>>>;
-  readonly amendments: readonly { readonly by: string; readonly text: string; readonly round: number; readonly entryId: string }[];
   readonly chairNotes?: string | undefined;
   readonly chairNotesAt?: string | undefined;
   readonly chairNotesCount: number;
@@ -215,14 +201,27 @@ export interface FloorBody {
   readonly notices: readonly Notice[];
   readonly priorities: readonly { readonly itemId: string; readonly urgency?: string; readonly at: string }[];
   readonly waitingTool?: { readonly tool: string; readonly agent: string; readonly since: string } | undefined;
-  readonly echo?: boolean | undefined;
   readonly startedAt: string;
   readonly endedAt?: string | undefined;
 }
 
+export interface BetweenState {
+  readonly key: string;
+  readonly motionId: string;
+  readonly version: number;
+  readonly round: number;
+  readonly rounds: number;
+  readonly fresh: number;
+  readonly todo: readonly string[];
+  readonly summary?: string | undefined;
+}
+
+/** One model answer kept for the procedure (the same shape as a unit's stored item, without the cost bookkeeping). */
+export type PortReply = StoredReply["items"][number];
+
 /** What `advance` did. */
 export type AdvanceResult =
-  | { readonly did: UnitKind; readonly agent?: string; readonly phase: FloorPhase; readonly waiting?: undefined }
+  | { readonly did: UnitKind | "procedure"; readonly agent?: string; readonly phase: FloorPhase; readonly detail?: string; readonly waiting?: undefined }
   | { readonly waiting: "owner" | "tool" | "vote-time" | "busy" | "none" | "chair" | "meeting-ended"; readonly phase: FloorPhase; readonly detail?: string };
 
 export type WaitingOn =

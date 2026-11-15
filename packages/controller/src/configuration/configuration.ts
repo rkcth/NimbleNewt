@@ -393,6 +393,44 @@ export class ConfigurationService {
     return { chain, complete };
   }
 
+  /**
+   * Moves what the owner stored under settings that were retired (renamed or merged into another) to where it now lives, so a choice made under the old name is not lost: for each `from` set in the installation layer, its value
+   * (through `clamp`, then the new setting's own check) becomes the value of `to` unless the owner set `to` as well (the newer choice stays); an empty `to`, or a value the new setting refuses, drops the old entry. The old entries are
+   * removed in the same step, so the layer holds no key this installation no longer knows. For the controller's own use at start; safe to repeat.
+   */
+  async migrateSettings(renames: readonly { readonly from: string; readonly to: string; readonly clamp?: (value: unknown) => unknown }[]): Promise<{ readonly moved: readonly string[]; readonly dropped: readonly string[] }> {
+    const id = layerIdOf("installation", "installation");
+    const current = await this.#runner.get("config-layer", id);
+    if (current === undefined) return { moved: [], dropped: [] };
+    const body = current.body as unknown as LayerBody;
+    const applied: Record<string, SettingEntry> = { ...body.applied };
+    const moved: string[] = []; const dropped: string[] = []; const set: string[] = [];
+    for (const r of renames) {
+      const entry = applied[r.from];
+      if (entry === undefined) continue;
+      delete applied[r.from];
+      if (r.to === "" || applied[r.to] !== undefined) { dropped.push(r.from); continue; }
+      const def = definitionFor(r.to, this.#definitions);
+      try { applied[r.to] = { value: def === undefined ? invalid("set", `${r.to} is not a setting`) : def.check(r.clamp === undefined ? entry.value : r.clamp(entry.value)), ...(entry.locked === true ? { locked: true } : {}) }; moved.push(r.from); set.push(r.to); } catch { dropped.push(r.from); }
+    }
+    if (moved.length + dropped.length === 0) return { moved, dropped };
+    const now = this.#runner.now();
+    const revisionAfter = current.revision + 1;
+    const entry: HistoryEntry = { revision: revisionAfter, at: now, by: "service:settings-migration", set, removed: [...moved, ...dropped], locked: [], unlocked: [], effects: Object.fromEntries(set.map((k) => [k, this.#define(k).effect])) };
+    const next: LayerBody = { ...body, applied, history: [...body.history, entry].slice(-CONFIG_LIMITS.history) };
+    try {
+      await this.#runner.command("config.migrate", { commandId: `cfg-migrate-${id}-${current.revision}`, actor: "service:settings-migration" }, async () => ({
+        payload: { moved: [...moved], dropped: [...dropped] },
+        build: async () => { const ref: AggregateRef = { kind: "config-layer", id }; return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }], detail: { layer: "installation", changed: moved.length + dropped.length } }; },
+      }));
+    } catch (error) {
+      // Another change got there first: the next start migrates what is left.
+      if (error instanceof DomainError && (error.code === "stale_revision" || error.code === "command_conflict")) return { moved: [], dropped: [] };
+      throw error;
+    }
+    return { moved, dropped };
+  }
+
   /** One setting's value as it applies to a task (installation, the working agent's team and agent, the task), for the controller's own reading; no rights check. `undefined` when unset, not known or the task is missing. */
   async taskValue(key: string, taskId: string): Promise<unknown> {
     if (!TASK_ID.test(taskId)) return undefined;

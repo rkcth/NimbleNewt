@@ -16,7 +16,8 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 const MOTION = "Move the nightly build to 01:00 because the cache is warm then.";
 
-const floorOf = async (w: FloorWorld, rec: string): Promise<FloorBody> => (await w.floor.state(w.owner, rec)) as unknown as FloorBody;
+type FloorView = FloorBody & { phase: string };
+const floorOf = async (w: FloorWorld, rec: string): Promise<FloorView> => (await w.floor.state(w.owner, rec)) as unknown as FloorView;
 const recordOf = async (w: FloorWorld, rec: string): Promise<RecordBody> => (await w.records.record(w.owner, rec)) as unknown as RecordBody;
 const transcript = async (w: FloorWorld, rec: string): Promise<{ seq: number; kind: string; speaker: string; text: string }[]> => (await w.records.discussion(w.owner, rec, { limit: 100 }))!.entries as never;
 const run = async (w: FloorWorld, rec: string, max = 200): Promise<void> => { await w.floor.drive(w.service, { recordId: rec, maxUnits: max }); };
@@ -28,13 +29,13 @@ floorSuite(test, "a whole meeting runs: blind first round, chair work, second ro
   const motionId = await start(w, rec);
   await run(w, rec);
   const f = await floorOf(w, rec);
-  assert.equal(f.phase, "done");
+  assert.equal(f.phase, "concluded");
   const d = await decisionOf(w, motionId);
   assert.equal(d.outcome, "adopted");
   assert.equal(d.table.length, 3);
   const kinds = w.script.calls.map((c) => c.kind);
   assert.deepEqual(kinds.slice(0, 3), ["blind-statement", "blind-statement", "blind-statement"], "round 1 is blind");
-  assert.ok(kinds.includes("chair-notes") && kinds.includes("chair-summary") && kinds.includes("objection") && kinds.includes("chair-match"));
+  assert.ok(kinds.includes("chair-notes") && kinds.includes("chair-summary") && kinds.includes("objection"));
   assert.equal(w.script.of("statement").length, 3, "round 2 is one open turn per member");
   assert.equal(w.script.of("ballot").length, 3);
   assert.equal(w.script.maxInflight <= 4, true);
@@ -82,9 +83,11 @@ floorSuite(test, "firstRound open lets each member hear the earlier speakers, an
   assert.ok(s[1]!.prompt.text.includes(marker(s[0]!)) || s[1]!.prompt.text.includes("thinks the nightly build"), "the second speaker of the first round hears the first");
   const f = await floorOf(w, rec);
   assert.equal(f.settings.firstRound, "open");
-  await refuses("forbidden", () => w.floor.configure(w.asA, { commandId: cid("cf"), recordId: rec, set: { commentRounds: 4 } }));
-  await refuses("forbidden", () => w.floor.configure(w.service, { commandId: cid("cf"), recordId: rec, set: { commentRounds: 4 } }));
-  await refuses("invalid_command", () => w.floor.configure(w.owner, { commandId: cid("cf"), recordId: rec, set: { commentRounds: 99 } }));
+  await refuses("forbidden", () => w.floor.configure(w.asA, { commandId: cid("cf"), recordId: rec, set: { chairQuestionCap: 4 } }));
+  await refuses("forbidden", () => w.floor.configure(w.service, { commandId: cid("cf"), recordId: rec, set: { chairQuestionCap: 4 } }));
+  await refuses("invalid_command", () => w.floor.configure(w.owner, { commandId: cid("cf"), recordId: rec, set: { chairQuestionCap: 99 } }));
+  // the rounds, reruns, tabling and revision limit are the procedure's, one choice for every meeting: the floor has no setting of its own for them
+  for (const retired of ["commentRounds", "objectionReruns", "tabling", "maxRevisionsPerVoter", "freshRoundAfterAmendment"]) await refuses("invalid_command", () => w.floor.configure(w.owner, { commandId: cid("cf"), recordId: rec, set: { [retired]: 1 } }));
   await refuses("invalid_command", () => w.floor.configure(w.owner, { commandId: cid("cf"), recordId: rec, set: { nonsense: 1 } }));
 });
 
@@ -136,7 +139,7 @@ floorSuite(test, "the turn limit counts visible tokens only: hidden reasoning is
     return reply("STANCE: for\nSTATEMENT: reasoned too long", 60, 900); // over the hidden budget
   });
   await start(w, rec);
-  await run(w, rec, 1);
+  await run(w, rec, 3); // the procedure takes one member's statement a step; the blind answers of the others were asked at once
   const f = await floorOf(w, rec);
   const byAgent = (a: string) => f.turns.find((t) => t.agent === a && t.kind === "blind-statement")!;
   assert.equal(byAgent(w.pA).truncated, undefined, "700 hidden tokens do not make 100 visible tokens too long");
@@ -158,7 +161,7 @@ floorSuite(test, "the turn limit counts visible tokens only: hidden reasoning is
   assert.ok(out.last && "waiting" in out.last);
   const g = await floorOf(w, rec);
   assert.equal(g.turns.some((x) => x.agent === w.pB && x.noResponse !== undefined && x.kind === "statement"), true);
-  assert.equal(g.phase, "done", "the meeting finished without the hung turn");
+  assert.equal(g.phase, "concluded", "the meeting finished without the hung turn");
 });
 
 const motionOf = async (w: FloorWorld, id: string): Promise<MotionBody> => (await w.records.motion(w.owner, id)) as unknown as MotionBody;
@@ -182,28 +185,30 @@ floorSuite(test, "the objection check is a bounded call (the motion and a round 
     assert.ok(o.maxVisibleTokens <= 80, "a bounded answer");
   }
   assert.equal(w.script.of("chair-ruling").length, 1);
-  assert.equal(w.script.of("statement").length, 6, "a fresh round of comments followed the amendment");
+  assert.equal(w.script.of("statement").length, 3, "the procedure's ruling reruns the objection check on the new version; it does not hold a new comment round");
   const m = await motionOf(w, motionId);
   assert.equal(m.version, 2);
   assert.equal(m.state, "adopted");
   const d = await decisionOf(w, motionId);
   assert.equal(d.version, 2);
   const t = await transcript(w, rec);
-  assert.ok(t.some((e) => e.text.startsWith("Objection: it is unclear what warm means")), "the objection's reason is in the transcript for the ruling and later speakers");
-  assert.ok(t.some((e) => e.text.includes("Chair's ruling: motion amended")));
+  assert.ok(t.some((e) => e.text.startsWith("Objection check") && e.text.includes("it is unclear what warm means")), "the objection's reason is in the transcript for the ruling and later speakers");
+  assert.ok(t.some((e) => e.text.includes("Objection upheld") && e.text.includes("the motion is amended (version 2)")));
 });
 
 floorSuite(test, "after the rerun limit the chair may only rule to proceed, and the remaining objections are recorded as dissent", async (w) => {
   const { rec } = await w.meet();
-  await start(w, rec, { objectionReruns: 0 });
+  w.procSettings.current.objectionReruns = 0;
+  const motionId = await start(w, rec);
   w.script.on((r) => (r.kind === "objection" && r.agent === w.pC ? reply("OBJECT: yes\nREASON: still unclear") : undefined));
   w.script.on((r) => (r.kind === "chair-ruling" ? reply("RULING: amend\nAMENDED_MOTION: something else entirely\nREASON: try") : undefined));
   await run(w, rec);
-  const m = await motionOf(w, (await floorOf(w, rec)).motionId!);
+  const m = await motionOf(w, motionId);
   assert.equal(m.version, 1, "no amendment was allowed");
   assert.equal(m.state, "adopted");
   const t = await transcript(w, rec);
-  assert.ok(t.some((e) => e.text.includes("recorded as dissent") && e.text.includes("still unclear")));
+  assert.ok(t.some((e) => e.text.includes("recorded as dissent")));
+  assert.ok(JSON.stringify((await w.procedure.status(w.owner, motionId))!["dissent"]).includes("still unclear"), "the objector and the reason are kept as dissent");
   assert.ok(w.script.of("chair-ruling")[0]!.prompt.specific.includes("no more amendments"));
 });
 
@@ -217,18 +222,19 @@ floorSuite(test, "needs time to research: the chair tables the motion, no vote i
   assert.equal(m.state, "tabled");
   assert.equal(w.script.of("ballot").length, 0, "no vote was held");
   const f = await floorOf(w, rec);
-  assert.equal(f.phase, "done");
-  const out = await w.floor.followUps(w.service, { recordId: rec });
-  assert.equal(out.created.length, 1);
-  assert.equal(out.created[0]!.owner, w.pB);
-  assert.ok(out.created[0]!.title.includes("run the cache benchmark"));
-  assert.equal((await w.floor.followUps(w.service, { recordId: rec })).created.length, 0, "a repeat makes no second task");
+  assert.equal(f.phase, "tabled");
+  // the procedure makes the research an owned follow-up task when it tables the motion, once; the floor's own follow-ups add nothing for it
+  assert.equal(w.created.length, 1);
+  assert.equal(w.created[0]!.owner, w.pB);
+  assert.ok(w.created[0]!.title.length > 0 && JSON.stringify(w.created[0]).includes("benchmark"));
+  assert.equal((await w.floor.followUps(w.service, { recordId: rec })).created.length, 0, "the research is not made a second task");
   assert.equal(w.created.length, 1);
 });
 
 floorSuite(test, "tabling can be switched off: research then reads as an ordinary objection", async (w) => {
   const { rec } = await w.meet();
-  const motionId = await start(w, rec, { tabling: false });
+  w.procSettings.current.tabling = false;
+  const motionId = await start(w, rec);
   w.script.on((r) => (r.kind === "objection" && r.agent === w.pB ? reply("OBJECT: research\nREASON: numbers") : undefined));
   await run(w, rec);
   assert.ok(!w.script.of("objection")[0]!.prompt.text.includes("OBJECT: yes|no|research"));
@@ -266,7 +272,8 @@ floorSuite(test, "chair questions are checked by structure and counted against a
 
 floorSuite(test, "a question that names a position or carries a position field is refused; chair questions after the last round are followed by a reply from every present member", async (w) => {
   const { rec } = await w.meet();
-  await start(w, rec, { commentRounds: 1, chairQuestionCap: 3 });
+  w.procSettings.current.rounds = 1;
+  await start(w, rec, { chairQuestionCap: 3 });
   w.script.on((r) => (r.kind === "chair-questions" ? reply(JSON.stringify({ questions: [
     { to: w.pA, topic: "will you vote for or against this", experience_sought: "your stance" },
     { to: w.pB, topic: "the build time", experience_sought: "what you measured", stance: "for" },
@@ -342,7 +349,7 @@ floorSuite(test, "an absent member whose desk was read is asked for a correction
   w.script.on((r) => (r.kind === "desk-excerpts" ? reply(JSON.stringify({ excerpts: [{ file: file.id, quote: "I would rather wait a week", bears_on: "timing" }] })) : undefined));
   w.script.on((r) => (r.kind === "correction" ? reply("CORRECTION: These notes do not state my position.\nCONTRADICTS: yes") : undefined));
   // the chair's work after round 1 happens while C is out; C comes in before the vote opens
-  while (true) { const r = await w.floor.advance(w.service, { recordId: rec }); if ("waiting" in r || (await floorOf(w, rec)).phase === "objection") break; }
+  while (true) { const r = await w.floor.advance(w.service, { recordId: rec }); if ("waiting" in r || (await floorOf(w, rec)).phase === "check") break; }
   await w.records.join(w.asC, { commandId: cid("j"), recordId: rec });
   await run(w, rec);
   assert.equal(w.script.of("correction").length, 1);
@@ -356,13 +363,14 @@ floorSuite(test, "an absent member whose desk was read is asked for a correction
 
 /** Runs until the meeting is at the start of the vote (ballots not yet asked), by advancing one unit at a time. */
 const untilPhase = async (w: FloorWorld, rec: string, phase: string, extra: () => boolean = () => true): Promise<void> => {
+  // "between" is the chair's work after a comment round (the floor has a list of it to do); the other names are the procedure's stages
+  const at = async (): Promise<boolean> => { const f = await floorOf(w, rec); return (phase === "between" ? f.between !== undefined : f.phase === phase) && extra(); };
   for (let i = 0; i < 200; i += 1) {
-    const f = await floorOf(w, rec);
-    if (f.phase === phase && extra()) return;
+    if (await at()) return;
     const r = await w.floor.advance(w.service, { recordId: rec });
     if ("waiting" in r && r.waiting !== undefined && r.waiting !== "busy") break;
   }
-  assert.equal((await floorOf(w, rec)).phase, phase);
+  assert.ok(await at(), `never reached ${phase}`);
 };
 
 floorSuite(test, "the owner asks one agent a question: it is answered at the next boundary into the transcript, the owner's turn limit applies, and only the owner may ask", async (w) => {
@@ -385,7 +393,7 @@ floorSuite(test, "the owner asks one agent a question: it is answered at the nex
   await run(w, rec);
   const later = w.script.of("blind-statement");
   assert.equal(later.length, 3);
-  assert.equal((await floorOf(w, rec)).phase, "done");
+  assert.equal((await floorOf(w, rec)).phase, "concluded");
   // the same command again answers nothing twice
   const again = await w.floor.ask(w.owner, { commandId: "same-cmd", recordId: rec, agent: w.pB, question: "Again?" }).catch(() => undefined);
   void again;
@@ -414,14 +422,11 @@ floorSuite(test, "an owner question to an agent that is not in the room is answe
 floorSuite(test, "an owner inquiry pauses the clock and holds the vote; answers during it are held from the other voters until it ends, revision turns follow, and the vote then closes", async (w) => {
   const { rec } = await w.meet();
   const motionId = await start(w, rec);
-  await untilPhase(w, rec, "vote");
+  await untilPhase(w, rec, "voting");
   // two voters cast, then the owner opens an inquiry
-  await w.floor.advance(w.service, { recordId: rec });
-  await w.floor.advance(w.service, { recordId: rec });
-  await w.floor.advance(w.service, { recordId: rec });
+  for (let i = 0; i < 20 && ((await motionOf(w, motionId)).ballots ?? 0) < 2; i += 1) await w.floor.advance(w.service, { recordId: rec });
   let f = await floorOf(w, rec);
-  assert.equal(f.vote!.opened, true);
-  const castBefore = Object.keys(f.vote!.cast).length;
+  const castBefore = (await motionOf(w, motionId)).ballots ?? 0;
   assert.ok(castBefore >= 1 && castBefore < 3, "mid-vote");
   const before = w.script.of("ballot").length;
   const inq = await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec });
@@ -455,7 +460,7 @@ floorSuite(test, "an owner inquiry pauses the clock and holds the vote; answers 
   w.clock.tick(5);
   // done with questions
   const ended = await again.endInquiry(w.owner, { commandId: cid("ie"), recordId: rec });
-  assert.ok(ended.revisionsOffered >= 1, "a voter who cast before the question may revise");
+  assert.equal(ended.revisionsOffered, 0, "the procedure, not the floor, offers revision turns");
   await run(w, rec);
   f = await floorOf(w, rec);
   assert.equal(f.inquiry, undefined);
@@ -463,7 +468,7 @@ floorSuite(test, "an owner inquiry pauses the clock and holds the vote; answers 
   t = await transcript(w, rec);
   assert.ok(t.some((e) => e.text.includes("held-answer-text")));
   assert.ok(w.script.of("revision").length >= 1);
-  assert.equal(f.phase, "done");
+  assert.equal(f.phase, "concluded");
   assert.equal((await decisionOf(w, motionId)).outcome, "adopted");
 });
 
@@ -479,7 +484,7 @@ floorSuite(test, "an inquiry stops the meeting's clock and timebox, and the paus
   const s2 = (await w.floor.state(w.owner, rec)) as Record<string, unknown>;
   assert.ok((s2["elapsedMinutes"] as number) < 30, "the paused time was removed");
   await run(w, rec);
-  assert.equal((await floorOf(w, rec)).phase, "done");
+  assert.equal((await floorOf(w, rec)).phase, "concluded");
   assert.equal((await floorOf(w, rec)).timebox, undefined);
 });
 
@@ -497,6 +502,33 @@ floorSuite(test, "an inquiry idle past the owner-set time sends a reminder once 
   assert.equal((await w.floor.sweep(w.service)).reminded.length, 1);
 });
 
+floorSuite(test, "the scheduled turn needs nobody to call advance: it reminds an idle inquiry, lists it for the Needs-you list, and drives every running meeting", async (w) => {
+  const a = (await w.meet()).rec;
+  const b = (await w.meet()).rec;
+  const motionA = await start(w, a);
+  const motionB = await start(w, b);
+  const out = await w.floor.tick(w.service);
+  assert.deepEqual([out.driven, out.failed], [2, 0], "both meetings were given their turn");
+  // each turn is a few steps; the loop repeats until the meetings are done, with nobody calling advance
+  for (let i = 0; i < 30 && ((await motionOf(w, motionA)).state !== "adopted" || (await motionOf(w, motionB)).state !== "adopted"); i += 1) await w.floor.tick(w.service);
+  assert.equal((await motionOf(w, motionA)).state, "adopted", "the scheduled turn finished the meeting by itself");
+  assert.equal((await motionOf(w, motionB)).state, "adopted");
+  await refuses("forbidden", () => w.floor.tick(w.asA));
+  // an inquiry: listed for the owner only, reminded once per idle period by the same turn
+  await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: b });
+  const listed = await w.floor.openInquiries(w.owner, 10);
+  assert.deepEqual(listed.items.map((i) => [i.recordId, i.idleMinutes]), [[b, 0]]);
+  assert.deepEqual((await w.floor.openInquiries(w.asA, 10)).items, [], "nobody but the owner sees it");
+  w.clock.tick(40);
+  assert.equal((await w.floor.openInquiries(w.owner, 10)).items[0]!.idleMinutes, 40);
+  assert.deepEqual((await w.floor.tick(w.service)).reminded, [b]);
+  assert.deepEqual((await w.floor.tick(w.service)).reminded, [], "once per idle period");
+  assert.ok(w.notices.some((n) => n.kind === "inquiry-open" && n.recordId === b));
+  assert.ok(w.notices.some((n) => n.kind === "inquiry-idle" && n.recordId === b));
+  await w.floor.endInquiry(w.owner, { commandId: cid("ie"), recordId: b });
+  assert.deepEqual((await w.floor.openInquiries(w.owner, 10)).items, [], "an ended inquiry leaves the list");
+});
+
 floorSuite(test, "the owner addresses the team: the words are in the transcript, nobody is given the floor out of turn, and each member hears them with its next turn; an amendment restarts the round", async (w) => {
   const { rec } = await w.meet();
   const motionId = await start(w, rec);
@@ -512,9 +544,8 @@ floorSuite(test, "the owner addresses the team: the words are in the transcript,
   const b = await w.floor.address(w.owner, { commandId: cid("adr"), recordId: rec, text: "Change it: move to 02:00 instead.", amend: { text: "Move the nightly build to 02:00 because the cache is warm then." } });
   assert.equal(b.restarted, true);
   const f = await floorOf(w, rec);
-  assert.equal(f.motionVersion, 2);
-  assert.equal(f.phase, "round", "a fresh round of comments on the new version");
-  assert.equal(f.fresh, true);
+  assert.equal(f.phase, "comment", "a fresh round of comments on the new version");
+  assert.equal((await w.procedure.status(w.owner, motionId))!["fresh"], 1);
   assert.equal((await motionOf(w, motionId)).version, 2);
   await run(w, rec);
   assert.equal((await decisionOf(w, motionId)).version, 2);
@@ -575,14 +606,14 @@ const defaultText = (kind: string): string => (kind === "ballot" ? "VOTE: yes\nR
 
 floorSuite(test, "a blocked budget is reported to the owner and the turn is recorded as no response, never silently skipped", async (w) => {
   const { rec } = await w.meet();
-  await start(w, rec);
+  const motionId = await start(w, rec);
   w.hooks.budget = async (a) => (a === w.pB ? { ok: false, reason: "the daily budget for B is reached" } : { ok: true });
   await run(w, rec);
   const f = await floorOf(w, rec);
   assert.ok(f.turns.some((x) => x.agent === w.pB && x.noResponse?.includes("budget reached")));
   assert.ok(f.notices.some((x) => x.kind === "no-response" && x.text.includes(w.pB) && x.text.includes("budget")), "the meeting's notices say why B said nothing");
   assert.ok(w.notices.some((n) => n.kind === "budget" && n.text.includes("budget")), "the owner is told");
-  assert.ok(f.vote!.noResponse.includes(w.pB), "the vote goes on without B, which is recorded as not having voted");
+  assert.ok(((await w.procedure.status(w.owner, motionId))!["noBallot"] as string[]).includes(w.pB), "the vote goes on without B, which is recorded as not having voted");
 });
 
 floorSuite(test, "a turn waiting on a tool shows as waiting on a tool, and the meeting tries again later without losing the unit", async (w) => {
@@ -598,7 +629,7 @@ floorSuite(test, "a turn waiting on a tool shows as waiting on a tool, and the m
   assert.equal((waiting as { what: string }).what, "the build tool");
   blocked = false;
   await run(w, rec);
-  assert.equal((await floorOf(w, rec)).phase, "done");
+  assert.equal((await floorOf(w, rec)).phase, "concluded");
   assert.equal((await w.floor.waiting(w.owner, rec))!.kind, "nothing");
 });
 
@@ -698,10 +729,10 @@ floorSuite(test, "the owner changes the priorities and the meeting's settings; a
   const t = await transcript(w, rec);
   assert.equal(t.filter((e) => e.text.startsWith("Summary of round")).length <= 2, true);
   assert.ok(w.script.calls.length > calls);
-  assert.equal((await floorOf(w, rec)).phase, "done");
+  assert.equal((await floorOf(w, rec)).phase, "concluded");
 });
 
-floorSuite(test, "the owner changes priorities (agenda urgency, recorded as the owner's message); a nonurgent item the meeting did not reach is batched to the next meeting, an urgent one is not", async (w) => {
+floorSuite(test, "the owner changes priorities (agenda urgency, recorded as the owner's note); a nonurgent item the meeting did not reach is batched to the next meeting, an urgent one is not", async (w) => {
   const { rec, occ } = await w.meet();
   await start(w, rec);
   const agenda = (await w.meetings.occurrence(w.owner, occ))!.agenda;
@@ -714,7 +745,7 @@ floorSuite(test, "the owner changes priorities (agenda urgency, recorded as the 
   const r = await w.floor.setPriorities(w.owner, { commandId: cid("pr"), recordId: rec, items: [{ itemId: item.id, urgency: "normal" }] });
   assert.equal(r.changed, 1);
   assert.equal((await w.meetings.agendaItem(w.owner, item.id))!.urgency, "normal");
-  assert.ok((await transcript(w, rec)).some((e) => e.kind === "owner-message" && e.text.includes("changes the priorities")));
+  assert.ok((await transcript(w, rec)).some((e) => e.kind === "ruling" && e.text.includes("changes the priorities")));
   assert.equal((await floorOf(w, rec)).priorities.length, 1);
   const out = await w.floor.followUps(w.service, { recordId: rec });
   assert.deepEqual(out.deferred, [item.id]);
