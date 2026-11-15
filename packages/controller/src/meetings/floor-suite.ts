@@ -9,14 +9,14 @@ import { DeskService } from "../context/desks.js";
 import { MeetingDeskReadService } from "./desk-reads.js";
 import { MeetingFloorService, type FloorDeps, type TurnReply, type TurnRequest } from "./floor.js";
 import { FLOOR_DEFAULTS, type FloorSettings } from "./floor-settings.js";
-import { MeetingRecordService, MeetingService, taskUpdateApplier, type RecordOptions } from "./index.js";
+import { MeetingProcedureService, MeetingRecordService, MeetingService, taskUpdateApplier, type ProcedureSettings, type RecordOptions } from "./index.js";
 
 /** What the harness needs to run a facilitated meeting against any storage backend: real services, a scripted model, no network. */
 export interface FloorWorld {
   owner: Principal; service: Principal; mgr: Principal; outsider: Principal;
   asA: Principal; asB: Principal; asC: Principal; asD: Principal; asE: Principal;
   pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
-  meetings: MeetingService; records: MeetingRecordService; floor: MeetingFloorService; deskReads: MeetingDeskReadService; desks: DeskService; principals: PrincipalService; grants: GrantService; projects: ProjectService;
+  meetings: MeetingService; records: MeetingRecordService; floor: MeetingFloorService; /** The one service that runs a motion; the floor is its members and chair. */ procedure: MeetingProcedureService; procSettings: { current: { -readonly [K in keyof ProcedureSettings]?: ProcedureSettings[K] } }; motion(rec: string, text?: string): Promise<string>; deskReads: MeetingDeskReadService; desks: DeskService; principals: PrincipalService; grants: GrantService; projects: ProjectService;
   storage: import("../storage/types.js").ControllerStorage;
   /** The controller's epoch and clock, for another service over the same storage (the meeting procedure of card M06). */
   epoch: number;
@@ -29,6 +29,7 @@ export interface FloorWorld {
   /** Hooks a test sets. */
   hooks: { checkpoint?: (agent: string) => Promise<{ savedAt: string; text: string } | undefined>; sourceRevision?: (cite: { kind: string; id: string }) => Promise<number | undefined>; budget?: (agent: string) => Promise<{ ok: true } | { ok: false; reason: string }>; fireTimer: (() => void)[]; timerMs: number[]; work: string[]; deskNotes?: (agent: string) => string | undefined };
   clock: { now: number; tick(minutes: number): void };
+  /** A new floor (and the procedure over it) on the same storage, as after a restart; `w.floor` and `w.procedure` are the new ones. */
   reopen(extra?: Partial<FloorDeps>): MeetingFloorService;
   meet(o?: { roster?: string[]; chair?: string | null; join?: string[]; endsInMinutes?: number }): Promise<{ occ: string; rec: string }>;
   task(title?: string): Promise<{ id: string; revision: number }>;
@@ -71,7 +72,6 @@ export const defaultReply = (r: TurnRequest): TurnReply => {
     case "chair-reminders": return t(`{"reminders":[]}`, 10);
     case "desk-offer": return t(`{"read":[]}`, 10);
     case "desk-excerpts": return t(`{"excerpts":[]}`, 10);
-    case "chair-match": return t("MATCHES: yes\nAMENDED_MOTION: none\nREASON: it matches.", 15);
     case "chair-ruling": return t("RULING: proceed\nREASON: the objection is noted.", 15);
     case "casting": return t("CASTING: no\nREASON: no clear majority.", 15);
     case "correction": return t("CORRECTION: none\nCONTRADICTS: no", 10);
@@ -142,7 +142,16 @@ export function floorSuite(test: (name: string, run: () => Promise<void>) => unk
           deskNotes: async (a) => hooks.deskNotes?.(a), timer: (ms, fire) => { hooks.timerMs.push(ms); hooks.fireTimer.push(fire); return () => undefined; },
           ...extra,
         });
-        const floor = MeetingFloorService.withEpoch(world.storage, epoch, deps(), options);
+        const procSettings: FloorWorld["procSettings"] = { current: {} };
+        const compose = (extra: Partial<FloorDeps> = {}): { floor: MeetingFloorService; procedure: MeetingProcedureService } => {
+          let procedure: MeetingProcedureService | undefined;
+          const floor = MeetingFloorService.withEpoch(world.storage, epoch, deps({ procedure: () => procedure, ...extra }), options);
+          procedure = MeetingProcedureService.withEpoch(world.storage, epoch, records, { ...options, settings: async () => procSettings.current, floor: floor.asMembers(), chair: floor.asChair(), actAs: async (a: string) => logins.get(a),
+            followUp: async (t) => { const made = await projects.createTask({ commandId: t.commandId, actor: owner.id, projectId: t.projectId, title: t.title, description: t.description }); created.push({ commandId: t.commandId, projectId: t.projectId, title: t.title, description: t.description, owner: t.agent }); return { taskId: made.id }; } });
+          return { floor, procedure };
+        };
+        const first = compose();
+        const floor = first.floor;
         const meet = async (m: { roster?: string[]; chair?: string | null; join?: string[]; endsInMinutes?: number } = {}): Promise<{ occ: string; rec: string }> => {
           const roster = m.roster ?? [pA, pB, pC];
           const occ = (await meetings.callUrgent(mgr, { commandId: cid("urg"), projectId: project, title: "Sync", reason: "decide something", roster, durationMinutes: m.endsInMinutes ?? 60 })).id;
@@ -151,13 +160,16 @@ export function floorSuite(test: (name: string, run: () => Promise<void>) => unk
           for (const a of m.join ?? roster) await records.join(logins.get(a)!, { commandId: cid("j"), recordId: rec });
           return { occ, rec };
         };
-        await body({
+        const self = {} as FloorWorld;
+        Object.assign(self, {
           owner, service, mgr, outsider, asA: logins.get(pA)!, asB: logins.get(pB)!, asC: logins.get(pC)!, asD: logins.get(pD)!, asE: logins.get(pE)!, pA, pB, pC, pD, pE, project, meetings, records, floor, deskReads, desks, principals, grants, projects,
-          storage: world.storage, epoch, iso, other, script, settings, notices, created, hooks, clock,
-          reopen: (extra = {}) => MeetingFloorService.withEpoch(world.storage, epoch, deps(extra), options),
+          storage: world.storage, epoch, iso, other, script, settings, notices, created, hooks, clock, procedure: first.procedure, procSettings,
+          motion: async (rec: string, text = "Move the nightly build to 01:00 because the cache is warm then.") => (await records.move(logins.get(pD)!, { commandId: cid("mo"), recordId: rec, text })).id,
+          reopen: (extra = {}) => { const c = compose(extra); self.floor = c.floor; self.procedure = c.procedure; return c.floor; },
           meet, task: async (title = "Write the guide") => { const t = await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title }); return { id: t.id, revision: t.revision }; },
-          principalOf: (a) => logins.get(a),
+          principalOf: (a: string) => logins.get(a),
         });
+        await body(self);
       } finally { await world.close(); }
     });
   }

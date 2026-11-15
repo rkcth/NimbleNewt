@@ -11,9 +11,11 @@ import type { MeetingRecordService } from "./record.js";
 import type { MeetingDeskReadService } from "./desk-reads.js";
 import type { MeetingService } from "./meetings.js";
 import type { MotionBody, RecordBody, SourceCite } from "./record-types.js";
-import { PROCEDURE_KIND } from "./procedure-types.js";
+import { PROCEDURE_KIND, type ProcedureBody } from "./procedure-types.js";
 import { quotesBallot } from "./procedure-rules.js";
 import type { BallotBody } from "./record-types.js";
+import type { BallotValue } from "./votes.js";
+import { FloorBusy, FloorWaits, type AsideRequest, type BallotRequest, type BetweenRequest, type BetweenResult, type CastingRequest, type ChairFloor, type CommentRequest, type FloorGate, type GateRequest, type MeetingDelivered, type MeetingFloor, type MeetingProcedureService, type ObjectionRequest, type RevisionRequest, type RulingInput, type RulingRequest, type StepResult } from "./procedure.js";
 import { FLOOR_DEFAULTS, applyFloorChange, type FloorSettings } from "./floor-settings.js";
 import {
   accountTurn, buildPrompt, chairQuestionRefusal, estimateTokens, parseJsonObject, parseObjection, parseStatement, parseVote, quoteOccurs, recordText, transcriptView, usesFacts, wrapCheckpointAnswer,
@@ -21,7 +23,7 @@ import {
 } from "./floor-text.js";
 import {
   TurnWaitsOnTool,
-  type AdvanceResult, type ChairQuestionRecord, type FloorBody, type FloorPhase, type Inflight, type InquiryState, type QueueItem, type StoredReply, type TurnLog, type TurnRunner, type UnitKind, type VoteState, type WaitingOn,
+  type AdvanceResult, type ChairQuestionRecord, type FloorBody, type FloorPhase, type Inflight, type InquiryState, type PortReply, type QueueItem, type StoredReply, type TurnKind, type TurnLog, type TurnRunner, type UnitKind, type WaitingOn,
 } from "./floor-types.js";
 
 export { TurnWaitsOnTool } from "./floor-types.js";
@@ -38,11 +40,16 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 const forbidden = (by: Principal, what: string): DomainError => new DomainError("forbidden", `${by.id} may not ${what}`);
 
 /** What the floor keeps, at most: the record it belongs to is bounded the same way (every list is a window). */
-export const FLOOR_LIMITS = { turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, amendments: 20, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 8, text: 3900, desk: 20, deskRead: 5 } as const;
+export const FLOOR_LIMITS = { turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20 } as const;
 
 /** What the facilitator needs from the rest of the controller. Nothing is reached by any other road. */
 export interface FloorDeps {
-  readonly records: Pick<MeetingRecordService, "record" | "discussion" | "append" | "move" | "amend" | "table" | "openVote" | "hold" | "resume" | "castBallot" | "closeVote" | "castingVote" | "finish" | "motion" | "ballots">;
+  readonly records: Pick<MeetingRecordService, "record" | "discussion" | "append" | "move" | "amend" | "table" | "hold" | "resume" | "finish" | "motion" | "ballots">;
+  /**
+   * The meeting procedure (card M06), which is the only service that runs a motion (comment rounds, the objection check, rulings, tabling, ballots one at a time, revision turns, the casting vote). The floor starts it and steps it, and
+   * is itself the procedure's `floor` and `chair` port (`asMembers`, `asChair`). A getter, because the procedure is built with the floor as its port. Absent: the floor only moves the motion and carries the owner's controls.
+   */
+  readonly procedure?: () => Pick<MeetingProcedureService, "begin" | "advance" | "expecting"> | undefined;
   readonly deskReads?: Pick<MeetingDeskReadService, "read">;
   readonly meetings?: Pick<MeetingService, "setAgendaState" | "agendaItem" | "correctAgendaItem">;
   /** The model side: one tool-less call per turn. */
@@ -66,7 +73,9 @@ export interface FloorDeps {
   /** The current revision of a record a statement cites, to tell whether the source has changed since. */
   readonly sourceRevision?: (cite: SourceCite) => Promise<number | undefined>;
   /** The owner is told (reminder of an idle inquiry, a budget that was reached, a timebox, a correction during an open vote). Failing it never stops the meeting. */
-  readonly notifyOwner?: (notice: { recordId: string; kind: string; text: string }) => Promise<void>;
+  readonly notifyOwner?: (notice: { recordId: string; projectId: string; kind: string; text: string; /** Makes the notice its own (a reminder repeated each idle period); without it the same words about the same meeting are one notice. */ key?: string }) => Promise<void>;
+  /** The notices about an inquiry (opened, idle) are closed once the owner ends it, so none stays on the owner's list after the answer. Failing it never stops the meeting. */
+  readonly settleOwner?: (notice: { recordId: string; projectId: string; kinds: readonly string[] }) => Promise<void>;
   /** Participants the owner did not address may go back to work during an inquiry, and are recalled when addressed (attendance's return rules). */
   readonly work?: { release(recordId: string, agents: readonly string[]): Promise<void>; recall(recordId: string, agent: string): Promise<void> };
   /** Timer for a turn that never answers; returns the way to cancel it. Default: the global timer. */
@@ -77,8 +86,10 @@ const defaultTimer = (delay: number, fire: () => void): (() => void) => { const 
 const isService = (p: Principal): boolean => (p.kind === "owner" || p.kind === "host" || p.kind === "service") && p.taskScope === undefined;
 const hash = (...parts: readonly string[]): string => createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 40);
 const base = (recordId: string): string => recordId.slice(4);
+/** The key a statement's TLDR is kept under: the procedure writes the statement, so its entry is found again by who said it and what. */
+const summaryKey = (speaker: string, text: string): string => hash(speaker, text.trim());
 
-const PRIORITY: Readonly<Record<QueueItem["kind"], number>> = { "owner-ask": 0, revision: 1, "chair-answer": 2, reply: 2, "chair-notes": 3, "direct-answer": 4, "direct-continue": 4 };
+const PRIORITY: Readonly<Record<QueueItem["kind"], number>> = { "owner-ask": 0, "chair-answer": 2, reply: 2, "chair-notes": 3, "direct-answer": 4, "direct-continue": 4, "direct-skip": 4 };
 const sortQueue = (q: readonly QueueItem[]): QueueItem[] => q.map((x, i) => ({ x, i })).sort((a, b) => PRIORITY[a.x.kind] - PRIORITY[b.x.kind] || a.i - b.i).map((r) => r.x);
 
 /**
@@ -180,8 +191,22 @@ export class MeetingFloorService {
   // ---- starting --------------------------------------------------------------------------------------------------------------------------
 
   /**
-   * Puts a meeting's record on the floor and moves the motion (when one is given): from here the facilitator runs the rounds, the chair's work, the objection check and the vote one unit at a time with `advance` (or `drive`).
-   * The owner, a host or service, or `meeting.manage` in the project. Called again once the motion has concluded, with another motion, it starts the next one (the clock, spend and inquiry settings carry on).
+   * The newest motion of the meeting that is still under way (proposed, being voted or tied). With `withProcedure` only one the meeting procedure runs: that is the motion `advance` moves.
+   */
+  async #activeMotion(rec: RecordBody, withProcedure: boolean): Promise<(MotionBody & { id: string }) | undefined> {
+    for (const id of [...rec.motions].reverse()) {
+      const m = (await this.#deps.records.motion(this.#deps.service, id)) as unknown as MotionBody | undefined;
+      if (m === undefined || !(m.state === "proposed" || m.state === "voting" || m.state === "tie-pending")) continue;
+      if (withProcedure && (await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", id))) === undefined) continue;
+      return { ...m, id };
+    }
+    return undefined;
+  }
+
+  /**
+   * Puts a meeting's record on the floor and, when a motion is given, moves it and has the meeting procedure begin it: from here the procedure runs the rounds, the objection check and the vote one step at a time and the floor supplies
+   * the members' turns (`advance` or `drive` do the next step). The owner, a host or service, or `meeting.manage` in the project. Called again once the motion has concluded, with another motion, it starts the next one (the clock, spend and inquiry
+   * settings carry on).
    */
   async start(by: Principal, command: NoActor & { recordId: string; motion?: { text: string; topic?: string; agendaItemId?: string }; settings?: Readonly<Record<string, unknown>> }): Promise<{ motionId?: string; present: readonly string[]; absent: readonly string[]; replayed: boolean }> {
     onlyKnown(command, ["commandId", "recordId", "motion", "settings"]);
@@ -195,36 +220,28 @@ export class MeetingFloorService {
     const present = this.#present(rec);
     const absent = this.#absent(rec);
     const now = this.#runner.now();
-    let motionId: string | undefined;
-    if (command.motion !== undefined) {
-      const proposer = rec.chair ?? present[0];
-      if (proposer === undefined) throw new DomainError("invalid_command", "nobody is present to move the motion", { field: "motion" });
-      const mover = await this.#deps.principalOf(proposer);
-      if (mover === undefined) throw new DomainError("invalid_command", `${proposer} has no credential to move the motion`, { field: "motion" });
-      const m = await this.#deps.records.move(mover, { commandId: `fl-mv-${hash(recordId, command.commandId, command.motion.text)}`, recordId, text: recordText(command.motion.text), ...(command.motion.topic === undefined ? {} : { topic: command.motion.topic }), ...(command.motion.agendaItemId === undefined ? {} : { agendaItemId: command.motion.agendaItemId }) } as never);
-      motionId = m.id;
+    if (existing !== undefined && command.motion !== undefined) {
+      // The floor is on one motion at a time: the next is moved once the earlier one is over.
+      const running = await this.#activeMotion(rec, true);
+      if (running !== undefined && existing.body.motionId !== undefined && running.id !== existing.body.motionId) throw new DomainError("invalid_command", "the floor is still on an earlier motion", { field: "motion" });
+      if (running !== undefined && running.id === existing.body.motionId) return { motionId: running.id, present, absent, replayed: true };
     }
+    const motionId = command.motion === undefined ? undefined : await this.#moveAndBegin(rec, recordId, command, present);
     if (existing !== undefined) {
-      if (existing.body.phase !== "done" || motionId === undefined) {
-        if (motionId === undefined || existing.body.motionId === motionId) return { ...(existing.body.motionId === undefined ? {} : { motionId: existing.body.motionId }), present, absent, replayed: true };
-        throw new DomainError("invalid_command", "the floor is still on an earlier motion", { field: "motion" });
-      }
-      const mid = motionId;
-      await this.#update(recordId, by, `next-motion-${mid}`, (b) => (b.motionId === mid ? undefined : this.#fresh(b, rec, mid, now)));
-      return { motionId: mid, present, absent, replayed: false };
+      if (motionId !== undefined) await this.#update(recordId, by, `next-motion-${motionId}`, (b) => (b.motionId === motionId ? undefined : { ...b, motionId, between: undefined, lastBetween: undefined, queue: b.queue.filter((q) => q.kind === "owner-ask"), chairQuestions: [], chairQuestionsAsked: 0, asks: {}, timebox: undefined }));
+      return { ...(motionId === undefined ? (existing.body.motionId === undefined ? {} : { motionId: existing.body.motionId }) : { motionId }), present, absent, replayed: motionId === undefined };
     }
     const durationMs = Math.max(60_000, ms(rec.endsAt) - ms(now));
     const body: FloorBody = {
-      recordId, occurrenceId: rec.occurrenceId, projectId: rec.projectId, state: "running", settings, phase: "round", round: 1, fresh: false, order: [], spoken: [], turn: 0, todo: [], queue: [],
-      ...(motionId === undefined ? {} : { motionId }), objection: { attempt: 0, objectors: [], noResponse: [] }, unitSeq: 0, clock: { startedAt: now, durationMs, extraMs: 0, pausedMs: 0 },
-      spend: { usd: 0, tokens: 0, calls: 0, hiddenTokens: 0, ownerUsd: 0, ownerTokens: 0, extraUsd: 0, extraTokens: 0 }, turns: [], deliveries: 0, summaries: {}, stances: {}, amendments: [], chairNotesCount: 0,
+      recordId, occurrenceId: rec.occurrenceId, projectId: rec.projectId, state: "running", settings, queue: [], ...(motionId === undefined ? {} : { motionId }), unitSeq: 0, replies: {}, claims: {},
+      clock: { startedAt: now, durationMs, extraMs: 0, pausedMs: 0 },
+      spend: { usd: 0, tokens: 0, calls: 0, hiddenTokens: 0, ownerUsd: 0, ownerTokens: 0, extraUsd: 0, extraTokens: 0 }, turns: [], deliveries: 0, summaries: {}, chairNotesCount: 0,
       chairQuestions: [], chairQuestionsAsked: 0, asks: {}, desk: { offered: [], filesRead: [], filesQuoted: [], refused: [], rejectedExcerpts: 0, corrections: [], readOwners: [], pending: [] }, skipped: [], held: [], ownerAnswers: [], investigations: [], followUps: [], notices: [], priorities: [], startedAt: now,
     };
-    const started = this.#beginRound(body, rec, 1, false);
     try {
       await this.#runner.command("meeting.floor.start", { commandId: `flr-start-${base(recordId)}`, actor: by.id }, async () => ({
         payload: { recordId },
-        build: async () => ({ ref: { kind: KIND, id: this.#floorId(recordId) }, creates: true, changes: [{ type: "create" as const, ref: { kind: KIND, id: this.#floorId(recordId) }, body: json(started) }], detail: { projectId: rec.projectId } }),
+        build: async () => ({ ref: { kind: KIND, id: this.#floorId(recordId) }, creates: true, changes: [{ type: "create" as const, ref: { kind: KIND, id: this.#floorId(recordId) }, body: json(body) }], detail: { projectId: rec.projectId } }),
       }));
     } catch (error) {
       if (error instanceof DomainError && error.code === "command_conflict") return { ...(motionId === undefined ? {} : { motionId }), present, absent, replayed: true };
@@ -234,26 +251,29 @@ export class MeetingFloorService {
     return { ...(motionId === undefined ? {} : { motionId }), present, absent, replayed: false };
   }
 
+  /** Moves the motion (the chair moves it, else the first present member) and has the procedure begin it, once: a repeat of the same start makes nothing twice. */
+  async #moveAndBegin(rec: RecordBody, recordId: string, command: { commandId: string; motion?: { text: string; topic?: string; agendaItemId?: string } }, present: readonly string[]): Promise<string> {
+    const motion = command.motion!;
+    const proposer = rec.chair ?? present[0];
+    if (proposer === undefined) throw new DomainError("invalid_command", "nobody is present to move the motion", { field: "motion" });
+    const mover = await this.#deps.principalOf(proposer);
+    if (mover === undefined) throw new DomainError("invalid_command", `${proposer} has no credential to move the motion`, { field: "motion" });
+    const m = await this.#deps.records.move(mover, { commandId: `fl-mv-${hash(recordId, command.commandId, motion.text)}`, recordId, text: recordText(motion.text), ...(motion.topic === undefined ? {} : { topic: motion.topic }), ...(motion.agendaItemId === undefined ? {} : { agendaItemId: motion.agendaItemId }) } as never);
+    const procedure = this.#deps.procedure?.();
+    if (procedure !== undefined && (await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", m.id))) === undefined) await procedure.begin(this.#deps.service, { commandId: `fl-pb-${hash(recordId, m.id)}`, motionId: m.id });
+    return m.id;
+  }
+
   /** A skipped member is recorded in the transcript (by the chair, when there is one) and on the floor. */
   async #noteAbsent(recordId: string, rec: RecordBody, absent: readonly string[]): Promise<void> {
     if (absent.length === 0) return;
     const now = this.#runner.now();
-    await this.#update(recordId, this.#deps.service, "absent", (b) => ({ ...b, skipped: [...b.skipped, ...absent.filter((a) => !b.skipped.some((s) => s.agent === a)).map((agent) => ({ agent, why: "absent (decided by the controller from the roster and attendance)", at: now }))] }));
+    await this.#update(recordId, this.#deps.service, `absent-${hash(...absent)}`, (b) => ({ ...b, skipped: [...b.skipped, ...absent.filter((a) => !b.skipped.some((s) => s.agent === a)).map((agent) => ({ agent, why: "absent (decided by the controller from the roster and attendance)", at: now }))] }));
     if (rec.chair !== undefined) {
       for (const a of absent) {
         await this.#deps.records.append(this.#deps.service, { commandId: `fl-abs-${hash(recordId, a)}`, recordId, kind: "statement", speaker: rec.chair, text: `${a} is absent and is skipped in the comment rounds and the vote (recorded).` });
       }
     }
-  }
-
-  #fresh(b: FloorBody, rec: RecordBody, motionId: string, now: string): FloorBody {
-    void now;
-    return this.#beginRound({ ...b, motionId, motionVersion: undefined, phase: "round", round: 1, fresh: false, todo: [], queue: b.queue.filter((q) => q.kind === "owner-ask"), objection: { attempt: 0, objectors: [], noResponse: [] }, chairQuestions: [], chairQuestionsAsked: 0, asks: {}, amendments: [], summaries: {}, stances: {}, echo: undefined, timebox: undefined, vote: undefined } as unknown as FloorBody, rec, 1, false);
-  }
-
-  /** Starts comment round `n`: everyone present now, in roster order. */
-  #beginRound(b: FloorBody, rec: RecordBody, n: number, fresh: boolean): FloorBody {
-    return { ...b, phase: "round", round: n, fresh, order: this.#present(rec), spoken: [], turn: 0, todo: [] };
   }
 
   // ---- reading the transcript ------------------------------------------------------------------------------------------------------------
@@ -271,7 +291,7 @@ export class MeetingFloorService {
         if (e.kind === "presence") continue;
         const text = e.currentText ?? e.text;
         const label = e.kind === "owner-message" ? "owner" : e.kind === "motion" || e.kind === "amendment" || e.kind === "ruling" || e.kind === "vote" || e.kind === "correction" ? e.kind : undefined;
-        const summary = b.summaries[e.id];
+        const summary = e.kind === "statement" ? b.summaries[summaryKey(e.speaker, text)] : undefined;
         out.push({ seq: e.seq, who: e.kind === "owner-message" ? "Owner" : e.speaker, ...(label === undefined ? {} : { label }), text, ...(summary === undefined ? {} : { summary }) });
       }
       if (page.next === undefined) break;
@@ -290,7 +310,7 @@ export class MeetingFloorService {
   async #ask(b: FloorBody, input: { kind: import("./floor-types.js").TurnKind; agent: string; prompt: import("./floor-text.js").Prompt; visible: number; round?: number; deliveredUpTo: number; owner?: boolean }): Promise<StoredReply["items"][number]> {
     const zero = { visible: 0, hidden: 0, input: 0, cached: 0 };
     const budget = await this.#deps.budget?.(input.agent, b.projectId).catch(() => ({ ok: false as const, reason: "the budget could not be read" }));
-    if (budget !== undefined && !budget.ok) await this.#deps.notifyOwner?.({ recordId: b.recordId, kind: "budget", text: `${input.agent} could not take its turn in a meeting: the budget is reached (${budget.reason}).` }).catch(() => undefined);
+    if (budget !== undefined && !budget.ok) await this.#deps.notifyOwner?.({ recordId: b.recordId, projectId: b.projectId, kind: "budget", text: `${input.agent} could not take its turn in a meeting: the budget is reached (${budget.reason}).` }).catch(() => undefined);
     if (budget !== undefined && !budget.ok) return { agent: input.agent, text: "", noResponse: `budget reached: ${budget.reason}`, usage: zero, deliveredUpTo: input.deliveredUpTo };
     const ac = new AbortController();
     const cancel = (this.#deps.timer ?? defaultTimer)(this.#hangMs(b), () => ac.abort());
@@ -325,8 +345,11 @@ export class MeetingFloorService {
     return undefined;
   }
 
-  /** The next unit of work, or why there is none. Pure: it reads the floor and the meeting only. */
-  #plan(b: FloorBody, rec: RecordBody, now: string, driven = false): { unit: Inflight } | { wait: Extract<AdvanceResult, { waiting: string }>["waiting"]; detail?: string } {
+  /**
+   * The next unit of the floor's own work, or why there is none. Pure: it reads the floor and the meeting only. The rounds, the objection check, rulings and the vote are not here: they are the meeting procedure's (card M06), which asks
+   * the floor for the members' turns and asks it first (`before`) whether it holds the meeting back.
+   */
+  #plan(b: FloorBody, rec: RecordBody, now: string, active?: { state: string }): { unit: Inflight } | { wait: Extract<AdvanceResult, { waiting: string }>["waiting"]; detail?: string } {
     const id = (kind: UnitKind): string => `u${b.unitSeq + 1}-${kind}`;
     const mk = (kind: UnitKind, extra: Partial<Inflight> = {}): { unit: Inflight } => ({ unit: { id: id(kind), kind, since: now, ...extra } });
     if (b.state === "ended" || rec.state !== "open") return { wait: "meeting-ended" };
@@ -336,94 +359,69 @@ export class MeetingFloorService {
     }
     const front = sortQueue(b.queue)[0];
     if (front?.kind === "owner-ask") return mk("owner-ask", { agent: front.agent, queueId: front.id, owner: true });
-    if (b.timebox !== undefined && b.phase !== "vote") return { wait: "none", detail: `the meeting's ${b.timebox.reason} timebox is used up` };
+    if (b.timebox !== undefined) return { wait: "none", detail: `the meeting's ${b.timebox.reason} timebox is used up` };
     const boxed = this.#timeboxed(b, now);
-    if (boxed !== undefined && b.timebox === undefined && b.phase !== "done") return mk("wrap-up");
-    if (b.timebox !== undefined && b.vote !== undefined && !b.vote.closed) return this.#planVote(b, rec, mk);
+    // The timebox ends the meeting's own work: a motion not yet put to a vote is tabled; one being voted on is counted without more ballots.
+    if (boxed !== undefined && active !== undefined) return mk("wrap-up");
     if (front !== undefined) return mk(front.kind as UnitKind, { agent: front.agent, queueId: front.id });
-    // The floor runs the rounds, the chair's work and the vote only for a motion it moved itself. A floor started without a motion carries the owner's controls only, and a motion run by the
-    // meeting procedure (card M06) is the procedure's: the two never drive one motion.
-    if (b.motionId === undefined) return { wait: "none", detail: "no motion is on the floor; it carries the owner's questions and controls only" };
-    if (driven) return { wait: "none", detail: "the motion is run by the meeting procedure, not by the floor" };
-    switch (b.phase) {
-      case "round": {
-        const joiner = this.#present(rec).find((a) => !b.order.includes(a));
-        if (b.round === 1 && b.settings.firstRound === "blind" && !b.fresh && b.turn === 0 && b.spoken.length === 0) return mk("round-blind", { agents: b.order.filter((a) => this.#present(rec).includes(a)) });
-        if (joiner !== undefined) return mk("round-turn", { agent: joiner });
-        const agent = b.order[b.turn];
-        return agent === undefined ? { wait: "none", detail: "the round is complete" } : mk("round-turn", { agent });
-      }
-      case "between": {
-        const step = b.todo[0];
-        return step === undefined ? { wait: "none", detail: "nothing is left between the rounds" } : mk(step as UnitKind);
-      }
-      case "objection": return mk("objection", { agents: this.#present(rec) });
-      case "ruling": return rec.chair === undefined ? { wait: "chair", detail: "a ruling is needed and there is no chair" } : mk("chair-ruling", { agent: rec.chair });
-      case "match": return rec.chair === undefined ? { wait: "none" } : mk("chair-match", { agent: rec.chair });
-      case "vote": return this.#planVote(b, rec, mk);
-      default: return { wait: "none", detail: "the motion is concluded" };
-    }
-  }
-
-  #planVote(b: FloorBody, rec: RecordBody, mk: (kind: UnitKind, extra?: Partial<Inflight>) => { unit: Inflight }): { unit: Inflight } | { wait: Extract<AdvanceResult, { waiting: string }>["waiting"]; detail?: string } {
-    const v = b.vote;
-    if (v === undefined || !v.opened) {
-      // a member whose desk was read, now in the room, is asked for a correction before the ballots open
-      const owed = b.desk.readOwners.find((a) => this.#present(rec).includes(a) && !b.desk.corrections.some((c) => c.member === a));
-      return owed === undefined ? mk("open-vote") : mk("correction", { agent: owed });
-    }
-    if (v.closed) {
-      if (v.tie === true && v.decisionId === undefined) {
-        if (rec.chair === undefined || v.castingAsked === true) return { wait: "chair", detail: "the tie waits for the chair's casting vote or its time limit" };
-        return mk("casting", { agent: rec.chair });
-      }
-      return { wait: "none", detail: "the vote is concluded" };
-    }
-    const can = this.#present(rec).filter((a) => v.order.includes(a));
-    if (b.timebox === undefined) {
-      const next = can.find((a) => v.cast[a] === undefined && !v.noResponse.includes(a));
-      if (next !== undefined) return mk("ballot", { agent: next });
-    }
-    return mk("close-vote");
+    return { wait: "none", detail: "the floor has no work of its own; the procedure runs the motion" };
   }
 
   /**
-   * Does one unit of work: the next turn, batch or step, in the order the rules give (the owner's questions first). Returns what it did, or why nothing can be done now. Safe to call from several places at once: a unit is claimed
-   * first, and a claim that is still fresh makes the other caller `busy`; a claim whose caller died is taken over (its stored reply is written, nothing is asked twice).
+   * Does the next step: first the floor's own work (the owner's questions come first, then the answers owed to members' and the chair's questions, the timebox's wrap-up), then the next step of the motion's procedure, which asks the floor
+   * for the members' turns. Returns what it did, or why nothing can be done now. Safe to call from several places at once: a unit is claimed first, and a claim that is still fresh makes the other caller `busy`; a claim whose caller died is
+   * taken over (its stored reply is written, nothing is asked twice).
    */
   async advance(by: Principal, command: { recordId: string }): Promise<AdvanceResult> {
     const recordId = RECORD_ID.test(command.recordId) ? command.recordId : invalid("recordId", "is not a meeting record ID");
     const rec = await this.#meeting(recordId);
     if (!this.#controls(by, rec.projectId)) throw forbidden(by, "run that meeting");
-    const r = await this.#advance(by, recordId, rec, false);
-    // A manager agent that runs the meeting is told a ballot was taken, never whose (it may be a voter itself).
-    if (!isService(by) && "did" in r && (r.did === "ballot" || r.did === "revision")) { const { agent: _a, ...rest } = r; void _a; return rest; }
-    return r;
+    const own = await this.#advance(by, recordId, rec, false);
+    if ("did" in own || own.waiting !== "none") return own;
+    const procedure = this.#deps.procedure?.();
+    const motion = procedure === undefined ? undefined : await this.#activeMotion(rec, true);
+    if (procedure === undefined || motion === undefined) return own;
+    const out = this.#fromStep(await procedure.advance(this.#deps.service, { motionId: motion.id }));
+    // The step may have closed the vote: answers held from the voters are released at once, not at the next call.
+    const after = await this.#need(recordId);
+    if (after.body.held.length > 0) {
+      const fresh = await this.#meeting(recordId);
+      if (fresh.state === "open" && (await this.#votingMotion(fresh)) === undefined) await this.#releaseHeld(by, recordId, fresh);
+    }
+    return out;
+  }
+
+  #fromStep(step: StepResult): AdvanceResult {
+    const phase = step.stage as FloorPhase;
+    if (step.done) return { waiting: "none", phase, detail: step.did };
+    if (step.waiting === undefined) return { did: "procedure", phase, detail: step.did };
+    const on = step.waiting.on === "owner" ? "owner" : step.waiting.on === "chair" ? "chair" : step.waiting.on === "time" ? "vote-time" : step.waiting.on === "tool" ? "tool" : step.waiting.on === "busy" ? "busy" : "none";
+    return { waiting: on, phase, detail: step.waiting.why };
   }
 
   async #advance(by: Principal, recordId: string, rec0: View<RecordBody>, onlyOwner: boolean): Promise<AdvanceResult> {
     let rec = rec0;
     let f = await this.#need(recordId);
+    const phaseNow = (): FloorPhase => "none";
     const now = this.#runner.now();
     // A claim that is still fresh belongs to another caller; one that outlived the hang timeout is taken over.
     if (f.body.inflight !== undefined) {
       const age = ms(now) - ms(f.body.inflight.since);
-      if (age < (f.body.settings.hangTimeoutSeconds + 30) * 1000 && !(f.body.inflight.reply !== undefined)) return { waiting: "busy", phase: f.body.phase };
+      if (age < (f.body.settings.hangTimeoutSeconds + 30) * 1000 && !(f.body.inflight.reply !== undefined)) return { waiting: "busy", phase: phaseNow() };
       if (f.body.inflight.reply === undefined && age >= (f.body.settings.hangTimeoutSeconds + 30) * 1000) { /* take it over */ }
     }
     let unit = f.body.inflight;
     if (unit === undefined) {
       rec = await this.#meeting(recordId);
       if (f.body.held.length > 0 && rec.state === "open" && (await this.#votingMotion(rec)) === undefined) f = { agg: f.agg, body: await this.#releaseHeld(by, recordId, rec) };
-      const driven = f.body.motionId !== undefined && (await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", f.body.motionId))) !== undefined;
-      const plan = this.#plan(f.body, rec, now, driven);
-      if ("wait" in plan) return { waiting: plan.wait, phase: f.body.phase, ...(plan.detail === undefined ? {} : { detail: plan.detail }) };
-      if (onlyOwner && !plan.unit.owner) return { waiting: "owner", phase: f.body.phase, detail: "only the owner's questions run now" };
+      const plan = this.#plan(f.body, rec, now, await this.#activeMotion(rec, false));
+      if ("wait" in plan) return { waiting: plan.wait, phase: phaseNow(), ...(plan.detail === undefined ? {} : { detail: plan.detail }) };
+      if (onlyOwner && !plan.unit.owner) return { waiting: "owner", phase: phaseNow(), detail: "only the owner's questions run now" };
       const claimed = plan.unit;
       try {
         await this.#update(recordId, by, `claim-${claimed.id}`, (b) => (b.inflight !== undefined || b.unitSeq + 1 !== Number(claimed.id.slice(1, claimed.id.indexOf("-"))) ? (() => { throw new DomainError("stale_revision", "another caller claimed the next unit"); })() : { ...b, unitSeq: b.unitSeq + 1, inflight: claimed }));
       } catch (error) {
-        if (error instanceof DomainError && error.code === "stale_revision") return { waiting: "busy", phase: f.body.phase };
+        if (error instanceof DomainError && error.code === "stale_revision") return { waiting: "busy", phase: phaseNow() };
         throw error;
       }
       f = await this.#need(recordId);
@@ -443,27 +441,28 @@ export class MeetingFloorService {
       f = { agg: f.agg, body: await this.#update(recordId, by, `reply-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...b, inflight: { ...b.inflight, reply: stored } } : undefined)) as unknown as FloorBody } as never;
     }
     const tool = reply.items.find((i) => i.waitsOnTool !== undefined);
-    if (tool !== undefined && unit.kind !== "round-blind") {
+    if (tool !== undefined) {
       // The agent waits on a tool: the unit is dropped (no spend counted twice) and tried again at the next advance.
       const now = this.#runner.now();
       const body = await this.#update(recordId, by, `tool-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...b, inflight: undefined, waitingTool: { tool: tool.waitsOnTool!, agent: tool.agent, since: b.waitingTool?.since ?? now } } : undefined));
-      return { waiting: "tool", phase: body.phase, detail: tool.waitsOnTool! };
+      return { waiting: "tool", phase: "none", detail: tool.waitsOnTool! };
     }
     const fresh = (await this.#need(recordId)).body;
     const recNow = await this.#meeting(recordId);
     if (recNow.state !== "open") {
       // the meeting ended (the owner's end command takes effect at this boundary): the unit is dropped, nothing completed is undone
       await this.#update(recordId, by, `ended-${unit.id}`, (b) => ({ ...b, inflight: undefined, state: "ended", endedAt: this.#runner.now() }));
-      return { waiting: "meeting-ended", phase: fresh.phase };
+      return { waiting: "meeting-ended", phase: "none" };
     }
     let fx: Record<string, unknown>;
     try { fx = await this.#apply(by, recordId, fresh, recNow, unit, reply); } catch (error) {
       // The step cannot be taken now: the unit is dropped (asked again later) and what the call cost is still counted.
-      if (error instanceof Wait) { await this.#update(recordId, by, `wait-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...this.#account(b, unit, reply!), inflight: undefined } : undefined)); return { waiting: error.reason, phase: fresh.phase, detail: error.message }; }
+      if (error instanceof Wait) { await this.#update(recordId, by, `wait-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...this.#account(b, unit, reply!), inflight: undefined } : undefined)); return { waiting: error.reason, phase: "none", detail: error.message }; }
       throw error;
     }
     const done = await this.#update(recordId, by, `commit-${unit.id}`, (b) => (b.inflight?.id === unit.id ? this.#reduce(b, recNow, unit, reply!, fx) : undefined));
-    return { did: unit.kind, ...(unit.agent === undefined ? {} : { agent: unit.agent }), phase: done.phase };
+    void done;
+    return { did: unit.kind, ...(unit.agent === undefined ? {} : { agent: unit.agent }), phase: "none" };
   }
 
   /** Runs units until nothing can be done now, the meeting is over, or `maxUnits` units ran. */
@@ -471,7 +470,7 @@ export class MeetingFloorService {
     onlyKnown(command, ["recordId", "maxUnits"]);
     const max = command.maxUnits === undefined ? FLOOR_LIMITS.stepsPerDrive : Number.isInteger(command.maxUnits) && command.maxUnits >= 1 && command.maxUnits <= 2000 ? command.maxUnits : invalid("maxUnits", "must be 1 to 2000");
     let did = 0;
-    let last: AdvanceResult = { waiting: "none", phase: "round" };
+    let last: AdvanceResult = { waiting: "none", phase: "none" };
     while (did < max) {
       last = await this.advance(by, { recordId: command.recordId });
       if ("waiting" in last && last.waiting !== undefined) break;
@@ -486,16 +485,6 @@ export class MeetingFloorService {
     if (b.motionId === undefined) return undefined;
     const m = (await this.#deps.records.motion(this.#deps.service, b.motionId)) as unknown as MotionBody | undefined;
     return m === undefined ? undefined : { version: m.version, text: m.text };
-  }
-
-  async #ownBallot(b: FloorBody, agent: string): Promise<{ value: string; reason: string } | undefined> {
-    if (b.motionId === undefined) return undefined;
-    const p = await this.#deps.principalOf(agent);
-    void p;
-    const all = await this.#deps.records.ballots(this.#deps.service, b.motionId);
-    if (all === undefined || all.hidden) return undefined;
-    const mine = all.ballots.find((x) => x.voter === agent);
-    return mine === undefined ? undefined : { value: mine.value, reason: mine.reason };
   }
 
   /** What the member itself exchanged with the owner while a vote was held: its own words are its own, so it keeps them though other voters do not get them. */
@@ -527,38 +516,40 @@ export class MeetingFloorService {
     return out;
   }
 
+  /** The motion the floor's own work is about: the meeting's newest motion under way, else the one the floor was started with. */
+  async #motionNow(b: FloorBody, rec: RecordBody): Promise<{ version: number; text: string } | undefined> {
+    const active = await this.#activeMotion(rec, false);
+    if (active !== undefined) return { version: active.version, text: active.text };
+    return this.#motionText(b);
+  }
+
+  /** One model call with the prompt every kind of turn shares: the persona, the motion, the transcript as the member may see it (never a ballot), its own exchange with the owner and its own desk notes. The reply is not stored or accounted here. */
+  async #prompted(b: FloorBody, rec: RecordBody, motion: { version: number; text: string } | undefined, kind: TurnKind, agent: string, instruction: string, o: { visible?: number; blind?: boolean; full?: boolean; extra?: string; transcript?: string; upTo?: number; desk?: boolean; owner?: boolean; round?: number } = {}): Promise<PortReply> {
+    let t: { text: string; upTo: number };
+    if (o.blind === true) t = { text: "(This is the independent first round: you have not heard anyone else.)", upTo: 0 };
+    else if (o.transcript !== undefined) t = { text: o.transcript, upTo: o.upTo ?? 0 };
+    else { const x = await this.#transcript(b.recordId, b, rec, o.full === true || agent === rec.chair); t = { text: x.text, upTo: x.upTo }; }
+    const notes = o.desk === true ? await this.#deps.deskNotes?.(agent, b.recordId).catch(() => undefined) : undefined;
+    const extra = [o.extra, this.#ownExchange(b, agent), notes === undefined ? "" : `Notes you looked up on your own desk:\n${notes}`].filter((x): x is string => x !== undefined && x !== "").join("\n\n");
+    const prompt = buildPrompt({ order: b.settings.promptOrder, motion, transcript: t.text, persona: await this.#persona(agent), extra, instruction });
+    return this.#ask(b, { kind, agent, prompt, visible: o.visible ?? b.settings.turnTokens, deliveredUpTo: t.upTo, ...(o.round === undefined ? {} : { round: o.round }), ...(o.owner === true ? { owner: true } : {}) });
+  }
+
   async #askUnit(b: FloorBody, rec: RecordBody, unit: Inflight): Promise<StoredReply> {
     const items: StoredReply["items"][number][] = [];
     let cost = 0;
     const take = (i: StoredReply["items"][number]): void => { cost += i.costUsd ?? 0; items.push(i); };
     const order = b.settings.promptOrder;
-    const motion = await this.#motionText(b);
+    const motion = await this.#motionNow(b, rec);
     const words = (tokens: number): number => Math.max(20, Math.round(tokens * 0.7));
     const limit = b.settings.turnTokens;
     const chair = rec.chair;
-    const ask = async (kind: import("./floor-types.js").TurnKind, agent: string, instruction: string, o: { visible?: number; blind?: boolean; full?: boolean; extra?: string; transcript?: string; upTo?: number; desk?: boolean; owner?: boolean } = {}): Promise<StoredReply["items"][number]> => {
-      let t: { text: string; upTo: number };
-      if (o.blind === true) t = { text: "(This is the independent first round: you have not heard anyone else.)", upTo: 0 };
-      else if (o.transcript !== undefined) t = { text: o.transcript, upTo: o.upTo ?? 0 };
-      else { const x = await this.#transcript(b.recordId, b, rec, o.full === true || agent === chair); t = { text: x.text, upTo: x.upTo }; }
-      const notes = o.desk === true ? await this.#deps.deskNotes?.(agent, b.recordId).catch(() => undefined) : undefined;
-      const extra = [o.extra, this.#ownExchange(b, agent), notes === undefined ? "" : `Notes you looked up on your own desk:\n${notes}`].filter((x): x is string => x !== undefined && x !== "").join("\n\n");
-      const prompt = buildPrompt({ order, motion, transcript: t.text, persona: await this.#persona(agent), extra, instruction });
-      return this.#ask(b, { kind, agent, prompt, visible: o.visible ?? limit, deliveredUpTo: t.upTo, round: b.round });
-    };
-    const batch = async (agents: readonly string[], one: (a: string) => Promise<StoredReply["items"][number]>): Promise<void> => {
-      const out = new Array<StoredReply["items"][number]>(agents.length);
-      let next = 0;
-      await Promise.all(Array.from({ length: Math.min(b.settings.parallel, agents.length) }, async () => { while (next < agents.length) { const i = next; next += 1; out[i] = await one(agents[i]!); } }));
-      out.forEach(take);
-    };
-    const FORMAT = `Use exactly this format:\nSTANCE: for|against|undecided\nSTATEMENT: <your statement>\nTLDR: <if your statement is brief, write none; otherwise one brief paragraph of the important points and details you want the group to know>${b.settings.directQuestions > 0 && b.round >= 2 ? "\nASK: none | <member id>: <one short factual question to one present member, only if you really need an answer from them>" : ""}\nAMEND: none | <a wording of the motion you think the group could accept, only if you would propose one>`;
+    const round = b.between?.round;
+    const ask = (kind: TurnKind, agent: string, instruction: string, o: { visible?: number; full?: boolean; transcript?: string; upTo?: number; desk?: boolean; owner?: boolean } = {}): Promise<PortReply> => this.#prompted(b, rec, motion, kind, agent, instruction, { ...o, ...(round === undefined ? {} : { round }) });
     const SHORT = "Use exactly this format:\nSTANCE: for|against|undecided\nSTATEMENT: <your statement>\nTLDR: none";
     const q = b.queue.find((x) => x.id === unit.queueId);
     const half = Math.ceil(limit / 2) + 20;
     switch (unit.kind) {
-      case "round-blind": await batch(unit.agents ?? [], (a) => ask("blind-statement", a, `Give your position on the motion in at most ${words(limit)} words. ${FORMAT}`, { blind: true })); break;
-      case "round-turn": take(await ask("statement", unit.agent!, `${b.round === 1 && !b.fresh ? `Give your position on the motion in at most ${words(limit)} words.` : "You have now heard the others. Respond to what was said; you may confirm, correct or reverse your earlier view, and you may cite your notes if you have any."} At most ${words(limit)} words. ${FORMAT}`, { desk: b.round >= 2 })); break;
       case "owner-ask": {
         if (q?.checkpoint === true) {
           const cp = await this.#deps.checkpointOf?.(unit.agent!, b.recordId).catch(() => undefined);
@@ -571,13 +562,6 @@ export class MeetingFloorService {
       case "direct-continue": take(await ask("direct-continue", unit.agent!, `You asked a question and the answer is above. If it changes anything for you, say so in at most ${words(limit / 2)} words; otherwise say briefly that it does not. ${SHORT}`, { visible: half })); break;
       case "chair-answer": { const cq = b.chairQuestions.find((x) => x.id === q?.chairQuestionId); take(await ask("chair-answer", unit.agent!, `The chair asked you: "${cq?.topic ?? ""}" — ${cq?.experienceSought ?? ""}. Answer in at most ${words(limit / 2)} words, from your own experience and your notes only. ${SHORT}`, { visible: half, desk: true })); break; }
       case "reply": take(await ask("reply", unit.agent!, `The chair's questions have been answered above. In at most ${words(limit / 2)} words, say whether the answers change your view before the vote. ${SHORT}`, { visible: half, desk: true })); break;
-      case "revision": {
-        const own = await this.#ownBallot(b, unit.agent!);
-        // a short prompt (proposed change 9): the motion, the voter's own ballot and what came after it, not the whole transcript
-        const t = await this.#transcript(b.recordId, b, rec, false, Math.max(1, b.vote?.cast[unit.agent!] ?? 1));
-        take(await ask("revision", unit.agent!, `You have the floor for one revision turn because of the owner's message and questions above. Your recorded ballot is ${own?.value ?? "none"}: ${own?.reason ?? ""}. Keep it or revise it. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>`, { visible: 120, transcript: t.text, upTo: t.upTo }));
-        break;
-      }
       case "chair-notes": take(await ask("chair-notes", chair!, b.settings.chairNotes === "rolling" && b.chairNotes !== undefined ? `YOUR PRIVATE NOTES SO FAR:\n${b.chairNotes}\n\nUpdate your notes with the newest statement: one short entry per speaker: key claims and evidence, what they could not answer, and follow-up factual questions you may want to ask (never how anyone will vote).` : "Read the full statements above. Keep private notes for yourself, briefly: for each speaker, their key claims and evidence, anything they could not answer or left unclear, and the follow-up factual questions you may want to ask (facts and experience only, never how anyone will vote).", { visible: 450, full: true })); break;
       case "chair-questions": {
         const left = Math.max(0, b.settings.chairQuestionCap - b.chairQuestionsAsked);
@@ -594,25 +578,6 @@ export class MeetingFloorService {
       case "correction": take(await ask("correction", unit.agent!, `While you were away the chair read your desk, read-only. Files read: ${b.desk.filesRead.join(", ") || "none"}. Files quoted to the meeting: ${b.desk.filesQuoted.join(", ") || "none"} (see the transcript, marked unverified). If the meeting was given a wrong or misleading picture of your view, add a short correction. Reply exactly:\nCORRECTION: none | <at most 40 words>\nCONTRADICTS: yes|no`, { visible: 120 })); break;
       case "chair-summary": take(await ask("chair-summary", chair!, `You have read the full statements. Give the group a neutral summary of the most important points before the next round: at most ${b.settings.chairSummaryPoints} points, covering points several speakers made, points a speaker made that the summaries left out and points the speakers dispute, each attributed and balanced, with no recommendation. A point left out of a summary must carry a verbatim quote from the speaker's full statement. Reply with JSON only: {"points":[{"kind":"shared|omitted|disputed","speakers":["<member id>"],"point":"...","quote":"<only for omitted>"}]}`, { visible: 700, full: true })); break;
       case "chair-reminders": take(await ask("chair-reminders", chair!, `Above are the statements as the other members saw them (summaries where long). You have read the full text. Find up to ${b.settings.chairReminders} important points a member's summary left out that the others should know before the vote. Each needs the speaker's member id and a verbatim quote from their full statement. Reply with JSON only: {"reminders":[{"from":"<member id>","quote":"..."}]}`, { visible: 450, full: true })); break;
-      case "objection": {
-        const t = await this.#transcript(b.recordId, b, rec, false);
-        const summary = t.entries.slice(-60).map((e) => `- ${e.who}: ${e.summary ?? e.text.slice(0, 280)}`).join("\n");
-        // the member receives only the motion version and the round summary, and may answer only yes or no with a reason
-        await batch(unit.agents ?? [], (a) => ask("objection", a, `Do you object to opening the vote now (for example the motion is unclear or something essential is missing)? Reply exactly:\nOBJECT: yes|no${b.settings.tabling ? "|research" : ""}\nREASON: <one sentence, only if yes${b.settings.tabling ? "; if research, say what you would look into and why it matters before voting" : ""}>`, { transcript: `Summary of the discussion:\n${summary}`, upTo: t.upTo, visible: 80 }));
-        break;
-      }
-      case "chair-ruling": {
-        const research = b.objection.objectors.some((o) => o.research === true);
-        const last = b.objection.attempt >= b.settings.objectionReruns;
-        take(await ask("chair-ruling", chair!, research
-          ? "Members asked for time to research before voting (see the transcript). Reply \"RULING: table\" to postpone the decision to the next meeting, listing \"RESEARCH: <member>: <what they will look into>\" per line, or \"RULING: proceed\" to vote now. Table only if the research could change the outcome."
-          : last ? "Members objected to opening the vote and no more amendments are allowed. Reply \"RULING: proceed\" (the remaining objections are recorded as dissent) with \"REASON: <one sentence>\"."
-            : "Members objected to opening the vote (see the transcript). Rule: reply \"RULING: proceed\" or \"RULING: amend\" followed by \"AMENDED_MOTION: <the clarified motion text>\" and \"REASON: <one sentence>\".", { visible: 250, full: true }));
-        break;
-      }
-      case "chair-match": take(await ask("chair-match", chair!, `Before the ballots open: does the motion as worded match where the discussion landed${b.amendments.length === 0 ? "" : ` (members proposed these wordings: ${b.amendments.map((a) => `${a.by}: ${a.text}`).join(" | ")})`}? Reply exactly:\nMATCHES: yes|no\nAMENDED_MOTION: none | <the motion reworded to match the discussion>\nREASON: <one sentence>`, { visible: 250, full: true })); break;
-      case "ballot": take(await ask("ballot", unit.agent!, "Cast your ballot on the motion as it now stands. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>", { visible: 120 })); break;
-      case "casting": take(await ask("casting", chair!, "The ballots are tied. Under the rules the chair casts a single casting vote on a tie, with no double vote. Reply exactly:\nCASTING: yes|no\nREASON: <one sentence>", { visible: 100, full: true })); break;
       default: break;
     }
     return { items, costUsd: cost };
@@ -639,7 +604,7 @@ export class MeetingFloorService {
     const fx: Record<string, unknown> = {};
     const item = reply.items[0];
     const chair = rec.chair;
-    const notice = async (kind: string, text: string): Promise<void> => { await this.#deps.notifyOwner?.({ recordId, kind, text }).catch(() => undefined); };
+    const notice = async (kind: string, text: string): Promise<void> => { await this.#deps.notifyOwner?.({ recordId, projectId: b.projectId, kind, text }).catch(() => undefined); };
     const statementOf = async (key: string, it: StoredReply["items"][number], label?: string): Promise<{ entryId: string; parsed: ReturnType<typeof parseStatement> } | undefined> => {
       if (it.noResponse !== undefined || it.text.trim() === "") return undefined;
       const parsed = parseStatement(it.text);
@@ -648,25 +613,18 @@ export class MeetingFloorService {
     };
     try {
       switch (unit.kind) {
-        case "round-blind": {
-          const done: Record<string, { entryId: string; parsed: ReturnType<typeof parseStatement> }> = {};
-          for (const it of reply.items) { const s = await statementOf(`s-${it.agent}`, it); if (s !== undefined) done[it.agent] = s; }
-          fx["statements"] = done;
+        case "direct-skip": {
+          const q = b.queue.find((x) => x.id === unit.queueId);
+          if (q?.target === undefined) break;
+          fx["entryId"] = await this.#say(recordId, unit, "skip", chair ?? q.from ?? q.target, `${q.from ?? "A member"}'s question to ${q.target} is skipped: absent (recorded).`);
           break;
         }
-        case "round-turn": case "direct-answer": case "direct-continue": case "chair-answer": case "reply": {
+        case "direct-answer": case "direct-continue": case "chair-answer": case "reply": {
+          const q = b.queue.find((x) => x.id === unit.queueId);
+          // A member's question to another is written now, just before the answer (the member's own statement was written by the procedure when it spoke).
+          if (unit.kind === "direct-answer" && q?.from !== undefined && q.question !== undefined) await this.#say(recordId, unit, "q", q.from, `To ${item!.agent}: ${recordText(q.question, 500)}`);
           const s = await statementOf("s", item!);
-          if (s !== undefined) {
-            fx["statements"] = { [item!.agent]: s };
-            const ask = s.parsed.ask;
-            if (unit.kind === "round-turn" && ask !== undefined && b.settings.directQuestions > 0 && b.round >= 2) {
-              const used = b.asks[`${b.round}:${item!.agent}`] ?? 0;
-              const target = rec.roster.find((a) => a === ask.to);
-              if (target === undefined || target === item!.agent || used >= b.settings.directQuestions) fx["askRefused"] = `${ask.to}`;
-              else if (!this.#present(rec).includes(target)) { fx["askSkipped"] = target; fx["askEntry"] = await this.#say(recordId, unit, "skip", chair ?? item!.agent, `${item!.agent}'s question to ${target} is skipped: absent (recorded).`); }
-              else { fx["askTo"] = target; fx["askQuestion"] = ask.text; fx["askEntry"] = await this.#say(recordId, unit, "q", item!.agent, `To ${target}: ${recordText(ask.text, 500)}`); }
-            }
-          }
+          if (s !== undefined) fx["statements"] = { [item!.agent]: s };
           break;
         }
         case "owner-ask": {
@@ -705,20 +663,6 @@ export class MeetingFloorService {
           if (holding) await notice("held-answer", `${item!.agent}'s answer to your question is kept out of the other voters' view until the vote closes.`);
           break;
         }
-        case "revision": {
-          const q = b.queue.find((x) => x.id === unit.queueId);
-          const v = b.vote;
-          const voter = await this.#voterPrincipal(item!.agent);
-          if (q === undefined || v === undefined || item!.noResponse !== undefined || voter === undefined) break;
-          await this.#notHeld(v.motionId);
-          const parsed = parseVote(item!.text);
-          const old = await this.#ownBallot(b, item!.agent);
-          const value = parsed.value ?? (old?.value as "yes" | "no" | "abstain" | undefined);
-          if (value === undefined) break;
-          await this.#deps.records.castBallot(voter, { commandId: `fl-${base(recordId)}-${unit.id}-rev`, motionId: v.motionId, version: v.version, value, reason: recordText(parsed.reason === "" ? `${value === old?.value ? "keeping" : "revising"} my ballot after the owner's questions` : parsed.reason, 480), ownerMessageEntryId: q.entryId! } as never);
-          fx["revised"] = true;
-          break;
-        }
         case "chair-notes": break;
         case "chair-questions": {
           const parsed = parseJsonObject(item!.text);
@@ -733,7 +677,7 @@ export class MeetingFloorService {
             const id = `cq${b.chairQuestions.length + made.length + 1}`;
             const present = this.#present(rec).includes(o["to"]!);
             const entryId = chair === undefined ? undefined : await this.#say(recordId, unit, id, chair, present ? `Question to ${o["to"]}: ${recordText(o["topic"]!, 300)} (${recordText(o["experience_sought"]!, 300)})` : `Question to ${o["to"]} skipped: absent (recorded).`);
-            made.push({ id, to: o["to"]!, topic: recordText(o["topic"]!, 300), experienceSought: recordText(o["experience_sought"]!, 300), askedBy: "chair", why: `fact-finding question after comment round ${b.round}`, round: b.round, state: present ? "asked" : "skipped", ...(entryId === undefined ? {} : { entryId }) });
+            made.push({ id, to: o["to"]!, topic: recordText(o["topic"]!, 300), experienceSought: recordText(o["experience_sought"]!, 300), askedBy: "chair", why: `fact-finding question after comment round ${b.between?.round ?? 1}`, round: b.between?.round ?? 1, state: present ? "asked" : "skipped", ...(entryId === undefined ? {} : { entryId }) });
           }
           fx["questions"] = made; fx["refused"] = refused;
           break;
@@ -779,7 +723,7 @@ export class MeetingFloorService {
           const m = /CORRECTION:\s*([\s\S]*?)(?:\n\s*CONTRADICTS:|$)/i.exec(item!.text)?.[1]?.trim();
           if (item!.noResponse !== undefined || m === undefined || /^none\.?$/i.test(m)) break;
           fx["entryId"] = await this.#say(recordId, unit, "c", item!.agent, `(correction by the returning member) ${m}`);
-          if (/CONTRADICTS:\s*yes/i.test(item!.text) && b.vote?.opened === true && b.vote.closed !== true) await notice("correction-during-vote", `${item!.agent}'s correction contradicts what the chair relayed from its desk while the vote is open.`);
+          if (/CONTRADICTS:\s*yes/i.test(item!.text) && (await this.#votingMotion(rec)) !== undefined) await notice("correction-during-vote", `${item!.agent}'s correction contradicts what the chair relayed from its desk while the vote is open.`);
           break;
         }
         case "chair-summary": case "chair-reminders": {
@@ -796,89 +740,15 @@ export class MeetingFloorService {
               if (ok) lines.push(`- (${String(p["kind"] ?? "point")}; ${who.join(", ")}) ${recordText(String(p["point"]), 400)}${p["kind"] === "omitted" ? ` — from the full statement: "${recordText(String(p["quote"]), 300)}"` : ""}`);
             } else if (typeof p["from"] === "string" && full.some((e) => e.who === p["from"] && quoteOccurs(p["quote"], e.text))) lines.push(`Reminder from ${p["from"]}'s full statement: "${recordText(String(p["quote"]), 300)}"`);
           }
-          if (lines.length > 0 && chair !== undefined) await this.#say(recordId, unit, "l", chair, unit.kind === "chair-summary" ? `Chair's summary of round ${b.round}:\n${lines.join("\n")}` : lines.join("\n"));
+          if (lines.length > 0 && chair !== undefined) await this.#say(recordId, unit, "l", chair, unit.kind === "chair-summary" ? `Chair's summary of round ${b.between?.round ?? 1}:\n${lines.join("\n")}` : lines.join("\n"));
           fx["lines"] = lines.length;
-          break;
-        }
-        case "objection": {
-          const results = reply.items.map((it) => ({ agent: it.agent, noResponse: it.noResponse, ...parseObjection(it.text, b.settings.tabling) }));
-          for (const r of results) if (r.noResponse === undefined && (r.answer === "yes" || r.answer === "research")) await this.#say(recordId, unit, `o-${r.agent}`, r.agent, `${r.answer === "research" ? "Needs time to research" : "Objection"}: ${r.reason === "" ? "(no reason given)" : r.reason}`);
-          fx["results"] = results;
-          break;
-        }
-        case "chair-ruling": {
-          const text = item?.text ?? "";
-          const motion = await this.#motionText(b);
-          const table = /RULING:\s*table/i.test(text) && b.objection.objectors.some((o) => o.research === true);
-          const amend = /RULING:\s*amend/i.test(text) && b.objection.attempt < b.settings.objectionReruns;
-          const reason = /REASON:\s*([^\n]+)/i.exec(text)?.[1]?.trim();
-          if (table) {
-            const research = [...text.matchAll(/RESEARCH:\s*([^\n]+)/gi)].map((m) => recordText(m[1]!, 300));
-            await this.#deps.records.table(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-tb`, motionId: b.motionId!, reason: `members asked for time to research: ${research.join(" | ") || "unspecified"}` });
-            fx["table"] = research;
-          } else if (amend) {
-            const to = /AMENDED_MOTION:\s*([\s\S]*?)(?:\n\s*REASON:|$)/i.exec(text)?.[1]?.trim();
-            if (to !== undefined && to !== "" && motion !== undefined && to !== motion.text) {
-              await this.#deps.records.amend(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-am`, motionId: b.motionId!, expectedVersion: motion.version, text: recordText(to, 3000), material: true });
-              fx["amended"] = true;
-            }
-          } else if (b.objection.objectors.length > 0 && b.objection.attempt >= b.settings.objectionReruns) {
-            await this.#say(recordId, unit, "dissent", chair ?? item!.agent, `Rerun limit reached; proceeding to the vote. Remaining objections are recorded as dissent: ${b.objection.objectors.map((o) => `${o.agent} (${o.reason || "no reason given"})`).join("; ")}.`);
-          }
-          if (chair !== undefined) await this.#say(recordId, unit, "ruling", chair, `Chair's ruling: ${table ? "motion tabled" : fx["amended"] === true ? "motion amended" : "proceed to the vote"}${reason === undefined ? "" : ` — ${reason}`}`);
-          break;
-        }
-        case "chair-match": {
-          const text = item?.text ?? "";
-          const motion = await this.#motionText(b);
-          const to = /AMENDED_MOTION:\s*([\s\S]*?)(?:\n\s*REASON:|$)/i.exec(text)?.[1]?.trim();
-          if (/MATCHES:\s*no/i.test(text) && to !== undefined && !/^none\.?$/i.test(to) && motion !== undefined && to !== motion.text && b.objection.attempt < b.settings.objectionReruns) {
-            await this.#deps.records.amend(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-am`, motionId: b.motionId!, expectedVersion: motion.version, text: recordText(to, 3000), material: true });
-            fx["amended"] = true;
-            if (chair !== undefined) await this.#say(recordId, unit, "ruling", chair, "Chair's check before the ballots: the motion did not match where the discussion landed and was amended; a fresh round and vote follow.");
-          } else if (chair !== undefined) await this.#say(recordId, unit, "ruling", chair, "Chair's check before the ballots: the motion matches where the discussion landed.");
-          break;
-        }
-        case "open-vote": {
-          const motion = await this.#motionText(b);
-          if (motion === undefined) throw new DomainError("invalid_command", "there is no motion to vote on");
-          await this.#deps.records.openVote(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-ov`, motionId: b.motionId!, expectedVersion: motion.version });
-          fx["version"] = motion.version;
-          break;
-        }
-        case "ballot": {
-          const v = b.vote!;
-          const voter = await this.#voterPrincipal(item!.agent);
-          const parsed = parseVote(item!.text);
-          if (item!.noResponse !== undefined || voter === undefined || parsed.value === undefined) { fx["noResponse"] = item!.noResponse ?? (voter === undefined ? "the agent has no credential" : "no valid ballot in the answer"); break; }
-          await this.#notHeld(v.motionId);
-          fx["seq"] = rec.nextSeq;
-          await this.#deps.records.castBallot(voter, { commandId: `fl-${base(recordId)}-${unit.id}-b`, motionId: v.motionId, version: v.version, value: parsed.value, reason: recordText(parsed.reason === "" ? `${parsed.value} (no reason given)` : parsed.reason, 480) } as never);
-          fx["cast"] = parsed.value;
-          break;
-        }
-        case "close-vote": {
-          const v = b.vote!;
-          let closed: { state: string; decisionId?: string };
-          try { closed = await this.#deps.records.closeVote(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-cl`, motionId: v.motionId }); }
-          catch (error) { if (error instanceof DomainError && error.code === "invalid_command") throw new Wait("vote-time", error.message); throw error; }
-          // answers held from the voters are released by the next step, once no vote is open (`#releaseHeld`)
-          fx["state"] = closed.state; fx["decisionId"] = closed.decisionId;
-          break;
-        }
-        case "casting": {
-          const v = b.vote!;
-          const chairP = chair === undefined ? undefined : await this.#voterPrincipal(chair);
-          const parsed = parseVote(item!.text);
-          if (chairP === undefined || item!.noResponse !== undefined || (parsed.value !== "yes" && parsed.value !== "no")) { fx["noAnswer"] = true; break; }
-          const closed = await this.#deps.records.castingVote(chairP, { commandId: `fl-${base(recordId)}-${unit.id}-cv`, motionId: v.motionId, value: parsed.value, reason: recordText(parsed.reason === "" ? `${parsed.value} (casting vote)` : parsed.reason, 480) });
-          fx["state"] = closed.state; fx["decisionId"] = closed.decisionId;
+          fx["summary"] = unit.kind === "chair-summary" && lines.length > 0 ? lines.join("\n") : undefined;
           break;
         }
         case "wrap-up": {
           const reason = this.#timeboxed(b, this.#runner.now()) ?? "time";
-          const m = b.motionId === undefined ? undefined : ((await this.#deps.records.motion(this.#deps.service, b.motionId)) as unknown as MotionBody | undefined);
-          if (m?.state === "proposed") { await this.#deps.records.table(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-tb`, motionId: b.motionId!, reason: `the meeting's ${reason === "time" ? "time" : "model-spend"} timebox ended before the vote; the rest is follow-up work` }); fx["tabled"] = true; }
+          const m = await this.#activeMotion(rec, false);
+          if (m?.state === "proposed") { await this.#deps.records.table(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-tb`, motionId: m.id, reason: `the meeting's ${reason === "time" ? "time" : "model-spend"} timebox ended before the vote; the rest is follow-up work` }); fx["tabled"] = true; }
           fx["reason"] = reason;
           await notice("timebox", `The meeting's ${reason === "time" ? "time" : "model-spend"} timebox is used up.`);
           break;
@@ -896,62 +766,52 @@ export class MeetingFloorService {
   // ---- the floor after a unit ------------------------------------------------------------------------------------------------------------
 
   /** The steps between rounds, in the order the experiments found useful: the chair's notes once, its questions, the desk read (absent members only) and its summary; reminders once summaries are used. */
-  #betweenSteps(b: FloorBody, rec: RecordBody, n: number): string[] {
+  #betweenSteps(b: FloorBody, rec: RecordBody, round: number, fresh: number): string[] {
     if (rec.chair === undefined) return [];
+    const first = round === 1 && fresh === 0;
     const steps: string[] = [];
-    if (n === 1 && b.settings.chairNotes === "once") steps.push("chair-notes");
+    if (first && b.settings.chairNotes === "once") steps.push("chair-notes");
     if (b.settings.chairQuestionCap - b.chairQuestionsAsked > 0) steps.push("chair-questions");
-    if (n === 1 && this.#absent(rec).length > 0 && this.#deps.deskReads !== undefined) steps.push("desk-offer");
-    if (n === 1) steps.push("chair-summary");
+    if (first && this.#absent(rec).length > 0 && this.#deps.deskReads !== undefined) steps.push("desk-offer");
+    if (first) steps.push("chair-summary");
     else if (usesFacts(b.settings.transcriptMode, this.#present(rec).length, b.settings.factsAboveMembers) && b.settings.chairReminders > 0) steps.push("chair-reminders");
     return steps;
   }
 
-  /** The round is over: between-round steps, or on to the objection check after the last round. */
-  #roundOver(b: FloorBody, rec: RecordBody): FloorBody {
-    const todo = this.#betweenSteps(b, rec, b.round);
-    return todo.length > 0 ? { ...b, phase: "between", todo } : this.#afterBetween(b, rec);
-  }
-
-  #afterBetween(b: FloorBody, rec: RecordBody): FloorBody {
-    const last = b.fresh ? b.round : b.settings.commentRounds;
-    if (!b.fresh && b.round < b.settings.commentRounds) return this.#beginRound({ ...b, todo: [] }, rec, b.round + 1, false);
-    void last;
-    return { ...b, phase: "objection", todo: [], objection: { attempt: b.objection.attempt, objectors: [], noResponse: [] } };
-  }
-
-  /** After a material amendment a fresh round (and then a fresh objection check and vote) follows, or the objection check runs again at once. */
-  #restart(b: FloorBody, rec: RecordBody, version: number): FloorBody {
-    const attempt = b.objection.attempt + 1;
-    const next: FloorBody = { ...b, motionVersion: version, vote: undefined, amendments: [], objection: { attempt, objectors: [], noResponse: [] } };
-    return b.settings.freshRoundAfterAmendment ? this.#beginRound({ ...next, round: b.round }, rec, b.round + 1, true) : { ...next, phase: "objection", todo: [] };
-  }
-
   /** What every unit leaves on the floor, whatever it did: its spend, its turn log, its no-response notices; the claim cleared. */
   #account(b: FloorBody, unit: Inflight, reply: StoredReply): FloorBody {
+    const kindOf: Record<UnitKind, TurnLog["kind"]> = {
+      "direct-answer": "direct-answer", "direct-continue": "direct-continue", "direct-skip": "direct-answer", "chair-answer": "chair-answer", reply: "reply", "owner-ask": "owner-answer",
+      "chair-notes": "chair-notes", "chair-questions": "chair-questions", "desk-offer": "desk-offer", "desk-excerpts": "desk-excerpts", correction: "correction", "chair-summary": "chair-summary", "chair-reminders": "chair-reminders", "wrap-up": "chair-ruling",
+    };
+    return { ...this.#spent(b, unit.id, kindOf[unit.kind], reply.items, reply.costUsd, unit.owner === true, unit.kind), inflight: undefined, waitingTool: undefined };
+  }
+
+  /** The spend and the turn log of answered calls: the owner's own questions are recorded apart so they never count against the meeting's timebox. */
+  #spent(b: FloorBody, unitId: string, kind: TurnLog["kind"], items: readonly PortReply[], costUsd: number, owner: boolean, label: string): FloorBody {
     const now = this.#runner.now();
-    const owner = unit.owner === true;
-    // every unit: spend, turn log, claim cleared
     let usd = b.spend.usd, tokens = b.spend.tokens, hidden = b.spend.hiddenTokens, ownerUsd = b.spend.ownerUsd, ownerTokens = b.spend.ownerTokens, calls = b.spend.calls;
     const logs: TurnLog[] = [];
     let deliveries = b.deliveries;
-    const kindOf: Record<UnitKind, TurnLog["kind"]> = {
-      "round-blind": "blind-statement", "round-turn": "statement", "direct-answer": "direct-answer", "direct-continue": "direct-continue", "chair-answer": "chair-answer", reply: "reply", "owner-ask": "owner-answer", revision: "revision",
-      "chair-notes": "chair-notes", "chair-questions": "chair-questions", "desk-offer": "desk-offer", "desk-excerpts": "desk-excerpts", correction: "correction", "chair-summary": "chair-summary", "chair-reminders": "chair-reminders",
-      objection: "objection", "chair-ruling": "chair-ruling", "chair-match": "chair-match", "open-vote": "ballot", ballot: "ballot", "close-vote": "ballot", casting: "casting", "wrap-up": "chair-ruling",
-    };
-    const share = reply.items.length === 0 ? 0 : reply.costUsd / reply.items.length;
-    for (const it of reply.items) {
+    const share = items.length === 0 ? 0 : costUsd / items.length;
+    for (const it of items) {
       if (it.usage.visible === 0 && it.usage.hidden === 0 && it.usage.input === 0 && it.noResponse === undefined) continue;
       const t = it.usage.input + it.usage.visible + it.usage.hidden;
       if (owner) { ownerUsd += share; ownerTokens += t; } else { usd += share; tokens += t; }
       hidden += it.usage.hidden; calls += 1;
       if (it.deliveredUpTo >= 0) deliveries += 1;
-      logs.push({ unit: unit.id, kind: owner && unit.kind === "owner-ask" ? "owner-answer" : kindOf[unit.kind], agent: it.agent, at: now, visibleTokens: it.usage.visible, hiddenTokens: it.usage.hidden, deliveredUpTo: it.deliveredUpTo, ...(it.truncated === true ? { truncated: true as const } : {}), ...(it.hiddenOver === true ? { hiddenOver: true as const } : {}), ...(it.noResponse === undefined ? {} : { noResponse: it.noResponse }) });
+      logs.push({ unit: unitId, kind, agent: it.agent, at: now, visibleTokens: it.usage.visible, hiddenTokens: it.usage.hidden, deliveredUpTo: it.deliveredUpTo, ...(it.truncated === true ? { truncated: true as const } : {}), ...(it.hiddenOver === true ? { hiddenOver: true as const } : {}), ...(it.noResponse === undefined ? {} : { noResponse: it.noResponse }) });
     }
     const notices: { at: string; kind: string; text: string }[] = [];
-    for (const it of reply.items) if (it.noResponse !== undefined) notices.push({ at: now, kind: "no-response", text: `${it.agent} gave no answer (${it.noResponse}) in ${unit.kind}` });
-    return { ...b, inflight: undefined, waitingTool: undefined, spend: { ...b.spend, usd, tokens, hiddenTokens: hidden, ownerUsd, ownerTokens, calls }, turns: [...b.turns, ...logs], deliveries, notices: [...b.notices, ...notices] };
+    for (const it of items) if (it.noResponse !== undefined) notices.push({ at: now, kind: "no-response", text: `${it.agent} gave no answer (${it.noResponse}) in ${label}` });
+    return { ...b, spend: { ...b.spend, usd, tokens, hiddenTokens: hidden, ownerUsd, ownerTokens, calls }, turns: [...b.turns, ...logs], deliveries, notices: [...b.notices, ...notices] };
+  }
+
+  /** The between-rounds list after the step `kind` ran: its entry is taken off, and the chair's summary is kept for the objection check. */
+  #popBetween(n: FloorBody, kind: string, summary?: string): FloorBody {
+    const t = n.between;
+    if (t === undefined || t.todo[0] !== kind) return n;
+    return { ...n, between: { ...t, todo: t.todo.slice(1), ...(summary === undefined ? {} : { summary }) } };
   }
 
   #reduce(b: FloorBody, rec: RecordBody, unit: Inflight, reply: StoredReply, fx: Record<string, unknown>): FloorBody {
@@ -959,44 +819,21 @@ export class MeetingFloorService {
     let n: FloorBody = this.#account(b, unit, reply);
     const dropQueue = (): FloorBody => ({ ...n, queue: n.queue.filter((q) => q.id !== unit.queueId) });
     const statements = (fx["statements"] ?? {}) as Record<string, { entryId: string; parsed: ReturnType<typeof parseStatement> }>;
-    const note = (round: number, agent: string, stance: string, base0: FloorBody): FloorBody => ({ ...base0, stances: { ...base0.stances, [String(round)]: { ...(base0.stances[String(round)] ?? {}), [agent]: stance } } });
     const withStatement = (base0: FloorBody): FloorBody => {
       let r = base0;
-      for (const [agent, s] of Object.entries(statements)) {
-        if (s.parsed.summary !== undefined) r = { ...r, summaries: { ...r.summaries, [s.entryId]: s.parsed.summary } };
-        if (s.parsed.amend !== undefined && r.amendments.length < FLOOR_LIMITS.amendments) r = { ...r, amendments: [...r.amendments, { by: agent, text: recordText(s.parsed.amend, 500), round: r.round, entryId: s.entryId }] };
-        r = note(r.round, agent, s.parsed.stance, r);
-      }
+      for (const [agent, s] of Object.entries(statements)) if (s.parsed.summary !== undefined) r = { ...r, summaries: { ...r.summaries, [summaryKey(agent, recordText(s.parsed.text, FLOOR_LIMITS.text))]: s.parsed.summary } };
       return r;
     };
     switch (unit.kind) {
-      case "round-blind": {
-        n = withStatement(n);
-        n = { ...n, spoken: n.order, turn: n.order.length };
-        return this.#roundOver(n, rec);
-      }
-      case "round-turn": {
-        n = withStatement(n);
-        const agent = unit.agent!;
-        let order = [...n.order]; let turn = n.turn;
-        if (!order.includes(agent)) { order = [...order.slice(0, turn), agent, ...order.slice(turn)]; turn += 1; } else turn += 1;
-        n = { ...n, order, turn, spoken: [...n.spoken, agent] };
-        const queue = [...n.queue];
-        if (typeof fx["askTo"] === "string") {
-          const key = `${n.round}:${agent}`;
-          n = { ...n, asks: { ...n.asks, [key]: (n.asks[key] ?? 0) + 1 } };
-          const id = `dq${n.unitSeq}`;
-          queue.push({ id: `${id}a`, kind: "direct-answer", agent: fx["askTo"] as string, from: agent, question: fx["askQuestion"] as string, entryId: fx["askEntry"] as string }, { id: `${id}c`, kind: "direct-continue", agent, from: fx["askTo"] as string });
-        } else if (typeof fx["askSkipped"] === "string") n = { ...n, skipped: [...n.skipped, { agent: fx["askSkipped"] as string, why: `a direct question from ${agent} was skipped: absent`, at: now }] };
-        if (n.settings.chairNotes === "rolling" && rec.chair !== undefined && statements[agent] !== undefined) queue.push({ id: `cn${n.unitSeq}`, kind: "chair-notes", agent: rec.chair });
-        n = { ...n, queue };
-        const joiner = this.#present(rec).find((a) => !n.order.includes(a));
-        return n.turn >= n.order.length && joiner === undefined ? this.#roundOver(n, rec) : n;
-      }
       case "direct-answer": case "direct-continue": case "chair-answer": case "reply": {
         n = withStatement(dropQueue());
         if (unit.kind === "chair-answer") n = { ...n, chairQuestions: n.chairQuestions.map((c) => (c.id === b.queue.find((x) => x.id === unit.queueId)?.chairQuestionId ? { ...c, state: "answered" as const, ...(statements[unit.agent!] === undefined ? {} : { answerEntryId: statements[unit.agent!]!.entryId }) } : c)) };
         return n;
+      }
+      case "direct-skip": {
+        const q = b.queue.find((x) => x.id === unit.queueId);
+        n = dropQueue();
+        return q?.target === undefined ? n : { ...n, skipped: [...n.skipped, { agent: q.target, why: `a direct question from ${q.from ?? "a member"} was skipped: absent`, at: now }] };
       }
       case "owner-ask": {
         const q = b.queue.find((x) => x.id === unit.queueId);
@@ -1010,83 +847,39 @@ export class MeetingFloorService {
         if (n.inquiry !== undefined) n = { ...n, inquiry: { ...n.inquiry, lastActivityAt: now, questions: n.inquiry.questions + 1, addressed: [...new Set([...n.inquiry.addressed, q.agent])], remindedAt: undefined } };
         return n;
       }
-      case "revision": {
-        n = dropQueue();
-        if (n.vote !== undefined && fx["revised"] === true) n = { ...n, vote: { ...n.vote, revisions: { ...n.vote.revisions, [unit.agent!]: (n.vote.revisions[unit.agent!] ?? 0) + 1 } } };
-        return n;
-      }
       case "chair-notes": {
         n = unit.queueId === undefined ? n : dropQueue();
         const text = reply.items[0]?.noResponse === undefined ? recordText(reply.items[0]!.text, 3000) : undefined;
-        n = { ...n, todo: n.phase === "between" && n.todo[0] === "chair-notes" ? n.todo.slice(1) : n.todo, ...(text === undefined ? {} : { chairNotes: text, chairNotesAt: now, chairNotesCount: n.chairNotesCount + 1 }) };
-        return n.phase === "between" && n.todo.length === 0 ? this.#afterBetween(n, rec) : n;
+        n = this.#popBetween(n, "chair-notes");
+        return { ...n, ...(text === undefined ? {} : { chairNotes: text, chairNotesAt: now, chairNotesCount: n.chairNotesCount + 1 }) };
       }
       case "chair-questions": {
         const made = (fx["questions"] as ChairQuestionRecord[] | undefined) ?? [];
         const queue = [...n.queue];
         for (const c of made) if (c.state === "asked") queue.push({ id: `cqa-${c.id}`, kind: "chair-answer", agent: c.to, chairQuestionId: c.id });
-        if (made.length > 0 && n.round >= n.settings.commentRounds && !n.fresh) for (const a of this.#present(rec)) queue.push({ id: `rp-${n.unitSeq}-${a.slice(-8)}`, kind: "reply", agent: a });
-        n = { ...n, notices: [...n.notices, ...((fx["refused"] as string[] | undefined) ?? []).map((text) => ({ at: now, kind: "chair-question-refused", text: recordText(text, 200) }))], chairQuestions: [...n.chairQuestions, ...made], chairQuestionsAsked: n.chairQuestionsAsked + made.length, queue, todo: n.todo.slice(1), skipped: [...n.skipped, ...made.filter((c) => c.state === "skipped").map((c) => ({ agent: c.to, why: "a chair question was skipped: absent", at: now }))] };
-        return n.todo.length === 0 ? this.#afterBetween(n, rec) : n;
+        const t = n.between;
+        if (made.length > 0 && t !== undefined && t.round >= t.rounds && t.fresh === 0) for (const a of this.#present(rec)) queue.push({ id: `rp-${n.unitSeq}-${a.slice(-8)}`, kind: "reply", agent: a });
+        n = this.#popBetween(n, "chair-questions");
+        return { ...n, notices: [...n.notices, ...((fx["refused"] as string[] | undefined) ?? []).map((text) => ({ at: now, kind: "chair-question-refused", text: recordText(text, 200) }))], chairQuestions: [...n.chairQuestions, ...made], chairQuestionsAsked: n.chairQuestionsAsked + made.length, queue, skipped: [...n.skipped, ...made.filter((c) => c.state === "skipped").map((c) => ({ agent: c.to, why: "a chair question was skipped: absent", at: now }))] };
       }
       case "desk-offer": {
         const read = (fx["read"] as string[] | undefined) ?? [];
         const pending = (fx["pending"] as FloorBody["desk"]["pending"] | undefined) ?? [];
-        n = { ...n, todo: n.todo.slice(1), desk: { ...n.desk, offered: (fx["offered"] as FloorBody["desk"]["offered"] | undefined) ?? [], filesRead: [...n.desk.filesRead, ...read], refused: [...n.desk.refused, ...((fx["refused"] as { id: string; why: string }[] | undefined) ?? [])], pending, readOwners: [...new Set([...n.desk.readOwners, ...pending.map((p) => p.owner)])] } };
-        if (pending.length > 0) n = { ...n, todo: ["desk-excerpts", ...n.todo] };
-        return n.todo.length === 0 ? this.#afterBetween(n, rec) : n;
-      }
-      case "desk-excerpts": {
-        n = { ...n, todo: n.todo.slice(1), desk: { ...n.desk, filesQuoted: [...new Set([...n.desk.filesQuoted, ...((fx["quoted"] as string[] | undefined) ?? [])])], rejectedExcerpts: n.desk.rejectedExcerpts + ((fx["rejected"] as number | undefined) ?? 0), pending: [] } };
-        return n.todo.length === 0 ? this.#afterBetween(n, rec) : n;
-      }
-      case "correction": {
-        n = { ...n, desk: { ...n.desk, corrections: [...n.desk.corrections, { member: unit.agent!, entryId: (fx["entryId"] as string | undefined) ?? "none" }] } };
+        n = this.#popBetween(n, "desk-offer");
+        n = { ...n, desk: { ...n.desk, offered: (fx["offered"] as FloorBody["desk"]["offered"] | undefined) ?? [], filesRead: [...n.desk.filesRead, ...read], refused: [...n.desk.refused, ...((fx["refused"] as { id: string; why: string }[] | undefined) ?? [])], pending, readOwners: [...new Set([...n.desk.readOwners, ...pending.map((p) => p.owner)])] } };
+        if (pending.length > 0 && n.between !== undefined) n = { ...n, between: { ...n.between, todo: ["desk-excerpts", ...n.between.todo] } };
         return n;
       }
-      case "chair-summary": case "chair-reminders": {
-        n = { ...n, todo: n.todo.slice(1) };
-        return n.todo.length === 0 ? this.#afterBetween(n, rec) : n;
+      case "desk-excerpts": {
+        n = this.#popBetween(n, "desk-excerpts");
+        return { ...n, desk: { ...n.desk, filesQuoted: [...new Set([...n.desk.filesQuoted, ...((fx["quoted"] as string[] | undefined) ?? [])])], rejectedExcerpts: n.desk.rejectedExcerpts + ((fx["rejected"] as number | undefined) ?? 0), pending: [] } };
       }
-      case "objection": {
-        const results = (fx["results"] as { agent: string; noResponse?: string; answer?: string; reason: string }[] | undefined) ?? [];
-        const objectors = results.filter((r) => r.noResponse === undefined && (r.answer === "yes" || r.answer === "research")).map((r) => ({ agent: r.agent, reason: recordText(r.reason, 300), ...(r.answer === "research" ? { research: true as const } : {}) }));
-        n = { ...n, objection: { attempt: n.objection.attempt, objectors, noResponse: results.filter((r) => r.noResponse !== undefined).map((r) => r.agent) } };
-        if (objectors.length === 0) return rec.chair === undefined ? { ...n, phase: "vote" } : { ...n, phase: "match" };
-        return rec.chair === undefined ? { ...n, phase: "vote" } : { ...n, phase: "ruling" };
-      }
-      case "chair-ruling": {
-        if (Array.isArray(fx["table"])) {
-          const research = fx["table"] as string[];
-          const items = research.length === 0 ? [{ text: "research asked for before voting (tabled)", by: "chair" }] : research.map((line) => { const m = /^(agent:[a-z0-9][a-z0-9-]{0,39})\s*:\s*([\s\S]+)$/.exec(line); return m === null ? { text: line, by: "chair" } : { text: m[2]!, by: m[1]! }; });
-          return { ...n, phase: "done", investigations: [...n.investigations, ...items].slice(-FLOOR_LIMITS.investigations) };
-        }
-        if (fx["amended"] === true) return this.#restart(n, rec, (n.motionVersion ?? 1) + 1);
-        return { ...n, phase: "match" };
-      }
-      case "chair-match": return fx["amended"] === true ? this.#restart(n, rec, (n.motionVersion ?? 1) + 1) : { ...n, phase: "vote" };
-      case "open-vote": return { ...n, phase: "vote", motionVersion: (fx["version"] as number | undefined) ?? n.motionVersion, vote: { motionId: n.motionId!, version: (fx["version"] as number) ?? 1, order: this.#present(rec), opened: true, cast: {}, noResponse: [], revisions: {} } };
-      case "ballot": {
-        const v = n.vote!;
-        const agent = unit.agent!;
-        return { ...n, vote: typeof fx["cast"] === "string" ? { ...v, cast: { ...v.cast, [agent]: (fx["seq"] as number | undefined) ?? 0 } } : { ...v, noResponse: [...v.noResponse, agent] } };
-      }
-      case "close-vote": {
-        const v = n.vote!;
-        const state = fx["state"] as string;
-        const echo = this.#echo(n);
-        if (state === "tie-pending") return { ...n, vote: { ...v, closed: true, tie: true } };
-        return { ...n, phase: "done", vote: { ...v, closed: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}) }, ...(echo === undefined ? {} : { echo }) };
-      }
-      case "casting": {
-        const v = n.vote!;
-        if (fx["noAnswer"] === true) return { ...n, vote: { ...v, castingAsked: true } };
-        return { ...n, phase: "done", vote: { ...v, tie: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}), castingAsked: true } };
-      }
+      case "correction": return { ...n, desk: { ...n.desk, corrections: [...n.desk.corrections, { member: unit.agent!, entryId: (fx["entryId"] as string | undefined) ?? "none" }] } };
+      case "chair-summary": return this.#popBetween(n, "chair-summary", typeof fx["summary"] === "string" ? (fx["summary"] as string) : undefined);
+      case "chair-reminders": return this.#popBetween(n, "chair-reminders");
       case "wrap-up": {
         const reason = ((fx["reason"] as string | undefined) ?? "time") as "time" | "spend";
-        const hasVote = n.vote !== undefined && n.vote.opened && n.vote.closed !== true;
-        return { ...n, timebox: { reason, at: now }, phase: hasVote ? n.phase : "done", queue: n.queue.filter((q) => q.kind === "owner-ask" || q.kind === "revision" && false) };
+        return { ...n, timebox: { reason, at: now }, queue: n.queue.filter((q) => q.kind === "owner-ask") };
       }
       default: return n;
     }
@@ -1106,6 +899,12 @@ export class MeetingFloorService {
     return { id: r.id, seq: r.seq };
   }
 
+  /** A note of the owner's control (an inquiry opened or ended, priorities changed): written as the owner's ruling, not an owner message, so it is not a reason to offer any voter a revision turn. */
+  async #ownerNote(owner: Principal, recordId: string, commandId: string, text: string): Promise<{ id: string; seq: number }> {
+    const r = await this.#deps.records.append(owner, { commandId, recordId, kind: "ruling", text: recordText(text, FLOOR_LIMITS.text) });
+    return { id: r.id, seq: r.seq };
+  }
+
   /**
    * The owner's words go to everyone who has the floor after them. While a vote is open, words that repeat a cast ballot's reason would hand that ballot to the other voters, so they are refused with a warning until sent again with
    * `acknowledged` true: the same check as the meeting procedure's owner message (card M06), on whichever vote of the meeting is open.
@@ -1120,26 +919,6 @@ export class MeetingFloorService {
         throw new DomainError("invalid_command", `These words repeat the reason of ${voter}'s ballot while the vote on motion ${voting.number} is open. Everyone who speaks after them will see those words, so ballots stop being private. Send them again with acknowledged true if that is what you want.`, { field: "acknowledged" });
       }
     }
-  }
-
-  /** Queues a revision turn (keep or revise, with a reason) for every voter who cast before the owner message `trigger`, within the voter's maximum; at most one per voter per message. */
-  async #offerRevisions(by: Principal, recordId: string, trigger: string, seq: number): Promise<number> {
-    let queued = 0;
-    await this.#update(recordId, by, `rev-${trigger}`, (b) => {
-      const v = b.vote;
-      if (v === undefined || !v.opened || v.closed === true || b.timebox !== undefined) return undefined;
-      const queue = [...b.queue]; const offered = [...(v.offered ?? [])];
-      queued = 0;
-      for (const [agent, castSeq] of Object.entries(v.cast)) {
-        const key = `${trigger}:${agent}`;
-        if (seq < castSeq || offered.includes(key) || (v.revisions[agent] ?? 0) + queue.filter((q) => q.kind === "revision" && q.agent === agent).length >= b.settings.maxRevisionsPerVoter) continue;
-        offered.push(key);
-        queue.push({ id: `rv-${hash(trigger)}-${agent.slice(-8)}`, kind: "revision", agent, entryId: trigger });
-        queued += 1;
-      }
-      return queued === 0 ? undefined : { ...b, queue, vote: { ...v, offered, trigger } };
-    });
-    return queued;
   }
 
   /**
@@ -1165,7 +944,6 @@ export class MeetingFloorService {
     const item: QueueItem = { id: `oa-${hash(by.id, command.commandId)}`, kind: "owner-ask", agent, entryId: msg.id, question, ...(checkpoint ? { checkpoint: true as const } : {}) };
     await this.#update(recordId, by, `ask-${item.id}`, (b) => (b.queue.some((q) => q.id === item.id) ? undefined : { ...b, queue: [...b.queue, item], ...(b.inquiry === undefined ? {} : { inquiry: { ...b.inquiry, lastActivityAt: now, messages: [...b.inquiry.messages, msg.id].slice(-50), addressed: [...new Set([...b.inquiry.addressed, agent])], remindedAt: undefined } }) }));
     if (f.body.inquiry !== undefined && !checkpoint) await this.#deps.work?.recall(recordId, agent).catch(() => undefined);
-    if (f.body.inquiry === undefined) await this.#offerRevisions(by, recordId, msg.id, msg.seq);
     // at a safe boundary: now, when no turn is being answered; otherwise the next advance takes it first
     // A unit that was claimed before the question is finished (or set aside, when an inquiry now holds the vote) first; then the question runs.
     for (let i = 0; i < 3; i += 1) {
@@ -1199,22 +977,17 @@ export class MeetingFloorService {
     const msg = await this.#ownerMessage(by, recordId, `fl-adr-${base(recordId)}-${hash(by.id, command.commandId)}`, text);
     if (command.amend !== undefined) {
       const amendText = typeof command.amend.text === "string" && command.amend.text.trim() !== "" ? recordText(command.amend.text, 3000) : invalid("amend", "needs the new wording");
-      if (f.body.motionId === undefined) invalid("amend", "there is no motion on the floor");
-      const m = await this.#motionText(f.body);
-      if (m === undefined) invalid("amend", "there is no motion on the floor");
-      const held = f.body.vote?.opened === true && f.body.vote.closed !== true && f.body.inquiry?.voteHeld === true;
-      void held;
-      await this.#deps.records.amend(this.#deps.service, { commandId: `fl-am-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: f.body.motionId!, expectedVersion: m!.version, text: amendText, material: true });
-      const rec2 = await this.#meeting(recordId);
-      await this.#update(recordId, by, `owner-amend-${msg.id}`, (b) => (b.motionVersion === m!.version + 1 ? undefined : { ...this.#restart({ ...b, queue: b.queue.filter((q) => q.kind !== "revision") }, rec2, m!.version + 1), ...(b.inquiry === undefined ? {} : {}) }));
-      // a held vote is no longer there to hold: the motion is back to proposed
+      const m = await this.#activeMotion(rec, false);
+      if (m === undefined) invalid("amend", "there is no motion under way");
+      // The record's own amendment: the procedure sees the new version at its next step and begins a fresh pass (one comment round, a fresh objection check and a fresh vote); a held vote is back to proposed.
+      await this.#deps.records.amend(this.#deps.service, { commandId: `fl-am-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: m!.id, expectedVersion: m!.version, text: amendText, material: true });
+      // The procedure notices the new version at its next step and begins the fresh pass; one step now, so the owner's call shows it (no member is asked).
+      await this.#deps.procedure?.()?.advance(this.#deps.service, { motionId: m!.id });
       return { entryId: msg.id, restarted: true, revisionsOffered: 0 };
     }
-    let offered = 0;
-    if (f.body.inquiry === undefined) offered = await this.#offerRevisions(by, recordId, msg.id, msg.seq);
-    else await this.#update(recordId, by, `inq-msg-${msg.id}`, (b) => (b.inquiry === undefined ? undefined : { ...b, inquiry: { ...b.inquiry, lastActivityAt: this.#runner.now(), messages: [...b.inquiry.messages, msg.id].slice(-50), remindedAt: undefined } }));
-    void rec;
-    return { entryId: msg.id, revisionsOffered: offered };
+    // Each voter who cast before these words is offered a revision turn by the procedure (one per owner message, up to the owner's maximum), once the vote is not held.
+    if (f.body.inquiry !== undefined) await this.#update(recordId, by, `inq-msg-${msg.id}`, (b) => (b.inquiry === undefined ? undefined : { ...b, inquiry: { ...b.inquiry, lastActivityAt: this.#runner.now(), messages: [...b.inquiry.messages, msg.id].slice(-50), remindedAt: undefined } }));
+    return { entryId: msg.id, revisionsOffered: 0 };
   }
 
   /**
@@ -1232,11 +1005,11 @@ export class MeetingFloorService {
     const voting = await this.#votingMotion(rec);
     const open = voting !== undefined && voting.state === "voting";
     if (open && voting.heldAt === undefined) await this.#deps.records.hold(this.#deps.service, { commandId: `fl-hold-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: voting.id });
-    const msg = await this.#ownerMessage(by, recordId, `fl-inq-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner opens an inquiry: the meeting clock and turn limits stop${open ? " and the vote is held" : ""} until the owner ends it.`);
+    const msg = await this.#ownerNote(by, recordId, `fl-inq-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner opens an inquiry: the meeting clock and turn limits stop${open ? " and the vote is held" : ""} until the owner ends it.`);
     const now = this.#runner.now();
     await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, ...(open ? { heldMotionId: voting.id } : {}), addressed: [], messages: [msg.id] } }));
     await this.#deps.work?.release(recordId, this.#present(rec)).catch(() => undefined);
-    await this.#deps.notifyOwner?.({ recordId, kind: "inquiry-open", text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
+    await this.#deps.notifyOwner?.({ recordId, projectId: rec.projectId, kind: "inquiry-open", text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
     return { voteHeld: open, replayed: false };
   }
 
@@ -1250,14 +1023,15 @@ export class MeetingFloorService {
     if (inq === undefined) return { revisionsOffered: 0, replayed: true };
     // answers still queued are answered first: the owner asked them
     for (let i = 0; i < 20; i += 1) { const r = await this.#advance(by, recordId, await this.#meeting(recordId), true).catch(() => undefined); if (r === undefined || "waiting" in r) break; }
-    const heldId = inq.heldMotionId ?? f.body.vote?.motionId;
+    const heldId = inq.heldMotionId;
     const held = inq.voteHeld && heldId !== undefined ? ((await this.#deps.records.motion(this.#deps.service, heldId)) as unknown as MotionBody | undefined) : undefined;
     if (held !== undefined && held.state === "voting" && held.heldAt !== undefined) await this.#deps.records.resume(this.#deps.service, { commandId: `fl-resume-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: heldId! });
-    const msg = await this.#ownerMessage(by, recordId, `fl-end-${base(recordId)}-${hash(by.id, command.commandId)}`, "That is all my questions; carry on.");
+    const msg = await this.#ownerNote(by, recordId, `fl-end-${base(recordId)}-${hash(by.id, command.commandId)}`, "That is all my questions; carry on.");
     const now = this.#runner.now();
     await this.#update(recordId, by, `inq-end-${msg.id}`, (b) => (b.inquiry === undefined ? undefined : { ...b, inquiry: undefined, clock: { ...b.clock, pausedMs: b.clock.pausedMs + (b.clock.pausedAt === undefined ? 0 : Math.max(0, ms(now) - ms(b.clock.pausedAt))), pausedAt: undefined } }));
-    const offered = inq.voteHeld ? await this.#offerRevisions(by, recordId, msg.id, msg.seq) : 0;
-    return { revisionsOffered: offered, replayed: false };
+    void msg;
+    await this.#deps.settleOwner?.({ recordId, projectId: f.body.projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
+    return { revisionsOffered: 0, replayed: false };
   }
 
   /** The owner's priorities for the meeting: the agenda items it names are made urgent or normal (nonurgent ones that cannot be reached are batched to the next meeting by the timebox). Recorded as the owner's message. */
@@ -1273,7 +1047,7 @@ export class MeetingFloorService {
       if (item === undefined) throw new DomainError("not_found", `no such agenda item ${i.itemId}`);
       if (item.urgency !== i.urgency) { await this.#deps.meetings!.correctAgendaItem(by, { commandId: `fl-pri-${base(recordId)}-${hash(command.commandId, i.itemId)}`, itemId: i.itemId, expectedRevision: item.revision, urgency: i.urgency }); changed += 1; }
     }
-    await this.#ownerMessage(by, recordId, `fl-pri-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner changes the priorities: ${items.map((i) => `${i.itemId} is ${i.urgency}`).join("; ")}.`);
+    await this.#ownerNote(by, recordId, `fl-pri-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner changes the priorities: ${items.map((i) => `${i.itemId} is ${i.urgency}`).join("; ")}.`);
     const now = this.#runner.now();
     await this.#update(recordId, by, `pri-${hash(command.commandId)}`, (b) => ({ ...b, priorities: [...b.priorities, ...items.map((i) => ({ itemId: i.itemId, urgency: i.urgency, at: now }))].slice(-40) }));
     return { changed };
@@ -1328,7 +1102,7 @@ export class MeetingFloorService {
     if (!this.#member(by, rec)) throw forbidden(by, "ask the chair for a question");
     const f = await this.#need(recordId);
     if (rec.chair === undefined) throw new DomainError("invalid_command", "the meeting has no chair to put the question");
-    if (f.body.vote?.opened === true || f.body.phase === "vote" || f.body.phase === "done") throw new DomainError("invalid_command", "chair questions are not put once the vote has opened", { field: "recordId" });
+    if ((await this.#votingMotion(rec)) !== undefined) throw new DomainError("invalid_command", "chair questions are not put once the vote has opened", { field: "recordId" });
     if (f.body.chairQuestionsAsked >= f.body.settings.chairQuestionCap) throw new DomainError("invalid_command", `the cap of ${f.body.settings.chairQuestionCap} chair questions for this motion is used`, { field: "recordId" });
     const why = chairQuestionRefusal({ to: command.to, topic: command.topic, experience_sought: command.experienceSought });
     if (why !== undefined) invalid("topic", why);
@@ -1338,7 +1112,7 @@ export class MeetingFloorService {
     const entryId = await this.#deps.records.append(this.#deps.service, { commandId: `fl-rq-${base(recordId)}-${hash(by.id, command.commandId)}`, recordId, kind: "statement", speaker: rec.chair, text: present ? `Question to ${command.to}, at ${by.id}'s request: ${recordText(command.topic, 300)} (${recordText(command.experienceSought, 300)})` : `Question to ${command.to}, at ${by.id}'s request, skipped: absent (recorded).` });
     await this.#update(recordId, by, `rq-${id}`, (b) => {
       if (b.chairQuestions.some((c) => c.id === id) || b.chairQuestionsAsked >= b.settings.chairQuestionCap) return undefined;
-      const q: ChairQuestionRecord = { id, to: command.to, topic: recordText(command.topic, 300), experienceSought: recordText(command.experienceSought, 300), askedBy: by.id, why: `asked of the chair by ${by.id}`, round: b.round, state: present ? "asked" : "skipped", entryId: entryId.id };
+      const q: ChairQuestionRecord = { id, to: command.to, topic: recordText(command.topic, 300), experienceSought: recordText(command.experienceSought, 300), askedBy: by.id, why: `asked of the chair by ${by.id}`, round: b.between?.round ?? 1, state: present ? "asked" : "skipped", entryId: entryId.id };
       return { ...b, chairQuestions: [...b.chairQuestions, q], chairQuestionsAsked: b.chairQuestionsAsked + 1, queue: present ? [...b.queue, { id: `cqa-${id}`, kind: "chair-answer", agent: command.to, chairQuestionId: id }] : b.queue };
     });
     return { questionId: id };
@@ -1368,7 +1142,7 @@ export class MeetingFloorService {
     const f = await this.#need(recordId);
     const q = f.body.chairQuestions.find((c) => c.id === command.questionId);
     if (q === undefined || q.challenge === undefined) throw new DomainError("not_found", "no such challenged chair question");
-    await this.#deps.records.append(this.#deps.service, { commandId: `fl-rl-${base(recordId)}-${hash(by.id, command.commandId)}`, recordId, kind: "statement", speaker: rec.chair ?? by.id, text: `Ruling on the challenge to chair question ${q.id}: ${command.ruling}${by.kind === "owner" ? " (by the owner)" : ""}.` }).catch(async () => this.#ownerMessage(by, recordId, `fl-rl-${base(recordId)}-${hash(by.id, command.commandId)}`, `Ruling on the challenge to chair question ${q.id}: ${command.ruling}.`));
+    await this.#deps.records.append(this.#deps.service, { commandId: `fl-rl-${base(recordId)}-${hash(by.id, command.commandId)}`, recordId, kind: "statement", speaker: rec.chair ?? by.id, text: `Ruling on the challenge to chair question ${q.id}: ${command.ruling}${by.kind === "owner" ? " (by the owner)" : ""}.` }).catch(async () => this.#ownerNote(by, recordId, `fl-rl-${base(recordId)}-${hash(by.id, command.commandId)}`, `Ruling on the challenge to chair question ${q.id}: ${command.ruling}.`));
     await this.#update(recordId, by, `rule-${q.id}-${command.ruling}`, (b) => ({
       ...b,
       chairQuestions: b.chairQuestions.map((c) => (c.id === q.id ? { ...c, challenge: { ...c.challenge!, ruling: command.ruling, ruledBy: by.id }, ...(command.ruling === "upheld" && c.state === "asked" ? { state: "withdrawn" as const } : {}) } : c)),
@@ -1430,7 +1204,7 @@ export class MeetingFloorService {
         if (b.inquiry === undefined || (command.projectId !== undefined && b.projectId !== command.projectId)) continue;
         const idleFrom = b.inquiry.remindedAt ?? b.inquiry.lastActivityAt;
         if (ms(now) - ms(idleFrom) < b.settings.inquiryIdleMinutes * 60_000) continue;
-        await this.#deps.notifyOwner?.({ recordId: b.recordId, kind: "inquiry-idle", text: `Your inquiry on a meeting has been idle for ${b.settings.inquiryIdleMinutes} minutes; say when you are done with questions.` }).catch(() => undefined);
+        await this.#deps.notifyOwner?.({ recordId: b.recordId, projectId: b.projectId, kind: "inquiry-idle", key: `remind-${now}`, text: `Your inquiry on a meeting has been idle for ${b.settings.inquiryIdleMinutes} minutes; say when you are done with questions.` }).catch(() => undefined);
         await this.#update(b.recordId, by, `remind-${now}`, (x) => (x.inquiry === undefined ? undefined : { ...x, inquiry: { ...x.inquiry, remindedAt: now } }));
         reminded.push(b.recordId);
       }
@@ -1470,17 +1244,21 @@ export class MeetingFloorService {
     const owner = viewer.kind === "owner" && viewer.taskScope === undefined;
     const full = owner || isService(viewer);
     const chair = viewer.kind === "agent" && viewer.asOf !== undefined && rec.chair === viewer.id && inTaskScope(viewer, rec.projectId);
+    const active = await this.#activeMotion(rec, true);
+    const procedure = this.#deps.procedure?.();
+    const shownMotion = active?.id ?? b.motionId;
+    const expecting = procedure === undefined || shownMotion === undefined ? undefined : await procedure.expecting(shownMotion);
     // Everyone but the owner, a host and a service (the chair and a manager agent included) sees only what a member sees: no ballot turn, no count of who has voted or is owed a revision, no held answer and nothing drawn from one.
-    const common = { phase: b.phase, round: b.round, state: b.state, motionId: b.motionId, waiting: this.#waitingFor(viewer, b, rec), timebox: b.timebox, inquiryOpen: b.inquiry !== undefined, queued: full ? b.queue.length : b.queue.filter((q) => q.kind !== "revision").length };
+    const common = { phase: (expecting?.stage ?? "none") as FloorPhase, state: b.state, motionId: active?.id ?? b.motionId, waiting: await this.#waitingFor(viewer, b, rec, expecting), timebox: b.timebox, inquiryOpen: b.inquiry !== undefined, queued: b.queue.length };
     if (!full) return json({ ...common, ...(chair && b.chairNotes !== undefined ? { chairNotes: b.chairNotes } : {}) }) as unknown as Record<string, unknown>;
-    const { inflight, ...rest } = b;
-    void inflight;
+    const { inflight, replies, claims, ...rest } = b;
+    void inflight; void replies; void claims;
     return { ...rest, ...common, spend: this.#spendView(b), elapsedMinutes: Math.round(this.#elapsedMs(b, this.#runner.now()) / 60_000), allowedMinutes: Math.round(this.#allowedMs(b) / 60_000) };
   }
 
   /** The waiting-on view as `viewer` may see it: while a vote is open, everyone but the owner, a host and a service is told only that the meeting waits on the voters, never which voter (that would tell who has voted). */
-  #waitingFor(viewer: Principal, b: FloorBody, rec: RecordBody): WaitingOn {
-    const w = this.#waiting(b, rec, this.#runner.now());
+  async #waitingFor(viewer: Principal, b: FloorBody, rec: RecordBody, expecting?: { stage: string; what: string; agent?: string }): Promise<WaitingOn> {
+    const w = await this.#waiting(b, rec, this.#runner.now(), expecting);
     if ((viewer.kind === "owner" && viewer.taskScope === undefined) || isService(viewer)) return w;
     return w.kind === "agent" && (w.what === "ballot" || w.what === "revision" || w.what === "close-vote") ? { kind: "agent", who: "the voters", what: "the vote", since: w.since } : w;
   }
@@ -1489,23 +1267,32 @@ export class MeetingFloorService {
     return { usd: b.spend.usd, tokens: b.spend.tokens, ownerUsd: b.spend.ownerUsd, ownerTokens: b.spend.ownerTokens, capUsd: b.settings.spendCapUsd + b.spend.extraUsd, capTokens: b.settings.tokenCap + b.spend.extraTokens };
   }
 
-  #waiting(b: FloorBody, rec: RecordBody, now: string): WaitingOn {
+  async #waiting(b: FloorBody, rec: RecordBody, now: string, expecting?: { stage: string; what: string; agent?: string }): Promise<WaitingOn> {
     if (b.state === "ended" || rec.state !== "open") return { kind: "nothing", what: "the meeting has ended" };
     if (b.inquiry !== undefined) return { kind: "person", who: "owner", what: "the owner's questions (inquiry open)", since: b.inquiry.openedAt };
     if (b.waitingTool !== undefined) return { kind: "tool", who: b.waitingTool.agent, what: b.waitingTool.tool, since: b.waitingTool.since };
     if (b.inflight !== undefined) return { kind: "agent", who: b.inflight.agent ?? b.inflight.agents?.[0] ?? "the members", what: b.inflight.kind, since: b.inflight.since };
     const plan = this.#plan(b, rec, now);
     if ("unit" in plan) return { kind: "agent", who: plan.unit.agent ?? plan.unit.agents?.[0] ?? "the members", what: plan.unit.kind, since: now };
-    if (plan.wait === "vote-time") return { kind: "agent", who: "the voters", what: "the vote's time limit", since: now };
-    if (plan.wait === "chair") return { kind: "agent", who: rec.chair ?? "the chair", what: plan.detail ?? "the chair", since: now };
-    return { kind: "nothing", what: plan.detail ?? "nothing is waiting" };
+    if (expecting !== undefined && expecting.what !== "nothing") {
+      if (expecting.what === "inquiry") return { kind: "person", who: "owner", what: "the owner's questions (inquiry open)", since: now };
+      if (expecting.agent !== undefined) return { kind: "agent", who: expecting.agent, what: expecting.what, since: now };
+      if (expecting.what === "close-vote") return { kind: "agent", who: "the voters", what: "the vote's time limit", since: now };
+      return { kind: "agent", who: rec.chair ?? "the members", what: expecting.what, since: now };
+    }
+    return { kind: "nothing", what: plan.wait === "none" ? (plan.detail ?? "nothing is waiting") : "nothing is waiting" };
   }
 
   /** What the meeting waits on right now: a person (the owner), an agent (who holds the floor or must answer) or a tool; or nothing. Seen by whoever may read the meeting. */
   async waiting(viewer: Principal, recordId: string): Promise<WaitingOn | undefined> {
     const rec = await this.#deps.records.record(viewer, recordId).catch(() => undefined);
     const f = rec === undefined ? undefined : await this.#load(recordId);
-    return rec === undefined || f === undefined ? undefined : this.#waitingFor(viewer, f.body, rec);
+    if (rec === undefined || f === undefined) return undefined;
+    const active = await this.#activeMotion(rec, true);
+    const procedure = this.#deps.procedure?.();
+    const shownMotion = active?.id ?? f.body.motionId;
+    const expecting = procedure === undefined || shownMotion === undefined ? undefined : await procedure.expecting(shownMotion);
+    return this.#waitingFor(viewer, f.body, rec, expecting);
   }
 
   /** The chair's private notes, kept in the meeting's records: for the owner and the chair only. */
@@ -1518,11 +1305,322 @@ export class MeetingFloorService {
     return { ...(f.body.chairNotes === undefined ? {} : { notes: f.body.chairNotes }), ...(f.body.chairNotesAt === undefined ? {} : { at: f.body.chairNotesAt }), count: f.body.chairNotesCount };
   }
 
-  /** The meeting looked like an echo: every first-round stance and every ballot was the same (the summary flags it; the experiments saw 45 of 46 votes unanimous). */
-  #echo(b: FloorBody): boolean | undefined {
-    const first = Object.values(b.stances["1"] ?? {});
-    return first.length > 1 && first.every((s) => s === first[0]) && b.vote !== undefined && Object.keys(b.vote.cast).length > 1 ? true : undefined;
+  // ---- the procedure's members and chair -------------------------------------------------------------------------------------------------
+
+  /**
+   * Asks one thing of one member for the procedure, once. The answer is stored on the floor before the procedure writes anything, so a repeat after a restart returns the same words and spends nothing more; another driver asking the same
+   * thing meanwhile gets `FloorBusy` (a claim whose asker died is taken over); an agent that waits on a tool gets `FloorWaits`. `afterStore` also changes the floor in the same step as the stored answer.
+   */
+  async #cached(recordId: string, key: string, produce: (b: FloorBody, rec: RecordBody) => Promise<PortReply>, afterStore?: (b: FloorBody, item: PortReply) => FloorBody): Promise<PortReply> {
+    const have = (await this.#need(recordId)).body.replies[key];
+    if (have !== undefined) return have;
+    const claimedAt = this.#runner.now();
+    let settings: FloorSettings | undefined;
+    await this.#update(recordId, this.#deps.service, `claim-${hash(key)}`, (b) => {
+      if (b.replies[key] !== undefined) return undefined;
+      const since = b.claims[key];
+      if (since !== undefined && ms(claimedAt) - ms(since) < (b.settings.hangTimeoutSeconds + 30) * 1000) throw new FloorBusy();
+      settings = b.settings;
+      return { ...b, claims: { ...b.claims, [key]: claimedAt } };
+    });
+    const again = (await this.#need(recordId)).body;
+    if (again.replies[key] !== undefined) return again.replies[key]!;
+    void settings;
+    let item: PortReply;
+    try {
+      item = await produce(again, await this.#meeting(recordId));
+    } catch (error) {
+      await this.#update(recordId, this.#deps.service, `unclaim-${hash(key)}`, (b) => { const { [key]: _c, ...rest } = b.claims; void _c; return { ...b, claims: rest }; }).catch(() => undefined);
+      throw error;
+    }
+    if (item.waitsOnTool !== undefined) {
+      const tool = item.waitsOnTool;
+      await this.#update(recordId, this.#deps.service, `tool-${hash(key)}`, (b) => { const { [key]: _c, ...rest } = b.claims; void _c; return { ...b, claims: rest, waitingTool: { tool, agent: item.agent, since: b.waitingTool?.since ?? this.#runner.now() } }; });
+      throw new FloorWaits(tool);
+    }
+    const kind = (item as PortReply & { turnKind?: TurnKind }).turnKind;
+    await this.#update(recordId, this.#deps.service, `store-${hash(key)}`, (b) => {
+      if (b.replies[key] !== undefined) return undefined;
+      const { [key]: _c, ...claims } = b.claims; void _c;
+      const stored: PortReply = { ...item };
+      delete (stored as { turnKind?: TurnKind }).turnKind;
+      let n: FloorBody = this.#spent({ ...b, claims, waitingTool: undefined }, `p-${hash(key)}`, kind ?? "statement", [item], item.costUsd ?? 0, false, key.split(":")[0]!);
+      n = { ...n, replies: Object.fromEntries(Object.entries({ ...n.replies, [key]: stored }).slice(-FLOOR_LIMITS.replies)) };
+      return afterStore === undefined ? n : afterStore(n, item);
+    });
+    return (await this.#need(recordId)).body.replies[key]!;
   }
+
+  /** Forgets a stored answer (a ballot set aside because an inquiry held the vote): its spend stays counted, the member is asked again. */
+  async #forget(recordId: string, key: string): Promise<void> {
+    await this.#update(recordId, this.#deps.service, `forget-${hash(key)}`, (b) => { if (b.replies[key] === undefined) return undefined; const { [key]: _r, ...rest } = b.replies; void _r; return { ...b, replies: rest }; });
+  }
+
+  /** What the meeting's own checks say about asking now, for answers that start a model call for the procedure: the budget is checked by the call itself. */
+  #tag(kind: TurnKind, item: PortReply): PortReply { return Object.assign({}, item, { turnKind: kind }); }
+
+  /** The members, as the procedure's port (card M06). Every call is one tool-less model turn within the turn limits; what a member is given is the motion and the transcript as it may see it, never a ballot. */
+  asMembers(): MeetingFloor {
+    const view = (recordId: string): Promise<{ b: FloorBody; rec: RecordBody }> => Promise.all([this.#need(recordId), this.#meeting(recordId)]).then(([f, rec]) => ({ b: f.body, rec }));
+    const shown = (entries: readonly MeetingDelivered[]): ShownEntry[] => entries.map((e) => ({ seq: e.seq, who: e.kind === "owner-message" ? "Owner" : e.speaker, ...(e.kind === "owner-message" ? { label: "owner" } : e.kind === "motion" || e.kind === "amendment" || e.kind === "ruling" || e.kind === "vote" || e.kind === "correction" ? { label: e.kind } : {}), text: e.text }));
+    const words = (tokens: number): number => Math.max(20, Math.round(tokens * 0.7));
+    // A member who has not come into the room is skipped (nothing is asked of it), and that is written in the transcript once; the procedure counts the missing answer as no response.
+    const away = async (recordId: string, agent: string): Promise<boolean> => {
+      const rec = await this.#meeting(recordId);
+      if (rec.attended.includes(agent) && !rec.withheld.includes(agent)) return false;
+      await this.#noteAbsent(recordId, rec, [agent]);
+      return true;
+    };
+    return {
+      comment: async (r: CommentRequest) => {
+        if (await away(r.recordId, r.agent)) return undefined;
+        const { b, rec: rec0 } = await view(r.recordId);
+        const blind = r.round === 1 && r.fresh === 0 && b.settings.firstRound === "blind";
+        const key = (agent: string): string => `statement:${r.motion.id}:v${r.motion.version}:p${r.fresh}:r${r.round}:${agent}`;
+        const ask = (agent: string): Promise<PortReply> => this.#cached(r.recordId, key(agent), async (bb, rec) => {
+          const limit = bb.settings.turnTokens;
+          const FORMAT = `Use exactly this format:\nSTANCE: for|against|undecided\nSTATEMENT: <your statement>\nTLDR: <if your statement is brief, write none; otherwise one brief paragraph of the important points and details you want the group to know>${bb.settings.directQuestions > 0 && r.round >= 2 ? "\nASK: none | <member id>: <one short factual question to one present member, only if you really need an answer from them>" : ""}\nAMEND: none | <a wording of the motion you think the group could accept, only if you would propose one>`;
+          const text = r.round === 1 && r.fresh === 0 ? `Give your position on the motion in at most ${words(limit)} words.` : "You have now heard the others. Respond to what was said; you may confirm, correct or reverse your earlier view, and you may cite your notes if you have any.";
+          return this.#tag(blind ? "blind-statement" : "statement", await this.#prompted(bb, rec, { version: r.motion.version, text: r.motion.text }, blind ? "blind-statement" : "statement", agent, `${text} At most ${words(limit)} words. ${FORMAT}`, { desk: r.deskCheck, round: r.round, ...(blind ? { blind: true } : {}) }));
+        }, (n, item) => this.#afterStatement(n, item, r, rec0));
+        // The blind first round is asked of several members at once (up to `parallel`): the answers are kept and used one by one in seat order.
+        if (blind) {
+          const others = r.seats.filter((a) => a !== r.agent).slice(0, Math.max(0, b.settings.parallel - 1));
+          const settled = await Promise.allSettled([ask(r.agent), ...others.map((a) => ask(a))]);
+          const mine = settled[0]!;
+          if (mine.status === "rejected") throw mine.reason;
+          return this.#statementOf(mine.value);
+        }
+        return this.#statementOf(await ask(r.agent));
+      },
+      objection: async (r: ObjectionRequest) => {
+        if (await away(r.recordId, r.agent)) return undefined;
+        const { b } = await view(r.recordId);
+        const key = (agent: string): string => `objection:${r.motion.id}:v${r.motion.version}:p${r.fresh}:u${r.run}:${agent}`;
+        const ask = (agent: string): Promise<PortReply> => this.#cached(r.recordId, key(agent), async (bb, rec) => this.#tag("objection", await this.#prompted(bb, rec, { version: r.motion.version, text: r.motion.text }, "objection", agent, `Do you object to opening the vote now (for example the motion is unclear or something essential is missing)? Reply exactly:\nOBJECT: yes|no${r.tabling ? "|research" : ""}\nREASON: <one sentence, only if yes${r.tabling ? "; if research, say what you would look into and why it matters before voting" : ""}>`, { transcript: `Summary of the discussion:\n${r.summary}`, upTo: 0, visible: 80 })));
+        const others = r.seats.filter((a) => a !== r.agent).slice(0, Math.max(0, b.settings.parallel - 1));
+        const settled = await Promise.allSettled([ask(r.agent), ...others.map((a) => ask(a))]);
+        const mine = settled[0]!;
+        if (mine.status === "rejected") throw mine.reason;
+        const item = mine.value;
+        if (item.noResponse !== undefined) return undefined;
+        const parsed = parseObjection(item.text, r.tabling);
+        if (parsed.answer === "yes") return { answer: "objection" as const, reason: parsed.reason };
+        if (parsed.answer === "research") return { answer: "research" as const, reason: parsed.reason };
+        return { answer: "none" as const };
+      },
+      ballot: async (r: BallotRequest) => {
+        if (await away(r.recordId, r.agent)) return undefined;
+        const item = await this.#cached(r.recordId, `ballot:${r.motion.id}:v${r.motion.version}:${r.agent}`, async (bb, rec) => this.#tag("ballot", await this.#prompted(bb, rec, { version: r.motion.version, text: r.motion.text }, "ballot", r.agent, "Cast your ballot on the motion as it now stands. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>", { visible: 120 })));
+        if (item.noResponse !== undefined) return undefined;
+        const parsed = parseVote(item.text);
+        return parsed.value === undefined ? undefined : { value: parsed.value as BallotValue, reason: recordText(parsed.reason === "" ? `${parsed.value} (no reason given)` : parsed.reason, 480) };
+      },
+      revision: async (r: RevisionRequest) => {
+        if (await away(r.recordId, r.agent)) return undefined;
+        const item = await this.#cached(r.recordId, `revision:${r.motion.id}:v${r.motion.version}:${r.agent}:m${r.ownerMessage.seq}`, async (bb, rec) => {
+          const t = transcriptView(shown(r.since), "full");
+          // a short prompt (proposed change 9): the motion, the voter's own ballot and what came after it, not the whole transcript
+          return this.#tag("revision", await this.#prompted(bb, rec, { version: r.motion.version, text: r.motion.text }, "revision", r.agent, `You have the floor for one revision turn because of the owner's message and questions above. Your recorded ballot is ${r.ballot.value}: ${r.ballot.reason}. Keep it or revise it. Reply exactly:\nVOTE: yes|no|abstain\nREASON: <one sentence>`, { visible: 120, transcript: t, upTo: r.since.at(-1)?.seq ?? 0 }));
+        });
+        if (item.noResponse !== undefined) return undefined;
+        const parsed = parseVote(item.text);
+        if (parsed.value === undefined) return { keep: true as const };
+        return { value: parsed.value as BallotValue, reason: recordText(parsed.reason === "" ? `${parsed.value === r.ballot.value ? "keeping" : "revising"} my ballot after the owner's questions` : parsed.reason, 480) };
+      },
+      before: (r: GateRequest) => this.#before(r),
+      between: (r: BetweenRequest) => this.#between(r),
+      setAside: async (r: AsideRequest) => { await this.#forget(r.recordId, r.kind === "ballot" ? `ballot:${r.motionId}:v${r.version}:${r.agent}` : `revision:${r.motionId}:v${r.version}:${r.agent}:m`); },
+    };
+  }
+
+  #statementOf(item: PortReply): { text: string; stance?: string } | undefined {
+    if (item.noResponse !== undefined || item.text.trim() === "") return undefined;
+    const parsed = parseStatement(item.text);
+    const text = recordText(parsed.text, FLOOR_LIMITS.text);
+    return { text: text === "" ? "(no words)" : text, stance: parsed.stance };
+  }
+
+  /** A member's statement is kept with its TLDR, and what it asks (a direct question to another member, a rolling chair note) is queued with it, in the same step. */
+  #afterStatement(n0: FloorBody, item: PortReply, r: CommentRequest, rec: RecordBody): FloorBody {
+    if (item.noResponse !== undefined || item.text.trim() === "") return n0;
+    const parsed = parseStatement(item.text);
+    let n = n0;
+    const text = recordText(parsed.text, FLOOR_LIMITS.text);
+    if (parsed.summary !== undefined) n = { ...n, summaries: Object.fromEntries(Object.entries({ ...n.summaries, [summaryKey(item.agent, text === "" ? "(no words)" : text)]: parsed.summary }).slice(-FLOOR_LIMITS.summaries)) };
+    const queue = [...n.queue];
+    const ask = parsed.ask;
+    const id = `dq-${hash(r.motion.id, String(r.motion.version), String(r.fresh), String(r.round), item.agent)}`;
+    if (ask !== undefined && n.settings.directQuestions > 0 && r.round >= 2 && !queue.some((q) => q.id.startsWith(id))) {
+      const key = `${r.round}:${item.agent}`;
+      const used = n.asks[key] ?? 0;
+      // a question to nobody on the roster, to oneself or past the member's limit is refused (nothing is asked or written); one to an absent member is recorded as skipped
+      const target = rec.roster.find((a) => a === ask.to);
+      if (target !== undefined && target !== item.agent && used < n.settings.directQuestions) {
+        if (this.#present(rec).includes(target)) {
+          n = { ...n, asks: { ...n.asks, [key]: used + 1 } };
+          queue.push({ id: `${id}a`, kind: "direct-answer", agent: target, from: item.agent, question: ask.text }, { id: `${id}c`, kind: "direct-continue", agent: item.agent, from: target });
+        } else queue.push({ id: `${id}s`, kind: "direct-skip", agent: item.agent, from: item.agent, target });
+      }
+    }
+    if (n.settings.chairNotes === "rolling" && rec.chair !== undefined) queue.push({ id: `cn-${id}`, kind: "chair-notes", agent: rec.chair });
+    return { ...n, queue };
+  }
+
+  /** The chair, as the procedure's port: a ruling on the objections, and a casting vote. */
+  asChair(): ChairFloor {
+    return {
+      rule: async (r: RulingRequest): Promise<RulingInput | undefined> => {
+        const { rec } = await Promise.all([this.#need(r.recordId), this.#meeting(r.recordId)]).then(([f, rr]) => ({ b: f.body, rec: rr }));
+        const chair = rec.chair;
+        if (chair === undefined) return undefined;
+        const research = r.answers.some((a) => a.answer === "research");
+        const item = await this.#cached(r.recordId, `ruling:${r.motion.id}:v${r.motion.version}:u${r.run}`, async (bb, rr) => this.#tag("chair-ruling", await this.#prompted(bb, rr, { version: r.motion.version, text: r.motion.text }, "chair-ruling", chair, research && r.canTable
+          ? "Members asked for time to research before voting (see the transcript). Reply \"RULING: table\" to postpone the decision to the next meeting, listing \"RESEARCH: <member>: <what they will look into>\" per line, or \"RULING: proceed\" to vote now. Table only if the research could change the outcome."
+          : !r.canUphold ? "Members objected to opening the vote and no more amendments are allowed. Reply \"RULING: proceed\" (the remaining objections are recorded as dissent) with \"REASON: <one sentence>\"."
+            : "Members objected to opening the vote (see the transcript). Rule: reply \"RULING: proceed\" or \"RULING: amend\" followed by \"AMENDED_MOTION: <the clarified motion text>\" and \"REASON: <one sentence>\".", { visible: 250, full: true })));
+        if (item.noResponse !== undefined) return undefined;
+        const text = item.text;
+        const reason = /REASON:\s*([^\n]+)/i.exec(text)?.[1]?.trim();
+        if (/RULING:\s*table/i.test(text) && r.canTable && research) {
+          const lines = [...text.matchAll(/RESEARCH:\s*([^\n]+)/gi)].map((m) => recordText(m[1]!, 300));
+          return { ruling: "table", reason: `members asked for time to research: ${lines.join(" | ") || "unspecified"}` };
+        }
+        if (/RULING:\s*amend/i.test(text) && r.canUphold) {
+          const to = /AMENDED_MOTION:\s*([\s\S]*?)(?:\n\s*REASON:|$)/i.exec(text)?.[1]?.trim();
+          if (to !== undefined && to !== "" && to !== r.motion.text) return { ruling: "uphold", addressed: "amend", text: recordText(to, 600) };
+        }
+        return { ruling: "proceed", ...(reason === undefined ? {} : { text: recordText(`Chair's ruling: proceed to the vote — ${reason}`, 580) }) };
+      },
+      castingVote: async (r: CastingRequest) => {
+        const rec = await this.#meeting(r.recordId);
+        if (rec.chair === undefined) return undefined;
+        const chair = rec.chair;
+        const item = await this.#cached(r.recordId, `casting:${r.motion.id}:v${r.motion.version}`, async (bb, rr) => this.#tag("casting", await this.#prompted(bb, rr, { version: r.motion.version, text: r.motion.text }, "casting", chair, "The ballots are tied. Under the rules the chair casts a single casting vote on a tie, with no double vote. Reply exactly:\nCASTING: yes|no\nREASON: <one sentence>", { visible: 100, full: true })));
+        if (item.noResponse !== undefined) return undefined;
+        const parsed = parseVote(item.text);
+        if (parsed.value !== "yes" && parsed.value !== "no") return undefined;
+        return { value: parsed.value, reason: recordText(parsed.reason === "" ? `${parsed.value} (casting vote)` : parsed.reason, 480) };
+      },
+    };
+  }
+
+  // ---- what the floor does for the procedure between its steps ----------------------------------------------------------------------------
+
+  /**
+   * Asked before every step of the procedure: the owner's inquiry and a used-up timebox hold the meeting (nothing is asked of a member), and the floor's own work comes first (the owner's questions, a chair question's answer, the wrap-up of
+   * a timebox, the correction of a member whose desk was read, before the vote opens).
+   */
+  async #before(r: GateRequest): Promise<FloorGate> {
+    const f = await this.#load(r.recordId);
+    if (f === undefined || f.body.state === "ended") return undefined;
+    const rec = await this.#meeting(r.recordId);
+    const own = await this.#advance(this.#deps.service, r.recordId, rec, false);
+    if ("did" in own) return { ran: `the floor did ${own.did}${own.agent === undefined ? "" : ` for ${own.agent}`}` };
+    if (own.waiting === "busy") throw new FloorBusy();
+    if (own.waiting === "tool") throw new FloorWaits(own.detail ?? "a tool");
+    const b = (await this.#need(r.recordId)).body;
+    if (b.inquiry !== undefined) return { halt: "inquiry", why: "the owner's inquiry holds the meeting; only the owner's questions run" };
+    if (b.timebox !== undefined) return { halt: b.timebox.reason, why: `the meeting's ${b.timebox.reason} timebox is used up` };
+    // A member whose desk the chair read, now in the room, is asked for a correction before the vote opens.
+    if (r.stage === "ready") {
+      const owed = b.desk.readOwners.find((a) => this.#present(rec).includes(a) && !b.desk.corrections.some((c) => c.member === a));
+      if (owed !== undefined) {
+        const ran = await this.#runOwnUnit(r.recordId, rec, "correction", owed);
+        if (ran) return { ran: `the floor asked ${owed} for a correction` };
+      }
+    }
+    return undefined;
+  }
+
+  /** Runs one floor unit of a kind now (claimed, answered, written, committed like any other unit). */
+  async #runOwnUnit(recordId: string, rec: RecordBody, kind: UnitKind, agent?: string): Promise<boolean> {
+    const f = await this.#need(recordId);
+    if (f.body.inflight !== undefined) return false;
+    const unit: Inflight = { id: `u${f.body.unitSeq + 1}-${kind}`, kind, since: this.#runner.now(), ...(agent === undefined ? {} : { agent }) };
+    try {
+      await this.#update(recordId, this.#deps.service, `claim-${unit.id}`, (b) => (b.inflight !== undefined || b.unitSeq + 1 !== f.body.unitSeq + 1 ? (() => { throw new DomainError("stale_revision", "another caller claimed the next unit"); })() : { ...b, unitSeq: b.unitSeq + 1, inflight: unit }));
+    } catch (error) {
+      if (error instanceof DomainError && error.code === "stale_revision") return false;
+      throw error;
+    }
+    await this.#run(this.#deps.service, recordId, (await this.#need(recordId)).body.inflight!);
+    return true;
+  }
+
+  /**
+   * The chair's work between two comment rounds, one step each time the procedure asks: the notes once, its questions, the desk read and its summary (the first round only), the reminders where facts-style summaries are used. When none is
+   * left, `done` with the chair's summary (a verified one: a point left out of a statement carries a verbatim quote from it), which the objection check is given in place of the mechanical digest.
+   */
+  async #between(r: BetweenRequest): Promise<BetweenResult> {
+    const key = `${r.motion.id}:${r.motion.version}:${r.fresh}:${r.round}`;
+    const f = await this.#load(r.recordId);
+    if (f === undefined) return { done: true };
+    if (f.body.lastBetween?.key === key) return { done: true, ...(f.body.lastBetween.summary === undefined ? {} : { summary: f.body.lastBetween.summary }) };
+    const rec = await this.#meeting(r.recordId);
+    if (f.body.between?.key !== key) {
+      const todo = this.#betweenSteps(f.body, rec, r.round, r.fresh);
+      await this.#update(r.recordId, this.#deps.service, `between-${hash(key)}`, (b) => (b.between?.key === key ? undefined : { ...b, between: { key, motionId: r.motion.id, version: r.motion.version, round: r.round, rounds: r.rounds, fresh: r.fresh, todo } }));
+    }
+    const cur = (await this.#need(r.recordId)).body.between;
+    if (cur === undefined || cur.key !== key || cur.todo.length === 0) {
+      const summary = cur?.key === key ? cur.summary : undefined;
+      await this.#update(r.recordId, this.#deps.service, `between-done-${hash(key)}`, (b) => (b.lastBetween?.key === key ? undefined : { ...b, between: undefined, lastBetween: { key, ...(summary === undefined ? {} : { summary }) } }));
+      return { done: true, ...(summary === undefined ? {} : { summary }) };
+    }
+    const kind = cur.todo[0] as UnitKind;
+    const ran = await this.#runOwnUnit(r.recordId, rec, kind, kind === "correction" ? undefined : rec.chair);
+    if (!ran) throw new FloorBusy();
+    return { done: false, did: `the chair's ${kind.replace("chair-", "")} after round ${r.round}` };
+  }
+
+  // ---- the scheduled turn ----------------------------------------------------------------------------------------------------------------
+
+  /**
+   * The scheduled loop's turn (host or service): reminds the owner of an idle inquiry, and gives each running meeting a few steps (its own work and its motion's procedure), so a meeting goes on with nobody calling `advance`. A meeting that
+   * fails does not stop the others.
+   */
+  async tick(by: Principal, command: { units?: number } = {}): Promise<{ reminded: readonly string[]; driven: number; failed: number }> {
+    if (!isService(by)) throw forbidden(by, "run the meetings' turn");
+    const units = command.units === undefined ? FLOOR_LIMITS.tickUnits : command.units;
+    const { reminded } = await this.sweep(by);
+    let driven = 0, failed = 0;
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id;
+        const b = a.body as unknown as FloorBody;
+        if (b.state !== "running") continue;
+        try { await this.drive(by, { recordId: b.recordId, maxUnits: units }); driven += 1; } catch { failed += 1; }
+      }
+      if (page.length < 200) break;
+    }
+    return { reminded, driven, failed };
+  }
+
+  /** The meetings whose owner inquiry is open, oldest first (the Needs-you list shows each until the owner says they are done). Owner only. */
+  async openInquiries(viewer: Principal, limit: number): Promise<{ items: readonly { recordId: string; projectId: string; since: string; idleMinutes: number; questions: number }[]; truncated: boolean }> {
+    if (!(viewer.kind === "owner" && viewer.taskScope === undefined)) return { items: [], truncated: false };
+    const items: { recordId: string; projectId: string; since: string; idleMinutes: number; questions: number }[] = [];
+    const now = ms(this.#runner.now());
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id;
+        const b = a.body as unknown as FloorBody;
+        if (b.state !== "running" || b.inquiry === undefined) continue;
+        items.push({ recordId: b.recordId, projectId: b.projectId, since: b.inquiry.openedAt, idleMinutes: Math.max(0, Math.floor((now - ms(b.inquiry.lastActivityAt)) / 60_000)), questions: b.inquiry.questions });
+      }
+      if (page.length < 200) break;
+    }
+    items.sort((x, y) => (x.since < y.since ? -1 : x.since > y.since ? 1 : 0));
+    return { items: items.slice(0, limit), truncated: items.length > limit };
+  }
+
+  /** Whether a meeting is on the floor and running: the scheduled procedure loop leaves such a meeting to the floor's own turn. */
+  async runs(recordId: string): Promise<boolean> { return (await this.#load(recordId))?.body.state === "running"; }
 }
 
 /** A step that cannot be taken yet (a vote that cannot close before its time): not a failure. */
@@ -1535,7 +1633,7 @@ class Wait extends Error {
 function capped(b: FloorBody): FloorBody {
   const w = {
     ...b, turns: b.turns.slice(-FLOOR_LIMITS.turns), notices: b.notices.slice(-FLOOR_LIMITS.notices), held: b.held.slice(-FLOOR_LIMITS.heldAnswers), ownerAnswers: b.ownerAnswers.slice(-FLOOR_LIMITS.ownerAnswers),
-    amendments: b.amendments.slice(-FLOOR_LIMITS.amendments), chairQuestions: b.chairQuestions.slice(-FLOOR_LIMITS.chairQuestions), investigations: b.investigations.slice(-FLOOR_LIMITS.investigations), followUps: b.followUps.slice(-FLOOR_LIMITS.followUps),
+    chairQuestions: b.chairQuestions.slice(-FLOOR_LIMITS.chairQuestions), investigations: b.investigations.slice(-FLOOR_LIMITS.investigations), followUps: b.followUps.slice(-FLOOR_LIMITS.followUps),
     queue: b.queue.slice(-FLOOR_LIMITS.queue),
   };
   // storage keeps JSON: a field that is undefined is simply absent

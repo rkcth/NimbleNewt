@@ -294,6 +294,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
+  meeting_procedure: { keys: ["motionId|motionTopic"], about: "where a motion stands in the meeting procedure (card M06): the stage, the round, the objection check, rulings, the vote, and what it waits for and from whom" },
+  meeting_waiting: { keys: ["recordId|meetingTopic"], about: "what an open meeting waits on right now: the owner, a member or the chair, a tool or nothing (card M05)" },
   meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
@@ -391,6 +393,8 @@ export type StatusRequest =
   | { readonly kind: "agents"; readonly state?: string; readonly limit?: number }
   | { readonly kind: "standup_briefs"; readonly occurrenceId: string; readonly agent?: string }
   | { readonly kind: "reconnect"; readonly limit?: number }
+  | { readonly kind: "meeting_procedure"; readonly motionId: string }
+  | { readonly kind: "meeting_waiting"; readonly recordId: string }
   | { readonly kind: "meeting_desk_reads"; readonly occurrenceId: string; readonly deskRecordId?: string; readonly limit?: number }
   | { readonly kind: "activity"; readonly taskId: string; readonly latest?: boolean; readonly after?: number; readonly limit?: number };
 
@@ -398,7 +402,7 @@ export type StatusRequest =
 /** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
 export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string }
 /** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
-export type NeedKind = "question" | "approval" | "meeting-decision" | "meeting-question" | "held-resume" | "blocker";
+export type NeedKind = "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "blocker";
 /** How an item is answered: one of the named choices, or the owner's own words. */
 export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
 interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer }
@@ -583,6 +587,11 @@ export interface StatusDeps {
   /** Adopted meeting decisions that wait for the owner (card M02g). Owner only. Absent: they are not listed in the needs-you list. */
   readonly meetingDecisions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; since: string; left: number; applied: number; text?: string; topic?: string }[]; truncated: boolean }>;
   /** Questions a meeting asked the owner (card M03h; a deferred decision or agenda item asks one, card M05): the open ones across projects, oldest first. Owner only. Absent: they are not listed in the needs-you list. */
+  /** The meetings whose owner inquiry is open (card M05): each waits for the owner to say they are done with questions. Owner only. Absent: they are not listed in the needs-you list. */
+  readonly meetingInquiries?: (viewer: Principal, limit: number) => Promise<{ items: readonly { recordId: string; projectId: string; since: string; idleMinutes: number; questions: number }[]; truncated: boolean }>;
+  /** A motion's procedure as its service tells it (card M06), and what a meeting waits on (card M05): the `meeting_procedure` and `meeting_waiting` views. Absent: the views are not offered. */
+  readonly meetingProcedure?: (viewer: Principal, motionId: string) => Promise<Record<string, unknown> | undefined>;
+  readonly meetingWaiting?: (viewer: Principal, recordId: string) => Promise<{ readonly waiting: Record<string, unknown>; readonly stage?: string; readonly motionId?: string } | undefined>;
   readonly meetingQuestions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; topic: string; question: string; askedAt: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
   /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
@@ -833,6 +842,8 @@ export class StatusService {
       case "standups": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.standupLines(by, request); }
       case "standup_questions": { onlyKnown(request, ["kind", "projectId"]); return this.standupQuestionLines(by, request); }
       case "agents": { onlyKnown(request, ["kind", "state", "limit"]); return this.agentLines(by, request); }
+      case "meeting_procedure": { onlyKnown(request, ["kind", "motionId"]); return this.meetingProcedureLines(by, request.motionId); }
+      case "meeting_waiting": { onlyKnown(request, ["kind", "recordId"]); return this.meetingWaitingLines(by, request.recordId); }
       case "meeting_desk_reads": { onlyKnown(request, ["kind", "occurrenceId", "deskRecordId", "limit"]); return this.deskReadLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
@@ -1901,6 +1912,34 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** Where a motion stands in the meeting procedure, in a few lines: the stage, the round, who is waited on. A caller who may not read it reads it as missing. */
+  async meetingProcedureLines(by: Principal, motionId: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.meetingProcedure === undefined) return undefined;
+    if (typeof motionId !== "string" || motionId === "") invalid("motionId", "must be a motion ID");
+    const got = await this.#deps.meetingProcedure(by, motionId);
+    if (got === undefined) return { observedAt: this.#runner.now(), lines: [line("No meeting procedure is under way for that motion, or it is not yours to see.", cite("meeting-motion", motionId))] };
+    const w = obj(got["waiting"]);
+    const stage = typeof got["stage"] === "string" ? got["stage"] : "unknown";
+    const round = count(got["round"]);
+    const lines: Line[] = [line(`The motion's procedure is at the ${shown(stage)} stage${round === undefined ? "" : `, round ${round}`}${typeof got["fresh"] === "number" && got["fresh"] > 0 ? ` (a fresh pass after an amendment, number ${got["fresh"]})` : ""}.`, cite("meeting-motion", motionId))];
+    if (w !== undefined) lines.push(line(`It waits on ${shown(String(w["on"] ?? "nobody"))}${typeof w["why"] === "string" ? `: ${shown(w["why"], 200)}` : ""}.`, cite("meeting-motion", motionId)));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** What an open meeting waits on, in one line. */
+  async meetingWaitingLines(by: Principal, recordId: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.meetingWaiting === undefined) return undefined;
+    if (typeof recordId !== "string" || recordId === "") invalid("recordId", "must be a meeting record ID");
+    const got = await this.#deps.meetingWaiting(by, recordId);
+    if (got === undefined) return { observedAt: this.#runner.now(), lines: [line("That meeting is not being run on the floor, or it is not yours to see.", cite("meeting-record", recordId))] };
+    const w = got.waiting;
+    const kind = String(w["kind"] ?? "nothing");
+    const who = typeof w["who"] === "string" ? shown(w["who"], 80) : undefined;
+    const what = typeof w["what"] === "string" ? shown(w["what"], 200) : "";
+    const text = kind === "person" ? `The meeting waits on you: ${what}.` : kind === "agent" ? `The meeting waits on ${who ?? "a member"}: ${what}.` : kind === "tool" ? `The meeting waits on a tool for ${who ?? "a member"}: ${what}.` : `The meeting waits on nothing: ${what}.`;
+    return { observedAt: this.#runner.now(), lines: [line(text, cite("meeting-record", recordId))] };
+  }
+
   async meetingLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.meetings === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
@@ -2180,6 +2219,13 @@ export class StatusService {
       if (asked.truncated || asked.items.length > 50) truncated.push("meeting questions");
       for (const q of asked.items.slice(0, 50)) {
         all.push({ text: `A meeting asks you about ${quoted(q.topic, 80)}: ${quoted(q.question, 200)} (answer the question; the topic stays decided as the meeting left it)`, cites: [cite("owner-question", q.id, q.revision), cite("project", q.projectId)], projectId: q.projectId, since: q.askedAt, id: q.id, rank: 2, kind: "meeting-question", answer: { kind: "words" } });
+      }
+    }
+    if (this.#deps.meetingInquiries !== undefined) {
+      const open = await this.#deps.meetingInquiries(by, 51);
+      if (open.truncated || open.items.length > 50) truncated.push("meeting inquiries");
+      for (const q of open.items.slice(0, 50)) {
+        all.push({ text: `Your inquiry in a meeting is open (${q.questions} question${q.questions === 1 ? "" : "s"} so far, idle ${q.idleMinutes} minute${q.idleMinutes === 1 ? "" : "s"}): the meeting is on hold until you say you are done with questions`, cites: [cite("meeting-record", q.recordId), cite("project", q.projectId)], projectId: q.projectId, since: q.since, id: q.recordId, rank: 2, kind: "meeting-inquiry", answer: { kind: "choice", choices: ["done"] } });
       }
     }
     if (this.#deps.heldResumes !== undefined) {

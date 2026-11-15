@@ -7,8 +7,6 @@ import type { SettingDefinition } from "../configuration/settings.js";
 export interface FloorSettings {
   /** `blind`: every present member answers once, independently and without hearing anyone else, before the first statement is shown to anyone. `open`: the usual order, each hears the earlier speakers. */
   readonly firstRound: "blind" | "open";
-  /** Comment rounds before the vote (the second may check the member's own desk). 0 goes straight to the objection check. */
-  readonly commentRounds: number;
   /** The most VISIBLE output tokens one statement may have; hidden reasoning is budgeted separately. */
   readonly turnTokens: number;
   /** The most hidden reasoning tokens one turn may spend (asked of the model route; a turn that goes over is recorded). */
@@ -27,16 +25,10 @@ export interface FloorSettings {
   readonly chairSummaryPoints: number;
   /** Direct questions one member may ask per round (the answer is a short turn; depth one). 0 turns them off. */
   readonly directQuestions: number;
-  /** How many times the objection check may run again after an amendment. */
-  readonly objectionReruns: number;
-  /** Whether "needs time to research" may table the motion (the chair rules; no vote is held). */
-  readonly tabling: boolean;
   /** `shared-first`: the part of a prompt that is the same for every member comes first and byte-identical (a hosted prompt cache reuses it); `agent-first` is the ordinary order. */
   readonly promptOrder: "shared-first" | "agent-first";
   /** After this many idle minutes of an open owner inquiry the owner is reminded. */
   readonly inquiryIdleMinutes: number;
-  /** The most revision turns one voter is offered in a vote, whatever the owner's messages. */
-  readonly maxRevisionsPerVoter: number;
   /** The meeting's model-spend timebox: dollars and tokens (the owner's own questions are recorded but not counted against them). */
   readonly spendCapUsd: number;
   readonly tokenCap: number;
@@ -46,20 +38,17 @@ export interface FloorSettings {
   readonly ownerAnswerTokens: number;
   /** Whether a question to a member who is not in the room is answered from its saved checkpoint (stamped as not live). */
   readonly checkpointAnswers: boolean;
-  /** Whether an amendment after the comment rounds starts a fresh round (and a fresh vote). */
-  readonly freshRoundAfterAmendment: boolean;
 }
 
 export const FLOOR_DEFAULTS: FloorSettings = {
-  firstRound: "blind", commentRounds: 2, turnTokens: 220, hiddenReasoningTokens: 800, hangTimeoutSeconds: 120, transcriptMode: "auto", factsAboveMembers: 8, chairNotes: "once", chairQuestionCap: 2, chairReminders: 2,
-  chairSummaryPoints: 6, directQuestions: 1, objectionReruns: 2, tabling: true, promptOrder: "shared-first", inquiryIdleMinutes: 30, maxRevisionsPerVoter: 3, spendCapUsd: 5, tokenCap: 600_000, parallel: 4, ownerAnswerTokens: 400,
-  checkpointAnswers: true, freshRoundAfterAmendment: true,
+  firstRound: "blind", turnTokens: 220, hiddenReasoningTokens: 800, hangTimeoutSeconds: 120, transcriptMode: "auto", factsAboveMembers: 8, chairNotes: "once", chairQuestionCap: 2, chairReminders: 2,
+  chairSummaryPoints: 6, directQuestions: 1, promptOrder: "shared-first", inquiryIdleMinutes: 30, spendCapUsd: 5, tokenCap: 600_000, parallel: 4, ownerAnswerTokens: 400,
+  checkpointAnswers: true,
 };
 
 type Kind = { readonly choice: readonly string[] } | { readonly flag: true } | { readonly whole: readonly [number, number] } | { readonly number: readonly [number, number] };
 const TABLE: readonly { readonly name: keyof FloorSettings; readonly kind: Kind; readonly description: string }[] = [
   { name: "firstRound", kind: { choice: ["blind", "open"] }, description: "blind (default): each present member gives its view on its own, in parallel, before hearing anyone; open: each hears the earlier speakers." },
-  { name: "commentRounds", kind: { whole: [0, 5] }, description: "How many comment rounds come before the vote (default 2)." },
   { name: "turnTokens", kind: { whole: [40, 4000] }, description: "The most visible output tokens one statement may have (default 220, about 150 words); hidden reasoning is budgeted separately." },
   { name: "hiddenReasoningTokens", kind: { whole: [0, 20000] }, description: "The most hidden reasoning tokens one turn may spend (default 800); a turn that goes over is recorded." },
   { name: "hangTimeoutSeconds", kind: { whole: [5, 3600] }, description: "Seconds after which a turn that has not answered is given up on and recorded as no response (default 120); a safety, not a length limit." },
@@ -70,17 +59,13 @@ const TABLE: readonly { readonly name: keyof FloorSettings; readonly kind: Kind;
   { name: "chairReminders", kind: { whole: [0, 5] }, description: "Omitted points the chair may restate when summaries are used (default 2)." },
   { name: "chairSummaryPoints", kind: { whole: [1, 12] }, description: "The most points in the chair's summary of a round (default 6)." },
   { name: "directQuestions", kind: { whole: [0, 3] }, description: "Direct questions one member may ask another per round (default 1; 0 turns them off)." },
-  { name: "objectionReruns", kind: { whole: [0, 5] }, description: "How many times the objection check may run again after an amendment (default 2)." },
-  { name: "tabling", kind: { flag: true }, description: "Whether a member's \"needs time to research\" lets the chair table the motion with no vote (default true)." },
   { name: "promptOrder", kind: { choice: ["shared-first", "agent-first"] }, description: "shared-first (default): what is the same for every member comes first so a hosted prompt cache is reused; agent-first is the ordinary order." },
   { name: "inquiryIdleMinutes", kind: { whole: [1, 1440] }, description: "Minutes an open owner inquiry may sit idle before the owner is reminded (default 30)." },
-  { name: "maxRevisionsPerVoter", kind: { whole: [0, 10] }, description: "The most revision turns one voter is offered in one vote (default 3)." },
   { name: "spendCapUsd", kind: { number: [0, 1000] }, description: "The meeting's model-spend timebox in dollars (default 5); the owner's own questions are recorded but not counted." },
   { name: "tokenCap", kind: { whole: [1000, 50_000_000] }, description: "The meeting's model-token timebox (default 600000); the owner's own questions are recorded but not counted." },
-  { name: "parallel", kind: { whole: [1, 8] }, description: "How many members of a blind round or an objection check are asked at once (default 4)." },
+  { name: "parallel", kind: { whole: [1, 8] }, description: "How many members of a blind first round or an objection check are asked at once (default 4); what they say is written in seat order." },
   { name: "ownerAnswerTokens", kind: { whole: [40, 4000] }, description: "The visible tokens an answer to the owner may have (default 400)." },
   { name: "checkpointAnswers", kind: { flag: true }, description: "Whether a question to a member who is not in the room is answered from its saved checkpoint, stamped as not live (default true)." },
-  { name: "freshRoundAfterAmendment", kind: { flag: true }, description: "Whether an amendment made after the comment rounds starts a fresh round and a fresh vote (default true)." },
 ];
 
 const KEY = (name: string): string => `meeting.floor.${name}`;
@@ -129,14 +114,15 @@ export function applyFloorChange(base: FloorSettings, change: Readonly<Record<st
   return out as unknown as FloorSettings;
 }
 
-/** The four settings the meeting procedure (card M06) has as well: one choice for the owner. The floor follows the procedure's key unless its own `meeting.floor.*` key was set on purpose. */
-export const FLOOR_SHARED_SETTINGS: readonly (readonly [floorKey: string, procedureKey: string])[] = [
-  ["meeting.floor.commentRounds", "meeting.rounds"], ["meeting.floor.objectionReruns", "meeting.objection.reruns"], ["meeting.floor.tabling", "meeting.tabling"], ["meeting.floor.maxRevisionsPerVoter", "meeting.vote.maxRevisions"],
+/**
+ * The settings the floor had that the meeting procedure (card M06) also has, now retired: the procedure runs every motion, so there is one choice for the owner. Each stored `meeting.floor.*` value is moved to the procedure's key
+ * (`migrateRetiredSettings`) unless the owner set that one too (the procedure's own choice stays). `commentRounds` 0 is moved as 1 (the procedure always holds a comment round). `meeting.floor.freshRoundAfterAmendment` has no
+ * equivalent: the procedure always starts a fresh pass after a material amendment, so a stored false is dropped.
+ */
+export const FLOOR_RETIRED_SETTINGS: readonly { readonly from: string; readonly to: string; readonly clamp?: (value: unknown) => unknown }[] = [
+  { from: "meeting.floor.commentRounds", to: "meeting.rounds", clamp: (v) => (v === 0 ? 1 : v) },
+  { from: "meeting.floor.objectionReruns", to: "meeting.objection.reruns" },
+  { from: "meeting.floor.tabling", to: "meeting.tabling" },
+  { from: "meeting.floor.maxRevisionsPerVoter", to: "meeting.vote.maxRevisions" },
+  { from: "meeting.floor.freshRoundAfterAmendment", to: "" },
 ];
-
-/** The floor's settings from the installation's (`installationSettings`, which says whether the owner set each): see `FLOOR_SHARED_SETTINGS`. */
-export function floorSettingsFromInstallation(settings: Readonly<Record<string, { readonly value: unknown; readonly set: boolean } | undefined>>): FloorSettings {
-  const values: Record<string, unknown> = Object.fromEntries(FLOOR_SETTINGS.map((d) => [d.key, settings[d.key]?.value]));
-  for (const [own, proc] of FLOOR_SHARED_SETTINGS) if (settings[own]?.set !== true && settings[proc]?.set === true) values[own] = settings[proc]!.value;
-  return floorSettingsFrom(values);
-}

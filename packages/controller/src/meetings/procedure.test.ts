@@ -223,7 +223,8 @@ for (const backend of backends) {
     await c.pump(motion);
     assert.equal(c.script.objections.length, 4);
     for (const o of c.script.objections) {
-      assert.deepEqual(Object.keys(o).sort(), ["agent", "motion", "run", "summary"], "the check carries nothing else");
+      // routing fields only (the meeting, the pass, the other seats a floor may ask at once, whether research may table): never a transcript, a ballot or another member's answer
+      assert.deepEqual(Object.keys(o).sort(), ["agent", "fresh", "motion", "recordId", "run", "seats", "summary", "tabling"], "the check carries nothing else");
       assert.equal(o.motion.version, 1);
       assert.match(o.summary, /Round 1: 4 members spoke/);
       assert.match(o.summary, /Round 2: 4 members spoke/);
