@@ -1,6 +1,6 @@
 import type { View } from "../domain/model.js";
 import type { ParticipantRecord } from "./meetings.js";
-import type { DecisionRecordBody, MotionBody, RecordBody, SourceCite, SummaryContent, SummaryDecision, SummaryItem } from "./record-types.js";
+import type { DecisionRecordBody, MotionBody, ProcedureNote, RecordBody, SourceCite, SummaryContent, SummaryDecision, SummaryItem } from "./record-types.js";
 
 /** Whether a citation can be shared with the meeting's readers. Private records (an agent's desk, scratch) cannot: a conclusion that rests on one is published as an unverifiable claim. */
 export type Shared = (cite: SourceCite) => boolean;
@@ -12,6 +12,8 @@ export interface SummaryInput {
   readonly motions: readonly View<MotionBody>[];
   readonly decisions: readonly View<DecisionRecordBody>[];
   readonly shared: Shared;
+  /** How each motion was run (card M06). */
+  readonly procedure?: readonly ProcedureNote[];
 }
 
 const restsOnPrivate = (sources: readonly SourceCite[] | undefined, shared: Shared): boolean => (sources ?? []).some((s) => !shared(s));
@@ -86,6 +88,7 @@ export function buildSummary(input: SummaryInput): SummaryContent {
     occurrenceId: record.occurrenceId, recordId: input.recordId, title: record.title, meetingState: record.state, partial: record.state === "interrupted",
     attendance: { present, absent, didNotTakePart, ...(record.chair === undefined ? {} : { chair: record.chair }), owner: { present: record.ownerPresent, joins: record.ownerJoins } },
     keyUpdates: tagged("update"), decisions: decisionRows, adopted, applied, notApplied, dissent, unresolved, actions: tagged("action"), plan: tagged("plan"),
+    ...(input.procedure === undefined || input.procedure.length === 0 ? {} : { procedure: input.procedure.map((n) => ({ ...n })) }),
     ...(record.ownerAnswers === undefined || record.ownerAnswers.length === 0 ? {} : { ownerAnswers: record.ownerAnswers.map((a) => ({ ...a })) }),
     consistent: isConsistent(decisionRows, adopted, applied, notApplied, waiting),
     unverifiableCount: all.filter((v) => !v).length,

@@ -22,9 +22,10 @@ import { safeSlice } from "../lifecycle/handoff-cut.js";
 import {
   ENTRY_TAGS, FINAL_MOTION_STATES,
   type BallotBody, type ChangeRecord, type DecisionLogBody, type DecisionLogOutcome, type DecisionPattern, type DecisionRecordBody, type MeetingEntryBody, type EntryKind, type EntryTag, type MotionBody, type MotionState, type OpenIndexBody, type UnloggedIndexBody, type WideningWindowBody, type OwnerResponse,
-  type PlanBody, type ProposedChange, type RecordBody, type SourceCite, type MeetingSummaryBody, type SummaryContent,
+  type PlanBody, type ProcedureNote, type ProposedChange, type RecordBody, type SourceCite, type MeetingSummaryBody, type SummaryContent,
 } from "./record-types.js";
 import { buildSummary } from "./summary.js";
+import { PROCEDURE_KIND, noteOf, type ProcedureBody } from "./procedure-types.js";
 import { BALLOT_VALUES, castingOutcome, tallyOf, verdictOf, type BallotValue, type CountedBallot, type VoteOutcome, type Tally, type TieBreak } from "./votes.js";
 
 export type * from "./record-types.js";
@@ -745,6 +746,9 @@ export class MeetingRecordService {
         if (!this.#chairOrOwner(by, head.body)) throw forbidden(by, "open that vote");
         if (motion.version !== expectedVersion) throw new DomainError("stale_revision", `motion ${motion.number} is at version ${motion.version}, not ${expectedVersion}`, { currentRevision: found.revision });
         if (motion.state !== "proposed") throw new DomainError("invalid_command", `motion ${motion.number} is ${motion.state}; a vote opens on a motion that is proposed`, { field: "motionId" });
+        // The procedure (card M06): a motion that has gone through the comment rounds is voted on only when its objection check is settled. The owner's own order to open the vote is the owner's ruling and passes.
+        const proc = known<ProcedureBody>(await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", motionId)));
+        if (proc !== undefined && by.kind !== "owner" && proc.stage !== "ready") throw new DomainError("invalid_command", `motion ${motion.number} is at the ${proc.stage} stage of its procedure (${proc.stage === "ruling" ? "an objection or a request for research waits for the chair's or the owner's ruling" : "the comment rounds and the objection check come first"}); a vote opens when it is ready`, { field: "motionId" });
         const tally = tallyOf(head.body.roster, head.body.withheld, []);
         if (tally.eligible < tally.quorum) throw new DomainError("invalid_command", `only ${tally.eligible} of ${tally.roster} members can be asked and ${tally.quorum} are needed, so a binding vote is deferred; reports and discussion go on`, { field: "motionId" });
         for (const o of head.body.motions) {
@@ -2317,7 +2321,9 @@ export class MeetingRecordService {
     const ballotVoters = new Set<string>();
     for (const m of motions) if (m.decisionId !== undefined) for (const v of rec.roster) if ((await this.#runner.get("meeting-ballot", derivedId("mbl", `${m.id}:${v}`))) !== undefined) ballotVoters.add(v);
     const merged: RecordBody = { ...rec, attended: [...new Set([...rec.attended, ...ballotVoters])] };
-    return buildSummary({ recordId, record: merged, participants: occ?.participants ?? [], motions, decisions, shared: (c) => cites.get(`${c.kind}\0${c.id}`) === true });
+    const procedure: ProcedureNote[] = [];
+    for (const m of motions) { const p = known<ProcedureBody>(await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", m.id))); if (p !== undefined) procedure.push(noteOf(m.number, m.id, p, FINAL_MOTION_STATES.includes(m.state))); }
+    return buildSummary({ recordId, record: merged, participants: occ?.participants ?? [], motions, decisions, procedure, shared: (c) => cites.get(`${c.kind}\0${c.id}`) === true });
   }
 
   async #privateSources(rec: RecordBody, recordId: string): Promise<{ ref: string; cites: readonly SourceCite[] }[]> {

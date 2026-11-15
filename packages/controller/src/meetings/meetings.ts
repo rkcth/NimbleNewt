@@ -10,6 +10,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { SettingDefinition } from "../configuration/settings.js";
+import { PROCEDURE_SETTINGS } from "./procedure-settings.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { OwnerAnswerNote, RecordBody } from "./record-types.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
@@ -246,6 +247,7 @@ export const MEETING_SETTINGS: readonly SettingDefinition[] = [
   { key: "meeting.decision.steward", kind: "default", installationOnly: true, check: (v) => (typeof v === "boolean" ? v : (() => { throw "must be true or false"; })()), fallback: false, effect: "next-request", description: "Whether a steward agent may allow a meeting decision's budget raise that the approval policy would leave to you (default false: off). It answers allow or ask only, under the same per-decision limit and daily cap, and every start it allows is logged as decided by the steward. Needs the host to have configured one." },
   { key: "meeting.decision.stewardRights", kind: "default", installationOnly: true, check: (v) => (typeof v === "boolean" ? v : (() => { throw "must be true or false"; })()), fallback: false, effect: "next-request", description: "Whether the steward agent may also allow a grant of rights (default false: rights stay yours). Only matters when meeting.decision.steward is true." },
   { key: "meeting.decision.holdExpiryDays", kind: "default", installationOnly: true, check: (v) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= 365 ? v : (() => { throw "must be a whole number of days from 0 to 365"; })()), fallback: 14, effect: "next-request", description: "After how many days a meeting decision that waits for you (put back to you because of the policy or a limit) and was never answered ends as a decline, so silence never widens anything (default 14; 0 means it waits until you answer)." },
+  ...PROCEDURE_SETTINGS,
   { key: "meeting.timeZone", kind: "default", check: (v) => knownZone(v) ?? (() => { throw "must be an IANA time zone name such as Europe/Berlin"; })(), effect: "next-request", description: "The time zone meeting schedules use when they name none." },
 ];
 

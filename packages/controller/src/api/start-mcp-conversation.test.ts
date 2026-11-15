@@ -60,7 +60,8 @@ test("the owner switches the MCP door off and on again through the chat interpre
       seen.push(open.map((o) => o[2]).join(" | "));
       return JSON.stringify(open.length === 1 ? [{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }] : [{ kind: "none", reason: "no single open proposal" }]);
     }
-    const template = /\{"kind":"policy_edit".*?"basis":"owner"\}/.exec(r.system);
+    // The door's own template (the prompt holds other settings' templates too, and their order is not part of the contract).
+    const template = /\{"kind":"policy_edit","change":\{[^}]*"key":"conversation\.mcp\.enabled"[^}]*\},"evidence":[^}]*?"basis":"owner"\}/.exec(r.system);
     if (template === null || meant === undefined) return JSON.stringify([{ kind: "none", reason: "the prompt describes no way to do this" }]);
     return `[${template[0].replace("false|true", meant === "on" ? "true" : "false").replace("<their words, copied exactly>", JSON.stringify(owner))}]`;
   } };

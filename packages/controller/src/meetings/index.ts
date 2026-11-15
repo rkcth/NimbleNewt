@@ -16,3 +16,8 @@ export { SAFE_LONG_RUNNING_SETTING, safeLongRunningOf, type SafeLongRunningJobs,
 export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
 export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, WAKE_LIMITS, type WakeAttender, type WakeHostLifecycle, type WakePass } from "./wake-host.js";
 export { MeetingDeskReadService, REFUSED_OPERATIONS, type DeskReadBody, type DeskAttemptBody, type DeskReadContent, type RefusedOperation } from "./desk-reads.js";
+export {
+  MeetingProcedureService, PROCEDURE_DEFAULTS, PROCEDURE_KIND, PROCEDURE_LIMITS, PROCEDURE_SETTINGS, PROCEDURE_SETTING_KEYS, looksLikeEcho, noteOf, quotesBallot, roundSummary, seatOrder,
+  type BallotRequest, type ChairFloor, type CommentRequest, type MeetingDelivered, type FollowUp, type MeetingFloor, type ObjectionAnswer, type ObjectionRequest, type ProcedureBody, type ProcedureOptions, type ProcedureSettings, type ProcedureStage,
+  type RevisionRequest, type RulingInput, type RulingRequest, type SeatTraits, type StepResult, type Waiting, type CastingRequest,
+} from "./procedure.js";
