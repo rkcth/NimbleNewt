@@ -996,6 +996,46 @@ Arguments:
 
 Result: `{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.
 
+#### `meeting.floor.state`
+
+Where the meeting is, what it waits on, its timebox and spend. The owner also sees the chair's notes and held answers; the chair sees its own notes; a member sees where the meeting is.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+
+Result: `{ item }`.
+
+#### `meeting.floor.waiting`
+
+What the meeting waits on right now: a person (the owner), an agent or a tool.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+
+Result: `{ item: { kind, who, what, since } }`.
+
+#### `meeting.floor.chair-notes`
+
+The chair's private notes of the meeting. Owner and chair only.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+
+Result: `{ item: { notes, at, count } }`.
+
+#### `meeting.floor.needs-you`
+
+Owner only: open owner inquiries, waiting for you to say you are done with questions.
+
+Arguments:
+
+- `limit`: the most to list
+
+Result: `{ items }`.
+
 #### `meeting.record.get`
 
 A meeting record, if you may read it.
@@ -4106,6 +4146,192 @@ Arguments:
 - `commandId`: required
 
 Result: `{ replayed }`.
+
+#### `meeting.floor.start`
+
+Starts the facilitated run of a meeting that is open: the first (blind) round, the chair's work, the comment rounds, the objection check and the vote follow one step at a time. Owner, host, service or meeting.manage. Called again after the motion concludes it starts the next motion.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `motion`: { text, topic?, agendaItemId? }: the motion to put to the meeting
+- `settings`: per-meeting changes to the floor settings (meeting.floor.* names without the prefix, e.g. { "firstRound": "open" })
+- `commandId`: required
+
+Result: `{ motionId, present, absent, replayed }`.
+
+#### `meeting.floor.advance`
+
+Does the next step (one turn, one batch or one chair step) or says why nothing can be done now. The owner's questions come first.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ did, agent, phase }` or `{ waiting, phase }`.
+
+#### `meeting.floor.drive`
+
+Runs steps until nothing can be done now, the meeting is over, or `maxUnits` ran.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `maxUnits`: the most steps to run now (default 200)
+- `commandId`: required
+
+Result: `{ did, last }`.
+
+#### `meeting.floor.ask`
+
+Owner only: asks one agent of the meeting a question. It is answered at the next safe boundary (a turn being answered is not undone); an agent not in the room is answered from its saved checkpoint, marked as not live; nobody outside the roster is brought in.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `agent`: an agent (agent:name) on the roster
+- `question`: what to ask
+- `commandId`: required
+
+Result: `{ entryId, answered, queued, checkpoint?, blocked? }`.
+
+#### `meeting.floor.address`
+
+Owner only: speaks to the whole meeting (or to one agent with `agent`). Nobody gets the floor out of turn: each member hears the words with its next turn, and a voter who cast before may revise once. With `amend` the words materially amend the motion and a fresh round and vote follow.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `text`: the owner's words
+- `agent`: an agent (agent:name) on the roster
+- `amend`: { text }: the owner's words materially amend the motion; a fresh round and vote follow
+- `commandId`: required
+
+Result: `{ entryId, restarted?, revisionsOffered }`.
+
+#### `meeting.floor.inquiry-open`
+
+Owner only: opens an inquiry. The meeting's clock and turn limits stop, an open vote is held, nothing advances but the owner's questions; after the idle time set in meeting.floor.inquiryIdleMinutes the owner is reminded and it shows in the Needs-you list.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ voteHeld, replayed }`.
+
+#### `meeting.floor.inquiry-end`
+
+Owner only: done with questions. The clock runs again, a held vote resumes, voters who cast before are offered one revision turn, and the held answers are shown with the close of the vote.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ revisionsOffered, replayed }`.
+
+#### `meeting.floor.priorities`
+
+Owner only: makes agenda items urgent or normal for this meeting. Nonurgent items not reached are batched to the next meeting.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `items`: [{ itemId, urgency: urgent | normal }] agenda items
+- `commandId`: required
+
+Result: `{ changed }`.
+
+#### `meeting.floor.extend`
+
+Owner only: gives the meeting more time, model spend or tokens.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `minutes`: more minutes for the meeting
+- `usd`: more model spend in dollars
+- `tokens`: more model tokens
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.floor.configure`
+
+Owner only: changes this meeting's settings (the installation's defaults are the meeting.floor.* settings, changed with the configuration operations).
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `set`: the settings to change for this meeting
+- `commandId`: required
+
+Result: `{ settings }`.
+
+#### `meeting.floor.end`
+
+Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `reason`: why
+- `commandId`: required
+
+Result: `{ voided }`.
+
+#### `meeting.floor.cq-request`
+
+A member asks the chair to put a fact-finding question to someone else (a topic and the experience sought, never a position; within the owner's cap; not once the vote opened).
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `to`: the agent (agent:name) the chair question goes to
+- `topic`: the topic asked about
+- `experienceSought`: the experience sought (never a position)
+- `commandId`: required
+
+Result: `{ questionId }`.
+
+#### `meeting.floor.cq-challenge`
+
+A member challenges a chair question as one that seeks a position.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `questionId`: the chair question
+- `reason`: why
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.floor.cq-rule`
+
+The chair (or the owner, who can overrule) rules on a challenge; an upheld challenge withdraws the question.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `questionId`: the chair question
+- `ruling`: upheld or dismissed
+- `commandId`: required
+
+Result: `{ ok }`.
+
+#### `meeting.floor.follow-ups`
+
+Turns what the meeting left open (unresolved questions, unanswered chair questions, deeper investigations, tabled research) into owned follow-up tasks, once each; batches nonurgent unreached agenda items to the next meeting.
+
+Arguments:
+
+- `recordId`: the meeting record's ID
+- `commandId`: required
+
+Result: `{ created, deferred }`.
 
 #### `meeting.record.open`
 

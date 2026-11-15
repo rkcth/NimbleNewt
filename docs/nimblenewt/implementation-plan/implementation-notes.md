@@ -11330,3 +11330,33 @@ Reviewed `u11d-integrity` at b745befa after merging origin/main (27e8b4a8, no co
 One job of 18 failed: Windows, Node 22, shard 1 reached the 75-minute limit and was cancelled; the other 17 were green and the same shard on Node 24 took 58 minutes. Windows jobs took 43-60 minutes in the last two runs and are growing with the suite.
 
 ASSUMPTION: raise `timeout-minutes` from 75 to 100 in `.github/workflows/exhaustive.yml`, as round 3 did from 50 to 75 for the same reason. It costs nothing unless a runner is slow and weakens no test. A fourth shard (more parallel jobs, more total minutes) is the better fix when the suite grows again and needs `scripts/test-shard.mjs` to take the shard count from the matrix.
+
+
+## M05 notes (Claude agent, Sonnet 5.5, 2026-11-14): meeting facilitation and owner control, offline slice
+
+**What was lacking.** Meetings had a record (M06), desk reads (M05b), attendance (M04) and the owner's decision controls, but nothing ran a meeting: nobody decided who speaks, in what order, for how long, what the chair does between rounds, or what happens when the owner interrupts.
+
+**Done.**
+- `meetings/floor.ts` (`MeetingFloorService`): one unit of work at a time (claim, ask the model, store the reply, write to the record with fixed command IDs, commit). A crash repeats nothing and spends nothing twice. Blind first round (members answer alone, in parallel, up to `parallel`), then comment rounds, the chair's notes once, chair summary, reminders, an objection check that sees only the motion and the round summary, a chair ruling (proceed, amend, table), a fresh round after an amendment, the vote one ballot at a time (a voter is never shown another ballot; ballots are not transcript entries) and the chair's single casting vote on a tie.
+- Pure rules in `floor-text.ts` (visible-token limit with a separate hidden-reasoning budget, cut at a word; shared-first prompts; facts-style summaries above 8 members with verbatim short statements; structural chair-question check; verbatim quote check; checkpoint answers wrapped by the controller as "not live"). Settings in `floor-settings.ts`, all `meeting.floor.*`, registered in `MEETING_SETTINGS` (chat and API through the configuration service) and per meeting with `meeting.floor.configure`.
+- Chair desk read by a list of file IDs through M05b (one inspection per file, files read and quoted listed, an unquoted excerpt marked unverified, a member who comes in is asked for a correction).
+- Owner commands (owner only; the chair, a manager or a member is refused): ask one agent (next safe boundary, nothing done is undone; an absent member answers from its checkpoint, stamped not live; nobody outside the roster), address the team (heard with each member's next turn; a voter who already voted is offered one revision turn, at most `maxRevisionsPerVoter`), amend the motion (fresh round and vote), open and end an inquiry, change priorities (agenda urgency), extend time or spend, configure, end the meeting.
+- Inquiry: the meeting clock and turn limits stop, an open vote is held (record hold/resume), answers are held from the other voters and released at the close, an idle reminder after `inquiryIdleMinutes`, an open inquiry shows on the Needs-you list (`meeting.floor.needs-you`), it survives a restart.
+- Timeboxes: time (without inquiry pauses) and model spend/tokens (the owner's own questions are recorded but not counted); at the end the motion is tabled with a reason and the rest becomes follow-up work; nonurgent agenda items not reached are batched to the next meeting; a blocked budget is reported to the owner.
+- Chair questions with an owner-set cap, members may ask the chair for one, a member may challenge, the chair or the owner rules. Follow-up tasks (unanswered questions, unanswered chair questions, investigations, tabled research), once each, by stable command ID. A waiting-on view (person, agent or tool).
+- API: `meeting.floor.*` operations. Chat: ask, address, inquiry-open, inquiry-end, priorities, extend, configure, start, follow-ups, end, each by the owner's own words (meeting by title words, agent by name); the interpreter prompt describes them and every setting key.
+- Tests: `floor.test.ts` (33 scenarios, all four backends), `floor-text.test.ts`, two chat scenarios in `meeting-controls-suite.ts`. Mutation checks (apply a bug, see a test fail, restore): visible limit counting hidden tokens, owner-only check removed, answers not held during a vote, clock not paused in an inquiry, unverified quotes accepted, chair-question cap removed. All six were caught. One mutation (the cap check in the second place) survived because the same cap is checked twice; the first check was then mutated and caught.
+
+**NOT done.**
+- No model route has been wired to a real model: `options.meetingFloor.runner` is the port, and without it the floor says "unavailable". Nothing was measured against a real model (no local server was used). The M00 numbers (220 visible tokens, 800 hidden, 120 seconds) are the proposed defaults, not measured here.
+- Hidden tokens are only known when the route reports them; otherwise they count as zero.
+- Follow-up tasks carry the owner in their description ("Owner: agent:x"), because tasks have no owner field; they are not assigned.
+- `checkpointOf`, `persona`, `deskNotes` and `budget` are ports with no production implementation yet. Release/recall of attendees during an inquiry (`work`) is a port, not wired to attendance.
+- The loop that calls `advance` and `sweep` on a schedule is not wired; the owner or a host drives it with `meeting.floor.drive`.
+- Priorities by chat resolve one agenda item at a time.
+
+**ASSUMPTION lines.**
+- ASSUMPTION: the owner has not formally accepted the proposals of `m00-meeting-experiments.md`; they are built as the defaults anyway, and each is a setting the owner can change by chat and API.
+- ASSUMPTION: during an owner inquiry the owner's question text is visible to the other voters before the vote closes (smallest change; the answers are held, the questions are not).
+- ASSUMPTION: a hang timeout records "no response" and the meeting goes on; a turn waiting on a tool shows as waiting on a tool and is tried again at the next advance.
+- ASSUMPTION: the floor writes controller words as a service principal with `meeting.manage` and `meeting.read`; ballots, the casting vote and desk reads use the agent's own principal.
