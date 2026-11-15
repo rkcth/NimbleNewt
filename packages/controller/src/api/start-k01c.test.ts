@@ -3,6 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { MemoryStorage } from "../storage/index.js";
+import { createBackup } from "../backup/index.js";
 import { ModelInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "./index.js";
@@ -58,6 +60,7 @@ test("the owner configures the backup system through the state API: targets, sch
       const age = await call(boot.token, "retention.settings.set", { backupMaxAgeDays: 20 }, "r1");
       assert.ok(age.ok, JSON.stringify(age));
       assert.match(age.result.summary, /age limit \(20 days\) is shorter/);
+      assert.match(age.result.summary, /pre-upgrade snapshot is kept while the rollback period \(14 days after an upgrade\) is open/, "the answer says how long a pre-upgrade snapshot is kept");
       const counts = await call(boot.token, "retention.settings.set", { backupDaily: 3, backupWeekly: 2, backupMaxAgeDays: "default" }, "r2");
       assert.match(counts.result.summary, /counts let a backup go after about 20 days|counts and the age limit agree|counts decide/);
       // A deletion's confirmation says how long it stays, by target.
@@ -174,6 +177,35 @@ test("a purge by chat is shown with what it would delete, worked out by the cont
       assert.equal((await turn("Yes, do that."))[0].status, "applied");
       assert.deepEqual(names(join(d, "backups")), []);
       await c.services.backups!.finish();
+    } finally { await c.close(); }
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a running controller keeps a pre-upgrade snapshot while K03's rollback period is open and lets the ordinary rules take it afterwards; the owner's period is the one used (card K01c)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k01c-snap-"));
+  let clock = Date.parse("2026-11-01T10:00:00.000Z");
+  const DAY = 86_400_000;
+  try {
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], backup: { directory: join(d, "backups"), now: () => new Date(clock) } });
+    try {
+      const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+      const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+      const scratch = new MemoryStorage(); await scratch.acquireEpoch({ holder: "c", at: new Date(clock).toISOString() });
+      const snapshot = async (ms: number): Promise<string> => (await createBackup(scratch, { root: join(d, "backups"), kind: "pre-upgrade", version: "t", now: () => new Date(ms) })).manifest.name;
+      const young = await snapshot(clock - 5 * DAY); const old = await snapshot(clock - 40 * DAY);
+      const first = await call("backup.now", {}, "b1");
+      await c.services.backups!.finish();
+      assert.ok(names(join(d, "backups")).includes(young), "5 days old: inside the 14-day period, kept");
+      assert.ok(!names(join(d, "backups")).includes(old), "40 days old: past the period and the 35-day age limit, so the ordinary rules delete it");
+      assert.ok(names(join(d, "backups")).includes(first.result.item.name));
+      // The owner lengthens the period: the next snapshot of that age is kept.
+      assert.ok((await call("migration.policy.set", { rollbackPeriodDays: 30 }, "mp1")).ok);
+      const mid = await snapshot(clock - 25 * DAY);
+      clock += 3_600_000;
+      await call("backup.now", {}, "b2"); await c.services.backups!.finish();
+      assert.ok(names(join(d, "backups")).includes(mid), "inside the owner's 30-day period");
+      const said = await call("retention.settings.set", { backupDaily: 5 }, "r1");
+      assert.match(said.result.summary, /kept while the rollback period \(30 days after an upgrade\) is open/);
     } finally { await c.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

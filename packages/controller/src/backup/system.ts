@@ -448,7 +448,7 @@ export class BackupSystem {
     const state = await this.#o.config.state();
     const base = await this.#o.retention();
     const copies = await this.#copies();
-    const rules = describeRules(base);
+    const rules = describeRules({ ...base, preUpgradeDays: base.preUpgrade?.periodDays ?? null });
     const row = (id: string, name: string, kind: string, extra: Record<string, unknown>, c: { listed?: BackupInfo[]; error?: string } | undefined, t: TargetRecord | undefined) => ({
       id, name, kind, ...extra,
       ...(c?.listed === undefined ? { reachable: false, ...(c?.error === undefined ? {} : { problem: c.error }) } : { reachable: true, count: c.listed.length, ...(c.listed[0] === undefined ? {} : { newest: c.listed[0].manifest.name }) }),

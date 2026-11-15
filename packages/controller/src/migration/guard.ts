@@ -268,6 +268,21 @@ export class MigrationGuardService {
     return Date.parse(this.#now()) > Date.parse(until) ? undefined : { backTo: first.from, until };
   }
 
+  /**
+   * What the backup retention needs to know about pre-upgrade snapshots (card K01c): a snapshot is needed while the rollback period is open (K03 reads upgrades, tested pairs and the period for `release.rollback.check`, and the way back
+   * from a destructive migration is the snapshot, so both end together). `notBefore` is now minus the period; `since` the earliest upgrade still inside it; `keepNewest` while a destructive approval waits to be applied. Throws when the record cannot be read
+   * (the caller then keeps every snapshot). Undefined when the guard has no record at all yet (nothing is known, nothing may go).
+   */
+  async preUpgradeNeed(): Promise<{ readonly periodDays: number; readonly notBefore: string; readonly since?: string; readonly keepNewest?: boolean } | undefined> {
+    const { body } = await this.#state();
+    if (body === undefined) return undefined;
+    const policy = await this.effective();
+    const now = Date.parse(this.#now());
+    const notBefore = new Date(now - policy.rollbackPeriodDays * 86_400_000).toISOString();
+    const open = body.upgrades.filter((u) => Date.parse(u.at) >= now - policy.rollbackPeriodDays * 86_400_000).map((u) => u.at).sort();
+    return { periodDays: policy.rollbackPeriodDays, notBefore, ...(open[0] === undefined ? {} : { since: open[0] }), ...(body.contract !== undefined && body.contract.appliedAt === undefined ? { keepNewest: true } : {}) };
+  }
+
   async status(by: Principal): Promise<{
     schemaVersion: number; latestKnown: number; migrations: ReturnType<typeof journalView>; deferred: number[]; upgrades: readonly UpgradeRecord[]; testedPairs: readonly TestedPair[];
     rollbackPeriod: { days: number; open: boolean; since?: string; until?: string }; contract: { approvedThrough: number | null; appliedAt?: string; approvedBy?: string; waiting: boolean; refusals: string[] };

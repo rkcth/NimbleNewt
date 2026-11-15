@@ -108,6 +108,8 @@ test("user-requested deletion: material a resumable task needs is retained and s
     assert.match(done.result.backups.note, /Other disk at the latest in 10 days/);
     assert.equal(done.result.backups.holding, 1);
     assert.match(done.result.backups.note, /not altered/);
+    assert.equal(done.result.backups.preUpgradeDays, 14, "K03's rollback period, how long a pre-upgrade snapshot is kept");
+    assert.match(done.result.backups.note, /pre-upgrade snapshot is kept while the rollback period \(14 days after an upgrade\) is open/);
     assert.match(done.result.derived.indexes, /none exist/); assert.match(done.result.derived.cachedReplies, /none are stored/);
     for (const id of [rec.id, copy.id]) { const b = (await c.storage.getAggregate({ kind: "desk-record", id }))!.body as any; assert.equal(b.body, ""); assert.equal(b.title, ""); assert.equal(b.visibility, "private"); assert.ok(b.deleted.by); assert.ok(b.deleted.contentDigest.length === 64); }
     assert.equal(await c.storage.getAggregate({ kind: "summary-record", id: sum.id }), undefined, "the summary is removed");

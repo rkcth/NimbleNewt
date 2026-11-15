@@ -24,4 +24,4 @@ export { generationReport, pruneGenerations, removedText, type GenerationReport,
 export { BackupConfigService, CONFIG_DEFAULTS, MAX_TARGETS, buildTarget, describeSchedule, type ConfigBody, type ConfigChange, type PurgeRecord, type PurgeResult, type StateBody, type TargetRecord, type VerifiedMark } from "./config.js";
 export { FolderDriver, HttpDriver, TARGET_KINDS, checkedName, filesUnder, offsiteLocationProblem, safeMessage, type TargetDriver, type TargetKind, type TargetTest } from "./targets.js";
 export { BackupSystem, PRIMARY as PRIMARY_TARGET, type BackupSystemOptions, type PurgeAnswer, type TestRestoreResult } from "./system.js";
-export { describeRules, infoOf, staysUpToDays } from "./retention.js";
+export { describeRules, infoOf, neededSnapshots, snapshotWords, staysUpToDays, type PreUpgradeNeed } from "./retention.js";

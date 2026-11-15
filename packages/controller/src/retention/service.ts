@@ -1,4 +1,4 @@
-import { staysUpToDays as stays } from "../backup/retention.js";
+import { snapshotWords, staysUpToDays as stays } from "../backup/retention.js";
 import { createHash } from "node:crypto";
 import { assignmentIdOf } from "../domain/assignment-model.js";
 import { incidentSlotId } from "../projects/incidents.js";
@@ -80,6 +80,8 @@ export interface RetentionDeps {
   readonly settings: Pick<RetentionSettingsService, "effective">;
   readonly backups?: BackupPort;
   /** How long a backup stays on each extra target (card K01c): a deletion's confirmation says it by target when targets keep backups for different times. */
+  /** Card K01c: K03's rollback period in days (how long a pre-upgrade snapshot is kept), or null when no migration guard is wired (then they are kept for ever). */
+  readonly preUpgradeDays?: () => Promise<number | null>;
   readonly backupTargets?: () => Promise<readonly { readonly name: string; readonly staysUpToDays: number }[]>;
   readonly incidents?: IncidentPort;
   readonly projects?: () => Promise<readonly string[]>;
@@ -167,7 +169,7 @@ export interface DeletionReport {
   readonly recordId: string;
   readonly retained?: { kind: string; id: string; reasons: string[] }[];
   readonly derived: { copies: string[]; summaries: string[]; compactions: string[]; archives: string[]; others: string[]; indexes: string; cachedReplies: string };
-  readonly backups: { handling: string; holding: number; staysUpToDays: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string };
+  readonly backups: { handling: string; holding: number; staysUpToDays: number | null; preUpgradeDays?: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string };
   readonly deletionId?: string;
   /** Records a replay cites that the owner released in this request (`releaseReplay`): the replay steps now point at a removed record. */
   readonly replayReleased?: { kind: string; id: string; reasons: string[] }[];
@@ -1064,14 +1066,15 @@ export class RetentionService {
   }
 
   /** How the backups are handled for a deletion: left alone, and for how long they hold the text. */
-  async #backupHandling(since: string, values: RetentionValues): Promise<{ handling: string; holding: number; staysUpToDays: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string }> {
+  async #backupHandling(since: string, values: RetentionValues): Promise<{ handling: string; holding: number; staysUpToDays: number | null; preUpgradeDays?: number | null; byTarget?: readonly { name: string; staysUpToDays: number }[]; note: string }> {
     const port = this.#deps.backups;
     if (port === undefined) return { handling: "no backups are configured", holding: 0, staysUpToDays: null, note: "No backup folder is configured, so there is no backup copy to expire." };
     const holding = (await port.list()).filter((b) => b.at >= since.slice(0, 19)).length;
     const staysUpToDays = stays({ daily: values.backupDaily, weekly: values.backupWeekly, maxAgeDays: values.backupMaxAgeDays });
     const byTarget = this.#deps.backupTargets === undefined ? [] : await this.#deps.backupTargets().catch(() => []);
+    const preUpgradeDays = this.#deps.preUpgradeDays === undefined ? null : await this.#deps.preUpgradeDays().catch(() => null);
     const theTargets = byTarget.length === 0 ? "" : ` On the other targets: ${byTarget.map((t) => `${t.name} at the latest in ${t.staysUpToDays} days`).join("; ")}.`;
-    return { handling: "left to expire", holding, staysUpToDays, ...(byTarget.length === 0 ? {} : { byTarget }), note: `Existing backups are not altered. ${holding} of them hold the text and drop it as they fall outside the backup rule (${values.backupDaily} daily, ${values.backupWeekly} weekly${values.backupMaxAgeDays === null ? "" : `, ${values.backupMaxAgeDays} days at most`}), at the latest in ${staysUpToDays} days in the main backups folder;${theTargets} a pre-upgrade snapshot is kept until its rollback period ends. A backup made now no longer contains it.` };
+    return { handling: "left to expire", holding, staysUpToDays, preUpgradeDays, ...(byTarget.length === 0 ? {} : { byTarget }), note: `Existing backups are not altered. ${holding} of them hold the text and drop it as they fall outside the backup rule (${values.backupDaily} daily, ${values.backupWeekly} weekly${values.backupMaxAgeDays === null ? "" : `, ${values.backupMaxAgeDays} days at most`}), at the latest in ${staysUpToDays} days in the main backups folder;${theTargets} ${snapshotWords(preUpgradeDays)} A backup made now no longer contains it.` };
   }
 
   // ---- archive and restore --------------------------------------------------------------------------------------------------
