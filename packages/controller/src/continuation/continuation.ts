@@ -57,13 +57,23 @@ export interface ContinuationBody extends Omit<ContinuationInput, "durable"> {
   readonly capturedBy: string;
   readonly capturedAt: string;
 }
-interface HeadBody { readonly identity: string; readonly next: number; readonly latestComplete: number; readonly latestCompleteId?: string; readonly projectId: string }
+/** What the task's head remembers of a capture so it can be found by its checkpoint and pruned without scanning every record (card L04d). */
+interface RecentEntry { readonly id: string; readonly seq: number; readonly complete: boolean; readonly digest: string }
+interface HeadBody {
+  readonly identity: string; readonly next: number; readonly latestComplete: number; readonly latestCompleteId?: string; readonly projectId: string;
+  /** The newest captures still kept, oldest first (at most `CONTINUATION_KEEP`; the latest complete one is always among them). Absent on a head written before pruning existed. */
+  readonly recent?: readonly RecentEntry[];
+  /** The first capture `recent` covers. Captures before it (a head from before pruning) are found by scanning the records. */
+  readonly recentFrom?: number;
+}
 export interface ResumeBody { readonly taskId: string; readonly continuationId: string; readonly identity: string; readonly model: { readonly provider: string; readonly id: string }; readonly previousModel?: { readonly provider: string; readonly id: string }; readonly modelChanged: boolean; readonly after: "restart" | "model-change" | "continue"; /** How the context came back, as the host found it: never inferred by this service. Absent when the host did not say. */ readonly restoredBy?: RestoreMethod; readonly by: string; readonly at: string }
 
 /** `native-restore`: the harness continued the same stored history (its checkpoint verified). `reconstruction`: the context was rebuilt from recorded material, so it is not the original. `restart`: nothing of the conversation came back; the work begins again. */
 export type RestoreMethod = "native-restore" | "reconstruction" | "restart";
 export const RESTORE_METHODS: readonly RestoreMethod[] = ["native-restore", "reconstruction", "restart"];
 
+/** How many captures of one task are kept (card L04d): when a newer capture would make it more, the oldest is deleted in the same write, except the latest complete one, which is always kept. */
+export const CONTINUATION_KEEP = 50;
 export const CONTINUATION_LIMITS = { items: 200, text: 2000, ranges: 200, tools: 50, /** The longest summary lineage a capture accepts before folding it (card C07q). */ lineage: 10_000 } as const;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
@@ -129,8 +139,15 @@ export class ContinuationService {
         const { durable: _unused, ...rest } = input;
         void _unused;
         const body: ContinuationBody = { ...rest, taskId, projectId: task.projectId, seq, status: complete ? "complete" : "incomplete", ...(complete ? {} : { problem: durable.error ?? "the durability check did not pass" }), capturedBy: by.id, capturedAt: this.#runner.now() };
-        const next: HeadBody = { identity: input.identity, next: seq + 1, latestComplete: complete ? seq : (head?.latestComplete ?? 0), ...(complete ? { latestCompleteId: id } : head?.latestCompleteId === undefined ? {} : { latestCompleteId: head.latestCompleteId }), projectId: task.projectId };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, head === undefined ? { type: "create", ref: headRef, body: next as unknown as JsonObject } : { type: "update", ref: headRef, expectedRevision: found!.revision, body: next as unknown as JsonObject }], detail: { taskId, seq, status: body.status }, contention: async () => new DomainError("stale_revision", "another continuation was captured at the same moment") };
+        const latestId = complete ? id : head?.latestCompleteId;
+        // The head remembers the newest captures; the oldest beyond the keep limit are deleted with this write (never the latest complete one), so a task's records do not grow without bound.
+        const recent: RecentEntry[] = [...(head?.recent ?? []), { id, seq, complete, digest: input.checkpoint.digest }];
+        const evicted: RecentEntry[] = [];
+        while (recent.length > CONTINUATION_KEEP) { const at = recent.findIndex((e) => e.id !== latestId); if (at < 0) break; evicted.push(...recent.splice(at, 1)); }
+        const next: HeadBody = { identity: input.identity, next: seq + 1, latestComplete: complete ? seq : (head?.latestComplete ?? 0), ...(latestId === undefined ? {} : { latestCompleteId: latestId }), projectId: task.projectId, recent, recentFrom: head === undefined ? 1 : (head.recentFrom ?? (head.recent === undefined ? seq : 1)) };
+        const deletes: Change[] = []; const audit: { type: string; subject: AggregateRef; detail: JsonObject }[] = [];
+        for (const e of evicted) { const old = await this.#runner.get("continuation", e.id); if (old === undefined) continue; deletes.push({ type: "delete", ref: { kind: "continuation", id: e.id }, expectedRevision: old.revision }); audit.push({ type: "continuation.pruned", subject: { kind: "continuation", id: e.id }, detail: { taskId, seq: e.seq, keep: CONTINUATION_KEEP } }); }
+        return { ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, head === undefined ? { type: "create", ref: headRef, body: next as unknown as JsonObject } : { type: "update", ref: headRef, expectedRevision: found!.revision, body: next as unknown as JsonObject }, ...deletes], detail: { taskId, seq, status: body.status }, audit, contention: async () => new DomainError("stale_revision", "another continuation was captured at the same moment") };
       },
     }));
     const stored = (await this.#runner.get("continuation", r.id))!.body as unknown as ContinuationBody;
@@ -145,6 +162,42 @@ export class ContinuationService {
     if (head.latestCompleteId === undefined) return undefined;
     const a = await this.#runner.get("continuation", head.latestCompleteId);
     return a === undefined ? undefined : { ...(a.body as unknown as ContinuationBody), id: a.id };
+  }
+
+  /**
+   * The complete continuation of a task that holds the checkpoint with this digest (the newest such), or nothing: the check of a resume follows the checkpoint the attempt restores, not only the task's latest capture
+   * (card L04d). Found through the head's list of recent captures; a task whose head predates that list is scanned (pages of 500, at most 20 reads). Same right as `latest`; a pruned capture reads as none.
+   */
+  async forCheckpoint(by: Principal, taskId: string, digest: string): Promise<(ContinuationBody & { id: string }) | undefined> {
+    const tid = checkTaskId(taskId);
+    const head = (await this.#runner.get("continuation-head", tid))?.body as unknown as HeadBody | undefined;
+    if (head === undefined || !this.#mayRead(by, head.projectId, tid) || typeof digest !== "string") return undefined;
+    for (const e of [...(head.recent ?? [])].reverse()) {
+      if (!e.complete || e.digest !== digest) continue;
+      const a = await this.#runner.get("continuation", e.id);
+      if (a !== undefined) return { ...(a.body as unknown as ContinuationBody), id: a.id };
+    }
+    if (head.recent !== undefined && (head.recentFrom ?? 1) <= 1) return undefined;
+    // Captures from before the head kept a list: found by scanning, the newest complete one with this digest.
+    let best: (ContinuationBody & { id: string }) | undefined;
+    let after: string | undefined;
+    for (let reads = 0; reads < 20; reads++) {
+      const chunk = await this.#runner.list("continuation", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of chunk) {
+        after = a.id;
+        const b = a.body as unknown as ContinuationBody;
+        if (b.taskId === tid && b.status === "complete" && b.checkpoint.digest === digest && (best === undefined || b.seq > best.seq)) best = { ...b, id: a.id };
+      }
+      if (chunk.length < 500) break;
+    }
+    return best;
+  }
+
+  /** The conversation identity the task's captures keep, from the first capture of any kind (a first capture that was incomplete fixes it too), or nothing when none was made. Same right as `latest`. */
+  async identityOf(by: Principal, taskId: string): Promise<string | undefined> {
+    const tid = checkTaskId(taskId);
+    const head = (await this.#runner.get("continuation-head", tid))?.body as unknown as HeadBody | undefined;
+    return head === undefined || !this.#mayRead(by, head.projectId, tid) ? undefined : head.identity;
   }
 
   /**
@@ -222,7 +275,8 @@ export class ContinuationService {
     }));
     const done = (await this.#runner.get("continuation-resume", r.id))!.body as unknown as ResumeBody;
     if (chosen === undefined || chosen.id !== done.continuationId) {
-      const a = (await this.#runner.get("continuation", done.continuationId))!;
+      const a = await this.#runner.get("continuation", done.continuationId);
+      if (a === undefined) throw new DomainError("not_found", "the continuation that resume was recorded against has been pruned");
       chosen = { ...(a.body as unknown as ContinuationBody), id: a.id };
     }
     return { identity: done.identity, continuation: chosen, modelChanged: done.modelChanged, ...(done.restoredBy === undefined ? {} : { restoredBy: done.restoredBy }), replayed: r.replayed };
