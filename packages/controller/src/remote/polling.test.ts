@@ -326,9 +326,13 @@ for (const backend of backends) {
       if (mid.open < 95) { stop.abort(); await Promise.all(runs); }
       assert.ok(troubles.length === 0, `trouble: ${troubles.length} first: ${troubles[0]}`);
       assert.ok(mid.open >= 95 && mid.open <= 100, `one held poll per host: ${mid.open}`);
-      const windowMs = 12_000;
-      await sleepMs(windowMs);
+      // At least 12 s, and longer (bounded) until the hosts made 1.5 polls each: on a slow runner one poll cycle takes more than its 6 s wait, and 148 polls in a fixed 12 s failed a test about
+      // progress and not about speed (CI repair round 16, macOS). The bound on too many polls is taken against the time that really went by.
+      const windowStart = Date.now();
+      await sleepMs(12_000);
+      for (let i = 0; i < 600 && c.remote.pollStats(c.dispatcherPrincipal).polls - mid.polls < 150; i++) await sleepMs(50);
       const end = c.remote.pollStats(c.dispatcherPrincipal);
+      const windowMs = Date.now() - windowStart;
       // A reconnect burst: every host's session is replaced at once (as after a network blip), each poll ends fenced, and the pollers connect again on their own jitter, inside the default limits.
       const before = troubles.length;
       const Client = hosts[0]!.client.constructor as new (o: never) => typeof hosts[0]['client'];

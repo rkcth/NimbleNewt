@@ -104,7 +104,11 @@ for (const backend of backends) {
     await c.grants.grant(c.owner, { commandId: cid("g"), taskId: c.ctx.taskId, host: "task.example.com", port: 443 });
     const { tunnel } = await c.connect(relay.forAttempt(c.ctx), "task.example.com");
     tunnel.close();
-    assert.equal((await c.grants.connections(c.owner, c.ctx.taskId)).at(-1)?.grantId?.startsWith("ngr-"), true, "a task's own grant is named as before");
+    // Found by its host: the log orders entries by their start in milliseconds, then by ID, so the refused attempt above can sort after it when both began in the same millisecond (CI repair round
+    // 16, a fast macOS runner).
+    const own = (await c.grants.connections(c.owner, c.ctx.taskId)).filter((x) => x.host === "task.example.com");
+    assert.equal(own.length, 1);
+    assert.equal(own[0]!.grantId?.startsWith("ngr-"), true, "a task's own grant is named as before");
   });
 
   suite("ending the request closes the connections it allowed at once and refuses new ones; another request for the same site keeps it open", async (c) => {
