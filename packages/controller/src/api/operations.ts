@@ -38,6 +38,7 @@ import type { DatabaseTransferService } from "../transfer/index.js";
 import { ProofRefused, type BackupConfigService, type BackupSystem, type BackupEncryption, type BackupEncryptionSettingService, type BackupKeyPinService, type BackupService, type BackupSigningService, type StagedRestore } from "../backup/index.js";
 import type { ImprovementService } from "../standups/improvements.js";
 import type { MeetingRecordService } from "../meetings/record.js";
+import type { MeetingFloorService } from "../meetings/floor.js";
 import type { MeetingProcedureService } from "../meetings/procedure.js";
 import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
 import type { AttendanceService } from "../meetings/attendance.js";
@@ -243,6 +244,8 @@ export interface Context {
   readonly policyContext?: Pick<PolicyService, "contextFor">;
   /** What the chair of a meeting read from absent members' desks and notes, and the refused attempts to change them (card M05b). */
   readonly deskReads?: Pick<MeetingDeskReadService, "reads" | "attempts">;
+  /** The meeting floor (card M05): rounds, chair work, the owner's questions and inquiry, timeboxes. */
+  readonly floor?: Pick<MeetingFloorService, "start" | "advance" | "drive" | "ask" | "address" | "openInquiry" | "endInquiry" | "setPriorities" | "extend" | "configure" | "end" | "requestChairQuestion" | "challengeQuestion" | "ruleOnChallenge" | "followUps" | "ownerPending" | "state" | "waiting" | "chairNotes">;
   /** The meeting procedure (card M06). */
   readonly procedure?: Pick<MeetingProcedureService, "begin" | "advance" | "run" | "rule" | "amend" | "overruleTabling" | "ownerMessage" | "status" | "ownerControls">;
   readonly records?: Pick<MeetingRecordService, "open" | "setChair" | "join" | "leave" | "append" | "move" | "amend" | "table" | "openVote" | "castBallot" | "closeVote" | "castingVote" | "apply" | "ownerRespond" | "ownerControls" | "ownerOutcomes" | "finish" | "summarize" | "returnOutcomes" | "sweep" | "record" | "recordFor" | "discussion" | "motion" | "ballots" | "decision" | "why" | "summary" | "latestPlan" | "decisionLog" | "learnedPatterns" | "ownerPending">;
@@ -651,6 +654,23 @@ const HELP: Readonly<Record<string, string>> = {
   expectedVersion: "the motion version you read", material: "true if the change alters what is voted on", reason: "why", limitMinutes: "how long the vote stays open", version: "the motion version voted on", value: "yes, no or abstain (casting vote: yes or no)",
   ownerMessageEntryId: "the owner's message this vote follows", response: "agree, decline or alternative", alternative: "the owner's own decision instead", interrupted: "true if the meeting was cut short", askOwner: "true to put a question to the owner for every decision the meeting deferred, or a list of { motionId, question? } (words made from the motion when left out); owner, host or service only, never an agent or a task credential", fromSeq: "first entry number", toSeq: "last entry number", limit: "at most 100",
 };
+
+const FLOOR_HELP: Readonly<Record<string, string>> = {
+  recordId: "the meeting record's ID", motion: "{ text, topic?, agendaItemId? }: the motion to put to the meeting", settings: "per-meeting changes to the floor settings (meeting.floor.* names without the prefix, e.g. { \"firstRound\": \"open\" })", maxUnits: "the most steps to run now (default 200)",
+  agent: "an agent (agent:name) on the roster", question: "what to ask", text: "the owner's words", amend: "{ text }: the owner's words materially amend the motion; a fresh round and vote follow", items: "[{ itemId, urgency: urgent | normal }] agenda items",
+  minutes: "more minutes for the meeting", usd: "more model spend in dollars", tokens: "more model tokens", set: "the settings to change for this meeting", reason: "why", to: "the agent (agent:name) the chair question goes to", topic: "the topic asked about",
+  experienceSought: "the experience sought (never a position)", acknowledged: "true to send words that repeat a cast ballot's reason while its vote is open (refused with a warning without it)", questionId: "the chair question", ruling: "upheld or dismissed", limit: "the most to list",
+};
+const floorOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["floor"]>, fields: readonly string[], result: string, shape: "command" | "view" | "limit" = "command"): Operation => ({
+  name: `meeting.floor.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, FLOOR_HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
+  run: async (c, a, id) => {
+    only(a, fields);
+    const svc = (c.floor ?? unavailable("the meeting floor")) as unknown as Record<string, (...x: unknown[]) => Promise<unknown>>;
+    if (shape === "limit") return asJson((await svc[method]!(c.principal, typeof a["limit"] === "number" ? a["limit"] : 50)) as object);
+    if (shape === "view") { const out = await svc[method]!(c.principal, a["recordId"]); if (out === undefined) throw new DomainError("not_found", "no such meeting, or none you may read"); return asJson({ item: out }); }
+    return asJson(((await svc[method]!(c.principal, { ...(kind === "command" ? { commandId: need(id) } : {}), ...a })) ?? { ok: true }) as object);
+  },
+});
 const recordOp = (name: string, kind: "query" | "command", summary: string, method: keyof NonNullable<Context["records"]>, fields: readonly string[], result: string, shape: "id" | "viewer" = "id", viewerArgs: readonly string[] = []): Operation => ({
   name: `meeting.record.${name}`, kind, summary, args: { ...Object.fromEntries(fields.map((f) => [f, HELP[f] ?? f])), ...(kind === "command" ? { commandId: "required" } : {}) }, result,
   run: async (c, a, id) => {
@@ -1166,6 +1186,25 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a, id) => { only(a, ["taskId", "first", "last", "reason"]); return asJson(await activityOf(c).markUnavailable(c.principal, { commandId: need(id), ...a } as never)); } },
   { name: "policy.context", kind: "query", summary: "The approval policy as it binds you in a project, read from the records now: which kinds of action are decided by the owner, by review or not at all, the environment tier, the approvals you hold and the latest changes. Nothing is cached, so a change the owner made is in your next read. You may ask about yourself only.", args: { projectId: "the project" }, result: "`{ context: { … } | null }`; null when the project does not exist or you hold nothing in it.",
     run: async (c, a) => { only(a, ["projectId"]); return asJson({ context: (await policyContextOf(c).contextFor(c.principal, a["projectId"] as string)) ?? null }); } },
+  floorOp("start", "command", "Starts the facilitated run of a meeting that is open: the first (blind) round, the chair's work, the comment rounds, the objection check and the vote follow one step at a time. Owner, host, service or meeting.manage. Called again after the motion concludes it starts the next motion.", "start", ["recordId", "motion", "settings"], "`{ motionId, present, absent, replayed }`."),
+  floorOp("advance", "command", "Does the next step (one turn, one batch or one chair step) or says why nothing can be done now. The owner's questions come first.", "advance", ["recordId"], "`{ did, agent, phase }` or `{ waiting, phase }`."),
+  floorOp("drive", "command", "Runs steps until nothing can be done now, the meeting is over, or `maxUnits` ran.", "drive", ["recordId", "maxUnits"], "`{ did, last }`."),
+  floorOp("ask", "command", "Owner only: asks one agent of the meeting a question. It is answered at the next safe boundary (a turn being answered is not undone); an agent not in the room is answered from its saved checkpoint, marked as not live; nobody outside the roster is brought in.", "ask", ["recordId", "agent", "question", "acknowledged"], "`{ entryId, answered, queued, checkpoint?, blocked? }`."),
+  floorOp("address", "command", "Owner only: speaks to the whole meeting (or to one agent with `agent`). Nobody gets the floor out of turn: each member hears the words with its next turn, and a voter who cast before may revise once. With `amend` the words materially amend the motion and a fresh round and vote follow.", "address", ["recordId", "text", "agent", "amend", "acknowledged"], "`{ entryId, restarted?, revisionsOffered }`."),
+  floorOp("inquiry-open", "command", "Owner only: opens an inquiry. The meeting's clock and turn limits stop, an open vote is held, nothing advances but the owner's questions; after the idle time set in meeting.floor.inquiryIdleMinutes the owner is reminded and it shows in the Needs-you list.", "openInquiry", ["recordId"], "`{ voteHeld, replayed }`."),
+  floorOp("inquiry-end", "command", "Owner only: done with questions. The clock runs again, a held vote resumes, voters who cast before are offered one revision turn, and the held answers are shown with the close of the vote.", "endInquiry", ["recordId"], "`{ revisionsOffered, replayed }`."),
+  floorOp("priorities", "command", "Owner only: makes agenda items urgent or normal for this meeting. Nonurgent items not reached are batched to the next meeting.", "setPriorities", ["recordId", "items"], "`{ changed }`."),
+  floorOp("extend", "command", "Owner only: gives the meeting more time, model spend or tokens.", "extend", ["recordId", "minutes", "usd", "tokens"], "`{ ok }`."),
+  floorOp("configure", "command", "Owner only: changes this meeting's settings (the installation's defaults are the meeting.floor.* settings, changed with the configuration operations).", "configure", ["recordId", "set"], "`{ settings }`."),
+  floorOp("end", "command", "Owner only: ends the meeting. Nothing is asked after; nothing written is undone. The chair cannot prevent it.", "end", ["recordId", "reason"], "`{ voided }`."),
+  floorOp("cq-request", "command", "A member asks the chair to put a fact-finding question to someone else (a topic and the experience sought, never a position; within the owner's cap; not once the vote opened).", "requestChairQuestion", ["recordId", "to", "topic", "experienceSought"], "`{ questionId }`."),
+  floorOp("cq-challenge", "command", "A member challenges a chair question as one that seeks a position.", "challengeQuestion", ["recordId", "questionId", "reason"], "`{ ok }`."),
+  floorOp("cq-rule", "command", "The chair (or the owner, who can overrule) rules on a challenge; an upheld challenge withdraws the question.", "ruleOnChallenge", ["recordId", "questionId", "ruling"], "`{ ok }`."),
+  floorOp("follow-ups", "command", "Turns what the meeting left open (unresolved questions, unanswered chair questions, deeper investigations, tabled research) into owned follow-up tasks, once each; batches nonurgent unreached agenda items to the next meeting.", "followUps", ["recordId"], "`{ created, deferred }`."),
+  floorOp("state", "query", "Where the meeting is, what it waits on, its timebox and spend. The owner also sees the chair's notes and held answers; the chair sees its own notes; a member sees where the meeting is.", "state", ["recordId"], "`{ item }`.", "view"),
+  floorOp("waiting", "query", "What the meeting waits on right now: a person (the owner), an agent or a tool.", "waiting", ["recordId"], "`{ item: { kind, who, what, since } }`.", "view"),
+  floorOp("chair-notes", "query", "The chair's private notes of the meeting. Owner and chair only.", "chairNotes", ["recordId"], "`{ item: { notes, at, count } }`.", "view"),
+  floorOp("needs-you", "query", "Owner only: open owner inquiries, waiting for you to say you are done with questions.", "ownerPending", ["limit"], "`{ items }`.", "limit"),
   recordOp("open", "command", "Opens the record of a live meeting that is still planned (owner, host, service or meeting.manage in the project). The roster is the occurrence's; those it could not reach are absent. Without a chair a tie fails.", "open", ["occurrenceId", "chair"], "`{ id, replayed }`."),
   recordOp("set-chair", "command", "Changes the chair (or clears it with null).", "setChair", ["recordId", "chair"], "`{ ok }`."),
   recordOp("join", "command", "The caller joins the meeting.", "join", ["recordId"], "`{ ok }`."),

@@ -143,6 +143,9 @@ export class MeetingProcedureService {
         const again2 = known<RecordBody>(await this.#runner.get("meeting-record", m.recordId))!;
         if (m.state !== "proposed") throw new DomainError("invalid_command", `motion ${m.number} is ${m.state}; a procedure begins on a proposed motion`, { field: "motionId" });
         if ((await this.#runner.get(PROCEDURE_KIND, id)) !== undefined) throw new DomainError("invalid_command", `motion ${m.number} already has a procedure`, { field: "motionId" });
+        // A motion the meeting floor (card M05) moved is run by the floor, through its own rounds and vote: two services never drive one motion (nor write its statements, rulings and ballots twice).
+        const floor = known<{ motionId?: string; state?: string }>(await this.#runner.get("meeting-floor", derivedId("mfl", m.recordId)));
+        if (floor?.motionId === motionId && floor.state === "running") throw new DomainError("invalid_command", `motion ${m.number} is run by the meeting floor; its procedure cannot begin as well`, { field: "motionId" });
         const body: ProcedureBody = {
           recordId: m.recordId, projectId: m.projectId, motionId, settings, seats, stage: command.skipComments === true ? "check" : "comment", version: m.version, roundSince: again2.nextSeq, round: 1, rounds: command.skipComments === true ? 0 : settings.rounds,
           asked: [], spoken: [], skipped: [], stances: [], summaries: [], check: { run: 1, answers: [] }, dissent: [], rulings: [], followUps: [], fresh: 0, voteAsked: [], ballotSeq: [], noBallot: [], offers: [], offersCapped: [],
