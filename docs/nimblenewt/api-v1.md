@@ -4212,6 +4212,7 @@ Arguments:
 - `recordId`: the meeting record's ID
 - `agent`: an agent (agent:name) on the roster
 - `question`: what to ask
+- `acknowledged`: true to send words that repeat a cast ballot's reason while its vote is open (refused with a warning without it)
 - `commandId`: required
 
 Result: `{ entryId, answered, queued, checkpoint?, blocked? }`.
@@ -4226,6 +4227,7 @@ Arguments:
 - `text`: the owner's words
 - `agent`: an agent (agent:name) on the roster
 - `amend`: { text }: the owner's words materially amend the motion; a fresh round and vote follow
+- `acknowledged`: true to send words that repeat a cast ballot's reason while its vote is open (refused with a warning without it)
 - `commandId`: required
 
 Result: `{ entryId, restarted?, revisionsOffered }`.

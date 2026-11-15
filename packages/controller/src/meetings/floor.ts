@@ -11,6 +11,9 @@ import type { MeetingRecordService } from "./record.js";
 import type { MeetingDeskReadService } from "./desk-reads.js";
 import type { MeetingService } from "./meetings.js";
 import type { MotionBody, RecordBody, SourceCite } from "./record-types.js";
+import { PROCEDURE_KIND } from "./procedure-types.js";
+import { quotesBallot } from "./procedure-rules.js";
+import type { BallotBody } from "./record-types.js";
 import { FLOOR_DEFAULTS, applyFloorChange, type FloorSettings } from "./floor-settings.js";
 import {
   accountTurn, buildPrompt, chairQuestionRefusal, estimateTokens, parseJsonObject, parseObjection, parseStatement, parseVote, quoteOccurs, recordText, transcriptView, usesFacts, wrapCheckpointAnswer,
@@ -139,6 +142,29 @@ export class MeetingFloorService {
 
   #present(rec: RecordBody): string[] { return rec.roster.filter((a) => rec.attended.includes(a) && !rec.withheld.includes(a)); }
   #absent(rec: RecordBody): string[] { return rec.roster.filter((a) => !rec.attended.includes(a) || rec.withheld.includes(a)); }
+
+  /**
+   * The meeting's motion whose vote is open (voting, or tied and waiting for the casting vote), whoever runs it: the floor's own vote, the meeting procedure's (card M06) or one opened on the record. One vote at a time, so the newest
+   * such motion is the one. Answers to the owner are held from the voters while it is there, and an inquiry holds it.
+   */
+  async #votingMotion(rec: RecordBody): Promise<(MotionBody & { id: string }) | undefined> {
+    for (const id of [...rec.motions].reverse()) {
+      const m = (await this.#deps.records.motion(this.#deps.service, id)) as unknown as MotionBody | undefined;
+      if (m !== undefined && (m.state === "voting" || m.state === "tie-pending")) return { ...m, id };
+    }
+    return undefined;
+  }
+
+  /** Answers to the owner held while a vote was open go into the transcript once no vote is open, each once (stable command IDs), and leave the floor's list. */
+  async #releaseHeld(by: Principal, recordId: string, rec: RecordBody): Promise<FloorBody> {
+    const f = await this.#need(recordId);
+    const keyOf = (h: FloorBody["held"][number]): string => hash(h.agent, h.at, h.question, h.text);
+    for (const h of f.body.held) {
+      await this.#deps.records.append(this.#deps.service, { commandId: `fl-${base(recordId)}-hr-${keyOf(h)}`, recordId, kind: "statement", speaker: h.agent, text: `(answer to the owner, released now that the vote has closed) ${recordText(h.text, FLOOR_LIMITS.text - 80)}` });
+    }
+    const done = new Set(f.body.held.map(keyOf));
+    return this.#update(recordId, by, `release-held-${hash(...done)}`, (b) => (b.held.some((h) => done.has(keyOf(h))) ? { ...b, held: b.held.filter((h) => !done.has(keyOf(h))) } : undefined));
+  }
 
   // ---- authorization ---------------------------------------------------------------------------------------------------------------------
 
@@ -281,7 +307,9 @@ export class MeetingFloorService {
       } as StoredReply["items"][number];
     } catch (error) {
       if (error instanceof TurnWaitsOnTool) return { agent: input.agent, text: "", noResponse: `waiting on ${error.tool}`, waitsOnTool: error.tool, usage: zero, deliveredUpTo: input.deliveredUpTo };
-      return { agent: input.agent, text: "", noResponse: recordText(error instanceof Error ? error.message : String(error), 200) || "no answer", usage: zero, deliveredUpTo: input.deliveredUpTo };
+      // The route's own error text can carry a host path, an address or a key: it is not kept. The hang timeout and a refusal the controller itself raised say what happened in their own words.
+      const said = ac.signal.aborted ? `no answer within ${b.settings.hangTimeoutSeconds} seconds` : error instanceof DomainError ? `the call was refused (${error.code})` : "the model call failed";
+      return { agent: input.agent, text: "", noResponse: said, usage: zero, deliveredUpTo: input.deliveredUpTo };
     } finally { cancel(); }
   }
 
@@ -298,7 +326,7 @@ export class MeetingFloorService {
   }
 
   /** The next unit of work, or why there is none. Pure: it reads the floor and the meeting only. */
-  #plan(b: FloorBody, rec: RecordBody, now: string): { unit: Inflight } | { wait: Extract<AdvanceResult, { waiting: string }>["waiting"]; detail?: string } {
+  #plan(b: FloorBody, rec: RecordBody, now: string, driven = false): { unit: Inflight } | { wait: Extract<AdvanceResult, { waiting: string }>["waiting"]; detail?: string } {
     const id = (kind: UnitKind): string => `u${b.unitSeq + 1}-${kind}`;
     const mk = (kind: UnitKind, extra: Partial<Inflight> = {}): { unit: Inflight } => ({ unit: { id: id(kind), kind, since: now, ...extra } });
     if (b.state === "ended" || rec.state !== "open") return { wait: "meeting-ended" };
@@ -313,6 +341,10 @@ export class MeetingFloorService {
     if (boxed !== undefined && b.timebox === undefined && b.phase !== "done") return mk("wrap-up");
     if (b.timebox !== undefined && b.vote !== undefined && !b.vote.closed) return this.#planVote(b, rec, mk);
     if (front !== undefined) return mk(front.kind as UnitKind, { agent: front.agent, queueId: front.id });
+    // The floor runs the rounds, the chair's work and the vote only for a motion it moved itself. A floor started without a motion carries the owner's controls only, and a motion run by the
+    // meeting procedure (card M06) is the procedure's: the two never drive one motion.
+    if (b.motionId === undefined) return { wait: "none", detail: "no motion is on the floor; it carries the owner's questions and controls only" };
+    if (driven) return { wait: "none", detail: "the motion is run by the meeting procedure, not by the floor" };
     switch (b.phase) {
       case "round": {
         const joiner = this.#present(rec).find((a) => !b.order.includes(a));
@@ -363,7 +395,10 @@ export class MeetingFloorService {
     const recordId = RECORD_ID.test(command.recordId) ? command.recordId : invalid("recordId", "is not a meeting record ID");
     const rec = await this.#meeting(recordId);
     if (!this.#controls(by, rec.projectId)) throw forbidden(by, "run that meeting");
-    return this.#advance(by, recordId, rec, false);
+    const r = await this.#advance(by, recordId, rec, false);
+    // A manager agent that runs the meeting is told a ballot was taken, never whose (it may be a voter itself).
+    if (!isService(by) && "did" in r && (r.did === "ballot" || r.did === "revision")) { const { agent: _a, ...rest } = r; void _a; return rest; }
+    return r;
   }
 
   async #advance(by: Principal, recordId: string, rec0: View<RecordBody>, onlyOwner: boolean): Promise<AdvanceResult> {
@@ -379,7 +414,9 @@ export class MeetingFloorService {
     let unit = f.body.inflight;
     if (unit === undefined) {
       rec = await this.#meeting(recordId);
-      const plan = this.#plan(f.body, rec, now);
+      if (f.body.held.length > 0 && rec.state === "open" && (await this.#votingMotion(rec)) === undefined) f = { agg: f.agg, body: await this.#releaseHeld(by, recordId, rec) };
+      const driven = f.body.motionId !== undefined && (await this.#runner.get(PROCEDURE_KIND, derivedId("mpr", f.body.motionId))) !== undefined;
+      const plan = this.#plan(f.body, rec, now, driven);
       if ("wait" in plan) return { waiting: plan.wait, phase: f.body.phase, ...(plan.detail === undefined ? {} : { detail: plan.detail }) };
       if (onlyOwner && !plan.unit.owner) return { waiting: "owner", phase: f.body.phase, detail: "only the owner's questions run now" };
       const claimed = plan.unit;
@@ -421,7 +458,8 @@ export class MeetingFloorService {
     }
     let fx: Record<string, unknown>;
     try { fx = await this.#apply(by, recordId, fresh, recNow, unit, reply); } catch (error) {
-      if (error instanceof Wait) { await this.#update(recordId, by, `wait-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...b, inflight: undefined } : undefined)); return { waiting: error.reason, phase: fresh.phase, detail: error.message }; }
+      // The step cannot be taken now: the unit is dropped (asked again later) and what the call cost is still counted.
+      if (error instanceof Wait) { await this.#update(recordId, by, `wait-${unit.id}`, (b) => (b.inflight?.id === unit.id ? { ...this.#account(b, unit, reply!), inflight: undefined } : undefined)); return { waiting: error.reason, phase: fresh.phase, detail: error.message }; }
       throw error;
     }
     const done = await this.#update(recordId, by, `commit-${unit.id}`, (b) => (b.inflight?.id === unit.id ? this.#reduce(b, recNow, unit, reply!, fx) : undefined));
@@ -588,6 +626,12 @@ export class MeetingFloorService {
     return r.id;
   }
 
+  /** An inquiry opened while a ballot was being asked holds the vote: the answer is not cast now, and the voter is asked again once the vote resumes (with what was said meanwhile). */
+  async #notHeld(motionId: string): Promise<void> {
+    const m = (await this.#deps.records.motion(this.#deps.service, motionId)) as unknown as MotionBody | undefined;
+    if (m?.heldAt !== undefined) throw new Wait("owner", "the vote is held for the owner's inquiry; the ballot is asked again when it resumes");
+  }
+
   async #voterPrincipal(agent: string): Promise<Principal | undefined> { return this.#deps.principalOf(agent).catch(() => undefined); }
 
   /** Writes what the reply means into the meeting record (every write has an ID derived from the unit, so a repeat after a crash writes nothing twice) and returns what the reduction needs. */
@@ -651,8 +695,8 @@ export class MeetingFloorService {
             if (inv !== undefined) invest.push(inv);
             text = [answer, completed.length === 0 ? "" : `Done: ${completed.join("; ")}`, proposed.length === 0 ? "" : `Proposed, not done: ${proposed.join("; ")}`, stale.length === 0 ? "" : `Stale sources (changed since the agent looked): ${stale.join("; ")}`, invest.length === 0 ? "" : `Needs deeper work than this meeting (follow-up): ${invest.join("; ")}`].filter((x) => x !== "").join("\n");
           }
-          const vote = b.vote;
-          const holding = vote !== undefined && vote.opened && vote.closed !== true;
+          // held while any vote of the meeting is open, the floor's own or one the meeting procedure (card M06) or the record runs
+          const holding = (await this.#votingMotion(rec)) !== undefined;
           fx["held"] = holding;
           fx["text"] = recordText(text, FLOOR_LIMITS.text);
           fx["completed"] = completed; fx["proposed"] = proposed; fx["stale"] = stale; fx["invest"] = invest;
@@ -666,6 +710,7 @@ export class MeetingFloorService {
           const v = b.vote;
           const voter = await this.#voterPrincipal(item!.agent);
           if (q === undefined || v === undefined || item!.noResponse !== undefined || voter === undefined) break;
+          await this.#notHeld(v.motionId);
           const parsed = parseVote(item!.text);
           const old = await this.#ownBallot(b, item!.agent);
           const value = parsed.value ?? (old?.value as "yes" | "no" | "abstain" | undefined);
@@ -806,6 +851,7 @@ export class MeetingFloorService {
           const voter = await this.#voterPrincipal(item!.agent);
           const parsed = parseVote(item!.text);
           if (item!.noResponse !== undefined || voter === undefined || parsed.value === undefined) { fx["noResponse"] = item!.noResponse ?? (voter === undefined ? "the agent has no credential" : "no valid ballot in the answer"); break; }
+          await this.#notHeld(v.motionId);
           fx["seq"] = rec.nextSeq;
           await this.#deps.records.castBallot(voter, { commandId: `fl-${base(recordId)}-${unit.id}-b`, motionId: v.motionId, version: v.version, value: parsed.value, reason: recordText(parsed.reason === "" ? `${parsed.value} (no reason given)` : parsed.reason, 480) } as never);
           fx["cast"] = parsed.value;
@@ -816,8 +862,8 @@ export class MeetingFloorService {
           let closed: { state: string; decisionId?: string };
           try { closed = await this.#deps.records.closeVote(this.#deps.service, { commandId: `fl-${base(recordId)}-${unit.id}-cl`, motionId: v.motionId }); }
           catch (error) { if (error instanceof DomainError && error.code === "invalid_command") throw new Wait("vote-time", error.message); throw error; }
+          // answers held from the voters are released by the next step, once no vote is open (`#releaseHeld`)
           fx["state"] = closed.state; fx["decisionId"] = closed.decisionId;
-          if (closed.state !== "tie-pending") { let n = 0; for (const h of b.held) { await this.#say(recordId, unit, `h${n}`, h.agent, `(answer to the owner, released now that the vote has closed) ${h.text}`); n += 1; } }
           break;
         }
         case "casting": {
@@ -827,7 +873,6 @@ export class MeetingFloorService {
           if (chairP === undefined || item!.noResponse !== undefined || (parsed.value !== "yes" && parsed.value !== "no")) { fx["noAnswer"] = true; break; }
           const closed = await this.#deps.records.castingVote(chairP, { commandId: `fl-${base(recordId)}-${unit.id}-cv`, motionId: v.motionId, value: parsed.value, reason: recordText(parsed.reason === "" ? `${parsed.value} (casting vote)` : parsed.reason, 480) });
           fx["state"] = closed.state; fx["decisionId"] = closed.decisionId;
-          let n = 0; for (const h of b.held) { await this.#say(recordId, unit, `h${n}`, h.agent, `(answer to the owner, released now that the vote has closed) ${h.text}`); n += 1; }
           break;
         }
         case "wrap-up": {
@@ -882,7 +927,8 @@ export class MeetingFloorService {
     return b.settings.freshRoundAfterAmendment ? this.#beginRound({ ...next, round: b.round }, rec, b.round + 1, true) : { ...next, phase: "objection", todo: [] };
   }
 
-  #reduce(b: FloorBody, rec: RecordBody, unit: Inflight, reply: StoredReply, fx: Record<string, unknown>): FloorBody {
+  /** What every unit leaves on the floor, whatever it did: its spend, its turn log, its no-response notices; the claim cleared. */
+  #account(b: FloorBody, unit: Inflight, reply: StoredReply): FloorBody {
     const now = this.#runner.now();
     const owner = unit.owner === true;
     // every unit: spend, turn log, claim cleared
@@ -905,9 +951,12 @@ export class MeetingFloorService {
     }
     const notices: { at: string; kind: string; text: string }[] = [];
     for (const it of reply.items) if (it.noResponse !== undefined) notices.push({ at: now, kind: "no-response", text: `${it.agent} gave no answer (${it.noResponse}) in ${unit.kind}` });
-    let n: FloorBody = {
-      ...b, inflight: undefined, waitingTool: undefined, spend: { ...b.spend, usd, tokens, hiddenTokens: hidden, ownerUsd, ownerTokens, calls }, turns: [...b.turns, ...logs], deliveries, notices: [...b.notices, ...notices],
-    };
+    return { ...b, inflight: undefined, waitingTool: undefined, spend: { ...b.spend, usd, tokens, hiddenTokens: hidden, ownerUsd, ownerTokens, calls }, turns: [...b.turns, ...logs], deliveries, notices: [...b.notices, ...notices] };
+  }
+
+  #reduce(b: FloorBody, rec: RecordBody, unit: Inflight, reply: StoredReply, fx: Record<string, unknown>): FloorBody {
+    const now = this.#runner.now();
+    let n: FloorBody = this.#account(b, unit, reply);
     const dropQueue = (): FloorBody => ({ ...n, queue: n.queue.filter((q) => q.id !== unit.queueId) });
     const statements = (fx["statements"] ?? {}) as Record<string, { entryId: string; parsed: ReturnType<typeof parseStatement> }>;
     const note = (round: number, agent: string, stance: string, base0: FloorBody): FloorBody => ({ ...base0, stances: { ...base0.stances, [String(round)]: { ...(base0.stances[String(round)] ?? {}), [agent]: stance } } });
@@ -1026,13 +1075,13 @@ export class MeetingFloorService {
         const v = n.vote!;
         const state = fx["state"] as string;
         const echo = this.#echo(n);
-        if (state === "tie-pending") return { ...n, vote: { ...v, closed: true, tie: true }, held: n.held };
-        return { ...n, phase: "done", held: [], vote: { ...v, closed: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}) }, ...(echo === undefined ? {} : { echo }) };
+        if (state === "tie-pending") return { ...n, vote: { ...v, closed: true, tie: true } };
+        return { ...n, phase: "done", vote: { ...v, closed: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}) }, ...(echo === undefined ? {} : { echo }) };
       }
       case "casting": {
         const v = n.vote!;
         if (fx["noAnswer"] === true) return { ...n, vote: { ...v, castingAsked: true } };
-        return { ...n, phase: "done", held: [], vote: { ...v, tie: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}), castingAsked: true } };
+        return { ...n, phase: "done", vote: { ...v, tie: true, ...(typeof fx["decisionId"] === "string" ? { decisionId: fx["decisionId"] } : {}), castingAsked: true } };
       }
       case "wrap-up": {
         const reason = ((fx["reason"] as string | undefined) ?? "time") as "time" | "spend";
@@ -1055,6 +1104,22 @@ export class MeetingFloorService {
   async #ownerMessage(owner: Principal, recordId: string, commandId: string, text: string): Promise<{ id: string; seq: number }> {
     const r = await this.#deps.records.append(owner, { commandId, recordId, kind: "owner-message", text: recordText(text, FLOOR_LIMITS.text) });
     return { id: r.id, seq: r.seq };
+  }
+
+  /**
+   * The owner's words go to everyone who has the floor after them. While a vote is open, words that repeat a cast ballot's reason would hand that ballot to the other voters, so they are refused with a warning until sent again with
+   * `acknowledged` true: the same check as the meeting procedure's owner message (card M06), on whichever vote of the meeting is open.
+   */
+  async #ballotEcho(rec: RecordBody, text: string, acknowledged: unknown): Promise<void> {
+    if (acknowledged !== undefined && typeof acknowledged !== "boolean") invalid("acknowledged", "is true or false");
+    const voting = await this.#votingMotion(rec);
+    if (voting === undefined || acknowledged === true) return;
+    for (const voter of rec.roster) {
+      const ballot = (await this.#runner.get("meeting-ballot", derivedId("mbl", `${voting.id}:${voter}`)))?.body as unknown as BallotBody | undefined;
+      if (ballot !== undefined && quotesBallot(text, ballot.reason)) {
+        throw new DomainError("invalid_command", `These words repeat the reason of ${voter}'s ballot while the vote on motion ${voting.number} is open. Everyone who speaks after them will see those words, so ballots stop being private. Send them again with acknowledged true if that is what you want.`, { field: "acknowledged" });
+      }
+    }
   }
 
   /** Queues a revision turn (keep or revise, with a reason) for every voter who cast before the owner message `trigger`, within the voter's maximum; at most one per voter per message. */
@@ -1082,8 +1147,8 @@ export class MeetingFloorService {
    * transcript at once, or - while a vote is open - held and shown to the owner only until the vote closes. A voter who cast before the question is offered one short revision turn. A member who is not in the room is answered from its
    * saved checkpoint, stamped as not live; nobody outside the roster is ever brought in. The meeting's turn limit and timebox do not apply; the spend is recorded, and a budget that is reached is reported to the owner.
    */
-  async ask(by: Principal, command: NoActor & { recordId: string; agent: string; question: string }): Promise<{ entryId: string; answered: boolean; queued: boolean; checkpoint?: true; blocked?: string }> {
-    onlyKnown(command, ["commandId", "recordId", "agent", "question"]);
+  async ask(by: Principal, command: NoActor & { recordId: string; agent: string; question: string; acknowledged?: boolean }): Promise<{ entryId: string; answered: boolean; queued: boolean; checkpoint?: true; blocked?: string }> {
+    onlyKnown(command, ["commandId", "recordId", "agent", "question", "acknowledged"]);
     this.#ownerOnly(by, "ask a meeting member a question");
     const { recordId, rec } = await this.#open(command.recordId);
     const agent = typeof command.agent === "string" && AGENT.test(command.agent) ? command.agent : invalid("agent", "is not an agent");
@@ -1093,6 +1158,7 @@ export class MeetingFloorService {
     if (!rec.roster.includes(agent) && agent !== rec.chair) invalid("agent", "is not in this meeting's roster; nobody outside the roster is brought in");
     const checkpoint = !present;
     if (checkpoint && (!f.body.settings.checkpointAnswers || this.#deps.checkpointOf === undefined)) throw new DomainError("invalid_command", `${agent} is not in the room, and answers from checkpoints are off`, { field: "agent" });
+    await this.#ballotEcho(rec, question, command.acknowledged);
     const msg = await this.#ownerMessage(by, recordId, `fl-ask-${base(recordId)}-${hash(by.id, command.commandId)}`, `Question to ${agent}: ${question}`);
     if (f.body.ownerAnswers.some((a) => a.entryId === msg.id)) return { entryId: msg.id, answered: true, queued: false, ...(checkpoint ? { checkpoint: true as const } : {}) };
     const now = this.#runner.now();
@@ -1101,12 +1167,16 @@ export class MeetingFloorService {
     if (f.body.inquiry !== undefined && !checkpoint) await this.#deps.work?.recall(recordId, agent).catch(() => undefined);
     if (f.body.inquiry === undefined) await this.#offerRevisions(by, recordId, msg.id, msg.seq);
     // at a safe boundary: now, when no turn is being answered; otherwise the next advance takes it first
-    const r = await this.#advance(by, recordId, rec, true).catch(() => undefined);
+    // A unit that was claimed before the question is finished (or set aside, when an inquiry now holds the vote) first; then the question runs.
+    for (let i = 0; i < 3; i += 1) {
+      const r = await this.#advance(by, recordId, rec, true).catch(() => undefined);
+      if (r === undefined || ("did" in r && r.did === "owner-ask") || (r.waiting !== undefined && r.waiting !== "owner" && r.waiting !== "vote-time")) break;
+      if ((await this.#need(recordId)).body.ownerAnswers.some((a) => a.entryId === msg.id)) break;
+    }
     const after = await this.#need(recordId);
     const answered = after.body.ownerAnswers.some((a) => a.entryId === msg.id);
     const queued = after.body.queue.some((q) => q.id === item.id);
     const blocked = !answered && !queued ? after.body.notices.at(-1)?.text : undefined;
-    void r;
     return { entryId: msg.id, answered, queued, ...(checkpoint ? { checkpoint: true as const } : {}), ...(blocked === undefined ? {} : { blocked }) };
   }
 
@@ -1115,16 +1185,17 @@ export class MeetingFloorService {
    * ballot request, and a voter who cast before is offered one revision turn. With `agent` that agent is given the floor to answer (as `ask`). With `amend` the owner's words materially amend the motion: a fresh round and a fresh vote follow
    * and no revision is offered (an owner alternative to the decision itself is a separate record, not a ballot).
    */
-  async address(by: Principal, command: NoActor & { recordId: string; text: string; agent?: string; amend?: { text: string } }): Promise<{ entryId: string; restarted?: true; revisionsOffered: number }> {
-    onlyKnown(command, ["commandId", "recordId", "text", "agent", "amend"]);
+  async address(by: Principal, command: NoActor & { recordId: string; text: string; agent?: string; amend?: { text: string }; acknowledged?: boolean }): Promise<{ entryId: string; restarted?: true; revisionsOffered: number }> {
+    onlyKnown(command, ["commandId", "recordId", "text", "agent", "amend", "acknowledged"]);
     this.#ownerOnly(by, "address the meeting");
     const { recordId, rec } = await this.#open(command.recordId);
     const text = typeof command.text === "string" && command.text.trim() !== "" ? recordText(command.text, 3000) : invalid("text", "must say something");
     if (command.agent !== undefined) {
-      const r = await this.ask(by, { commandId: command.commandId, recordId, agent: command.agent, question: text });
+      const r = await this.ask(by, { commandId: command.commandId, recordId, agent: command.agent, question: text, ...(command.acknowledged === undefined ? {} : { acknowledged: command.acknowledged }) });
       return { entryId: r.entryId, revisionsOffered: 0 };
     }
     const f = await this.#need(recordId);
+    await this.#ballotEcho(rec, text, command.acknowledged);
     const msg = await this.#ownerMessage(by, recordId, `fl-adr-${base(recordId)}-${hash(by.id, command.commandId)}`, text);
     if (command.amend !== undefined) {
       const amendText = typeof command.amend.text === "string" && command.amend.text.trim() !== "" ? recordText(command.amend.text, 3000) : invalid("amend", "needs the new wording");
@@ -1157,12 +1228,13 @@ export class MeetingFloorService {
     const { recordId, rec } = await this.#open(command.recordId);
     const f = await this.#need(recordId);
     if (f.body.inquiry !== undefined) return { voteHeld: f.body.inquiry.voteHeld, replayed: true };
-    const v = f.body.vote;
-    const open = v !== undefined && v.opened && v.closed !== true;
-    if (open) await this.#deps.records.hold(this.#deps.service, { commandId: `fl-hold-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: v.motionId });
+    // The vote open on the record is held, whoever runs it (the floor, the meeting procedure of card M06, or the record itself); one a crash already held is not held twice.
+    const voting = await this.#votingMotion(rec);
+    const open = voting !== undefined && voting.state === "voting";
+    if (open && voting.heldAt === undefined) await this.#deps.records.hold(this.#deps.service, { commandId: `fl-hold-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: voting.id });
     const msg = await this.#ownerMessage(by, recordId, `fl-inq-${base(recordId)}-${hash(by.id, command.commandId)}`, `The owner opens an inquiry: the meeting clock and turn limits stop${open ? " and the vote is held" : ""} until the owner ends it.`);
     const now = this.#runner.now();
-    await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, addressed: [], messages: [msg.id] } }));
+    await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, ...(open ? { heldMotionId: voting.id } : {}), addressed: [], messages: [msg.id] } }));
     await this.#deps.work?.release(recordId, this.#present(rec)).catch(() => undefined);
     await this.#deps.notifyOwner?.({ recordId, kind: "inquiry-open", text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
     return { voteHeld: open, replayed: false };
@@ -1178,8 +1250,9 @@ export class MeetingFloorService {
     if (inq === undefined) return { revisionsOffered: 0, replayed: true };
     // answers still queued are answered first: the owner asked them
     for (let i = 0; i < 20; i += 1) { const r = await this.#advance(by, recordId, await this.#meeting(recordId), true).catch(() => undefined); if (r === undefined || "waiting" in r) break; }
-    const v = f.body.vote;
-    if (inq.voteHeld && v !== undefined) await this.#deps.records.resume(this.#deps.service, { commandId: `fl-resume-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: v.motionId });
+    const heldId = inq.heldMotionId ?? f.body.vote?.motionId;
+    const held = inq.voteHeld && heldId !== undefined ? ((await this.#deps.records.motion(this.#deps.service, heldId)) as unknown as MotionBody | undefined) : undefined;
+    if (held !== undefined && held.state === "voting" && held.heldAt !== undefined) await this.#deps.records.resume(this.#deps.service, { commandId: `fl-resume-${base(recordId)}-${hash(by.id, command.commandId)}`, motionId: heldId! });
     const msg = await this.#ownerMessage(by, recordId, `fl-end-${base(recordId)}-${hash(by.id, command.commandId)}`, "That is all my questions; carry on.");
     const now = this.#runner.now();
     await this.#update(recordId, by, `inq-end-${msg.id}`, (b) => (b.inquiry === undefined ? undefined : { ...b, inquiry: undefined, clock: { ...b.clock, pausedMs: b.clock.pausedMs + (b.clock.pausedAt === undefined ? 0 : Math.max(0, ms(now) - ms(b.clock.pausedAt))), pausedAt: undefined } }));
@@ -1318,7 +1391,8 @@ export class MeetingFloorService {
     const wanted: { key: string; title: string; why: string; owner?: string }[] = [];
     for (const t of rec.tagged) if (t.tag === "question" && t.answeredBy === undefined) wanted.push({ key: `q:${t.entryId}`, title: `Answer: ${recordText(t.text, 150)}`, why: `Raised in meeting ${rec.title} (entry ${t.entryId}) and left unresolved.`, owner: t.speaker });
     for (const c of f.body.chairQuestions) if (c.state === "asked") wanted.push({ key: `c:${c.id}`, title: `Find out: ${recordText(c.topic, 150)}`, why: `A chair question to ${c.to} was never answered (${c.experienceSought}).`, owner: c.to });
-    f.body.investigations.forEach((i, n) => wanted.push({ key: `i:${n}:${hash(i.text).slice(0, 8)}`, title: `Investigate: ${recordText(i.text, 150)}`, why: `Deeper work than the meeting could do (${i.by}).`, ...(AGENT.test(i.by) ? { owner: i.by } : {}) }));
+    // keyed by what the investigation is, not by its place in the list: the list is a window, and a place that shifts must not make a second task
+    f.body.investigations.forEach((i) => wanted.push({ key: `i:${hash(i.by, i.text).slice(0, 16)}`, title: `Investigate: ${recordText(i.text, 150)}`, why: `Deeper work than the meeting could do (${i.by}).`, ...(AGENT.test(i.by) ? { owner: i.by } : {}) }));
     const made: { key: string; taskId: string; title: string; owner?: string }[] = [];
     for (const w of wanted) {
       if (f.body.followUps.some((x) => x.key === w.key)) continue;
@@ -1394,16 +1468,21 @@ export class MeetingFloorService {
     if (rec === undefined || f === undefined) return undefined;
     const b = f.body;
     const owner = viewer.kind === "owner" && viewer.taskScope === undefined;
-    const chair = viewer.kind === "agent" && rec.chair === viewer.id;
-    const manager = this.#controls(viewer, rec.projectId);
-    const common = { phase: b.phase, round: b.round, state: b.state, motionId: b.motionId, waiting: this.#waiting(b, rec, this.#runner.now()), timebox: b.timebox, inquiryOpen: b.inquiry !== undefined, queued: b.queue.length };
-    if (!owner && !manager && !chair) return json(common) as unknown as Record<string, unknown>;
-    const { inflight, chairNotes, held, ...rest } = b;
+    const full = owner || isService(viewer);
+    const chair = viewer.kind === "agent" && viewer.asOf !== undefined && rec.chair === viewer.id && inTaskScope(viewer, rec.projectId);
+    // Everyone but the owner, a host and a service (the chair and a manager agent included) sees only what a member sees: no ballot turn, no count of who has voted or is owed a revision, no held answer and nothing drawn from one.
+    const common = { phase: b.phase, round: b.round, state: b.state, motionId: b.motionId, waiting: this.#waitingFor(viewer, b, rec), timebox: b.timebox, inquiryOpen: b.inquiry !== undefined, queued: full ? b.queue.length : b.queue.filter((q) => q.kind !== "revision").length };
+    if (!full) return json({ ...common, ...(chair && b.chairNotes !== undefined ? { chairNotes: b.chairNotes } : {}) }) as unknown as Record<string, unknown>;
+    const { inflight, ...rest } = b;
     void inflight;
-    return {
-      ...rest, ...common, spend: this.#spendView(b), elapsedMinutes: Math.round(this.#elapsedMs(b, this.#runner.now()) / 60_000), allowedMinutes: Math.round(this.#allowedMs(b) / 60_000),
-      ...(owner || chair ? { chairNotes } : {}), ...(owner ? { held } : { heldCount: held.length }),
-    };
+    return { ...rest, ...common, spend: this.#spendView(b), elapsedMinutes: Math.round(this.#elapsedMs(b, this.#runner.now()) / 60_000), allowedMinutes: Math.round(this.#allowedMs(b) / 60_000) };
+  }
+
+  /** The waiting-on view as `viewer` may see it: while a vote is open, everyone but the owner, a host and a service is told only that the meeting waits on the voters, never which voter (that would tell who has voted). */
+  #waitingFor(viewer: Principal, b: FloorBody, rec: RecordBody): WaitingOn {
+    const w = this.#waiting(b, rec, this.#runner.now());
+    if ((viewer.kind === "owner" && viewer.taskScope === undefined) || isService(viewer)) return w;
+    return w.kind === "agent" && (w.what === "ballot" || w.what === "revision" || w.what === "close-vote") ? { kind: "agent", who: "the voters", what: "the vote", since: w.since } : w;
   }
 
   #spendView(b: FloorBody): { usd: number; tokens: number; ownerUsd: number; ownerTokens: number; capUsd: number; capTokens: number } {
@@ -1426,7 +1505,7 @@ export class MeetingFloorService {
   async waiting(viewer: Principal, recordId: string): Promise<WaitingOn | undefined> {
     const rec = await this.#deps.records.record(viewer, recordId).catch(() => undefined);
     const f = rec === undefined ? undefined : await this.#load(recordId);
-    return rec === undefined || f === undefined ? undefined : this.#waiting(f.body, rec, this.#runner.now());
+    return rec === undefined || f === undefined ? undefined : this.#waitingFor(viewer, f.body, rec);
   }
 
   /** The chair's private notes, kept in the meeting's records: for the owner and the chair only. */
@@ -1434,7 +1513,7 @@ export class MeetingFloorService {
     const rec = await this.#deps.records.record(viewer, recordId).catch(() => undefined);
     const f = rec === undefined ? undefined : await this.#load(recordId);
     if (rec === undefined || f === undefined) return undefined;
-    const ok = (viewer.kind === "owner" && viewer.taskScope === undefined) || (viewer.kind === "agent" && rec.chair === viewer.id && viewer.asOf !== undefined);
+    const ok = (viewer.kind === "owner" && viewer.taskScope === undefined) || (viewer.kind === "agent" && rec.chair === viewer.id && viewer.asOf !== undefined && inTaskScope(viewer, rec.projectId));
     if (!ok) return undefined;
     return { ...(f.body.chairNotes === undefined ? {} : { notes: f.body.chairNotes }), ...(f.body.chairNotesAt === undefined ? {} : { at: f.body.chairNotesAt }), count: f.body.chairNotesCount };
   }
@@ -1448,8 +1527,8 @@ export class MeetingFloorService {
 
 /** A step that cannot be taken yet (a vote that cannot close before its time): not a failure. */
 class Wait extends Error {
-  readonly reason: "vote-time";
-  constructor(reason: "vote-time", message: string) { super(message); this.reason = reason; }
+  readonly reason: "vote-time" | "owner";
+  constructor(reason: "vote-time" | "owner", message: string) { super(message); this.reason = reason; }
 }
 
 /** Keeps every list on the floor inside its window (oldest dropped). */

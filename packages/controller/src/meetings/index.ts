@@ -16,7 +16,7 @@ export { SAFE_LONG_RUNNING_SETTING, safeLongRunningOf, type SafeLongRunningJobs,
 export { checkMeetingWakeTimeout, meetingWakeSink, type HostWakeRequest, type MeetingWakeOptions } from "./wake-sink.js";
 export { MeetingWakeHost, WAKE_LEASE_KIND, WAKE_LEASE_LIMIT, WAKE_LIMITS, type WakeAttender, type WakeHostLifecycle, type WakePass } from "./wake-host.js";
 export { MeetingDeskReadService, REFUSED_OPERATIONS, type DeskReadBody, type DeskAttemptBody, type DeskReadContent, type RefusedOperation } from "./desk-reads.js";
-export { FLOOR_DEFAULTS, FLOOR_SETTING_NAMES, FLOOR_SETTINGS, applyFloorChange, checkFloorValue, floorSettingsFrom, type FloorSettings } from "./floor-settings.js";
+export { FLOOR_DEFAULTS, FLOOR_SETTING_NAMES, FLOOR_SETTINGS, applyFloorChange, checkFloorValue, floorSettingsFrom, floorSettingsFromInstallation, FLOOR_SHARED_SETTINGS, type FloorSettings } from "./floor-settings.js";
 export { MeetingFloorService, FLOOR_LIMITS, TurnWaitsOnTool, type FloorBody, type FloorDeps, type AdvanceResult, type TurnRequest, type TurnReply, type TurnRunner, type TurnKind, type WaitingOn, type ChairQuestionRecord } from "./floor.js";
 export { PREAMBLE, QUESTION_FIELDS, accountTurn, buildPrompt, chairQuestionRefusal, estimateTokens, parseJsonObject, parseObjection, parseStatement, parseVote, quoteOccurs, recordText, transcriptView, usesFacts, wrapCheckpointAnswer, type Prompt, type TurnUsage as FloorTurnUsage } from "./floor-text.js";
 export {

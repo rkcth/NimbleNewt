@@ -7,7 +7,7 @@ import { PiStateTransfers, RemotePiRestore, RemotePiState, RemoteThinkingStores,
 import { PlacementSettingsService } from "../remote/placement-settings.js";
 import { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import { ReconnectSettingsService } from "../remote/reconnect-settings.js";
-import { FLOOR_SETTINGS, MeetingFloorService, floorSettingsFrom, InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
+import { FLOOR_SETTINGS, FLOOR_SHARED_SETTINGS, MeetingFloorService, floorSettingsFromInstallation, InvitationInbox, MeetingWakeHost, MEETING_LIMITS, MEETING_SETTINGS, MeetingService, meetingWakeSink, safeLongRunningOf, SAFE_LONG_RUNNING_SETTING, checkMeetingWakeTimeout, type HostWakeRequest } from "../meetings/index.js";
 import { RetirementService } from "../retirement/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, combineThinkingStores, guardStorage, localThinkingStores, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
@@ -1137,7 +1137,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       records, deskReads: MeetingDeskReadService.withEpoch(storage, epoch), meetings, service: { id: "service:meeting-floor", kind: "service", name: "meeting-floor", asOf: "2026-01-01T00:00:00.000Z", grants: [{ action: "meeting.manage", project: "*" }, { action: "meeting.read", project: "*" }] } as Principal,
       runner: options.meetingFloor?.runner ?? { turn: async () => { throw new DomainError("unavailable", "no model route is set up for meetings on this controller"); } },
       principalOf: async (agentId) => { const p = await principals.get(agentId); return p === undefined || p.state !== "active" ? undefined : grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString()); },
-      settings: async () => floorSettingsFrom(await configuration.installationValues(FLOOR_SETTINGS.map((d) => d.key))),
+      // The four settings the meeting procedure (card M06) also has are one choice for the owner: the floor follows meeting.rounds, meeting.objection.reruns, meeting.tabling and meeting.vote.maxRevisions unless its own key was set.
+      settings: async () => floorSettingsFromInstallation(await configuration.installationSettings([...FLOOR_SETTINGS.map((d) => d.key), ...FLOOR_SHARED_SETTINGS.map(([, p]) => p)])),
       followUps: { create: async (i) => { const t = await projects.createTask({ commandId: i.commandId, actor: meetingController.id, projectId: i.projectId, title: i.title.slice(0, 150), description: `${i.description}${i.owner === undefined ? "" : ` Owner: ${i.owner}.`}`.slice(0, 2000) } as never); return { id: t.id }; } },
       ...(options.meetingFloor?.checkpointOf === undefined ? {} : { checkpointOf: options.meetingFloor.checkpointOf }),
       ...(options.meetingFloor?.persona === undefined ? {} : { persona: options.meetingFloor.persona }),

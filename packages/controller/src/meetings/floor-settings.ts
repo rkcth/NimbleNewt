@@ -128,3 +128,15 @@ export function applyFloorChange(base: FloorSettings, change: Readonly<Record<st
   }
   return out as unknown as FloorSettings;
 }
+
+/** The four settings the meeting procedure (card M06) has as well: one choice for the owner. The floor follows the procedure's key unless its own `meeting.floor.*` key was set on purpose. */
+export const FLOOR_SHARED_SETTINGS: readonly (readonly [floorKey: string, procedureKey: string])[] = [
+  ["meeting.floor.commentRounds", "meeting.rounds"], ["meeting.floor.objectionReruns", "meeting.objection.reruns"], ["meeting.floor.tabling", "meeting.tabling"], ["meeting.floor.maxRevisionsPerVoter", "meeting.vote.maxRevisions"],
+];
+
+/** The floor's settings from the installation's (`installationSettings`, which says whether the owner set each): see `FLOOR_SHARED_SETTINGS`. */
+export function floorSettingsFromInstallation(settings: Readonly<Record<string, { readonly value: unknown; readonly set: boolean } | undefined>>): FloorSettings {
+  const values: Record<string, unknown> = Object.fromEntries(FLOOR_SETTINGS.map((d) => [d.key, settings[d.key]?.value]));
+  for (const [own, proc] of FLOOR_SHARED_SETTINGS) if (settings[own]?.set !== true && settings[proc]?.set === true) values[own] = settings[proc]!.value;
+  return floorSettingsFrom(values);
+}

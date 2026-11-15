@@ -18,6 +18,9 @@ export interface FloorWorld {
   pA: string; pB: string; pC: string; pD: string; pE: string; project: string;
   meetings: MeetingService; records: MeetingRecordService; floor: MeetingFloorService; deskReads: MeetingDeskReadService; desks: DeskService; principals: PrincipalService; grants: GrantService; projects: ProjectService;
   storage: import("../storage/types.js").ControllerStorage;
+  /** The controller's epoch and clock, for another service over the same storage (the meeting procedure of card M06). */
+  epoch: number;
+  iso: () => string;
   other: Map<string, Availability>;
   script: Script;
   settings: { current: FloorSettings };
@@ -150,7 +153,7 @@ export function floorSuite(test: (name: string, run: () => Promise<void>) => unk
         };
         await body({
           owner, service, mgr, outsider, asA: logins.get(pA)!, asB: logins.get(pB)!, asC: logins.get(pC)!, asD: logins.get(pD)!, asE: logins.get(pE)!, pA, pB, pC, pD, pE, project, meetings, records, floor, deskReads, desks, principals, grants, projects,
-          storage: world.storage, other, script, settings, notices, created, hooks, clock,
+          storage: world.storage, epoch, iso, other, script, settings, notices, created, hooks, clock,
           reopen: (extra = {}) => MeetingFloorService.withEpoch(world.storage, epoch, deps(extra), options),
           meet, task: async (title = "Write the guide") => { const t = await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title }); return { id: t.id, revision: t.revision }; },
           principalOf: (a) => logins.get(a),

@@ -129,6 +129,8 @@ export interface InquiryState {
   readonly lastActivityAt: string;
   readonly questions: number;
   readonly voteHeld: boolean;
+  /** The motion whose vote the inquiry held (the floor's own, or one the meeting procedure or the record runs). */
+  readonly heldMotionId?: string;
   readonly addressed: readonly string[];
   readonly remindedAt?: string | undefined;
   /** The owner message entries entered during the inquiry. */
