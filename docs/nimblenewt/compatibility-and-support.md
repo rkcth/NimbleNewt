@@ -8,7 +8,7 @@ NimbleNewt is under development and has **no stable release yet**. "Supported" m
 
 | Part | Supported | Evidence |
 | --- | --- | --- |
-| Node.js | 22.19.0 or newer | 22.19.0 and 24.21.0 pass CI on every push |
+| Node.js | 22.19.0 or newer | 22.19.0 passes the CI run on every push (Linux); 22.19.0 and 24.21.0 pass the exhaustive and QA runs on Linux, macOS and Windows, which are started by hand or by a release tag |
 | Linux | x64 (kernel with unprivileged user namespaces for the sandbox) | GitHub-hosted Ubuntu runner and the development server |
 | macOS | Apple silicon, macOS 26 (Darwin 25) or newer | GitHub-hosted macOS runner |
 | Windows | x64, Windows 11 24H2 / Server 2025 (build 26100) or newer | GitHub-hosted Windows runner |
@@ -17,7 +17,7 @@ NimbleNewt is under development and has **no stable release yet**. "Supported" m
 | Data directory file systems | Linux: ext4, xfs, btrfs. macOS: APFS. Windows: NTFS | ext4, APFS and NTFS on CI; xfs and btrfs are on the list by decision and are not exercised by CI |
 | Git | 2.38.1 or newer | Checked at start |
 
-Not supported: 32-bit systems, Intel Macs, Windows on ARM, and **network or user-space file systems** for the data directory (NFS, SMB, FUSE, sshfs and similar cannot be trusted to flush; see [durability-and-flush](durability-and-flush.md)).
+Not supported: 32-bit systems, Linux on ARM, Intel Macs, Windows on ARM, and **network or user-space file systems** for the data directory (NFS, SMB, FUSE, sshfs and similar cannot be trusted to flush; see [durability-and-flush](durability-and-flush.md)).
 
 ### Sandbox for agents' tools
 
@@ -48,4 +48,4 @@ Internal TypeScript APIs (everything a package exports that is not listed above)
 
 ## How to ask for help
 
-Bugs and questions go to the project's public issue tracker; **security problems do not**, see [SECURITY.md](../../SECURITY.md). Say which environment you run (the first lines the controller prints at start-up name it), your Node.js version, SQLite or PostgreSQL, and what you expected. Redact credentials and private paths. [troubleshooting](troubleshooting.md) covers the common first steps.
+Bugs and questions go to the project's public issue tracker; **security problems do not**, see [SECURITY.md](../../SECURITY.md). Say which operating system, version and architecture you run, your Node.js version, SQLite or PostgreSQL, and what you expected. Redact credentials and private paths. [troubleshooting](troubleshooting.md) covers the common first steps.

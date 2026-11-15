@@ -50,7 +50,7 @@ Adding one is a decision, not a convenience. It must:
 
 - have a license on the allow-list (MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, Unlicense), and `npm run licenses:write` must be run and its result committed ([notices](docs/nimblenewt/notices.md));
 - be pinned to an exact version in the lockfile, with install scripts staying disabled (a package that needs one is a separate, reviewed change);
-- be allowed for that package by `scripts/package-boundaries.mjs` (most packages may have none; `config`, `contracts` and `registry` have no runtime dependencies on purpose);
+- be allowed for that package by `scripts/package-boundaries.mjs` (`config`, `contracts`, `registry`, `api` and `ui` may have no runtime dependencies at all);
 - justify itself against writing the dozen lines yourself.
 
 ## A component that is not TypeScript

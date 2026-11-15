@@ -15,12 +15,12 @@ All packages live in `packages/`, are private (`0.0.0`) and are compiled with Ty
 | `contracts` | Shared, versioned contracts between packages: the worker channel, the harness interface, credential scanning, safe text | nothing |
 | `config` | The versioned configuration file: loader, validation, migration of older files, secret references (names, never values), the operating-system secret stores, sanitized export | nothing |
 | `registry` | The protected registry of tools and extensions: reserved names, immutable versioned artifacts, revocation | nothing |
-| `controller` | The controller: storage contract and its implementations, domain services, the security layer, the state API, the transports, backups, release handling | `pg`, the MCP SDK, `registry` (and the embedded PostgreSQL for tests) |
+| `controller` | The controller: storage contract and its implementations, domain services, the security layer, the state API, the transports, backups, release handling | `pg`, `registry` (and, for tests only, the MCP SDK and the embedded PostgreSQL) |
 | `pi-adapter` | The adapter between NimbleNewt and the pinned Pi Durable release, including the isolated worker entry (`src/worker/main.ts`). Independent of the controller's database and of the UI | `contracts`, `registry`, Pi packages |
 | `worker` | The worker host: the sandbox launcher, the workspace bridge, agents' environments and the host service that speaks the controller channel | `contracts` |
 | `ui` | The web chat's page, script and style, served by the controller | nothing |
 | `api` | A placeholder; the API lives in the controller | nothing |
-| `integration` | Tests that run the controller, adapter and worker together. Holds no product code and nothing depends on it, which is why it alone may depend on all three | all of the above |
+| `integration` | Tests that run the controller, adapter and worker together. Holds no product code and nothing depends on it, which is why it alone may depend on all three | `config`, `contracts`, `controller`, `pi-adapter`, `worker`, Pi packages |
 
 Why so strict: the controller must not import the agent runtime, the worker must not see the database, and nothing may reach a database except through the storage folders, so a bug in one cannot silently widen into another.
 
@@ -28,7 +28,7 @@ Why so strict: the controller must not import the agent runtime, the worker must
 
 1. A client calls `controller.api.handle(token, request)` (`controller/src/api/state-api.ts`). The credential is authenticated afresh (`security/principals.ts`; a `tcr-` token is a task credential). Nothing is cached between requests.
 2. The request is validated against the operation table (`api/operations.ts`): version, operation name, and that `args` holds only that operation's arguments. A command needs a `commandId`.
-3. The operation runs as that principal through the **secured** layer (`security/secured.ts`), which checks the principal's grants for the action and project before any service is touched. A principal that lacks the right gets `forbidden`; a thing it may not read can read as not found.
+3. The operation runs as that principal through the **secured** layer (`security/secured.ts`), which checks the principal's grants for the action and project before any service is touched. A principal that lacks the right gets `forbidden`, and for projects and tasks the answer is the same whether or not the record exists (only the owner sees `not_found`); some operations instead answer `not_found` for both, as their text in api-v1 says.
 4. A domain service (`domain/`, `projects/`, `agents/`, `conversations/`, ...) does the work through the **storage contract** (`storage/types.ts`). Every storage method is one atomic transaction; every write carries the controller's **epoch**, and a stale epoch writes nothing and answers `stale_epoch`, so a controller that has been replaced cannot do anything more.
 5. The answer is one envelope: `ok`, `result` or `error`, plus `accepted`/`completed`/`state`. A command repeated with the same `commandId` is answered from the stored result (`replayed: true`).
 

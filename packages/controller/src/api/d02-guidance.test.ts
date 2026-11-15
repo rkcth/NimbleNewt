@@ -45,6 +45,7 @@ for (const kind of ["sqlite", "postgres"] as const) {
       const agent = (await c.services.principals.issueCredential(principal, "agent:ann")).token;
       const tokens: Record<string, string> = { owner: owner.token, agent, nobody: "x".repeat(40) };
       const ids = new Ids();
+      let lastPages = 0;
       for (const example of readExamples(GUIDE)) {
         const token = tokens[example.as];
         assert.ok(token !== undefined, `${GUIDE}:${example.line}: nobody called ${example.as}`);
@@ -52,7 +53,14 @@ for (const kind of ["sqlite", "postgres"] as const) {
         ids.learn(live);
         const bad = mismatch(example.response.body, live);
         assert.equal(bad, undefined, `${GUIDE}:${example.line}: ${bad}`);
+        // Answers are matched as a subset, so a field the guide leaves out is free, except `next`: a page the guide shows without one must end the list.
+        const shown = (example.response.body as { result?: Record<string, unknown> }).result;
+        if (shown !== undefined && "items" in shown && !("next" in shown)) {
+          assert.equal((live as { result?: Record<string, unknown> }).result?.["next"], undefined, `${GUIDE}:${example.line}: the guide shows no next, the controller gave one`);
+          lastPages++;
+        }
       }
+      assert.ok(lastPages >= 2, "the guide shows both ways a list ends (an empty page after a full one, and a short page)");
     } finally {
       await c.close();
       if (schema !== undefined) await withClient((await server!).url(), async (client) => { await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); });

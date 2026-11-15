@@ -2,11 +2,11 @@
 
 [api-v1](api-v1.md) is the reference: every operation, its arguments and its result. It is generated from the code, so it is exact but terse. This guide is the other half: how a program talks to the controller, what each kind of answer means, and what to do about it. Every request and answer shown here is run against a real controller by `packages/controller/src/api/d02-guidance.test.ts` (card D02), so an example that stops being true fails a test. A value written as `proj-...` stands for a real ID the controller made; the test fills it in from the earlier answer.
 
-Where a thing is **not built**, this guide says so. The most important one: **the state API has no HTTP route**. It is in-process (`controller.api.handle(token, request)`); chat, the command line and the web chat are clients of it inside the controller's own process. What a separate program can reach over HTTP today is the conversation listener (threads and messages, and the MCP door), described in [conversation-and-mcp-protocol](conversation-and-mcp-protocol.md).
+Where a thing is **not built**, this guide says so. The most important one: **the state API has no HTTP route**. It is in-process (`controller.api.handle(token, request)`); chat, the command line and the web chat are clients of it inside the controller's own process. The one HTTP door for agents and outside programs today is the conversation listener (threads and messages, and the MCP door), described in [conversation-and-mcp-protocol](conversation-and-mcp-protocol.md). (The web chat door serves the owner's browser and the remote-host listener serves worker hosts; neither carries state API operations.)
 
 ## Getting a credential
 
-A credential is a token of the form `<principal id>.<secret>`. The secret is 32 random bytes, shown once, and the controller stores only a salted scrypt hash of it, so a copy of the database yields no usable credential. The owner's first credential is made by `PrincipalService.bootstrapOwner` (the launcher does it the first time you start and keeps the token in the operating system's secret store, never in a file). Everyone else is enrolled by the owner and given a credential with `issueCredential`; an agent starts with no rights and no credential. See [security-guide](security-guide.md).
+A credential is a token of the form `<principal id>.<secret>`. The secret is 32 random bytes, shown once, and the controller stores only a salted scrypt hash of it, so a copy of the database yields no usable credential. The owner's first credential is made by `PrincipalService.bootstrapOwner` (the launcher does it the first time you start and keeps the token in the installation's secret store: the macOS Keychain, the Linux Secret Service, or owner-only or DPAPI-protected files in the data directory where there is no system store; never in the configuration file). Everyone else is enrolled by the owner and given a credential with `issueCredential`; an agent starts with no rights and no credential. See [security-guide](security-guide.md).
 
 ## Calling the API
 
@@ -17,7 +17,7 @@ const controller = await startController({ storage: { kind: "sqlite", path: "con
 const answer = await controller.api.handle(token, { v: 1, op: "setup.readiness", args: {} });
 ```
 
-`handle` never throws for a bad request: every refusal is an answer with `ok: false`. The first example is a **query** (it changes nothing, so it needs no `commandId`). On a fresh installation, the owner has an identity and nothing else, so the first thing missing is a project:
+`handle` never throws for a bad request: every refusal is an answer with `ok: false`. The first example is a **query** (it changes nothing, so it takes no `commandId`; a query that carries one is refused). On a fresh installation, the owner has an identity and nothing else, so the first thing missing is a project:
 
 ```json
 { "v": 1, "op": "setup.readiness", "args": {} }
@@ -105,7 +105,7 @@ First a second project, so that there is something to page through:
 { "v": 1, "op": "project.create", "ok": true, "result": { "id": "proj-...", "revision": 1, "replayed": false }, "accepted": true, "completed": true, "state": "completed" }
 ```
 
-A list takes `limit` (1 to 100, default 20) and `after`. When the answer carries `next`, pass it as `after` to get the following page. **`next` is present whenever a page came back full, including the last full page**: the end is an empty `items`, not a missing `next`.
+A list takes `limit` (1 to 100; the default is 20 for most lists, and [api-v1](api-v1.md) gives each operation's own) and `after`. When the answer carries `next`, pass it as `after` to get the following page; **the list has ended when an answer has no `next`**. Two things surprise people: a page can hold fewer items than `limit`, even none, while `next` is still present (the controller stops scanning after a bounded amount of work), and a page that came back full carries `next` even when it was the last one, so the following page is empty and has no `next`.
 
 ```json
 { "v": 1, "op": "project.list", "args": { "limit": 1 } }
@@ -132,6 +132,18 @@ A list takes `limit` (1 to 100, default 20) and `after`. When the answer carries
 ```
 
 (Projects are listed in the order of their IDs, which are random, so the page that holds Garden is not always the first. The three list requests above are shown in order; the `after` of the second is the first answer's `next`, and of the third the second's. The test follows them that way.)
+
+The usual end is a page that is not full. Asked for up to five, the controller returns both projects and no `next`:
+
+```json
+{ "v": 1, "op": "project.list", "args": { "limit": 5 } }
+```
+
+```json
+{ "v": 1, "op": "project.list", "ok": true, "result": { "items": [{ "state": "active", "id": "proj-..." }, { "state": "active", "id": "proj-..." }] } }
+```
+
+(Where a list answer in this guide shows no `next`, the test also checks that the controller's answer has none.)
 
 ## Refusals you should expect
 
@@ -202,7 +214,7 @@ The `forbidden` examples run with an agent's credential; the `unauthenticated` o
 3. Name the revision you read; on `stale_revision`, read again.
 4. Treat unknown fields in answers as additions (the contract only grows), and unknown `code`s as failures to show, not to retry blindly.
 5. Never put a secret (a provider key, a database address) in an argument: store it in the secret store and refer to it by name, as the launcher's `secret set` does.
-6. Follow `next` until `items` is empty.
+6. Follow `next` until an answer has none; do not stop at a short or empty page that still carries `next`.
 7. Regenerate nothing by hand: [api-v1](api-v1.md) is written by `npm run api:docs:write` from `packages/controller/src/api/operations.ts`.
 
 ## Where the pieces are

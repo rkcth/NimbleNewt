@@ -4,11 +4,11 @@ Start here when something does not work. Each entry says what you see, what it m
 
 ## First, look around
 
-1. `node scripts/nimblenewt.mjs status` starts the controller, prints what is set up and what is missing, and stops. It changes nothing but the start itself.
+1. `node scripts/nimblenewt.mjs status` starts the controller, prints what is set up and what is missing, and stops. It changes nothing but the start itself (and, when there is no configuration yet, writes a starter one).
 2. In the chat, or `setup.readiness` in the API (owner only): what is configured, what is missing, in the order a person sets things up, with a recommended answer for each.
 3. `migration.status` says what database migrations ran or are deferred; `release.status` says what the launcher did with the last start.
 4. The controller prints why a start was refused. Read the first problem, not the last.
-5. The data directory is `~/.nimblenewt` unless `--data DIR` or `NIMBLENEWT_DATA` says otherwise; the configuration is `nimblenewt.config.json` in it, and backups are in its `backups` folder.
+5. The data directory is `~/.nimblenewt` unless `--data DIR` or `NIMBLENEWT_DATA` says otherwise; the configuration is `nimblenewt.config.json` in it, and the supervised controller (`scripts/nimblenewt-controller.mjs`) keeps backups in its `backups` folder by default (`--backup-dir` moves them, `--no-backups` turns them off).
 
 ## The controller will not start
 
@@ -24,7 +24,7 @@ Start here when something does not work. Each entry says what you see, what it m
 | `... was changed after it was applied` | An applied migration differs from what this build ships | You are running a modified build. Use the release the data was made by. |
 | A refusal that names where the data is now | You moved the database with a transfer and started the old configuration, or restored an old copy over the old path | Start with the configuration for the new place. Only one place is the real database. |
 | A refusal naming the holder of the data directory | Another controller is running on it (or died and left a lock) | Stop the other one. A lock whose holder is gone is taken over after its stale period; do not delete lock files by hand. |
-| The same start fails over and over and the launcher backs off | A crash loop. Exit **76** means the machine is at fault (disk full, no write permission, a port or file taken, out of memory, database server down); **77** means a provider is down. Neither sets the release aside. | Fix the disk, permissions, port, server or provider. |
+| The same start fails over and over and the launcher backs off | A crash loop. Exit **76** means the machine is at fault (disk full, no write permission, a port or file taken, out of memory, database server down); **77** means a provider is down. Neither counts against a release that has proved itself; a new release still under watch that keeps exiting 76 or 77 is blamed after a bounded number of starts in a row (`hostRetries`, default 5). | Fix the disk, permissions, port, server or provider. |
 | Exit code **75** | Not a failure: the controller asked the launcher to start it again (after an activation or a database move) | Nothing. |
 
 ## It runs but nothing happens
@@ -45,11 +45,11 @@ Start here when something does not work. Each entry says what you see, what it m
 | `command_conflict` | The command ID was used for different content | Use a new ID for a new command, the same ID only to retry the same one. |
 | `stale_revision` | Someone changed the record since you read it | Read again, decide again. |
 | `unauthenticated` / HTTP 401 | The token is wrong, malformed or revoked | Issue a new credential. The answer never says which. |
-| `forbidden` / HTTP 403 | The principal lacks a right, or a host or service credential was used on the conversation listener | Ask the owner for the grant. |
+| `forbidden` / HTTP 403 | The principal lacks a right, a host or service credential was used on the conversation listener, or (on `/mcp`) the request carried an `Origin` that is not the listener's own | Ask the owner for the grant. |
 | HTTP 421 | The `Host` header is not one of the listener's own | Use the listener's address; behind a proxy, add the public host names. |
 | HTTP 429 | Over the allowance: too many failed sign-ins from the address, or too many requests from one principal | Wait a minute and fix the credential. |
 | HTTP 400 `idempotency_key_required` | A change without an `Idempotency-Key` header | Add one of your own choosing ([conversation-and-mcp-protocol](conversation-and-mcp-protocol.md)). |
-| HTTP 404 on `/mcp` | The owner switched the MCP door off, or the listener is not running | Ask the chat to switch `conversation.mcp.enabled` back on, or start with `--serve`. |
+| HTTP 404 on `/mcp` | The owner switched the MCP door off (a refused connection instead means the listener is not running: start with `--serve`) | Ask the chat to switch `conversation.mcp.enabled` back on. |
 | HTTP 405 on `GET /mcp` | There is no event stream | Poll with the tools from your cursor. |
 | `project.get` and friends say `forbidden` for an agent | A new agent has no grants | Grant it what it needs in that project. |
 

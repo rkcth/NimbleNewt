@@ -3,7 +3,7 @@
 // checks everything else a reader could act on: links, file paths, commands, flags, environment variables, operation and setting names, error
 // codes, and the facts the guides repeat from the code (supported environments, flush settings).
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -122,8 +122,18 @@ test("the durability guide matches the settings the storage code enforces (card 
   for (const event of ["process crash", "orderly shutdown", "power loss"]) assert.ok(outside.includes(event), `agent history: ${event}`);
   for (const call of ["file.sync()", "directory.sync()"]) assert.ok(readFileSync(join(root, "packages", "controller", "src", "artifacts", "blobs.ts"), "utf8").includes(call), `blobs.ts no longer calls ${call}`);
   // Pi Durable's store is the one NimbleNewt leaves at SQLite's default: the guide says so, and the code sets nothing for it.
-  assert.ok(/synchronous = NORMAL/.test(doc));
-  assert.ok(!/pi-durable/i.test(readdirSync(join(root, "packages", "pi-adapter", "src")).filter((f) => !f.endsWith(".test.ts")).map((f) => (statSync(join(root, "packages", "pi-adapter", "src", f)).isFile() ? readFileSync(join(root, "packages", "pi-adapter", "src", f), "utf8").match(/PRAGMA\s+synchronous/i)?.[0] ?? "" : "")).join("")), "the adapter now sets a Pi store flush mode: update the guide");
+  // The agent process opens Pi Durable's JSONL store with its default options, under which nothing is flushed (the guide says so).
+  assert.ok(/JSONL/.test(outside) && /nothing is flushed to disk/.test(outside) && /`fsync`/.test(outside), "the agent history section says the JSONL store is not flushed");
+  const worker = readFileSync(join(root, "packages", "pi-adapter", "src", "worker", "process.ts"), "utf8");
+  assert.match(worker, /openNodeJsonlStorage\(dir, BACKGROUND_CONTEXT\)/, "the agent process no longer opens the JSONL store with default options: update the guide");
+  const jsonl = join(root, "node_modules", "@earendil-works", "pi-durable", "dist", "storage", "jsonl", "storage.js");
+  assert.ok(existsSync(jsonl), "Pi Durable's JSONL storage moved: check whether it flushes by default and update the guide");
+  assert.match(readFileSync(jsonl, "utf8"), /this\.fsync = options\.fsync \?\? false/, "Pi Durable's JSONL store no longer defaults to no flush: update the guide");
+  // ... and no adapter source turns flushing on or opens another store kind.
+  const adapterSources = walk(join(root, "packages", "pi-adapter", "src"), (n) => n.endsWith(".ts") && !n.endsWith(".test.ts")).filter((f) => !relative(root, f).split(sep).includes("testing"));
+  assert.ok(adapterSources.length > 0, "no adapter sources found");
+  const others = adapterSources.filter((f) => /fsync\s*:\s*true|openNodeSqlite|storage\/sqlite/.test(readFileSync(f, "utf8")));
+  assert.deepEqual(others, [], "the adapter now opens Pi's store differently: update the guide");
 });
 
 test("SECURITY.md says how to report, what to expect, which versions are supported and what is in and out of scope (card D02)", () => {
