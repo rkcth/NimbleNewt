@@ -60,7 +60,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (rest.length > 0) { print(USAGE); return 2; }
       const all = await listBackups(folder);
       if (all.length === 0) print("no complete backups in that folder");
-      for (const b of all) print(`${b.manifest.name}  ${b.manifest.kind}  schema ${b.manifest.schemaVersion}  ${b.manifest.files.reduce((n, f) => n + f.rows, 0)} rows`);
+      for (const b of all) print(`${b.manifest.name}  ${b.manifest.kind}  schema ${b.manifest.schemaVersion}  ${b.manifest.files.reduce((n, f) => n + f.rows, 0)} rows${b.manifest.contentScope === undefined ? "" : `  NOT A FULL COPY (${b.manifest.contentScope.leftOut.reduce((n, l) => n + l.left, 0)} records left out by the backup scope)`}`);
       return 0;
     }
     if (command === "encryption-setup") {
