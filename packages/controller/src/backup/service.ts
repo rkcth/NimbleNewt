@@ -53,7 +53,7 @@ export interface BackupServiceOptions {
 export interface BackupStatus { readonly root: string; readonly newest?: { name: string; createdAt: string; kind: BackupKind }; readonly count: number; readonly running: boolean; /** Whether backups made here include the agents' conversation state (Pi state). False: it is NOT included, and a restore leaves the conversation memory as it is. */ readonly piStateIncluded: boolean; readonly lastError?: { at: string; message: string } }
 
 /**
- * The first release's built-in backup (card K01): "back up now", a nightly run and the retention rule (7 daily and 4 weekly copies, pre-upgrade snapshots untouched). One backup runs at a time; asking while one
+ * The first release's built-in backup (card K01): "back up now", a nightly run and the retention rule (7 daily and 4 weekly copies, pre-upgrade snapshots kept while K03's rollback period needs them). One backup runs at a time; asking while one
  * runs gets that one. A failed run is remembered and reported by `status`; it never deletes a good backup, because pruning runs only after a backup was written and listed complete.
  */
 export class BackupService {
@@ -192,9 +192,15 @@ export class BackupService {
 
   /** The counts and age limit in force with what the age limit must spare. */
   async rules(retention?: Retention): Promise<Retention> {
-    const base = retention ?? await this.#counts();
+    // Counts given by the retention runner (card K06) carry no pre-upgrade need: the one from the source in force is added, so the runner, the backup run and every target apply one rule (card K01c).
+    // Without a source, or when it fails, none is added and every pre-upgrade snapshot stays.
+    const base = retention === undefined ? await this.#counts() : retention.preUpgrade !== undefined || this.#options.retentionSource === undefined ? retention : await this.#withNeed(retention);
     const protect = await this.#protect();
     return protect === undefined ? base : { ...base, protect };
+  }
+
+  async #withNeed(retention: Retention): Promise<Retention> {
+    try { const need = (await this.#options.retentionSource!()).preUpgrade; return need === undefined ? retention : { ...retention, preUpgrade: need }; } catch { return retention; }
   }
 
   /** The counts in force: the owner's setting when one is wired, else the option, else the 7 daily and 4 weekly of the first release. A source that fails leaves the option (never fewer copies than before). */
@@ -210,7 +216,7 @@ export class BackupService {
     return all.filter((b) => !kept.has(b.path)).map((b) => b.manifest.name);
   }
 
-  /** Deletes the backups outside the rule (the newest, every pre-upgrade snapshot and any backup that cannot be trusted by name are kept) and returns their names. Used by the retention runner. */
+  /** Deletes the backups outside the rule (the newest, the newest good one, every pre-upgrade snapshot K03's rollback period still needs and any backup that cannot be trusted by name are kept) and returns their names. Used by the retention runner. */
   async prune(retention?: Retention): Promise<string[]> {
     const result = await pruneBackups(this.#options.root, { ...(this.#options.now === undefined ? {} : { now: this.#options.now }), retention: await this.rules(retention) });
     return result.deleted.map((p) => basename(p));
