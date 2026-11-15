@@ -38,6 +38,13 @@ export async function listBackups(root: string): Promise<BackupInfo[]> {
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }
 
+/**
+ * Which pre-upgrade snapshots K03's rollback period still needs (card K01c). `periodDays`: the period, for the words the owner reads. `notBefore`: a snapshot made at or after this instant is inside a rollback period of its own (now minus the period), whether or not an upgrade was recorded for it.
+ * `since`: the time of the earliest upgrade whose period is still open; the newest snapshot at or before it (the one taken for that upgrade) and every later one stay. `keepNewest`: a destructive migration is approved and not yet applied, so the newest snapshot stays
+ * whatever its age. Everything else is under the ordinary counts and the age limit.
+ */
+export interface PreUpgradeNeed { readonly periodDays: number; readonly notBefore: string; readonly since?: string; readonly keepNewest?: boolean }
+
 /** `preRestoreKept`: keep the newest this many snapshots taken before a restore (card K01h); absent or null: keep them all. `preRestoreMaxAgeDays`: those older than this are not kept (absent or null: no age limit). */
 export interface Retention {
   readonly daily: number; readonly weekly: number; readonly preRestoreKept?: number | null; readonly preRestoreMaxAgeDays?: number | null;
@@ -45,6 +52,19 @@ export interface Retention {
   readonly maxAgeDays?: number | null;
   /** Card K01c: the names (folder names; `path` or `manifest.name`) of backups the age limit must not delete: the newest one verified complete. */
   readonly protect?: ReadonlySet<string>;
+  /** Card K01c: what K03's rollback period still needs. ABSENT (no migration guard wired, or it could not be read): every pre-upgrade snapshot is kept, as before. Present: a snapshot is kept only while this says it is needed, then the counts and the age limit apply to it. */
+  readonly preUpgrade?: PreUpgradeNeed;
+}
+
+/** The pre-upgrade snapshots (by path) that `need` says are still needed. */
+export function neededSnapshots(snapshots: readonly BackupInfo[], need: PreUpgradeNeed): Set<string> {
+  const newestFirst = [...snapshots].sort((a, b) => b.at.localeCompare(a.at));
+  const out = new Set<string>();
+  const anchor = need.since === undefined ? undefined : newestFirst.find((b) => b.at <= need.since!);
+  const from = need.since === undefined ? undefined : (anchor?.at ?? need.since);
+  for (const b of newestFirst) if (b.at >= need.notBefore || (from !== undefined && b.at >= from)) out.add(b.path);
+  if (need.keepNewest === true && newestFirst[0] !== undefined) out.add(newestFirst[0].path);
+  return out;
 }
 export const DEFAULT_RETENTION: Retention = { daily: 7, weekly: 4 };
 
@@ -52,7 +72,7 @@ const day = (iso: string): string => iso.slice(0, 10);
 /** The Monday (UTC) that starts the week the instant is in. */
 const week = (iso: string): string => { const d = new Date(`${day(iso)}T00:00:00.000Z`); const back = (d.getUTCDay() + 6) % 7; return new Date(d.getTime() - back * 86_400_000).toISOString().slice(0, 10); };
 
-/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, the newest manual or scheduled one (card K01c: a newer snapshot never takes its place), and every pre-upgrade snapshot (a later release decides when those may go). */
+/** Which of the backups to keep: the newest of each of the last `daily` days that have one, the newest of each of the last `weekly` weeks that have one, the newest backup of all, the newest manual or scheduled one (card K01c: a newer snapshot never takes its place), and every pre-upgrade snapshot K03's rollback period still needs (all of them when no migration guard is wired). */
 export function chooseKept(backups: readonly BackupInfo[], retention: Retention = DEFAULT_RETENTION, now: Date = new Date()): Set<string> {
   const newestFirst = backups.filter((b) => b.trusted).sort((a, b) => b.at.localeCompare(a.at));
   // Snapshots taken before a restore are counted apart: they fill no daily or weekly slot (a scheduled backup of the same day is still kept) and do not stretch the time untrusted backups are kept for.
@@ -62,7 +82,10 @@ export function chooseKept(backups: readonly BackupInfo[], retention: Retention 
   // An untrusted backup is kept while it is no older than the oldest backup the rules keep (so it expires with the others); with no trusted backup at all, everything is kept.
   const first = newestFirst[0];
   if (first !== undefined) kept.add(first.path);
-  for (const b of newestFirst) if (b.manifest.kind === "pre-upgrade") kept.add(b.path);
+  // Without a migration guard every pre-upgrade snapshot stays; with one, only those the rollback period still needs (the others fall under the counts and the age limit like any backup).
+  const snapshots = newestFirst.filter((b) => b.manifest.kind === "pre-upgrade");
+  const needed = retention.preUpgrade === undefined ? new Set(snapshots.map((b) => b.path)) : neededSnapshots(snapshots, retention.preUpgrade);
+  for (const path of needed) kept.add(path);
   // A snapshot taken before a restore is the only way back from it: all are kept unless the owner set a count, then the newest that many.
   const oldest = retention.preRestoreMaxAgeDays === undefined || retention.preRestoreMaxAgeDays === null ? undefined : new Date(now.getTime() - retention.preRestoreMaxAgeDays * 86_400_000).toISOString();
   let preRestore = 0;
@@ -92,7 +115,7 @@ export function chooseKept(backups: readonly BackupInfo[], retention: Retention 
   if (retention.maxAgeDays !== undefined && retention.maxAgeDays !== null) {
     const limit = new Date(now.getTime() - retention.maxAgeDays * 86_400_000).toISOString();
     for (const b of newestFirst) {
-      if (!kept.has(b.path) || b.at >= limit || b.path === first?.path || b.path === newestGood?.path || b.manifest.kind === "pre-upgrade" || b.manifest.kind === "pre-restore") continue;
+      if (!kept.has(b.path) || b.at >= limit || b.path === first?.path || b.path === newestGood?.path || needed.has(b.path) || b.manifest.kind === "pre-restore") continue;
       if (retention.protect?.has(b.path) === true || retention.protect?.has(b.manifest.name) === true) continue;
       kept.delete(b.path);
     }
@@ -108,13 +131,18 @@ export function staysUpToDays(r: Pick<Retention, "daily" | "weekly" | "maxAgeDay
   return r.maxAgeDays === undefined || r.maxAgeDays === null ? byCounts : Math.min(byCounts, r.maxAgeDays);
 }
 
+/** How long a pre-upgrade snapshot is kept, in plain words: `days` is K03's rollback period, absent or null when no migration guard is wired. */
+export function snapshotWords(days: number | null | undefined): string {
+  return days === undefined || days === null ? "A pre-upgrade snapshot is never deleted here (no migration guard says when it may go)." : `A pre-upgrade snapshot is kept while the rollback period (${days} days after an upgrade) is open, whatever the counts and the age limit say; after that the counts and the age limit apply to it like any other backup.`;
+}
+
 /**
  * The counts and the age limit side by side, in plain words, for the owner (card K01c). `overrides` says which one decides: `age` when the age limit is shorter than the counts would keep a backup (the counts' extra
  * copies are deleted early), `counts` when the counts let a backup go before the limit (the limit then matters only when backups stop), `none` without a limit.
  */
-export function describeRules(r: Pick<Retention, "daily" | "weekly" | "maxAgeDays">): { readonly overrides: "none" | "age" | "counts" | "same"; readonly byCountsDays: number; readonly text: string } {
+export function describeRules(r: Pick<Retention, "daily" | "weekly" | "maxAgeDays"> & { readonly preUpgradeDays?: number | null }): { readonly overrides: "none" | "age" | "counts" | "same"; readonly byCountsDays: number; readonly text: string } {
   const byCounts = Math.max(r.daily, r.weekly * 7 + 6);
-  const base = `A backup is deleted once it falls outside the newest ${r.daily} daily and ${r.weekly} weekly copies${r.maxAgeDays === undefined || r.maxAgeDays === null ? "" : ` or is older than ${r.maxAgeDays} days`}. The newest backup, the newest one verified complete and every pre-upgrade snapshot are never deleted by age.`;
+  const base = `A backup is deleted once it falls outside the newest ${r.daily} daily and ${r.weekly} weekly copies${r.maxAgeDays === undefined || r.maxAgeDays === null ? "" : ` or is older than ${r.maxAgeDays} days`}. The newest good backup and the newest one verified complete are never deleted by age. ${snapshotWords(r.preUpgradeDays)}`;
   if (r.maxAgeDays === undefined || r.maxAgeDays === null) return { overrides: "none", byCountsDays: byCounts, text: `${base} There is no age limit, so the counts alone decide (about ${byCounts} days).` };
   if (r.maxAgeDays < byCounts) return { overrides: "age", byCountsDays: byCounts, text: `${base} The age limit (${r.maxAgeDays} days) is shorter than the counts alone would keep a backup (about ${byCounts} days), so the age limit decides: copies between ${r.maxAgeDays} and ${byCounts} days old are deleted although a count would keep them.` };
   if (r.maxAgeDays > byCounts) return { overrides: "counts", byCountsDays: byCounts, text: `${base} The counts let a backup go after about ${byCounts} days, sooner than the age limit (${r.maxAgeDays} days), so the counts decide; the age limit only matters when no new backups are made (then old copies still go once they are past it, but the newest good one stays).` };

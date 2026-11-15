@@ -44,12 +44,12 @@ export interface RetentionValues {
   readonly thinkingDays: number;
   /** Whether the dispatcher removes stored model thinking by itself once its time (`thinkingDays`) has come, even while `autoRun` is off (owner decision 2026-10-22: thinking goes 14 days after its task is done, so that default is on). It removes thinking and nothing else; the owner turns it off by chat. Card K06c. */
   readonly thinkingAuto: boolean;
-  /** Backup counts the nightly run keeps (the K01 rule: 7 daily, 4 weekly). The newest backup and every pre-upgrade snapshot are always kept. */
+  /** Backup counts the nightly run keeps (the K01 rule: 7 daily, 4 weekly). The newest backup is always kept; a pre-upgrade snapshot is kept while K03's rollback period is open. */
   readonly backupDaily: number;
   readonly backupWeekly: number;
   /** How many of the snapshots taken before a restore (kind pre-restore) are kept, newest first. `null`: keep them all (the default). */
   readonly preRestoreKept: number | null;
-  /** A backup older than this many days is deleted even when a daily or weekly count would keep it (card K01c; default 35, about what 7 daily and 4 weekly give). The newest good backup, the newest one verified complete and every pre-upgrade snapshot are never deleted by age. `null`: no age limit, the counts alone decide. */
+  /** A backup older than this many days is deleted even when a daily or weekly count would keep it (card K01c; default 35, about what 7 daily and 4 weekly give). The newest good backup and the newest one verified complete are never deleted by age; a pre-upgrade snapshot is kept while the rollback period is open (then it is under the counts and this limit). `null`: no age limit, the counts alone decide. */
   readonly backupMaxAgeDays: number | null;
   /** Snapshots taken before a restore older than this many days are removed by the nightly run (the newest backup is always kept). `null`: no age limit (the default). They never take the place of a scheduled daily or weekly backup. */
   readonly preRestoreMaxAgeDays: number | null;
@@ -142,12 +142,13 @@ export class RetentionSettingsService {
   readonly #runner: CommandRunner;
   readonly #defaults: RetentionValues;
   readonly #onChange: ((effective: RetentionValues) => Promise<void>) | undefined;
-  private constructor(runner: CommandRunner, defaults: RetentionValues, onChange: ((effective: RetentionValues) => Promise<void>) | undefined) { this.#runner = runner; this.#defaults = defaults; this.#onChange = onChange; }
+  private constructor(runner: CommandRunner, defaults: RetentionValues, onChange: ((effective: RetentionValues) => Promise<void>) | undefined, preUpgradeDays?: () => Promise<number | null>) { this.#runner = runner; this.#defaults = defaults; this.#onChange = onChange; this.#preUpgradeDays = preUpgradeDays; }
+  readonly #preUpgradeDays: (() => Promise<number | null>) | undefined;
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { defaults?: Partial<RetentionValues>; onChange?: (effective: RetentionValues) => Promise<void> } = {}): RetentionSettingsService {
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { defaults?: Partial<RetentionValues>; onChange?: (effective: RetentionValues) => Promise<void>; /** Card K01c: K03's rollback period in days, or null without a migration guard; said in the answer about the backup rules. */ preUpgradeDays?: () => Promise<number | null> } = {}): RetentionSettingsService {
     const defaults = { ...RETENTION_DEFAULTS, ...(options.defaults ?? {}) };
     for (const n of NAMES) if (!fieldOk(n, defaults[n])) throw new RangeError(`retention default ${n}: must be ${describe(n)}`);
-    return new RetentionSettingsService(new CommandRunner(storage, epoch, options), defaults, options.onChange);
+    return new RetentionSettingsService(new CommandRunner(storage, epoch, options), defaults, options.onChange, options.preUpgradeDays);
   }
 
   get defaults(): RetentionValues { return this.#defaults; }
@@ -208,7 +209,8 @@ export class RetentionSettingsService {
     const summary = changed.length === 0 ? "No retention value changed." : `Retention changed: ${changed.map((c) => `${c.field} ${fmt(c.old)} -> ${fmt(c.new)}`).join("; ")}.`;
     // Counts and the age limit side by side: when one overrides the other, the owner is told which decides (card K01c).
     const backupChanged = changed.some((c) => c.field === "backupDaily" || c.field === "backupWeekly" || c.field === "backupMaxAgeDays");
-    const rules = backupChanged ? describeRules({ daily: (applied ?? this.#defaults).backupDaily, weekly: (applied ?? this.#defaults).backupWeekly, maxAgeDays: (applied ?? this.#defaults).backupMaxAgeDays }) : undefined;
+    const preUpgradeDays = backupChanged && this.#preUpgradeDays !== undefined ? await this.#preUpgradeDays().catch(() => null) : null;
+    const rules = backupChanged ? describeRules({ preUpgradeDays, daily: (applied ?? this.#defaults).backupDaily, weekly: (applied ?? this.#defaults).backupWeekly, maxAgeDays: (applied ?? this.#defaults).backupMaxAgeDays }) : undefined;
     return { revision: result.revision, changed, summary: rules === undefined ? summary : `${summary} ${rules.text}` };
   }
 

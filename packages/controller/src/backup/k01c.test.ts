@@ -6,7 +6,10 @@ import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/index.js";
-import { BackupConfigService, BackupService, BackupSystem, FolderDriver, HttpDriver, chooseKept, safeMessage, createBackup, describeRules, generationReport, listBackups, offsiteLocationProblem, parseKeyring, staysUpToDays, type BackupInfo, type BackupRetention, type TargetDriver } from "./index.js";
+import { BackupConfigService, BackupService, BackupSystem, FolderDriver, HttpDriver, chooseKept, safeMessage, createBackup, describeRules, generationReport, listBackups, offsiteLocationProblem, parseKeyring, staysUpToDays, type BackupInfo, type BackupRetention, type PreUpgradeNeed, type TargetDriver } from "./index.js";
+import { MigrationGuardService } from "../migration/index.js";
+import type { Migration } from "../storage/migrations.js";
+import { neededSnapshots, snapshotWords } from "./index.js";
 import { runBackupCli } from "./cli.js";
 import { startFakeTarget, type FakeTarget } from "./testing/target-server.js";
 
@@ -43,7 +46,7 @@ async function seed(storage: ControllerStorage): Promise<number> {
 
 interface Rig {
   d: string; root: string; clock: { t: number }; epoch: number; storage: ControllerStorage; config: BackupConfigService; service: BackupService; system: BackupSystem; notes: ReturnType<typeof fakeNotifications>;
-  retention: { value: BackupRetention }; day(n: number): void; backup(n: number): Promise<string>; names(dir: string): string[];
+  retention: { value: BackupRetention }; guard: { g?: { preUpgradeNeed(): Promise<PreUpgradeNeed | undefined> } }; day(n: number): void; backup(n: number): Promise<string>; names(dir: string): string[];
 }
 async function rig(storage: ControllerStorage, options: { retention?: BackupRetention; resolveSecret?: (n: string) => Promise<string | undefined>; driverFor?: (t: never) => TargetDriver | undefined; keyringFile?: string } = {}): Promise<Rig> {
   const d = mkdtempSync(join(tmpdir(), "nn-k01c-"));
@@ -54,14 +57,17 @@ async function rig(storage: ControllerStorage, options: { retention?: BackupRete
   const notes = fakeNotifications();
   const retention = { value: options.retention ?? { daily: 7, weekly: 4, maxAgeDays: 35 } };
   let system!: BackupSystem;
+  // Card K01c: K03's guard, when a test wires one, says which pre-upgrade snapshots its rollback period needs (a guard that cannot be read says nothing, as in api/start.ts).
+  const guard: Rig["guard"] = {};
+  const rules = async (): Promise<BackupRetention> => { let need: PreUpgradeNeed | undefined; try { need = await guard.g?.preUpgradeNeed(); } catch { need = undefined; } return { ...retention.value, ...(need === undefined ? {} : { preUpgrade: need }) }; };
   const service = new BackupService(storage, {
-    root, version: "t", now: () => new Date(clock.t), retentionSource: async () => retention.value,
+    root, version: "t", now: () => new Date(clock.t), retentionSource: rules,
     scheduleSource: async () => { const c = await config.effective(); return { everyMs: c.everyHours * 3_600_000, hourUtc: c.hourUtc }; },
     verifiedSource: () => system.verifiedNames(), afterBackup: (made) => system.afterBackup(made),
   });
-  system = new BackupSystem({ service, config, root, notifications: notes.port, retention: async () => retention.value, now: () => new Date(clock.t), ...(options.resolveSecret === undefined ? {} : { resolveSecret: options.resolveSecret }), ...(options.driverFor === undefined ? {} : { driverFor: options.driverFor as never }), ...(options.keyringFile === undefined ? {} : { keyringFile: options.keyringFile }), scratchDirectory: d });
+  system = new BackupSystem({ service, config, root, notifications: notes.port, retention: rules, now: () => new Date(clock.t), ...(options.resolveSecret === undefined ? {} : { resolveSecret: options.resolveSecret }), ...(options.driverFor === undefined ? {} : { driverFor: options.driverFor as never }), ...(options.keyringFile === undefined ? {} : { keyringFile: options.keyringFile }), scratchDirectory: d });
   return {
-    d, root, clock, epoch, storage, config, service, system, notes, retention,
+    d, root, clock, epoch, storage, config, service, system, notes, retention, guard,
     day: (n) => { clock.t = T0 + n * DAYMS; },
     backup: async (n) => { clock.t = T0 + n * DAYMS; const made = await service.backUpNow("scheduled"); await service.finish(); return made.manifest.name; },
     names: (dir) => (existsSync(dir) ? readdirSync(dir).filter((n) => n.startsWith("backup-") && !n.endsWith(".partial")).sort() : []),
@@ -552,4 +558,197 @@ test("an old key generation is deleted only when no backup on ANY target uses it
       assert.match(told.detail, /key generation 1/);
     } finally { await r.system.idle(); cleanup(r); }
   } finally { await fake.close(); rmSync(d0, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); await world.close(); }
+});
+
+
+// ---- pre-upgrade snapshots and K03's rollback period (card K01c) ----------------------------------------------------------------------------
+
+test("a pre-upgrade snapshot is kept while the rollback period needs it and then falls under the counts and the age limit; none of it ever deletes the newest good backup (pure, card K01c)", () => {
+  const now = new Date(Date.UTC(2026, 10, 30, 12));
+  const days = (n: number): string => new Date(now.getTime() - n * DAYMS).toISOString();
+  const need = (period: number, extra: { since?: string; keepNewest?: boolean } = {}) => ({ periodDays: period, notBefore: days(period), ...extra });
+  const good = info(days(0)); const newer = info(days(5), "pre-upgrade"); const old = info(days(20), "pre-upgrade"); const ancient = info(days(50), "pre-upgrade");
+  const rules = { daily: 1, weekly: 0, maxAgeDays: 35 };
+  const all = [good, newer, old, ancient];
+  // No guard wired: every snapshot stays, as before (the age limit does not touch them).
+  assert.deepEqual([...chooseKept(all, rules, now)].sort(), all.map((b) => b.path).sort());
+  // A guard says the period is 14 days: the snapshot 5 days old stays, the ones 20 and 50 days old are under the ordinary rules and go.
+  const kept = chooseKept(all, { ...rules, preUpgrade: need(14) }, now);
+  assert.deepEqual([newer, old, ancient].map((b) => kept.has(b.path)), [true, false, false]);
+  assert.ok(kept.has(good.path), "the newest good backup stays");
+  // The counts still apply to an expired snapshot: when it is the newest of its day inside the daily count it stays like any backup.
+  const counted = chooseKept(all, { daily: 30, weekly: 0, maxAgeDays: 35, preUpgrade: need(14) }, now);
+  assert.deepEqual([old, ancient].map((b) => counted.has(b.path)), [true, false], "20 days old is inside 30 daily copies and the age limit; 50 days old is past the age limit");
+  // An upgrade recorded 18 days ago (a longer period was set) anchors on the snapshot taken for it, the newest one at or before it, and keeps what came after.
+  const anchored = chooseKept(all, { ...rules, preUpgrade: need(14, { since: days(19.9) }) }, now);
+  assert.deepEqual([newer, old, ancient].map((b) => anchored.has(b.path)), [true, true, false]);
+  // The newest good backup is kept when only snapshots are newer, under every rule.
+  const lone = info(days(60), "manual");
+  for (const pre of [undefined, need(14), need(1, { keepNewest: true })]) assert.ok(chooseKept([newer, lone], { daily: 1, weekly: 0, maxAgeDays: 1, ...(pre === undefined ? {} : { preUpgrade: pre }) }, now).has(lone.path));
+  // A destructive approval waiting for the next start keeps the newest snapshot whatever its age; the older ones go.
+  assert.deepEqual([...neededSnapshots([old, ancient], need(14, { keepNewest: true }))], [old.path]);
+  assert.deepEqual([...neededSnapshots([old, ancient], need(14))], []);
+  assert.match(snapshotWords(14), /kept while the rollback period \(14 days after an upgrade\) is open/);
+  assert.match(snapshotWords(null), /never deleted here/);
+  assert.match(describeRules({ daily: 7, weekly: 4, maxAgeDays: 35, preUpgradeDays: 14 }).text, /pre-upgrade snapshot is kept while the rollback period \(14 days/);
+  assert.match(describeRules({ daily: 7, weekly: 4, maxAgeDays: 35 }).text, /pre-upgrade snapshot is never deleted here/);
+});
+
+const MIGRATIONS: Migration[] = [{ version: 1, name: "initial", statements: ["x"] }, { version: 2, name: "add_a", statements: ["x"] }, { version: 3, name: "drop_b", statements: ["x"], kind: "destructive" }];
+
+for (const backend of backends) {
+  test(`${backend.name}: a pre-upgrade snapshot stays while K03's rollback period is open on the main folder and a target, goes after it, and a destructive approval still waiting keeps the newest one; the newest good backup stays throughout, also for a second controller (card K01c)`, async () => {
+    const world = await backend.open();
+    const r = await rig(world.storage, { retention: { daily: 1, weekly: 0, maxAgeDays: 35 } });
+    try {
+      const schema = { v: 1 };
+      const make = (): MigrationGuardService => MigrationGuardService.withEpoch(world.storage, r.epoch, { migrations: MIGRATIONS, schemaVersion: async () => schema.v, gateFile: join(r.d, "migration-gate.json"), snapshots: true, now: () => new Date(r.clock.t).toISOString() });
+      const g = make(); r.guard.g = g;
+      const snapAt = async (ms: number): Promise<string> => (await createBackup(world.storage, { root: r.root, kind: "pre-upgrade", version: "t", now: () => new Date(ms) })).manifest.name;
+      // Day 0 is the baseline; day 1 the upgrade to schema 2, with the snapshot the opener took just before it.
+      await r.backup(0); await g.noteStart();
+      schema.v = 2; r.day(1);
+      const snap = await snapAt(T0 + DAYMS - 5000);
+      assert.ok((await g.noteStart()).upgrade !== undefined);
+      const targetDir = join(r.d, "spare");
+      await r.system.addTarget(owner, { commandId: "t1", name: "Spare", kind: "folder", location: targetDir });
+      cpSync(join(r.root, snap), join(targetDir, snap), { recursive: true });
+      for (const n of [1, 10, 14]) {
+        const newest = await r.backup(n); await r.system.idle();
+        assert.ok(r.names(r.root).includes(snap) && r.names(targetDir).includes(snap), `day ${n}: inside the rollback period the snapshot stays on the main folder and on the target`);
+        assert.ok(r.names(r.root).includes(newest), "the newest good backup stays");
+      }
+      // A second controller (another service over the same database) sees the same need, and a restart keeps it.
+      assert.deepEqual(await make().preUpgradeNeed(), await g.preUpgradeNeed());
+      const last = await r.backup(16); await r.system.idle();
+      assert.ok(!r.names(r.root).includes(snap) && !r.names(targetDir).includes(snap), "after the period the ordinary rules take it, on the main folder and on the target");
+      assert.ok(r.names(r.root).includes(last), "the newest good backup stays");
+      // The owner approves a destructive migration (allowed once the period is over): the newest snapshot is the way back, so it stays however old.
+      const old = await snapAt(T0 + 2 * DAYMS);
+      await g.approveContract(owner, { commandId: "ap1", through: 3 });
+      for (const n of [17, 30]) { await r.backup(n); await r.system.idle(); assert.ok(r.names(r.root).includes(old), `day ${n}: an approval waiting for the next start keeps the newest snapshot`); }
+      await g.withdrawContract(owner, { commandId: "wd1" });
+      const after = await r.backup(31); await r.system.idle();
+      assert.ok(!r.names(r.root).includes(old), "withdrawn, nothing needs it any more");
+      assert.ok(r.names(r.root).includes(after));
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+
+  test(`${backend.name}: with no migration guard wired, or one whose record cannot be read, every pre-upgrade snapshot is kept as before; nothing is deleted on a guess (card K01c)`, async () => {
+    const world = await backend.open();
+    const r = await rig(world.storage, { retention: { daily: 1, weekly: 0, maxAgeDays: 5 } });
+    try {
+      await r.backup(0);
+      const snap = (await createBackup(world.storage, { root: r.root, kind: "pre-upgrade", version: "t", now: () => new Date(T0 + 1000) })).manifest.name;
+      await r.backup(60); await r.system.idle();
+      assert.ok(r.names(r.root).includes(snap), "no guard wired: kept, as in the first release");
+      r.guard.g = { preUpgradeNeed: async () => { throw new Error("the record could not be read"); } };
+      await r.backup(90); await r.system.idle();
+      assert.ok(r.names(r.root).includes(snap), "a guard that cannot be read says nothing, so nothing goes");
+      // A guard with no record yet knows nothing either.
+      r.guard.g = { preUpgradeNeed: async () => undefined };
+      const last = await r.backup(120); await r.system.idle();
+      assert.ok(r.names(r.root).includes(snap) && r.names(r.root).includes(last));
+      // Once a guard answers, the snapshot (older than the period) goes.
+      r.guard.g = { preUpgradeNeed: async () => ({ periodDays: 14, notBefore: new Date(T0 + 106 * DAYMS).toISOString() }) };
+      await r.backup(121); await r.system.idle();
+      assert.ok(!r.names(r.root).includes(snap));
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+
+  test(`${backend.name}: a snapshot with no upgrade on record (a start that failed before it was noted) is still kept for the rollback period of its own, then goes (card K01c)`, async () => {
+    const world = await backend.open();
+    const r = await rig(world.storage, { retention: { daily: 1, weekly: 0, maxAgeDays: 35 } });
+    try {
+      const g = MigrationGuardService.withEpoch(world.storage, r.epoch, { migrations: MIGRATIONS, schemaVersion: async () => 1, snapshots: true, now: () => new Date(r.clock.t).toISOString() });
+      r.guard.g = g; await r.backup(0); await g.noteStart();
+      const snap = (await createBackup(world.storage, { root: r.root, kind: "pre-upgrade", version: "t", now: () => new Date(T0 + DAYMS) })).manifest.name;
+      await r.backup(10); assert.ok(r.names(r.root).includes(snap), "day 10: inside 14 days of its own");
+      await r.backup(16); assert.ok(!r.names(r.root).includes(snap), "day 16: past it");
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+}
+
+// ---- review: the destructive migration once applied, the owner's longer period, a guard read that fails half-way, the retention runner (card K01c) ----
+
+for (const backend of backends) {
+  test(`${backend.name}: once a destructive migration is applied, the snapshot taken just before it stays for the owner's whole rollback period (30 days here), on the retention runner's prune too, and then goes (card K01c)`, async () => {
+    const world = await backend.open();
+    const r = await rig(world.storage, { retention: { daily: 1, weekly: 0, maxAgeDays: 35 } });
+    try {
+      const schema = { v: 2 };
+      const g = MigrationGuardService.withEpoch(world.storage, r.epoch, { migrations: MIGRATIONS, schemaVersion: async () => schema.v, gateFile: join(r.d, "migration-gate.json"), snapshots: true, now: () => new Date(r.clock.t).toISOString() });
+      r.guard.g = g;
+      await r.backup(0); await g.noteStart();
+      await g.setPolicy(owner, { commandId: "p30", rollbackPeriodDays: 30 });
+      await g.approveContract(owner, { commandId: "ap", through: 3 });
+      // The next start (day 2) applies migration 3: the opener takes the snapshot, then the start notes the upgrade and the approval as applied.
+      r.day(2); const snap = (await createBackup(world.storage, { root: r.root, kind: "pre-upgrade", version: "t", now: () => new Date(T0 + 2 * DAYMS - 3000) })).manifest.name;
+      schema.v = 3; assert.ok((await g.noteStart()).upgrade !== undefined);
+      const need = await g.preUpgradeNeed();
+      assert.equal(need?.keepNewest, undefined, "the approval is applied: nothing waits any more");
+      assert.equal(need?.periodDays, 30);
+      for (const n of [3, 20, 31]) { await r.backup(n); await r.system.idle(); assert.ok(r.names(r.root).includes(snap), `day ${n}: inside the owner's 30-day period the way back from the destructive migration stays`); }
+      // The retention runner passes its own counts (no need in them): the need in force is still applied, so it keeps the snapshot too.
+      assert.deepEqual(await r.service.prune({ daily: 1, weekly: 0, maxAgeDays: 1 }), [], "inside the period the runner deletes nothing (the newest is the only other backup)");
+      assert.ok(r.names(r.root).includes(snap));
+      r.day(33);
+      assert.deepEqual(await r.service.preview({ daily: 1, weekly: 0, maxAgeDays: 35 }), [snap], "past the period the runner's preview names it, as the backup run would");
+      // While the guard cannot be read the runner deletes nothing.
+      r.guard.g = { preUpgradeNeed: async () => { throw new Error("unreadable"); } };
+      assert.deepEqual(await r.service.prune({ daily: 1, weekly: 0, maxAgeDays: 35 }), []);
+      r.guard.g = g;
+      assert.deepEqual(await r.service.prune({ daily: 1, weekly: 0, maxAgeDays: 35 }), [snap]);
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+
+  test(`${backend.name}: a guard whose policy or upgrade times cannot be read says nothing (not the default period), so a snapshot the owner's longer period needs is never deleted on a guess (card K01c)`, async () => {
+    const world = await backend.open();
+    const r = await rig(world.storage, { retention: { daily: 1, weekly: 0, maxAgeDays: 5 } });
+    try {
+      const fail = { policy: false, badTime: false };
+      const storage = new Proxy(world.storage, { get(target, prop, receiver) {
+        if (prop === "getAggregate") return async (ref: { kind: string; id: string }) => {
+          if (fail.policy && ref.kind === "migration-policy") throw new Error("connection lost");
+          const found = await target.getAggregate(ref as never);
+          if (fail.badTime && found !== undefined && ref.kind === "migration-guard") return { ...found, body: { ...found.body, upgrades: [{ from: 1, to: 2, at: "not a time", additiveOnly: true }] } };
+          return found;
+        };
+        const v = Reflect.get(target, prop, receiver) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as ControllerStorage;
+      const schema = { v: 1 };
+      const g = MigrationGuardService.withEpoch(storage, r.epoch, { migrations: MIGRATIONS, schemaVersion: async () => schema.v, snapshots: true, now: () => new Date(r.clock.t).toISOString() });
+      r.guard.g = g;
+      await r.backup(0); await g.noteStart();
+      await g.setPolicy(owner, { commandId: "p60", rollbackPeriodDays: 60 });
+      r.day(1); const snap = (await createBackup(world.storage, { root: r.root, kind: "pre-upgrade", version: "t", now: () => new Date(T0 + DAYMS - 2000) })).manifest.name;
+      schema.v = 2; await g.noteStart();
+      fail.policy = true;
+      await assert.rejects(g.preUpgradeNeed(), "an unreadable policy is not taken as the 14-day default");
+      assert.equal((await g.effective()).rollbackPeriodDays, 14, "(K03's own reading falls back to the default, which is why the need does not use it)");
+      await r.backup(20); await r.system.idle();
+      assert.ok(r.names(r.root).includes(snap), "day 20: the owner's 60-day period is open; an unreadable policy deletes nothing");
+      fail.policy = false; fail.badTime = true;
+      await assert.rejects(g.preUpgradeNeed(), "an upgrade time that cannot be read is not judged closed");
+      await r.backup(70); await r.system.idle();
+      assert.ok(r.names(r.root).includes(snap), "day 70: a damaged upgrade time deletes nothing");
+      fail.badTime = false;
+      const need = await g.preUpgradeNeed();
+      assert.equal(need?.since, undefined, "day 70: the 60-day period after the day-1 upgrade is over");
+      await r.backup(71); await r.system.idle();
+      assert.ok(!r.names(r.root).includes(snap), "readable again and past the owner's period: it goes");
+    } finally { await r.system.idle(); cleanup(r); await world.close(); }
+  });
+}
+
+test("the need's times are plain UTC instants with milliseconds, whatever form the upgrade record holds, so they compare with a backup's time by text (card K01c)", async () => {
+  const body = { highWater: 2, pairs: [], upgrades: [{ from: 1, to: 2, at: "2026-11-01T10:00:00+02:00", additiveOnly: true }], updatedAt: "2026-11-01T08:00:00.000Z" };
+  const storage = { getAggregate: async (ref: { kind: string }) => (ref.kind === "migration-guard" ? { ref, revision: 1, body } : undefined) } as unknown as ControllerStorage;
+  const g = MigrationGuardService.withEpoch(storage, 1, { migrations: MIGRATIONS, schemaVersion: async () => 2, now: () => "2026-11-05T00:00:00.000Z" });
+  const need = await g.preUpgradeNeed();
+  assert.equal(need?.since, "2026-11-01T08:00:00.000Z");
+  assert.equal(need?.notBefore, "2026-10-22T00:00:00.000Z");
+  // The snapshot taken at 07:59:58 UTC (09:59:58 in the record's own zone) is the one for that upgrade, and stays.
+  const snap = info("2026-11-01T07:59:58.000Z", "pre-upgrade"); const older = info("2026-10-01T07:00:00.000Z", "pre-upgrade");
+  assert.deepEqual([...neededSnapshots([snap, older], need!)], [snap.path]);
 });

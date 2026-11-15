@@ -152,6 +152,9 @@ export class MigrationGuardService {
   async effective(): Promise<EffectivePolicy> {
     let body: PolicyBody | undefined;
     try { body = (await this.#policyBody()).body; } catch { body = undefined; }
+    return this.#pick(body);
+  }
+  #pick(body: PolicyBody | undefined): EffectivePolicy {
     const pick = (k: PolicyKey): number => { const v = body?.[k]; const b = POLICY_BOUNDS[k]; return typeof v === "number" && Number.isSafeInteger(v) && v >= b.min && v <= b.max ? v : POLICY_DEFAULTS[k]; };
     return { rollbackPeriodDays: pick("rollbackPeriodDays"), probationMinutes: pick("probationMinutes"), maxReleaseFailures: pick("maxReleaseFailures"), hostRetries: pick("hostRetries") };
   }
@@ -266,6 +269,27 @@ export class MigrationGuardService {
     if (first === undefined) return undefined;
     const until = new Date(Date.parse(first.at) + policy.rollbackPeriodDays * 86_400_000).toISOString();
     return Date.parse(this.#now()) > Date.parse(until) ? undefined : { backTo: first.from, until };
+  }
+
+  /**
+   * What the backup retention needs to know about pre-upgrade snapshots (card K01c): a snapshot is needed while the rollback period is open (K03 reads upgrades, tested pairs and the period for `release.rollback.check`, and the way back
+   * from a destructive migration is the snapshot, so both end together). `notBefore` is now minus the period; `since` the earliest upgrade still inside it; `keepNewest` while a destructive approval waits to be applied. Throws when the record cannot be read
+   * (the caller then keeps every snapshot). Undefined when the guard has no record at all yet (nothing is known, nothing may go).
+   */
+  async preUpgradeNeed(): Promise<{ readonly periodDays: number; readonly notBefore: string; readonly since?: string; readonly keepNewest?: boolean } | undefined> {
+    const { body } = await this.#state();
+    if (body === undefined) return undefined;
+    // The owner's period is read here without `effective()`'s fall-back: a policy record that cannot be read at this moment must not shorten the period to the default (a longer period chosen by the owner would
+    // then let snapshots go that it still needs). The read throws, and the caller keeps every snapshot. A record that was read but holds a damaged field uses the default, as K03 itself does.
+    const policy = this.#pick((await this.#policyBody()).body);
+    const now = Date.parse(this.#now());
+    if (!Number.isFinite(now)) throw new Error("the clock gave no usable time");
+    const from = now - policy.rollbackPeriodDays * 86_400_000;
+    // An upgrade whose time cannot be read is not judged closed on a guess: nothing is said and everything stays (K03's own check also treats such a record as open).
+    const times = body.upgrades.map((u) => Date.parse(u.at));
+    if (times.some((t) => !Number.isFinite(t))) throw new Error("an upgrade record has no usable time");
+    const open = times.filter((t) => t >= from).sort((a, b) => a - b);
+    return { periodDays: policy.rollbackPeriodDays, notBefore: new Date(from).toISOString(), ...(open[0] === undefined ? {} : { since: new Date(open[0]).toISOString() }), ...(body.contract !== undefined && body.contract.appliedAt === undefined ? { keepNewest: true } : {}) };
   }
 
   async status(by: Principal): Promise<{
