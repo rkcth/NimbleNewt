@@ -9168,12 +9168,29 @@
       ],
       "deliverable": "Owner-configurable backups before 1.0, not needed for the first release: targets (local folder, other disk, off-machine), schedules, retention counts, verification restores and failure notifications, all settable by chatting with the supervisor (owner decision 2026-10-22)",
       "acceptance_and_verification": "a backup is deleted once it falls outside every count rule (7 daily, 4 weekly by default) or is older than an owner-set number of days (default about 35, which is what the counts give), except that the newest backup verified complete is never deleted by age and neither is a pre-upgrade snapshot while K03's rollback period needs it; if the newest good backup is older than the limit the owner is told (U11) because backups are failing, and a test shows that no new backup for longer than the limit leaves the last good one in place with a notice; changing a count or the age limit so that one overrides the other is said back to the owner; the owner can purge named backups sooner: a purge is owner-only and recorded, warns and asks for confirmation before it would delete the last good backup, covers every copy on every target (another disk, off-machine), reports each target's result, and keeps an unreachable target listed as not yet purged and retried; the delete confirmation says how long the item stays in backups, by target if targets keep backups for different times; once a key generation's last backup has expired or been purged its wrapped key and recovery file may be deleted and the owner is told the old recovery file no longer opens anything (K01b); deleting a project or record does not alter existing backups and the delete confirmation says how long it will remain in them; a backup target can be added, tested and removed by chat; a failed or missed backup notifies the owner; a periodic test restore proves a backup is usable; counts and schedule changes are owner-only and recorded; secrets and the encryption scope follow K01b",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "74d65007",
+          "646c1f6b",
+          "0c0eb7e2",
+          "b7ede651",
+          "d48b80b7",
+          "5e844583",
+          "0aac2b15"
+        ],
+        "ci_runs": [
+          "43672690406"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Owner-configurable backups: extra targets (a folder, a folder on another disk with a same-disk warning, an off-machine https store with its credential named from the secret store) added only after a passing test, tested and removed by chat (copies are kept on removal); every backup copied to every target, each keeping its own time; the 7 daily and 4 weekly counts plus an age limit (default 35 days), with the newest good backup, the newest verified complete one and every pre-upgrade snapshot while K03's rollback period needs it never deleted, and the answer saying which rule decides; an Urgent notice when the newest good backup is older than the limit (tested: no new backup for 60 days leaves the last good one in place), and notices for a failed or missed backup, a failing target and a failed test restore; an owner-only, recorded purge of named backups on every target that asks before deleting the last good backup (the controller's preview decides it, never the model), reports each target and retries an unreachable one until it answers, and never copies a purged backup back; a record deletion leaves backups unaltered and its confirmation says how long the text stays, by target; an old key generation is deleted only when no backup on any readable target uses it, and the owner is told the old recovery file opens nothing; a periodic test restore into a scratch store; schedule and count changes owner-only and recorded. Limits: the off-machine target was exercised only against a loopback stand-in speaking NimbleNewt's own small protocol (no real network, https certificates, resumable large uploads or S3-style adapter); 'another disk' was shown only as a folder on the same disk (the warning path); a backup sealed for 'everything' is only manifest-checked by the periodic test unless the owner's passcode or recovery file is on the host; there is no free-space check before a copy to a target; pre-upgrade and pre-restore snapshots stay on the main folder only; NimbleNewt has no project deletion (projects are archived), so only record deletion was tested for the backup clause; Windows and macOS runs come from CI only."
+      }
     },
     {
       "id": "K01d",
