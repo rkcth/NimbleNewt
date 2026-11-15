@@ -43,7 +43,7 @@ export type FloorGate = { readonly ran: string } | { readonly halt: "inquiry" | 
 export interface BetweenRequest { readonly recordId: string; readonly motion: MotionView; readonly round: number; readonly rounds: number; readonly fresh: number }
 export interface BetweenResult { readonly done: boolean; readonly did?: string; readonly summary?: string }
 /** A ballot or a revision the member answered while an inquiry then held the vote: the answer is set aside (its cost stays counted) and asked again when the vote resumes. */
-export interface AsideRequest { readonly recordId: string; readonly motionId: string; readonly version: number; readonly kind: "ballot" | "revision"; readonly agent: string }
+export interface AsideRequest { readonly recordId: string; readonly motionId: string; readonly version: number; readonly kind: "ballot" | "revision"; readonly agent: string; /** For a revision turn: the owner message it answers. */ readonly ownerMessageSeq?: number }
 
 /** Thrown by a floor when another driver is already asking the same member the same thing: the step waits, nothing is recorded. */
 export class FloorBusy extends Error { constructor(message = "another driver is already asking") { super(message); this.name = "FloorBusy"; } }
@@ -130,6 +130,8 @@ export class MeetingProcedureService {
   readonly #runner: CommandRunner;
   readonly #records: MeetingRecordService;
   readonly #options: ProcedureOptions;
+  /** Where the scheduled look (`driveAll`) goes on from: in memory only (a restart begins at the start, which is safe). */
+  #driveAfter: string | undefined;
 
   private constructor(runner: CommandRunner, records: MeetingRecordService, options: ProcedureOptions) { this.#runner = runner; this.#records = records; this.#options = options; }
 
@@ -253,24 +255,29 @@ export class MeetingProcedureService {
     const each = command.steps === undefined ? 20 : whole(command.steps, "steps", 1, PROCEDURE_LIMITS.steps);
     const most = command.procedures === undefined ? 50 : whole(command.procedures, "procedures", 1, 500);
     let driven = 0, steps = 0, failed = 0;
-    let after: string | undefined;
+    // The look goes on from where the last call stopped (wrapping round at the end), so every procedure is reached in turn however many finished ones are kept, and one call reads at most `pages` pages.
+    let after: string | undefined = this.#driveAfter;
     outer: for (let page = 0; page < PROCEDURE_LIMITS.pages; page++) {
       const list = await this.#runner.list(PROCEDURE_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
       for (const a of list) {
         const b = a.body as unknown as ProcedureBody;
-        if (b.stage === "concluded" || b.stage === "tabled" || b.stage === "void") continue;
+        if (b.stage === "concluded" || b.stage === "tabled" || b.stage === "void") { after = a.id; continue; }
         if (driven >= most) break outer;
+        after = a.id;
         try {
           if (command.skip !== undefined && (await command.skip(b.recordId))) continue;
           const rec = known<RecordBody>(await this.#runner.get("meeting-record", b.recordId));
           if (rec === undefined || rec.state !== "open") continue;
+          // Card P06: an archived project's meetings are held: no member is asked and nothing is spent until it is restored (read fresh each time, so another controller's archive counts at once).
+          if (known<{ state?: string }>(await this.#runner.get("project", b.projectId))?.state === "archived") continue;
           const r = await this.run(by, { motionId: b.motionId, steps: each });
           driven += 1; steps += r.steps;
         } catch { failed += 1; }
       }
-      if (list.length < 100) break;
-      after = list[list.length - 1]!.id;
+      // At the end the next call begins again from the start.
+      if (list.length < 100) { after = undefined; break; }
     }
+    this.#driveAfter = after;
     return { driven, steps, failed };
   }
 
@@ -569,6 +576,11 @@ export class MeetingProcedureService {
           cast = true;
         } catch (error) {
           if (!(error instanceof DomainError) || !["invalid_command", "command_conflict", "forbidden"].includes(error.code)) throw error;
+          // An inquiry that held the vote between the check above and the cast: the ballot is set aside and asked again when the vote resumes, never counted as no ballot.
+          if (error.code === "invalid_command" && (await this.#motion(motionId)).heldAt !== undefined) {
+            await floor.setAside?.({ recordId: body.recordId, motionId, version: m.version, kind: "ballot", agent: next }).catch(() => undefined);
+            return { stage: "voting", did: `${next}'s ballot was set aside: the owner's inquiry holds the vote`, waiting: { on: "owner", why: "the owner's inquiry holds the vote; the ballot is asked again when it resumes" }, done: false };
+          }
           cast = error.code === "command_conflict";
         }
       }
@@ -591,7 +603,7 @@ export class MeetingProcedureService {
       if (!got.ok) return got.step;
       const reply = got.value;
       if (reply !== undefined && (await this.#motion(motionId)).heldAt !== undefined) {
-        await floor?.setAside?.({ recordId: body.recordId, motionId, version: m.version, kind: "revision", agent }).catch(() => undefined);
+        await floor?.setAside?.({ recordId: body.recordId, motionId, version: m.version, kind: "revision", agent, ownerMessageSeq: message.seq }).catch(() => undefined);
         return { stage: "voting", did: `${agent}'s revision was set aside: the owner's inquiry holds the vote`, waiting: { on: "owner", why: "the owner's inquiry holds the vote; the revision turn is offered again when it resumes" }, done: false };
       }
       if (reply !== undefined && who !== undefined) {
@@ -602,6 +614,10 @@ export class MeetingProcedureService {
             outcome = "revised";
           } catch (error) {
             if (!(error instanceof DomainError) || !["invalid_command", "command_conflict"].includes(error.code)) throw error;
+            if (error.code === "invalid_command" && (await this.#motion(motionId)).heldAt !== undefined) {
+              await floor?.setAside?.({ recordId: body.recordId, motionId, version: m.version, kind: "revision", agent, ownerMessageSeq: message.seq }).catch(() => undefined);
+              return { stage: "voting", did: `${agent}'s revision was set aside: the owner's inquiry holds the vote`, waiting: { on: "owner", why: "the owner's inquiry holds the vote; the revision turn is offered again when it resumes" }, done: false };
+            }
             // The same revision turn was answered before a restart: the revision is already on record.
             if (error.code === "command_conflict") outcome = "revised";
           }

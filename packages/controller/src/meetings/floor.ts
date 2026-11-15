@@ -40,7 +40,7 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 const forbidden = (by: Principal, what: string): DomainError => new DomainError("forbidden", `${by.id} may not ${what}`);
 
 /** What the floor keeps, at most: the record it belongs to is bounded the same way (every list is a window). */
-export const FLOOR_LIMITS = { turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20 } as const;
+export const FLOOR_LIMITS = { turns: 300, notices: 60, queue: 60, heldAnswers: 40, ownerAnswers: 60, chairQuestions: 30, investigations: 30, followUps: 60, stepsPerDrive: 400, unitRetries: 16, text: 3900, desk: 20, deskRead: 5, replies: 60, summaries: 80, tickUnits: 20, tickMeetings: 20, tickPages: 10 } as const;
 
 /** What the facilitator needs from the rest of the controller. Nothing is reached by any other road. */
 export interface FloorDeps {
@@ -103,6 +103,8 @@ const sortQueue = (q: readonly QueueItem[]): QueueItem[] => q.map((x, i) => ({ x
 export class MeetingFloorService {
   readonly #runner: CommandRunner;
   readonly #deps: FloorDeps;
+  /** Where the scheduled turn (`tick`) goes on from: in memory only (a restart begins at the start, which is safe). */
+  #tickAfter: string | undefined;
   private constructor(runner: CommandRunner, deps: FloorDeps) { this.#runner = runner; this.#deps = deps; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, deps: FloorDeps, options: RunnerOptions = {}): MeetingFloorService {
@@ -122,6 +124,15 @@ export class MeetingFloorService {
     const f = await this.#load(recordId);
     if (f === undefined) throw new DomainError("not_found", "this meeting has not been started on the floor");
     return f;
+  }
+
+  /**
+   * The procedure asks the floor for a member's turn in a meeting the floor was never started on (a motion begun with `meeting.proc.begin`): the floor is put on the meeting first, with no motion of its own (the owner's controls,
+   * the turn limits and timeboxes), as `start` without a motion does, so the member is really asked instead of every answer counting as none. Once on, the floor's own turn runs the meeting.
+   */
+  async #ensure(recordId: string): Promise<void> {
+    if ((await this.#load(recordId)) !== undefined) return;
+    await this.start(this.#deps.service, { commandId: `fl-auto-${base(recordId)}`, recordId });
   }
 
   /** Changes the floor with `mutate` against the newest state, again from the top when someone else changed it first (a few tries). `mutate` returns undefined to change nothing. */
@@ -388,6 +399,8 @@ export class MeetingFloorService {
       const fresh = await this.#meeting(recordId);
       if (fresh.state === "open" && (await this.#votingMotion(fresh)) === undefined) await this.#releaseHeld(by, recordId, fresh);
     }
+    // A step of the vote names the voter it asked ("agent:x cast its ballot") and the members still to answer: only the owner, a host and a service are told; a manager agent driving the meeting learns only that the vote moved.
+    if (!isService(by) && out.phase === "voting") return "did" in out ? { did: out.did, phase: out.phase, detail: "a step of the vote" } : { waiting: out.waiting, phase: out.phase, detail: "the vote is under way" };
     return out;
   }
 
@@ -1009,7 +1022,7 @@ export class MeetingFloorService {
     const now = this.#runner.now();
     await this.#update(recordId, by, `inq-open-${msg.id}`, (b) => (b.inquiry !== undefined ? undefined : { ...b, clock: { ...b.clock, pausedAt: now }, inquiry: { openedAt: now, lastActivityAt: now, questions: 0, voteHeld: open, ...(open ? { heldMotionId: voting.id } : {}), addressed: [], messages: [msg.id] } }));
     await this.#deps.work?.release(recordId, this.#present(rec)).catch(() => undefined);
-    await this.#deps.notifyOwner?.({ recordId, projectId: rec.projectId, kind: "inquiry-open", text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
+    await this.#deps.notifyOwner?.({ recordId, projectId: rec.projectId, kind: "inquiry-open", key: base(msg.id), text: "An owner inquiry is open on a meeting; it waits for you to say you are done with questions." }).catch(() => undefined);
     return { voteHeld: open, replayed: false };
   }
 
@@ -1017,6 +1030,15 @@ export class MeetingFloorService {
   async endInquiry(by: Principal, command: NoActor & { recordId: string }): Promise<{ revisionsOffered: number; replayed: boolean }> {
     onlyKnown(command, ["commandId", "recordId"]);
     this.#ownerOnly(by, "end an inquiry");
+    // A meeting closed by other means while the inquiry was open: the inquiry ends with it (its notices are closed), so the owner's "done" is never refused for it.
+    const closedId = typeof command.recordId === "string" && RECORD_ID.test(command.recordId) ? command.recordId : invalid("recordId", "is not a meeting record ID");
+    const closedRec = await this.#meeting(closedId);
+    if (closedRec.state !== "open") {
+      const had = (await this.#load(closedId))?.body;
+      if (had?.inquiry === undefined) throw new DomainError("invalid_command", `the meeting is ${closedRec.state}`, { field: "recordId" });
+      await this.#closeOut(by, closedId, had.projectId);
+      return { revisionsOffered: 0, replayed: false };
+    }
     const { recordId } = await this.#open(command.recordId);
     const f = await this.#need(recordId);
     const inq = f.body.inquiry;
@@ -1204,6 +1226,8 @@ export class MeetingFloorService {
         if (b.inquiry === undefined || (command.projectId !== undefined && b.projectId !== command.projectId)) continue;
         const idleFrom = b.inquiry.remindedAt ?? b.inquiry.lastActivityAt;
         if (ms(now) - ms(idleFrom) < b.settings.inquiryIdleMinutes * 60_000) continue;
+        // A meeting closed by other means ends its inquiry instead of reminding; an archived project's meeting reminds nobody until it is restored.
+        if (b.state !== "running" || !(await this.#live(by, b))) continue;
         await this.#deps.notifyOwner?.({ recordId: b.recordId, projectId: b.projectId, kind: "inquiry-idle", key: `remind-${now}`, text: `Your inquiry on a meeting has been idle for ${b.settings.inquiryIdleMinutes} minutes; say when you are done with questions.` }).catch(() => undefined);
         await this.#update(b.recordId, by, `remind-${now}`, (x) => (x.inquiry === undefined ? undefined : { ...x, inquiry: { ...x.inquiry, remindedAt: now } }));
         reminded.push(b.recordId);
@@ -1260,7 +1284,9 @@ export class MeetingFloorService {
   async #waitingFor(viewer: Principal, b: FloorBody, rec: RecordBody, expecting?: { stage: string; what: string; agent?: string }): Promise<WaitingOn> {
     const w = await this.#waiting(b, rec, this.#runner.now(), expecting);
     if ((viewer.kind === "owner" && viewer.taskScope === undefined) || isService(viewer)) return w;
-    return w.kind === "agent" && (w.what === "ballot" || w.what === "revision" || w.what === "close-vote") ? { kind: "agent", who: "the voters", what: "the vote", since: w.since } : w;
+    // A member asked for its ballot that waits on a tool would be named too: while the vote is open, no agent or tool wait is shown with its agent.
+    const voting = expecting !== undefined && expecting.stage === "voting" && expecting.what !== "nothing";
+    return (w.kind === "agent" && (voting || w.what === "ballot" || w.what === "revision" || w.what === "close-vote")) || (w.kind === "tool" && voting) ? { kind: "agent", who: "the voters", what: "the vote", since: w.since } : w;
   }
 
   #spendView(b: FloorBody): { usd: number; tokens: number; ownerUsd: number; ownerTokens: number; capUsd: number; capTokens: number } {
@@ -1312,6 +1338,7 @@ export class MeetingFloorService {
    * thing meanwhile gets `FloorBusy` (a claim whose asker died is taken over); an agent that waits on a tool gets `FloorWaits`. `afterStore` also changes the floor in the same step as the stored answer.
    */
   async #cached(recordId: string, key: string, produce: (b: FloorBody, rec: RecordBody) => Promise<PortReply>, afterStore?: (b: FloorBody, item: PortReply) => FloorBody): Promise<PortReply> {
+    await this.#ensure(recordId);
     const have = (await this.#need(recordId)).body.replies[key];
     if (have !== undefined) return have;
     const claimedAt = this.#runner.now();
@@ -1361,7 +1388,7 @@ export class MeetingFloorService {
 
   /** The members, as the procedure's port (card M06). Every call is one tool-less model turn within the turn limits; what a member is given is the motion and the transcript as it may see it, never a ballot. */
   asMembers(): MeetingFloor {
-    const view = (recordId: string): Promise<{ b: FloorBody; rec: RecordBody }> => Promise.all([this.#need(recordId), this.#meeting(recordId)]).then(([f, rec]) => ({ b: f.body, rec }));
+    const view = async (recordId: string): Promise<{ b: FloorBody; rec: RecordBody }> => { await this.#ensure(recordId); return Promise.all([this.#need(recordId), this.#meeting(recordId)]).then(([f, rec]) => ({ b: f.body, rec })); };
     const shown = (entries: readonly MeetingDelivered[]): ShownEntry[] => entries.map((e) => ({ seq: e.seq, who: e.kind === "owner-message" ? "Owner" : e.speaker, ...(e.kind === "owner-message" ? { label: "owner" } : e.kind === "motion" || e.kind === "amendment" || e.kind === "ruling" || e.kind === "vote" || e.kind === "correction" ? { label: e.kind } : {}), text: e.text }));
     const words = (tokens: number): number => Math.max(20, Math.round(tokens * 0.7));
     // A member who has not come into the room is skipped (nothing is asked of it), and that is written in the transcript once; the procedure counts the missing answer as no response.
@@ -1430,7 +1457,7 @@ export class MeetingFloorService {
       },
       before: (r: GateRequest) => this.#before(r),
       between: (r: BetweenRequest) => this.#between(r),
-      setAside: async (r: AsideRequest) => { await this.#forget(r.recordId, r.kind === "ballot" ? `ballot:${r.motionId}:v${r.version}:${r.agent}` : `revision:${r.motionId}:v${r.version}:${r.agent}:m`); },
+      setAside: async (r: AsideRequest) => { await this.#forget(r.recordId, r.kind === "ballot" ? `ballot:${r.motionId}:v${r.version}:${r.agent}` : `revision:${r.motionId}:v${r.version}:${r.agent}:m${r.ownerMessageSeq ?? ""}`); },
     };
   }
 
@@ -1471,6 +1498,7 @@ export class MeetingFloorService {
   asChair(): ChairFloor {
     return {
       rule: async (r: RulingRequest): Promise<RulingInput | undefined> => {
+        await this.#ensure(r.recordId);
         const { rec } = await Promise.all([this.#need(r.recordId), this.#meeting(r.recordId)]).then(([f, rr]) => ({ b: f.body, rec: rr }));
         const chair = rec.chair;
         if (chair === undefined) return undefined;
@@ -1580,23 +1608,50 @@ export class MeetingFloorService {
    * The scheduled loop's turn (host or service): reminds the owner of an idle inquiry, and gives each running meeting a few steps (its own work and its motion's procedure), so a meeting goes on with nobody calling `advance`. A meeting that
    * fails does not stop the others.
    */
-  async tick(by: Principal, command: { units?: number } = {}): Promise<{ reminded: readonly string[]; driven: number; failed: number }> {
+  async tick(by: Principal, command: { units?: number; meetings?: number } = {}): Promise<{ reminded: readonly string[]; driven: number; failed: number }> {
     if (!isService(by)) throw forbidden(by, "run the meetings' turn");
-    const units = command.units === undefined ? FLOOR_LIMITS.tickUnits : command.units;
+    const units = command.units === undefined ? FLOOR_LIMITS.tickUnits : Number.isInteger(command.units) && command.units >= 1 && command.units <= FLOOR_LIMITS.stepsPerDrive ? command.units : invalid("units", `must be 1 to ${FLOOR_LIMITS.stepsPerDrive}`);
+    const most = command.meetings === undefined ? FLOOR_LIMITS.tickMeetings : Number.isInteger(command.meetings) && command.meetings >= 1 && command.meetings <= 500 ? command.meetings : invalid("meetings", "must be 1 to 500");
     const { reminded } = await this.sweep(by);
     let driven = 0, failed = 0;
-    let after: string | undefined;
-    for (;;) {
+    // At most `most` meetings a turn, going on from where the last turn stopped (wrapping round at the end), so every running meeting is reached in turn however many there are.
+    let after = this.#tickAfter;
+    outer: for (let pages = 0; pages < FLOOR_LIMITS.tickPages; pages++) {
       const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
       for (const a of page) {
-        after = a.id;
         const b = a.body as unknown as FloorBody;
-        if (b.state !== "running") continue;
-        try { await this.drive(by, { recordId: b.recordId, maxUnits: units }); driven += 1; } catch { failed += 1; }
+        if (b.state !== "running") { after = a.id; continue; }
+        if (driven + failed >= most) break outer;
+        after = a.id;
+        try {
+          if (!(await this.#live(by, b))) continue;
+          await this.drive(by, { recordId: b.recordId, maxUnits: units }); driven += 1;
+        } catch { failed += 1; }
       }
-      if (page.length < 200) break;
+      if (page.length < 200) { after = undefined; break; }
     }
+    this.#tickAfter = after;
     return { reminded, driven, failed };
+  }
+
+  /**
+   * Whether the scheduled turn may work on this floor now. A meeting whose record was closed by other means (the record's own finish, its lease) is ended on the floor too: an open inquiry is closed with its notices, so nothing
+   * reminds the owner of it or keeps it on the Needs-you list. An archived project's meeting is held (card P06): nothing is asked or sent until it is restored.
+   */
+  async #live(by: Principal, b: FloorBody): Promise<boolean> {
+    const rec = await this.#deps.records.record(this.#deps.service, b.recordId).catch(() => undefined);
+    if (rec === undefined) return false;
+    if (rec.state !== "open") { await this.#closeOut(by, b.recordId, b.projectId); return false; }
+    return ((await this.#runner.get("project", b.projectId))?.body as { state?: unknown } | undefined)?.state !== "archived";
+  }
+
+  /** Ends the floor of a meeting that is no longer open: its inquiry is closed (its notices settled), nothing is in flight. Safe to repeat. */
+  async #closeOut(by: Principal, recordId: string, projectId: string): Promise<void> {
+    const now = this.#runner.now();
+    const had = (await this.#load(recordId))?.body;
+    if (had === undefined || had.state === "ended") return;
+    await this.#update(recordId, by, "closed-out", (b) => (b.state === "ended" ? undefined : { ...b, state: "ended", endedAt: now, inquiry: undefined, inflight: undefined, clock: { ...b.clock, pausedAt: undefined } }));
+    if (had.inquiry !== undefined) await this.#deps.settleOwner?.({ recordId, projectId, kinds: ["inquiry-open", "inquiry-idle"] }).catch(() => undefined);
   }
 
   /** The meetings whose owner inquiry is open, oldest first (the Needs-you list shows each until the owner says they are done). Owner only. */
