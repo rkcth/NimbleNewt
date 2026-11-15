@@ -8,6 +8,9 @@ import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
 import { GUEST, normalizeRecipe, type ReadOnlyMount } from "../sandbox/recipe.js";
 import { MAX_RUN_PROCESSES, splitRunTree, type RunProcess } from "../sandbox/proc.js";
 import { removeTree } from "../sandbox/script.js";
+import { SandboxError } from "../sandbox/errors.js";
+import type { HostSecurityEvent } from "../workspace/host.js";
+import { loaderChange, lookAtLoaderConfig, type LoaderPathState } from "./loader-watch.js";
 import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type NetworkPort, type RelayRequest, type RelayResponse } from "./process.js";
 
 /**
@@ -244,12 +247,15 @@ export interface OwnerPolicyServices {
   readonly recordCompaction?: (order: never, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => Promise<void>;
   /** Card U09b: keeps the model's thinking the attempt's process reported (untrusted text; the controller cleans, bounds and stores it for the owner). Optional, so a builder written before it still type-checks. */
   readonly recordThinking?: (order: never, blocks: readonly ThinkingReport[]) => Promise<void>;
+  /** Card U11d: the controller's security hook (`services.reportSecurity`). Optional, so a builder written before it still type-checks. */
+  readonly reportSecurity?: (event: { readonly kind: string; readonly key: string; readonly projectId?: string }) => void;
 }
 /** The three options that connect a host to the owner's limits, best-effort setting and launch record, from the services the controller gave `build`. Spread into `localWorkerParts` options. */
-export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch" | "onCompaction" | "onThinking"> {
+export function ownerPolicyOptions(services: OwnerPolicyServices): Pick<LocalHostOptions<unknown>, "limits" | "bestEffort" | "onLaunch" | "onCompaction" | "onThinking" | "security"> {
+  const security = services.reportSecurity;
   const record = services.recordCompaction;
   const thinking = services.recordThinking;
-  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (r) => services.recordLaunch(r), ...(record === undefined ? {} : { onCompaction: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => record(order as never, note) }), ...(thinking === undefined ? {} : { onThinking: (order: HostOrder, blocks: readonly ThinkingReport[]) => thinking(order as never, blocks) }) };
+  return { limits: () => services.currentLimits(), bestEffort: () => services.bestEffortAllowed(), onLaunch: (r) => services.recordLaunch(r), ...(record === undefined ? {} : { onCompaction: (order: HostOrder, note: { readonly messageCount: number; readonly summaryChars: number; readonly digest: string }) => record(order as never, note) }), ...(thinking === undefined ? {} : { onThinking: (order: HostOrder, blocks: readonly ThinkingReport[]) => thinking(order as never, blocks) }), ...(security === undefined ? {} : { security: (event: HostSecurityEvent) => security(event) }) };
 }
 /** What one named reach of the sandbox adds to the recipe: read-only inputs (under /inputs or /opt) and environment. Nothing else can be added by a name: not a writable path, not a network. */
 export interface ReachGrant { readonly readOnly?: readonly ReadOnlyMount[]; readonly env?: Readonly<Record<string, string>> }
@@ -322,6 +328,14 @@ export interface LocalHostOptions<Call> {
    */
   readonly network?: { readonly forAttempt: (order: HostOrder) => NetworkPort | undefined; readonly proxyPort?: number };
   readonly clock?: () => number;
+  /**
+   * Card U11d: told, without waiting, of a sign that an attempt reached what it must not. `sandbox-escape-attempt`: the launch found a place the host made for the attempt (its checkout, home or scratch, or the checkout's `.git` entry) to be a link
+   * (only the agent's own files can have put it there; the launch is refused as before). `protected-path-touched`: the protected loader configuration (`loaderConfig`) is not as it was when the attempt's sandbox opened. The key is the same for the same event
+   * and holds no path or secret. A throw or a rejection is dropped: reporting never changes what the caller gets. Given by `ownerPolicyOptions(services)` when the controller's `reportSecurity` is passed.
+   */
+  readonly security?: (event: HostSecurityEvent) => void | Promise<void>;
+  /** Card U11d: the protected loader configuration: absolute paths (files or folders, such as the folder of the controller-owned extensions) looked at when an attempt's sandbox opens, after each turn and when it closes. A difference is reported as `protected-path-touched`. */
+  readonly loaderConfig?: { readonly paths: readonly string[] };
   /** Where a contract check (card W05) gets its own empty home and scratch for the run, removed afterwards (an absolute directory this host owns; default the system's temporary directory). */
   readonly checkBase?: string;
 }
@@ -347,6 +361,10 @@ interface Reserved {
   /** Every worker process launched in this sandbox (a restart of the runtime launches another), for Stop (card L02d). Bounded: past 16, the oldest ended one goes, its winding-down time kept in `foldedMs`. */
   readonly launched: WorkerProcess[];
   foldedMs: number;
+  /** The loader configuration as last looked at (card U11d). */
+  loaderSeen?: readonly LoaderPathState[];
+  /** The look at it running now, if any: the next waits for it. */
+  loaderLook?: Promise<void>;
   /** Contract checks running in this sandbox now (card W05): ended with it. */
   readonly checkRuns: Set<{ kill(): void }>;
 }
@@ -396,6 +414,36 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
   if (hostPaths && options.app.hostEntry === undefined) throw new Error("a launcher that shows host paths needs the worker app's host entry file (appFromRepository gives it)");
   const clock = options.clock ?? Date.now;
 
+  /** Tells the security hook (card U11d); never waits, never throws. */
+  const tell = (order: HostOrder, event: { readonly kind: HostSecurityEvent["kind"]; readonly key: string }): void => {
+    const sink = options.security;
+    if (sink === undefined) return;
+    try { void Promise.resolve(sink({ ...event, projectId: order.projectId })).catch(() => undefined); } catch { /* reporting never changes the answer */ }
+  };
+  /** A refusal that carries the launcher's containment marker is reported as a sandbox escape attempt; any other refusal is not. */
+  const flagLaunch = (order: HostOrder, error: unknown): void => {
+    if (!(error instanceof SandboxError) || error.containment === undefined) return;
+    tell(order, { kind: "sandbox-escape-attempt", key: `sbx:${error.containment.what}:${error.containment.id}` });
+  };
+  /** Looks at the loader configuration and reports a difference from the last look (card U11d). A look that cannot be made says nothing. */
+  // The looks of one attempt run one after another (a close during a turn's look waits for it), so a slower, older look never replaces a newer state and reports a change back that did not happen.
+  const lookLoader = (entry: Reserved): Promise<void> => {
+    const paths = options.loaderConfig?.paths;
+    if (paths === undefined || paths.length === 0) return Promise.resolve();
+    const next = (entry.loaderLook ?? Promise.resolve()).then(async () => {
+      try {
+        const now = await lookAtLoaderConfig(paths);
+        if (now === undefined) return;
+        const before = entry.loaderSeen;
+        entry.loaderSeen = now;
+        const changed = before === undefined ? undefined : loaderChange(before, now);
+        if (changed !== undefined) tell(entry.order, { kind: "protected-path-touched", key: changed.key });
+      } catch { /* never changes the answer */ }
+    });
+    entry.loaderLook = next;
+    return next;
+  };
+
   /** The mounts and environment the recipe's named reaches stand for. Every name must be known to this host; a name twice, a bad name or too many are refused. */
   const reachOf = async (summary: HostOrder["recipe"], order: HostOrder): Promise<{ readonly readOnly: readonly ReadOnlyMount[]; readonly env?: Record<string, string> }> => {
     const names = summary.reach;
@@ -423,10 +471,12 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       const network = options.network?.forAttempt(order);
       const recipe = { ...planned.recipe, readOnly: [...(planned.recipe.readOnly ?? []), { host: options.app.node.root, guest: "/opt/node" }, ...options.app.mounts, ...reach.readOnly], ...(network === undefined ? {} : { route: { proxyPort: options.network?.proxyPort ?? DEFAULT_PROXY_PORT } }) };
       // Checked against the host now, so a bad workspace refuses the attempt before any process starts; the launcher checks again at the launch.
-      const normalized = normalizeRecipe(recipe, planned.protectedPaths);
+      let normalized: ReturnType<typeof normalizeRecipe>;
+      try { normalized = normalizeRecipe(recipe, planned.protectedPaths); } catch (error) { flagLaunch(order, error); throw error; }
       // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
       const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set(), ...(network === undefined ? {} : { network }) };
       reserved.set(order.attemptId, entry);
+      await lookLoader(entry);
       return {
         revision: normalized.revision,
         close: async () => {
@@ -435,7 +485,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           try { entry.network?.closeAll("the attempt's sandbox was closed"); } catch { /* the relay is gone */ }
           for (const r of entry.checkRuns) r.kill();
           // A process the OS could not end is not taken as gone (card L02d): the close says so, and the sandbox keeps listing it.
-          await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; });
+          // The last look is made once the attempt's process has ended (or failed to), so a write in its last moments is seen too.
+          try { await entry.process?.close().catch((error: unknown) => { if (error instanceof ProcessNotEnded) throw error; }); } finally { await lookLoader(entry); }
         },
         work: () => heldBy(entry.launched, entry.foldedMs),
         end: async () => { for (const r of entry.checkRuns) r.kill(); await Promise.all(entry.launched.map((p) => p.forceEnd())); },
@@ -501,6 +552,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         const gone = entry.launched.length > 16 ? entry.launched.findIndex((p) => !p.alive) : -1;
         if (gone >= 0) entry.foldedMs += entry.launched.splice(gone, 1)[0]!.windDownMs();
       } catch (error) {
+        flagLaunch(order, error);
         const failed = (error as { limitFailures?: NonNullable<LaunchEnforcement["failed"]> }).limitFailures;
         try { await options.onLaunch?.({ attemptId: order.attemptId, agentId: order.agentId, outcome: "refused", requested, bestEffort, enforcement: [], wallTimeMs, reason: safeText(error, 500), ...(failed === undefined ? {} : { failed }), ...(stricter.length === 0 ? {} : { stricter }) }); } catch { /* the refusal itself is what is reported */ }
         throw error;
@@ -536,7 +588,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         if (taken.contextTokens !== undefined) contextTokens = taken.contextTokens;
         return { pi: taken.checkpoint, nn: { turnSeq, ...(lastRequest === undefined ? {} : { lastRequest }), ...(contextTokens === undefined ? {} : { contextTokens }), ...(taken.durable === undefined ? {} : { durable: { ...taken.durable } }) } };
       };
-      return {
+      const hostRuntime: HostRuntime = {
         firstCall: (content) => ({ systemPromptChars: process.info.systemPromptChars ?? UNKNOWN_SYSTEM_PROMPT_CHARS, toolSchemaChars: process.info.toolSchemaChars ?? 0, startupTokens: Math.ceil(content.length / 3) + (contextTokens ?? 0), replyReserveTokens: model.maxTokens }),
         async run(content, requestId) {
           let result;
@@ -579,6 +631,8 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         async refreshContext() { await process.tell(await options.refreshText?.(order) ?? DEFAULT_REFRESH); },
         async close() { await process.close(); },
       };
+      // After each turn the protected loader configuration is looked at again (card U11d); the turn's own answer is returned as it is.
+      return { ...hostRuntime, run: async (content, requestId) => { try { return await hostRuntime.run(content, requestId); } finally { await lookLoader(entry); } } };
     },
   };
 
@@ -602,7 +656,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
         let run;
         try {
           run = await options.launcher.launch({ recipe: { ...entry.recipe, home, scratch }, command: [...check.run], timeoutMs, maxOutputBytes: Math.max(1, Math.min(64 * 1024 * 1024, check.maxOutputBytes)), ...(Object.keys(processLimits).length === 0 ? {} : { limits: processLimits }), requireEnforced: !bestEffort });
-        } catch (error) { return { state: "not-run", reason: `the sandbox refused the check: ${safeText(error, 300)}` }; }
+        } catch (error) { flagLaunch(entry.order, error); return { state: "not-run", reason: `the sandbox refused the check: ${safeText(error, 300)}` }; }
         entry.checkRuns.add(run);
         // A sandbox closed while the launch was being made: the check is ended at once.
         if (entry.closed) run.kill();
