@@ -700,3 +700,23 @@ floorSuite(test, "the owner changes the priorities and the meeting's settings; a
   assert.ok(w.script.calls.length > calls);
   assert.equal((await floorOf(w, rec)).phase, "done");
 });
+
+floorSuite(test, "the owner changes priorities (agenda urgency, recorded as the owner's message); a nonurgent item the meeting did not reach is batched to the next meeting, an urgent one is not", async (w) => {
+  const { rec, occ } = await w.meet();
+  await start(w, rec);
+  const agenda = (await w.meetings.occurrence(w.owner, occ))!.agenda;
+  assert.equal(agenda.length, 1);
+  const item = agenda[0]!;
+  assert.equal(item.urgency, "urgent");
+  await refuses("forbidden", () => w.floor.setPriorities(w.asA, { commandId: cid("pr"), recordId: rec, items: [{ itemId: item.id, urgency: "normal" }] }));
+  await refuses("invalid_command", () => w.floor.setPriorities(w.owner, { commandId: cid("pr"), recordId: rec, items: [{ itemId: item.id, urgency: "soon" as never }] }));
+  assert.equal((await w.floor.followUps(w.service, { recordId: rec })).deferred.length, 0, "urgent: kept");
+  const r = await w.floor.setPriorities(w.owner, { commandId: cid("pr"), recordId: rec, items: [{ itemId: item.id, urgency: "normal" }] });
+  assert.equal(r.changed, 1);
+  assert.equal((await w.meetings.agendaItem(w.owner, item.id))!.urgency, "normal");
+  assert.ok((await transcript(w, rec)).some((e) => e.kind === "owner-message" && e.text.includes("changes the priorities")));
+  assert.equal((await floorOf(w, rec)).priorities.length, 1);
+  const out = await w.floor.followUps(w.service, { recordId: rec });
+  assert.deepEqual(out.deferred, [item.id]);
+  assert.equal((await w.meetings.agendaItem(w.owner, item.id))!.state, "deferred");
+});
