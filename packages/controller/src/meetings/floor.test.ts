@@ -42,8 +42,10 @@ floorSuite(test, "a whole meeting runs: blind first round, chair work, second ro
 });
 
 /** Waits for a condition by letting the event loop turn, never by a fixed pause. */
+// Bounded in time, not in event-loop turns: on a slow backend (a worker thread, PostgreSQL on a slow runner) what the test waits for takes longer than any count of turns (CI repair round 16).
 const waitFor = async (what: string, ok: () => boolean | Promise<boolean>): Promise<void> => {
-  for (let i = 0; i < 20_000; i += 1) { if (await ok()) return; await new Promise<void>((r) => setImmediate(r)); }
+  const end = Date.now() + 30_000;
+  while (Date.now() < end) { if (await ok()) return; await new Promise<void>((r) => setTimeout(r, 5)); }
   assert.fail(`never became true: ${what}`);
 };
 const marker = (r: { agent: string; kind: string; round?: number }): string => `[${r.kind}:${r.round ?? 0}:${r.agent.slice(-6)}]`;
@@ -154,6 +156,8 @@ floorSuite(test, "the turn limit counts visible tokens only: hidden reasoning is
   // a hang: the timer fires, the turn is recorded as no response and the meeting goes on
   w.script.on((r) => (r.kind === "statement" && r.agent === w.pB ? new Promise<never>(() => undefined) : undefined));
   const p = w.floor.drive(w.service, { recordId: rec });
+  // Awaited below; should a check before that fail, the drive's later error (its storage closed by the teardown) must not be reported in place of that check.
+  p.catch(() => undefined);
   await waitFor("the hung turn started", () => w.script.calls.some((c) => c.kind === "statement" && c.agent === w.pB));
   assert.equal(w.hooks.timerMs.at(-1), 120_000);
   w.hooks.fireTimer.at(-1)!();
