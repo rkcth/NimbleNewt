@@ -114,7 +114,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
-| Owner chat and web UI | `▓▓▓▓▓▓▓▓▓▓░░` 85% | 17 of 20 |
+| Owner chat and web UI | `▓▓▓▓▓▓▓▓▓▓░░` 90% | 18 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
@@ -360,7 +360,7 @@ Routes and capability policy, provider failure fallback, difficulty profiles, dr
 </details>
 
 <details>
-<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 17 of 20</summary>
+<summary><strong>Owner chat and web UI</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 18 of 20</summary>
 
 Talking to your agents: the chat interpreter, policy editing, status and blocker explanations, recovery chat, notifications and the responsive web interface.
 
@@ -382,7 +382,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 - [ ] **U08** · P34 · Implement settings and administration views _(needs U07, U10, A07, F09, H11, R03, T03, A07b, A07c)_
 - [x] **U11b** · P34 · Notification levels, the Needs you view and escalation to Urgent by age _(needs U11, A07b, H05, M03, H12, K01, H01, H09, A08)_
 - [x] **U11c** · P35 · Finish notification levels: Urgent triggers, critical path, answering in place, digest rule _(needs U11b)_
-- [ ] **U11d** · P36 · Finish notification levels: critical path, Urgent for stopped work, remaining triggers, answering in place _(needs U11c)_
+- [x] **U11d** · P36 · Finish notification levels: critical path, Urgent for stopped work, remaining triggers, answering in place _(needs U11c)_
 - [ ] **U09b** · P38 · Finish the replay: web view, producers, composed thinking and rerun _(needs U09, U07, K06c, P07, C09h)_
 
 </details>
