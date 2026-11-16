@@ -143,6 +143,46 @@ for (const backend of backends) {
     assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "one resume");
   });
 
+  suite("a resume recorded by another advance after this advance looked for it and before its start over is written: the start over is refused and the check ends done from that record", async ({ storage, svc, owner, task, epoch }) => {
+    const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });
+    let first = true;
+    const racing = new Proxy(svc, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "resume") return async (...args: unknown[]) => {
+        if (first) { first = false; await fill(svc, owner, task, 100); }
+        return (target.resume as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+      };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as ContinuationService;
+    const resumer = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] } as unknown as Parameters<ContinuationService["resume"]>[0];
+    let checkId = ""; let other = ""; let hidden = 0;
+    // The check service's own look for its record misses it once; the other advance records it right then, against a capture that exists.
+    const late = new Proxy(storage, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "getAggregate") return async (ref: { kind: string; id: string }) => {
+        if (ref.kind === "continuation-resume" && hidden === 0) {
+          hidden++;
+          other = (await svc.latest(owner, task))!.id;
+          await svc.resume(resumer, { commandId: `${checkId}-resume`, taskId: task, continuationId: other, model, after: "continue" });
+          return undefined;
+        }
+        return (target.getAggregate as (r: unknown) => Promise<unknown>).call(target, ref);
+      };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as typeof storage;
+    const checks = ResumeCheckService.withEpoch(late, epoch, { continuations: racing, dependencies: { check: async () => [] }, blockers: { getBlocker: async () => undefined, openBlocker: async () => ({ id: "blk-1" }) } as never, ports }, options);
+    const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(1) });
+    checkId = own.id;
+    assert.equal(own.continuationId, a.id);
+    const after = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
+    assert.equal(hidden, 1, "the record was missed once");
+    assert.equal(after.phase, "done", JSON.stringify(after.history));
+    assert.equal(after.round, own.round, "not started over");
+    assert.ok(after.history.at(-1)?.note.includes(other), JSON.stringify(after.history));
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "one resume");
+  });
+
   suite("a not_found from the resume while the check's capture still exists is a real error: thrown, the check stays executing in its round, nothing recorded", async ({ storage, svc, owner, task, epoch }) => {
     const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
     await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });

@@ -76,4 +76,54 @@ for (const backend of backends) {
       assert.equal(c.worker.starts.length, starts + 1);
     } finally { await store.close(); }
   });
+
+  // T8 second review: the attempt ended (the task was released) while its capture was pruned, before the resume was recorded. The resume answers not_found (the capture is looked up before the
+  // attempt), and the check ends cancelled as it does when the capture still exists: never started over for an attempt that will not run, and never a churn blocker for it.
+  for (const lastRound of [false, true]) {
+    test(`${backend.name}: a check whose attempt was released while its capture was pruned ends cancelled, not started over${lastRound ? " (in its last round: no churn blocker)" : ""}`, async () => {
+      const store = await backend.open();
+      try {
+        const c = await buildWorld(store.storage);
+        const options = { clock: c.options.clock!, ...(lastRound ? { maxRounds: 1 } : {}) };
+        const continuations = ContinuationService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+        const dependencies = DependencyService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+        const ann = await c.agent("ann", workGrants(c.project, []));
+        const { taskId, attemptId } = await c.task("long job", ann);
+        let prune = true;
+        const racing = new Proxy(continuations, { get: (target, prop) => {
+          const v = Reflect.get(target, prop) as unknown;
+          if (prop === "resume") return async (...args: unknown[]) => {
+            if (prune) {
+              prune = false;
+              for (let i = 0; i < CONTINUATION_KEEP + 1; i++) await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(100 + i) });
+              const asg = (await c.assignments.getAssignment(taskId))!;
+              await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId, expectedRevision: asg.revision });
+            }
+            return (target.resume as (...a: unknown[]) => unknown).apply(target, args);
+          };
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } }) as ContinuationService;
+        const opened: string[] = [];
+        const blockers = new Proxy(c.blockers, { get: (target, prop) => {
+          const v = Reflect.get(target, prop) as unknown;
+          if (prop === "openBlocker") return async (...args: unknown[]) => { opened.push(String((args[0] as { type?: string }).type)); return (v as (...a: unknown[]) => unknown).apply(target, args); };
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } }) as typeof c.blockers;
+        const real = ResumeCheckService.withEpoch(store.storage, c.epoch, { continuations: racing, dependencies, blockers, ports: controllerResumePorts(store.storage, { observe: async () => ({}), review: async () => ({}) }) }, options);
+        const first = await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(1) });
+        await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(2) });
+        const own = await real.start(c.owner, { commandId: cid("s"), taskId, attemptId: attemptId!, model: { provider: "local", id: "m1" }, after: "continue", checkpointDigest: dg(1) });
+        assert.equal(own.phase, "ready");
+        assert.equal(own.continuationId, first.id);
+        if (lastRound) assert.equal(own.round + 1, own.maxRounds, "the check is in its last round");
+        const after = await real.commit(c.owner, { commandId: cid("k"), checkId: own.id });
+        assert.equal(await store.storage.getAggregate({ kind: "continuation", id: first.id }), undefined, "the capture was pruned");
+        assert.equal(after.phase, "cancelled", JSON.stringify(after.history));
+        assert.equal(after.round, own.round, "not started over");
+        assert.equal((await store.storage.listAggregates("continuation-resume", { limit: 10 })).length, 0, "nothing recorded");
+        assert.deepEqual(opened, [], "no blocker opened");
+        assert.equal((await real.advance(c.owner, { checkId: own.id })).phase, "cancelled", "repeatable");
+      } finally { await store.close(); }
+    });
+  }
 }
