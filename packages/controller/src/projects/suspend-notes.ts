@@ -29,11 +29,11 @@ export async function noteSuspendedResponsibilities(duties: Pick<ResponsibilityS
   try {
     if (kind === "agent" || kind === "installation") for (const r of await duties.answeredBy(by, kind === "agent" ? event.scope.id : undefined)) found.set(r.id, { id: r.id, title: r.title, ownerId: r.ownerId! });
     else if (kind === "team" && ports.teamAgents !== undefined) {
-      for (const agent of await ports.teamAgents(event.scope.id)) for (const r of await duties.answeredBy(by, agent)) found.set(r.id, { id: r.id, title: r.title, ownerId: r.ownerId! });
+      // One agent whose responsibilities cannot be read does not cost the others their notes (the first failure is raised after all were tried).
+      for (const agent of await ports.teamAgents(event.scope.id)) { try { for (const r of await duties.answeredBy(by, agent)) found.set(r.id, { id: r.id, title: r.title, ownerId: r.ownerId! }); } catch (error) { failure ??= error; } }
     } else if (kind === "task" && ports.taskResponsibilities !== undefined && duties.get !== undefined) {
       for (const id of await ports.taskResponsibilities(event.scope.id)) {
-        const r = await duties.get(by, id);
-        if (r !== undefined && r.state !== "retired" && r.ownerId !== undefined) found.set(r.id, { id: r.id, title: r.title, ownerId: r.ownerId });
+        try { const r = await duties.get(by, id); if (r !== undefined && r.state !== "retired" && r.ownerId !== undefined) found.set(r.id, { id: r.id, title: r.title, ownerId: r.ownerId }); } catch (error) { failure ??= error; }
       }
     }
   } catch (error) { failure = error; }

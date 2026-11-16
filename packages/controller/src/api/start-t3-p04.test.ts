@@ -44,12 +44,21 @@ test("through the running controller: a provider outage is listed only for a res
     const start = new Date(Date.now() - 5 * 60_000).toISOString();
     await gaps.open(owner, { key: "provider:endpoint:or-api", reason: "provider-outage", start, detail: "cloud api down" } as never);
     const reasons = async (id: string) => ((await call("responsibility.observed", { responsibilityId: id })).result.item.coverageGaps as { reason: string }[]).map((g) => g.reason);
-    assert.deepEqual(await reasons(rLocal), [], "its agent uses only the local endpoint: the cloud outage is not about it");
+    assert.deepEqual(await reasons(rLocal), ["provider-outage"], "no execution profiles yet: where its check tasks would run is unknown, so the outage stays listed");
+    const exec = (profiles: Record<string, unknown>, expectedRevision: number) => call("difficulty.set-profiles", { expectedRevision, profiles: { profiles, mapping: { unrated: "quick" } } }, `dp-${expectedRevision}`);
+    assert.ok((await exec({ quick: { routingProfile: "solo" } }, 0)).ok);
+    assert.deepEqual(await reasons(rLocal), [], "its agent and every task it can be sent use only the local endpoint: the cloud outage is not about it");
     assert.deepEqual(await reasons(rBroad), ["provider-outage"], "its profile reaches the cloud route");
     assert.deepEqual(await reasons(rUnknown), ["provider-outage"], "no default profile: unknown routes keep it listed");
     await gaps.open(owner, { key: "provider:endpoint:strata-http", reason: "provider-outage", start, detail: "local engine down" } as never);
     assert.deepEqual(await reasons(rLocal), ["provider-outage"], "the local outage is about it");
     assert.equal((await call("responsibility.gaps", { projectId: project })).result.items.length, 2, "the project's list stays whole");
+    await gaps.open(owner, { key: "provider:endpoint:old-api", reason: "provider-outage", start, detail: "an endpoint since renamed" } as never);
+    assert.deepEqual(await reasons(rLocal), ["provider-outage", "provider-outage"], "an outage of a name today's table does not reach stays listed");
+    // T3 review: a check runs as a dispatched task, whose route comes from the task's difficulty profile, not the agent's own profile.
+    assert.ok((await exec({ quick: { routingProfile: "solo" }, deep: { provider: "openrouter", model: "qwen" } }, 1)).ok);
+    const keysOf = async (id: string) => { const ids = ((await call("responsibility.observed", { responsibilityId: id })).result.item.coverageGaps as { id: string }[]).map((g) => g.id); const all = (await call("responsibility.gaps", { projectId: project })).result.items as { id: string; key: string }[]; return all.filter((g) => ids.includes(g.id)).map((g) => g.key).sort(); };
+    assert.deepEqual(await keysOf(rLocal), ["provider:endpoint:old-api", "provider:endpoint:or-api", "provider:endpoint:strata-http"], "a task of its agent can be sent on the cloud route: the cloud outage is about it");
 
     // A team stop reaches the agents under it, sub-teams included.
     const stop = await call("lifecycle.stop", { scope: { kind: "team", id: team }, mode: "suspend", reason: "night" }, "st1");

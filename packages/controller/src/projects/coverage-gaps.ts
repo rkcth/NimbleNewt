@@ -37,27 +37,54 @@ export const GAP_KEEP_DAYS = 180;
 const HEARTBEAT_EVERY_MS = 60_000;
 const GC_PER_TICK = 25;
 
-/** The model routes, accounts and endpoints the answering agent's calls can go to (T3). Names are as the gap keys carry them: the canonical route (`model`), the account and the endpoint. */
-export interface RouteUse { readonly models: readonly string[]; readonly accounts: readonly string[]; readonly endpoints: readonly string[] }
+/** Model route, account and endpoint names, as the gap keys carry them: the canonical route (`model`), the account and the endpoint. */
+export interface RouteNames { readonly models: readonly string[]; readonly accounts: readonly string[]; readonly endpoints: readonly string[] }
+/**
+ * The names the answering agent's calls can go to (T3), and `known`: every name some route of the routing table reaches now. An outage of a name outside `known` (renamed or moved since the outage, or never mapped) cannot be judged
+ * against today's table and stays listed.
+ */
+export interface RouteUse extends RouteNames { readonly known?: RouteNames }
+
+type Target = (route: string) => { readonly canonical: string; readonly account: string; readonly endpoint: string };
+const namesOf = (routes: readonly string[], target: Target): RouteNames => {
+  const t = routes.map(target);
+  return { models: [...new Set(t.map((x) => x.canonical))], accounts: [...new Set(t.map((x) => x.account))], endpoints: [...new Set(t.map((x) => x.endpoint))] };
+};
 
 /**
- * What an agent's calls can reach, from its routing profile (T3). Known only when the agent has a `defaultProfile` that the routing table holds and no permitted override (an override could send a call through another profile);
- * otherwise `undefined`, which keeps every provider outage listed (the safe direction: one too many is listed, none hidden).
+ * The routes a dispatched task can be sent on (T3 review): the dispatcher picks each attempt's route from the task's difficulty profile (`DifficultyService.resolve`: the profile's own `provider/model` first, then its routing
+ * profile's routes), and a task's difficulty can change, so every execution profile counts, mapped or not. `undefined` when no execution profiles are configured (nothing can be judged).
  */
-export function routeUseOf(agent: { readonly defaultProfile?: string; readonly permittedOverrides?: readonly string[] }, profiles: Readonly<Record<string, readonly string[]>>, target: (route: string) => { readonly canonical: string; readonly account: string; readonly endpoint: string }): RouteUse | undefined {
-  const profile = agent.defaultProfile;
-  if (profile === undefined || (agent.permittedOverrides ?? []).length > 0 || !Object.hasOwn(profiles, profile)) return undefined;
-  const t = profiles[profile]!.map(target);
-  return { models: [...new Set(t.map((x) => x.canonical))], accounts: [...new Set(t.map((x) => x.account))], endpoints: [...new Set(t.map((x) => x.endpoint))] };
+export function dispatchRoutesOf(execution: { readonly profiles: Readonly<Record<string, { readonly provider?: string; readonly model?: string; readonly routingProfile?: string }>> } | undefined, profiles: Readonly<Record<string, readonly string[]>>): string[] | undefined {
+  if (execution === undefined) return undefined;
+  const out = new Set<string>();
+  for (const p of Object.values(execution.profiles)) {
+    if (p.provider !== undefined && p.model !== undefined) out.add(`${p.provider}/${p.model}`);
+    if (p.routingProfile !== undefined && Object.hasOwn(profiles, p.routingProfile)) for (const r of profiles[p.routingProfile]!) out.add(r);
+  }
+  return [...out];
 }
 
-/** A provider outage (key `provider:<model|account|endpoint>:<name>`) touches a responsibility whose agent can reach that name; unknown routes, an unreadable key or a key cut at its limit stay listed. */
+/**
+ * What an agent's calls can reach (T3): the routes of its `defaultProfile` (the hosted coordinator's chat) together with `reach.dispatched`, every route a dispatched task can be sent on (`dispatchRoutesOf`: a responsibility's
+ * check runs as a dispatched task, whose route comes from the task's difficulty profile, not from the agent). Known only when the agent has a `defaultProfile` that the routing table holds and no permitted override (an
+ * override could send a call through another profile), and the dispatched routes are known; otherwise `undefined`, which keeps every provider outage listed (the safe direction: one too many is listed, none hidden).
+ * `reach.tableRoutes` (every route of the routing table) gives `known`.
+ */
+export function routeUseOf(agent: { readonly defaultProfile?: string; readonly permittedOverrides?: readonly string[] }, profiles: Readonly<Record<string, readonly string[]>>, target: Target, reach: { readonly dispatched: readonly string[] | undefined; readonly tableRoutes: readonly string[] }): RouteUse | undefined {
+  const profile = agent.defaultProfile;
+  if (profile === undefined || (agent.permittedOverrides ?? []).length > 0 || !Object.hasOwn(profiles, profile) || reach.dispatched === undefined) return undefined;
+  return { ...namesOf([...new Set([...profiles[profile]!, ...reach.dispatched])], target), known: namesOf([...new Set([...reach.tableRoutes, ...reach.dispatched, ...profiles[profile]!])], target) };
+}
+
+/** A provider outage (key `provider:<model|account|endpoint>:<name>`) touches a responsibility whose agent can reach that name; unknown routes, a name today's table does not reach, an unreadable key or a key cut at its limit stay listed. */
 function outageTouches(key: string, routes: RouteUse | undefined): boolean {
   if (routes === undefined || key.length >= GAP_LIMITS.key) return true;
   const m = /^provider:(model|account|endpoint):(.+)$/.exec(key);
   if (m === null) return true;
-  const list = m[1] === "model" ? routes.models : m[1] === "account" ? routes.accounts : routes.endpoints;
-  return list.includes(m[2]!);
+  const pick = (n: RouteNames): readonly string[] => (m[1] === "model" ? n.models : m[1] === "account" ? n.accounts : n.endpoints);
+  if (routes.known !== undefined && !pick(routes.known).includes(m[2]!)) return true;
+  return pick(routes).includes(m[2]!);
 }
 
 /**

@@ -4,7 +4,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { ResponsibilityChecks } from "./checks.js";
-import { CoverageGapService, gapAppliesTo, routeUseOf, type RouteUse } from "./coverage-gaps.js";
+import { CoverageGapService, dispatchRoutesOf, gapAppliesTo, routeUseOf, type RouteUse } from "./coverage-gaps.js";
 import { ResponsibilityService } from "./index.js";
 import { noteSuspendedResponsibilities } from "./suspend-notes.js";
 
@@ -52,6 +52,11 @@ for (const backend of backends) {
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "team-2", scope: { kind: "team", id: "team-empty" } }, ports)).noted, [], "a team with no agents notes nothing");
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "team-3" })).noted, [], "without the team port the scope is not noted");
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "team-4", outcome: { state: "recovery-required" } }, ports)).noted, [], "an unfinished stop says nothing");
+    // One agent whose responsibilities cannot be read does not cost the others their notes; the failure is raised after the rest were written.
+    const flaky = { answeredBy: async (b: Principal, agent?: string) => { if (agent === "ann") throw new Error("read failed"); return duties.answeredBy(b, agent); }, record: duties.record.bind(duties) } as unknown as ResponsibilityService;
+    await assert.rejects(noteSuspendedResponsibilities(flaky, ctl, { ...event, intentId: "team-6" }, { teamAgents: async () => ["ann", "bob"] }), /read failed/);
+    assert.equal((await notes(duties, owner, ids.other)).length, 2, "bob's responsibility was still noted");
+    assert.equal((await notes(duties, owner, ids.web)).length, 1, "ann's could not be read: nothing new");
     const stopped = await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "team-5", mode: "stop", outcome: { state: "stopped" } }, ports);
     assert.equal(stopped.noted.length, 3);
     assert.ok((await notes(duties, owner, ids.web)).some((s) => /was stopped with its team/.test(s)), "worded by what happened");
@@ -83,6 +88,10 @@ for (const backend of backends) {
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "task-2" }, ports)).noted.map((x) => x.id), [ids.web], "a retired responsibility is skipped");
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "task-3", scope: { kind: "task", id: "task-none" } }, ports)).noted, []);
     assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "task-4" })).noted, [], "without the task port the scope is not noted");
+    setNow(at(130));
+    await duties.record(owner, { commandId: cid("chk"), responsibilityId: ids.web, kind: "check", summary: "all well", outcome: "ok" } as never);
+    assert.deepEqual(await checks.responsibilitiesOfTask(ctl, "task-a"), [ids.db], "a check the agent already answered is not left unfinished by the stop");
+    assert.deepEqual((await noteSuspendedResponsibilities(duties, ctl, { ...event, intentId: "task-5" }, ports)).noted, [], "nothing owed is left: no note (the other one is retired)");
   });
 
   suite("a provider outage is listed only for a responsibility whose agent uses that route, account or endpoint; unknown routes keep it listed (T3)", async ({ owner, project, duties, ids, gaps }) => {
@@ -106,19 +115,30 @@ for (const backend of backends) {
   });
 
   suite("the routes of an agent come from its default profile only when nothing could override it (T3)", async () => {
-    const target = (route: string) => ({ canonical: route.replace("alias/", "local/"), account: route.startsWith("cloud") ? "cloud-acct" : "local-acct", endpoint: route.startsWith("cloud") ? "cloud-api" : "local-http" });
+    const target = (route: string) => ({ canonical: route.replace("alias/", "local/"), account: route.startsWith("cloud") ? "cloud-acct" : route.startsWith("other") ? "other-acct" : "local-acct", endpoint: route.startsWith("cloud") ? "cloud-api" : route.startsWith("other") ? "other-api" : "local-http" });
     const profiles = { main: ["local/qwen", "cloud/qwen"], solo: ["alias/qwen"] };
-    assert.deepEqual(routeUseOf({ defaultProfile: "main" }, profiles, target), { models: ["local/qwen", "cloud/qwen"], accounts: ["local-acct", "cloud-acct"], endpoints: ["local-http", "cloud-api"] });
-    assert.deepEqual(routeUseOf({ defaultProfile: "solo", permittedOverrides: [] }, profiles, target)?.models, ["local/qwen"], "an alias counts as the route it resolves to");
-    assert.equal(routeUseOf({}, profiles, target), undefined, "no default profile: unknown");
-    assert.equal(routeUseOf({ defaultProfile: "gone" }, profiles, target), undefined, "a profile the table lacks: unknown");
-    assert.equal(routeUseOf({ defaultProfile: "main", permittedOverrides: ["profile"] }, profiles, target), undefined, "an override could use another profile: unknown");
-    const use = routeUseOf({ defaultProfile: "main" }, profiles, target)!;
+    const tableRoutes = ["local/qwen", "cloud/qwen", "alias/qwen", "other/x", "cloud/big"];
+    const reach = { dispatched: [] as string[], tableRoutes };
+    assert.deepEqual(routeUseOf({ defaultProfile: "main" }, profiles, target, reach), { models: ["local/qwen", "cloud/qwen"], accounts: ["local-acct", "cloud-acct"], endpoints: ["local-http", "cloud-api"], known: { models: ["local/qwen", "cloud/qwen", "other/x", "cloud/big"], accounts: ["local-acct", "cloud-acct", "other-acct"], endpoints: ["local-http", "cloud-api", "other-api"] } });
+    assert.deepEqual(routeUseOf({ defaultProfile: "solo", permittedOverrides: [] }, profiles, target, reach)?.models, ["local/qwen"], "an alias counts as the route it resolves to");
+    assert.equal(routeUseOf({}, profiles, target, reach), undefined, "no default profile: unknown");
+    assert.equal(routeUseOf({ defaultProfile: "gone" }, profiles, target, reach), undefined, "a profile the table lacks: unknown");
+    assert.equal(routeUseOf({ defaultProfile: "main", permittedOverrides: ["profile"] }, profiles, target, reach), undefined, "an override could use another profile: unknown");
+    // A check runs as a dispatched task, whose route comes from the task's difficulty profile: those routes are reachable whatever the agent's own profile says (T3 review).
+    assert.equal(routeUseOf({ defaultProfile: "solo" }, profiles, target, { dispatched: undefined, tableRoutes }), undefined, "dispatch routes unknown: unknown");
+    const viaDispatch = routeUseOf({ defaultProfile: "solo" }, profiles, target, { dispatched: ["cloud/big"], tableRoutes })!;
+    assert.deepEqual([viaDispatch.models, viaDispatch.endpoints], [["local/qwen", "cloud/big"], ["local-http", "cloud-api"]], "a local-only agent whose tasks may run on a cloud route reaches the cloud endpoint");
+    assert.equal(gapAppliesTo({ reason: "provider-outage", key: "provider:endpoint:cloud-api" }, { id: "r", ownerId: "agent:ann", eventSources: [], routes: viaDispatch }), true);
+    assert.deepEqual(dispatchRoutesOf({ profiles: { quick: { routingProfile: "solo" }, deep: { provider: "cloud", model: "big", routingProfile: "main" }, odd: { routingProfile: "gone" } } }, profiles), ["alias/qwen", "cloud/big", "local/qwen", "cloud/qwen"], "every execution profile: its own model first, then its routing profile");
+    assert.equal(dispatchRoutesOf(undefined, profiles), undefined, "no execution profiles: unknown");
+    const use = routeUseOf({ defaultProfile: "main" }, profiles, target, reach)!;
+    assert.equal(gapAppliesTo({ reason: "provider-outage", key: "provider:endpoint:renamed-api" }, { id: "r", ownerId: "agent:ann", eventSources: [], routes: use }), true, "a name today's table does not reach (renamed or moved since the outage) stays listed");
+    assert.equal(gapAppliesTo({ reason: "provider-outage", key: "provider:model:gone/old" }, { id: "r", ownerId: "agent:ann", eventSources: [], routes: use }), true);
     const gap = (key: string) => ({ reason: "provider-outage" as const, key });
     const duty = { id: "r", ownerId: "agent:ann", eventSources: [] as string[], routes: use };
-    assert.deepEqual([gapAppliesTo(gap("provider:model:local/qwen"), duty), gapAppliesTo(gap("provider:model:other/x"), duty), gapAppliesTo(gap("provider:account:cloud-acct"), duty), gapAppliesTo(gap("provider:endpoint:cloud-api"), duty), gapAppliesTo(gap("provider:endpoint:nowhere"), duty)], [true, false, true, true, false]);
+    assert.deepEqual([gapAppliesTo(gap("provider:model:local/qwen"), duty), gapAppliesTo(gap("provider:model:other/x"), duty), gapAppliesTo(gap("provider:account:cloud-acct"), duty), gapAppliesTo(gap("provider:endpoint:cloud-api"), duty), gapAppliesTo(gap("provider:endpoint:other-api"), duty), gapAppliesTo(gap("provider:account:other-acct"), duty)], [true, false, true, true, false, false], "a known name the agent does not reach is not about it");
     assert.equal(gapAppliesTo(gap("provider:model:local/qwen"), { ...duty, routes: { ...use, models: [] } }), false, "the kind of name matters: a model is not matched against accounts");
-    assert.equal(gapAppliesTo(gap("provider:account:local/qwen"), { ...duty, routes: { ...use, models: ["local/qwen"], accounts: [] } }), false);
+    assert.equal(gapAppliesTo(gap("provider:account:local/qwen"), { ...duty, routes: { ...use, models: ["local/qwen"], accounts: [], known: { ...use.known!, accounts: ["local/qwen"] } } }), false);
     assert.equal(gapAppliesTo(gap("provider:weird"), duty), true, "a key that cannot be read is not hidden");
     assert.equal(gapAppliesTo(gap(`provider:model:${"m".repeat(160)}`), duty), true, "a key cut at its limit is not hidden");
     assert.equal(gapAppliesTo(gap("provider:model:local/qwen"), { id: "r", eventSources: [], routes: use }), false, "still nobody answering: not about it");
