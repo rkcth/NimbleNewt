@@ -98,6 +98,8 @@ export interface RetentionDeps {
   /** The conversation stores that keep the model's own copy of its thinking (card K06c): the rule that removes stored thinking `thinkingDays` after a task is done also cleans them. Absent: only the controller's copy is removed (the Pi stores are named as not reached). */
   readonly thinkingStores?: ThinkingStorePort;
   /** A test seam: called before each batch of removals. */
+  /** Tests only: a smaller bound for the read of the catalog versions that name source records. */
+  readonly catalogScanLimit?: number;
   readonly beforeBatch?: (batch: number) => Promise<void>;
   /** A test seam: runs after the citations of a revoked executable record were read and before it is blanked (what a task does in that gap must keep the record). */
   readonly beforeBlank?: (recordId: string) => Promise<void>;
@@ -139,6 +141,23 @@ async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) =>
     if (seen >= limit) return false;
     after = page[page.length - 1]!.id;
   }
+}
+
+/** Why a private desk record stays: a catalog version names it as its instructions or its executable source (an agent may register a personal tool or skill from its own accepted private records). */
+export const CATALOG_SOURCE_REASON = "a catalogued tool or skill reads its instructions or code from this record";
+/**
+ * The IDs of every desk record that a catalog version names as `instructional.recordId` or `executable.recordId` (revoked versions included, like the backup scope tier: a revoked text is blanked by its own rule).
+ * `undefined` when the read could not finish (bounded scan reached its limit, or the read failed): the caller must then remove nothing that this answer would have protected.
+ */
+async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<Set<string> | undefined> {
+  const ids = new Set<string>();
+  try {
+    const complete = await scan(runner, "catalog-version", (a) => {
+      const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
+      for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") ids.add(s.recordId);
+    }, limit);
+    return complete ? ids : undefined;
+  } catch { return undefined; }
 }
 
 export interface Candidate { readonly kind: string; readonly id: string; readonly revision: number; readonly projectId: string | undefined; readonly ageDays: number }
@@ -586,7 +605,10 @@ export class RetentionService {
       const archiveCut = values.scratchArchiveDays === null ? undefined : now - values.scratchArchiveDays * DAY;
       const purgeCut = values.scratchPurgeDays === null ? undefined : now - values.scratchPurgeDays * DAY;
       const scratch: Aggregate[] = [];
-      if (!(await scan(this.#runner, "desk-record", (a) => { const b = a.body as { visibility?: unknown; taskId?: unknown; deleted?: unknown }; if (b.visibility === "private" && typeof b.taskId === "string" && b.deleted === undefined) scratch.push(a); }))) partial = true;
+      // Fail closed: a catalogued tool's source records are held, and if that list cannot be read to the end nothing is archived or removed by this tier.
+      const sources = await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit);
+      if (sources === undefined) partial = true;
+      if (sources !== undefined && !(await scan(this.#runner, "desk-record", (a) => { const b = a.body as { visibility?: unknown; taskId?: unknown; deleted?: unknown }; if (b.visibility === "private" && typeof b.taskId === "string" && b.deleted === undefined) scratch.push(a); }))) partial = true;
       for (const a of scratch) {
         if (candidates.length >= limit) { partial = true; break; }
         const b = a.body as { taskId: string; projectId?: unknown; archived?: { at?: unknown; archiveId?: unknown } };
@@ -599,6 +621,7 @@ export class RetentionService {
         else if (archiveCut === undefined && purgeCut !== undefined && Date.parse(a.updatedAt) < purgeCut) action = "scratch-purge";
         if (action === undefined || !(await isFinal(b.taskId))) continue;
         const why = material.why("desk-record", a.id)?.filter((w) => !w.includes(`written for task ${b.taskId}`) && (action === "scratch-purge" || !isReplayReason(w)));
+        if (sources?.has(a.id) === true) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: [...(why ?? []), CATALOG_SOURCE_REASON] }); continue; }
         if (why !== undefined && why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: why }); continue; }
         candidates.push({ kind: action, id: a.id, revision: a.revision, projectId, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
       }
@@ -656,7 +679,11 @@ export class RetentionService {
       await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
       const batch = candidates.slice(i, i + REMOVE_BATCH);
       const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: batch.some((c) => c.kind === "ctx-route-archive"), transcripts: batch.some((c) => c.kind === "chat-turn") });
+      // The catalog's source records are read again for a batch with scratch work (a tool may be registered while the run goes); an unfinished read holds the whole batch's scratch work.
+      const scratchInBatch = batch.some((c) => c.kind === "scratch-archive" || c.kind === "scratch-purge");
+      const sourcesNow = scratchInBatch ? await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit) : new Set<string>();
       for (const c of batch) {
+        if ((c.kind === "scratch-archive" || c.kind === "scratch-purge") && (sourcesNow === undefined || sourcesNow.has(c.id))) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: [sourcesNow === undefined ? "the check of which records a catalogued tool reads did not finish, so nothing is removed" : CATALOG_SOURCE_REASON] }); continue; }
         // The tiers of card K06b act on desk records under their own names; an archive is not stopped by a replay's citation (it keeps the original), a removal is.
         const heldAs = c.kind === "scratch-archive" || c.kind === "scratch-purge" ? "desk-record" : c.kind;
         const why = c.kind === "pi-thinking" ? undefined : material.why(heldAs, c.id)?.filter((w) => !(c.kind === "scratch-archive" && isReplayReason(w)) && !((c.kind === "scratch-archive" || c.kind === "scratch-purge") && w.includes("written for task")));
