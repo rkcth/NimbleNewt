@@ -13,7 +13,7 @@ import type { BackupScopeLine, BackupScopeRecord } from "./format.js";
  * This is separate from the live system's retention (K06): nothing is deleted from the running store, only left out of the copy.
  *
  * What is never left out, whatever the setting: the audit log, the owner's decisions, every table other than `aggregates` (operations, deliveries, effects, timers, state), and every record that a task that can still
- * resume, or the replay of any task, refers to (the same check the live retention rules use: `RetainedMaterial`). The one kind of record that is left as an empty shell and not removed is a chat turn, because a message
+ * resume, or the replay of any task, refers to (the same check the live retention rules use: `RetainedMaterial`). Private records that a catalogued tool or skill reads its text from are kept too. The one kind of record that is left as an empty shell and not removed is a chat turn, because a message
  * sent again after a restore must still be answered as the turn it was.
  */
 export interface BackupScopeValues {
@@ -111,6 +111,13 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
     const cut = now.getTime() - values.scratchDays * DAY;
     const final = new Set<string>();
     let ok = await eachOf(lister, "task", (a) => { const s = (a.body as { state?: unknown }).state; if (s === "done" || s === "cancelled") final.add(a.id); });
+    // An agent may register a tool or skill from its own accepted private records. The catalog version is always in the backup and reads its instructions and code back from those records (by ID and digest),
+    // so they are kept whatever their age, revoked versions included (a revoked text is blanked by live retention, not by the backup).
+    const catalogSources = new Set<string>();
+    ok = (await eachOf(lister, "catalog-version", (a) => {
+      const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
+      for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") catalogSources.add(s.recordId);
+    })) && ok;
     const l = line("scratch", "desk-record", values.scratchDays);
     const found: Aggregate[] = [];
     ok = (await eachOf(lister, "desk-record", (a) => {
@@ -118,7 +125,7 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
       if (b.visibility === "private" && typeof b.taskId === "string" && b.deleted === undefined && b.archived === undefined && final.has(b.taskId) && Date.parse(a.updatedAt) < cut) found.push(a);
     })) && ok;
     if (!ok) complete = false;
-    else for (const a of found) { if (material.why("desk-record", a.id) !== undefined) l.heldBack += 1; else { omit.add(key("desk-record", a.id)); l.left += 1; } }
+    else for (const a of found) { if (catalogSources.has(a.id) || material.why("desk-record", a.id) !== undefined) l.heldBack += 1; else { omit.add(key("desk-record", a.id)); l.left += 1; } }
   }
   if (complete && values.transcriptDays !== null) {
     const cut = now.getTime() - values.transcriptDays * DAY;
@@ -158,7 +165,7 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
       const held = leftOut.reduce((n, l) => n + l.heldBack, 0);
       const text = !complete
         ? `This backup was made under your backup scope (${sentence(values)}), but the check of which records a task that can still resume or a replay refers to could not be finished, so nothing was left out: it holds everything.`
-        : `This backup is NOT a full copy. Under your backup scope it leaves out ${sentence(values)}: ${total} record${total === 1 ? "" : "s"} in all${leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind}${l.stubbed > 0 ? `, kept as empty shells` : ""})`).join("")}${held > 0 ? `; ${held} that matched were kept because a task that can still resume or a replay refers to them` : ""}. The audit log, your decisions and everything else are in it whole. What was left out is not brought back by a restore.`;
+        : `This backup is NOT a full copy. Under your backup scope it leaves out ${sentence(values)}: ${total} record${total === 1 ? "" : "s"} in all${leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind}${l.stubbed > 0 ? `, kept as empty shells` : ""})`).join("")}${held > 0 ? `; ${held} that matched were kept because a task that can still resume, a replay or a catalogued tool refers to them` : ""}. The audit log, your decisions and everything else are in it whole. What was left out is not brought back by a restore.`;
       return { rules: { scratchDays: values.scratchDays, transcriptDays: values.transcriptDays, logDays: values.logDays }, leftOut, referenceCheckComplete: complete, text };
     },
   };
