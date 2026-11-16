@@ -207,6 +207,53 @@ test("owner inquiry: the vote is held, answers are kept from other voters until 
   assert.ok(provider.prompts.length > 0);
 });
 
+// The meeting clock is read once and clamped (total >= 0, 0 <= paused <= total, meeting = total - paused). These tests swap Date.now
+// for a fake clock (no real time passes, no sleeps) and always put the real one back.
+async function withClock(next, fn) { const real = Date.now; Date.now = next; try { return await fn(); } finally { Date.now = real; } }
+const clockOf = (summary) => summary.stats.inquiryChecks.clockMs;
+const ownerScenario = () => scenario("ship-owner");
+const noInquiryScenario = () => ({ ...scenario("tool-adoption"), agents: scenario("tool-adoption").agents.slice(0, 4) });
+const noInquiryVariant = () => ({ ...variant("one-round"), firstRound: "blind", chairQuestions: 0 });
+
+test("clock: a clock that moves 1 ms on every read, with an owner inquiry, never gives meeting above total or a negative pause", async () => {
+  let t = 1_000_000;
+  const { summary } = await withClock(() => (t += 1), () => meet(ownerScenario(), variant("m00-full"), { statement: ownerAnswer }));
+  assert.ok(summary.stats.inquiries.length > 0, "the owner inquiry ran");
+  const c = clockOf(summary);
+  assert.ok(c.paused >= 0 && c.paused <= c.total && c.meeting >= 0 && c.meeting <= c.total, JSON.stringify(c));
+  assert.equal(c.meeting, c.total - c.paused);
+  assert.ok(c.paused > 0 && c.total > 0, "the fake clock was read and the pause was counted");
+});
+
+test("clock: a clock that only moves backwards gives total 0, paused 0 and meeting 0", async () => {
+  let t = 1_000_000;
+  const { summary } = await withClock(() => (t -= 1000), () => meet(ownerScenario(), variant("m00-full"), { statement: ownerAnswer }));
+  assert.ok(summary.stats.inquiries.length > 0, "the owner inquiry ran");
+  assert.deepEqual(clockOf(summary), { total: 0, paused: 0, meeting: 0 });
+});
+
+test("clock: a pause longer than the whole meeting is cut to the total and the meeting time is 0", async () => {
+  // First count the reads with a steady clock, then repeat with the same steps, except that the last read (the closing one) says the
+  // meeting has lasted 1 ms, while the pauses already counted add up to far more than that.
+  let reads = 0;
+  await withClock(() => { reads += 1; return 1_000_000 + reads * 1000; }, () => meet(ownerScenario(), variant("m00-full"), { statement: ownerAnswer }));
+  assert.ok(reads > 3, "the inquiry read the clock");
+  let n = 0;
+  const { summary } = await withClock(() => { n += 1; return n === reads ? 1_000_000 + 1000 + 1 : 1_000_000 + n * 1000; }, () => meet(ownerScenario(), variant("m00-full"), { statement: ownerAnswer }));
+  assert.equal(n, reads, "the same number of reads in both runs");
+  assert.deepEqual(clockOf(summary), { total: 1, paused: 1, meeting: 0 });
+});
+
+test("clock: with no owner inquiry nothing is paused, and total and meeting agree even while the clock moves", async () => {
+  let t = 1_000_000;
+  const { summary } = await withClock(() => (t += 1), () => meet(noInquiryScenario(), noInquiryVariant()));
+  assert.equal(summary.stats.inquiries.length, 0);
+  const c = clockOf(summary);
+  assert.equal(c.paused, 0);
+  assert.equal(c.meeting, c.total);
+  assert.ok(c.total >= 0);
+});
+
 test("mutation drill: releasing held answers early is caught by the leak check", async () => {
   const sc = scenario("ship-owner");
   process.env.M00_MUTATE_LEAK = "1";
