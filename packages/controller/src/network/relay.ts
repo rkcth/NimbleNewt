@@ -49,7 +49,7 @@ export interface NetworkRelayOptions {
 
 export const NETWORK_RELAY_DEFAULTS = { recheckMs: 1000, maxOpen: 16, connectTimeoutMs: 10_000, idleMs: 300_000 } as const;
 
-interface Live { readonly socket: Socket; readonly grantId: string; close(by: NonNullable<ConnectionBody["endedBy"]>): void }
+interface Live { readonly socket: Socket; readonly grantId: string; /** Who and where: an agent site ending closes every connection of that agent to that destination, whichever request it was opened under. */ readonly agentId: string | undefined; readonly host: string; readonly port: number; /** Opened under an agent's approved site rather than its task's own grant: only these close when the agent's site ends (a task grant to the same place still stands). */ readonly viaSite: boolean; close(by: NonNullable<ConnectionBody["endedBy"]>): void }
 
 export class NetworkRelay {
   readonly #o: NetworkRelayOptions;
@@ -58,7 +58,7 @@ export class NetworkRelay {
 
   constructor(options: NetworkRelayOptions) {
     this.#o = options;
-    this.#stop = options.grants.onRevoked?.((grant) => { for (const l of [...this.#live]) if (l.grantId === grant.id) l.close("revoked"); });
+    this.#stop = options.grants.onRevoked?.((grant) => { for (const l of [...this.#live]) if (l.grantId === grant.id || (grant.via === "maintenance" && l.viaSite && l.agentId === grant.requestedBy && l.host === grant.host && l.port === grant.port)) l.close("revoked"); });
   }
 
   /** Stops listening for revokes and ends every connection. */
@@ -103,7 +103,7 @@ export class NetworkRelay {
           void o.grants.logClose(ctx.taskId, admitted.recordId, { outcome, endedBy, bytesToTarget: bytesTo, bytesFromTarget: bytesFrom, ...(reason === undefined ? {} : { reason }) }).catch((error: unknown) => { o.onError?.(`a connection record could not be completed: ${error instanceof Error ? error.message.slice(0, 120) : "error"}`); });
           try { events.closed(reason ?? `closed by ${endedBy}`); } catch { /* the pipe is over */ }
         };
-        const live: Live = { socket, grantId: admitted.grant.id, close: (by) => { endedBy = by; finish("closed", by === "revoked" ? "the grant was revoked" : by === "ended" ? "the grant ended with its task" : by === "attempt" ? "the attempt ended" : by === "idle" ? "idle too long" : undefined); } };
+        const live: Live = { socket, grantId: admitted.grant.id, agentId: ctx.agentId, host: admitted.host, port: admitted.port, viaSite: admitted.grant.via === "maintenance", close: (by) => { endedBy = by; finish("closed", by === "revoked" ? "the grant was revoked" : by === "ended" ? "the grant ended with its task" : by === "attempt" ? "the attempt ended" : by === "idle" ? "idle too long" : undefined); } };
         settle(); mine.add(live); this.#live.add(live);
         const touch = (): void => { clearTimeout(idle); idle = setTimeout(() => live.close("idle"), o.idleMs ?? NETWORK_RELAY_DEFAULTS.idleMs); idle.unref?.(); };
         touch();

@@ -24,7 +24,7 @@ export type MaintenanceClass = "skill-draft" | "dependency" | "access" | "protec
 export type MaintenanceStatus = "pending" | "approved" | "applying" | "applied" | "rejected" | "withdrawn" | "failed" | "revoking" | "revoked" | "apply-uncertain";
 export type SiteRule = "allow" | "deny";
 
-export const MAINTENANCE_LIMITS = { reason: 500, plan: 500, note: 300, pendingPerAgent: 20, sites: 200, catalogue: 200, listDefault: 50, listMax: 200, scan: 1000, driveBatch: 50, leaseMs: 1_800_000, attempts: 5, effectBytes: 4096, pendingReason: 300, requestsPerDay: 200, windowMs: 86_400_000, indexScan: 5000, staleKept: 5, leaseMinMs: 60_000, leaseMaxMs: 86_400_000 } as const;
+export const MAINTENANCE_LIMITS = { administrators: 5, reason: 500, plan: 500, note: 300, pendingPerAgent: 20, sites: 200, catalogue: 200, listDefault: 50, listMax: 200, scan: 1000, driveBatch: 50, leaseMs: 1_800_000, attempts: 5, effectBytes: 4096, pendingReason: 300, requestsPerDay: 200, windowMs: 86_400_000, indexScan: 5000, staleKept: 5, leaseMinMs: 60_000, leaseMaxMs: 86_400_000 } as const;
 
 const CLASS_OF: Readonly<Record<MaintenanceKind, MaintenanceClass>> = { skill: "skill-draft", package: "dependency", extension: "dependency", mount: "access", network: "access", "host-policy": "protected", base: "protected" };
 const KINDS = Object.keys(CLASS_OF) as MaintenanceKind[];
@@ -206,8 +206,8 @@ export function reviewSummary(b: MaintenanceBody, inspection?: StoredInspection)
       case "mount": return { change: `mount ${shown(s["resource"])} at ${shown(s["mountPath"])}`, access: `${shown(s["mode"])} access to ${shown(s["resource"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
       case "network": return { change: `network ${shown(s["site"])}:${shown(s["port"])}`, access: `outgoing connections to ${shown(s["site"])} port ${shown(s["port"])}`, installBehaviour: "nothing is installed", rollback, reversible: true };
       case "skill": return { change: `skill ${shown(s["name"])}`, digest: shown(s["digest"]), access: "none", installBehaviour: "a skill draft is only recorded", rollback, reversible: true };
-      case "host-policy": return { change: `host policy ${shown(s["setting"])}: ${shown(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
-      case "base": return { change: `shared base: ${shown(s["change"])}`, access: "protected: the owner decides", installBehaviour: "nothing is installed", rollback, reversible: false };
+      case "host-policy": return { change: `host policy ${shown(s["setting"])}: ${shown(s["change"])}`, access: "protected: the owner, or an administrator the owner named, decides", installBehaviour: "nothing is installed", rollback, reversible: false };
+      case "base": return { change: `shared base: ${shown(s["change"])}`, access: "protected: the owner, or an administrator the owner named, decides", installBehaviour: "nothing is installed", rollback, reversible: false };
     }
   })();
   const read = inspection !== undefined && inspection.specDigest === b.specDigest && (b.kind === "package" || b.kind === "extension") ? inspectionSummary(b, inspection, shown) : undefined;
@@ -221,7 +221,7 @@ export function reviewSummary(b: MaintenanceBody, inspection?: StoredInspection)
   } as JsonObject;
 }
 
-export interface MaintenanceDecision { readonly by: string; readonly verdict: "approve" | "reject"; readonly via: "owner" | "supervisor" | "rule"; readonly rule?: string; readonly specDigest: string; readonly at: string; readonly note?: string }
+export interface MaintenanceDecision { readonly by: string; readonly verdict: "approve" | "reject"; readonly via: "owner" | "administrator" | "supervisor" | "rule"; readonly rule?: string; readonly specDigest: string; readonly at: string; readonly note?: string }
 export interface MaintenanceBody {
   readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly spec: MaintenanceSpec; readonly specDigest: string;
   readonly reason: string; readonly rollbackPlan?: string; readonly status: MaintenanceStatus; readonly requestedBy: string; readonly requestedAt: string;
@@ -241,9 +241,9 @@ export interface MaintenanceBody {
   readonly revoke?: { readonly by: string; readonly at: string; readonly reason: string };
   readonly revertEffect?: JsonObject; readonly revokedAt?: string;
 }
-interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly bossKinds?: readonly MaintenanceKind[]; readonly leaseMinutes?: number; readonly requestsPerDay?: number; /** Further numbers the owner may set (0 = switched off where that makes sense, absent = the default): see `LIMIT_SETTINGS`. */ readonly limits?: Readonly<Record<string, number>>; /** The record was created by the service at start (revision 1 is not an owner's write): the revisions the owner sees count from there. */ readonly base?: true; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
+interface SettingsBody { readonly requests?: boolean; readonly bosses?: boolean; readonly rules?: boolean; readonly bossKinds?: readonly MaintenanceKind[]; /** Agents the owner named as administrators: they may decide host policy and the shared base (the protected kinds), and nothing else. */ readonly administrators?: readonly string[]; readonly leaseMinutes?: number; readonly requestsPerDay?: number; /** Further numbers the owner may set (0 = switched off where that makes sense, absent = the default): see `LIMIT_SETTINGS`. */ readonly limits?: Readonly<Record<string, number>>; /** The record was created by the service at start (revision 1 is not an owner's write): the revisions the owner sees count from there. */ readonly base?: true; readonly sites?: Readonly<Record<string, SiteRule>>; readonly catalogue?: readonly CatalogueEntry[]; readonly updatedBy: string; readonly updatedAt: string }
 export interface CatalogueEntry { readonly name: string; readonly version: string; readonly digest: string; readonly source: string; readonly installScripts?: boolean }
-export interface MaintenanceEffective { readonly requests: boolean; readonly bosses: boolean; readonly rules: boolean; readonly bossKinds: readonly MaintenanceKind[]; readonly leaseMs: number; /** Requests per agent per day; undefined = no cap (the default). */ readonly requestsPerDay: number | undefined; /** Requests of one agent waiting at once; undefined = no cap. Default 20. */ readonly pendingPerAgent: number | undefined; readonly attempts: number; /** An application that runs longer is marked uncertain and verified/reverted; undefined = no timeout. Default 60 minutes. */ readonly applyTimeoutMs: number | undefined; /** How long a controller shutdown waits for running applications; undefined = until they end. Default 30 seconds. */ readonly closeWaitMs: number | undefined; readonly maxApplies: number; readonly tickMs: number }
+export interface MaintenanceEffective { readonly requests: boolean; readonly bosses: boolean; readonly rules: boolean; readonly bossKinds: readonly MaintenanceKind[]; /** Agents the owner named as administrators (may decide the protected kinds only); none by default. */ readonly administrators: readonly string[]; readonly leaseMs: number; /** Requests per agent per day; undefined = no cap (the default). */ readonly requestsPerDay: number | undefined; /** Requests of one agent waiting at once; undefined = no cap. Default 20. */ readonly pendingPerAgent: number | undefined; readonly attempts: number; /** An application that runs longer is marked uncertain and verified/reverted; undefined = no timeout. Default 60 minutes. */ readonly applyTimeoutMs: number | undefined; /** How long a controller shutdown waits for running applications; undefined = until they end. Default 30 seconds. */ readonly closeWaitMs: number | undefined; readonly maxApplies: number; readonly tickMs: number }
 
 /** What the applier is shown: the checked request, never the free text. */
 export interface MaintenanceView { readonly id: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly spec: MaintenanceSpec; readonly specDigest: string; readonly rollbackPlan?: string }
@@ -357,8 +357,8 @@ export class MaintenanceService {
     try {
       const found = await this.#runner.get(SETTINGS.kind, SETTINGS.id);
       const body = found?.body as unknown as SettingsBody | undefined;
-      return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true, bossKinds: body?.bossKinds ?? [], leaseMs: (body?.leaseMinutes ?? MAINTENANCE_LIMITS.leaseMs / 60_000) * 60_000, ...limitsOf(body) } };
-    } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false, bossKinds: [], leaseMs: MAINTENANCE_LIMITS.leaseMs, ...limitsOf(undefined) } }; }
+      return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true, bossKinds: body?.bossKinds ?? [], administrators: body?.administrators ?? [], leaseMs: (body?.leaseMinutes ?? MAINTENANCE_LIMITS.leaseMs / 60_000) * 60_000, ...limitsOf(body) } };
+    } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false, bossKinds: [], administrators: [], leaseMs: MAINTENANCE_LIMITS.leaseMs, ...limitsOf(undefined) } }; }
   }
   async #agent(id: string): Promise<{ state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined> { return (await this.#runner.get("agent", id.slice("agent:".length)))?.body as unknown as { state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined; }
   async #isSupervisorOf(by: Principal, agentId: string): Promise<boolean> {
@@ -381,31 +381,76 @@ export class MaintenanceService {
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // A legacy agent has no record of who chose its supervisor: that is unknown, so a boss may not decide a kind that widens the sandbox for it (the owner does).
     if (target?.supervisorSetBy === undefined) return false;
-    // A puppet is not a boss: whoever the decider was created by (and by whom those were created, bounded) must not be the requester, someone the requester controls, or whoever made the requester or chose its supervisor.
-    const requester = b.agentId.startsWith("agent:") ? b.agentId : `agent:${b.agentId}`;
-    const madeBy = new Set<string>();
-    for (let at: string | undefined = by.id, hops = 0; at !== undefined && hops < 6; hops++) {
-      const creator: string | undefined = (await this.#agent(at))?.createdBy;
-      if (creator === undefined || madeBy.has(creator)) break;
-      madeBy.add(creator);
-      at = creator.startsWith("agent:") ? creator : undefined;
-    }
-    for (const creator of madeBy) {
-      if (creator === requester) return false;
-      if (creator.startsWith("agent:")) {
-        // Someone the requester controls (its supervisor is the requester).
-        const c = await this.#agent(creator);
-        if (c?.supervisorId !== undefined && `agent:${c.supervisorId}` === requester) return false;
-        // The one who made the requester or chose its supervisor is the same hand as the decider's maker.
-        if (creator === target.createdBy || creator === target.supervisorSetBy) return false;
-      }
-    }
+    if (await this.#madeByRequesterSide(by.id, b, target)) return false;
     if (b.kind === "mount") {
       const resource = String(b.spec["resource"]);
       const own = resource.startsWith(`${openKey(b.agentId)}.`), shared = resource.startsWith("shared.");
       if (!own && !(shared && b.spec["mode"] === "read")) return false;
     }
     return true;
+  }
+  /**
+   * Whether the decider is the requester's own hand: whoever the decider was created by (and by whom those were created, bounded) is the requester, someone the requester controls, or whoever made the requester or chose its supervisor.
+   * A puppet decides nothing for the one that made it.
+   */
+  async #madeByRequesterSide(deciderId: string, b: MaintenanceBody, target: { createdBy?: string; supervisorSetBy?: string } | undefined): Promise<boolean> {
+    const requester = b.agentId.startsWith("agent:") ? b.agentId : `agent:${b.agentId}`;
+    const madeBy = new Set<string>();
+    for (let at: string | undefined = deciderId, hops = 0; at !== undefined && hops < 6; hops++) {
+      const creator: string | undefined = (await this.#agent(at))?.createdBy;
+      if (creator === undefined || madeBy.has(creator)) break;
+      madeBy.add(creator);
+      at = creator.startsWith("agent:") ? creator : undefined;
+    }
+    for (const creator of madeBy) {
+      if (creator === requester) return true;
+      if (creator.startsWith("agent:")) {
+        const c = await this.#agent(creator);
+        if (c?.supervisorId !== undefined && `agent:${c.supervisorId}` === requester) return true;
+        if (target !== undefined && (creator === target.createdBy || creator === target.supervisorSetBy)) return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Whether `by` may decide this protected request as an administrator: the owner named it (`administrators`), it is an active agent no pause, suspend or stop gate holds (fail closed), it is not a task credential, it is not the requester,
+   * it is not the requester's own hand (it did not create the requester or choose its supervisor, and nobody the requester controls made it), and it is not in the requester's line of management either way (its team). The supervisor role plays no part.
+   */
+  async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<boolean> {
+    if (b.class !== "protected" || by.kind !== "agent" || by.taskScope !== undefined || !by.id.startsWith("agent:") || !eff.administrators.includes(by.id)) return false;
+    if (by.id === b.agentId || by.id === b.requestedBy) return false;
+    if ((await this.#agent(by.id))?.state !== "active") return false;
+    if (this.#options.held !== undefined) { let held = true; try { held = await this.#options.held(by.id.slice("agent:".length)); } catch { held = true; } if (held) return false; }
+    const target = await this.#agent(b.agentId);
+    if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
+    // Not its own team either: an administrator above the requester (its supervisor, or further up by supervisor or creator) would approve what it can direct the requester to ask for, and one below the requester is directed by it.
+    const requesters = [b.agentId, ...(b.requestedBy.startsWith("agent:") && b.requestedBy !== b.agentId ? [b.requestedBy] : [])];
+    // A line of management longer or wider than the bound is not read to its end, so whether the administrator stands in it is unknown: that is refused (the owner decides), never taken as "not its team".
+    for (const r of requesters) { const up = await this.#upline(r); if (!up.complete || up.seen.has(by.id)) return false; }
+    const mine = await this.#upline(by.id);
+    if (!mine.complete || requesters.some((r) => mine.seen.has(r))) return false;
+    return !(await this.#madeByRequesterSide(by.id, b, target));
+  }
+  /**
+   * The agents above `agentId` in its line of management: its supervisor and whoever created it, and theirs, bounded (at most 6 steps and 32 agents). A step whose record is missing ends that branch; a cycle ends where it meets an agent already seen.
+   * `complete` is false when an agent lies beyond the bound (a seventh step, or a 33rd agent): the caller then cannot say who is not in the line.
+   */
+  async #upline(agentId: string): Promise<{ seen: Set<string>; complete: boolean }> {
+    const seen = new Set<string>();
+    let frontier = [agentId];
+    for (let hops = 0; frontier.length > 0; hops++) {
+      const next: string[] = [];
+      for (const at of frontier) {
+        const a = await this.#agent(at);
+        for (const up of [a?.supervisorId === undefined ? undefined : `agent:${a.supervisorId}`, a?.createdBy]) {
+          if (up === undefined || !up.startsWith("agent:") || up === agentId || seen.has(up)) continue;
+          if (hops >= 6 || seen.size >= 32) return { seen, complete: false };
+          seen.add(up); next.push(up);
+        }
+      }
+      frontier = next;
+    }
+    return { seen, complete: true };
   }
   #owner(by: Principal, what: string): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not ${what}`); }
 
@@ -418,7 +463,9 @@ export class MaintenanceService {
   }
 
   #view(id: string, b: MaintenanceBody): MaintenanceView { return { id, agentId: b.agentId, kind: b.kind, class: b.class, spec: b.spec, specDigest: b.specDigest, ...(b.rollbackPlan === undefined ? {} : { rollbackPlan: b.rollbackPlan }) }; }
-  async #mayRead(by: Principal, b: MaintenanceBody): Promise<boolean> { return by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy || await this.#isSupervisorOf(by, b.agentId); }
+  async #mayRead(by: Principal, b: MaintenanceBody): Promise<boolean> { return by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy || await this.#isSupervisorOf(by, b.agentId) || await this.#isNamedAdmin(by, b); }
+  /** Whether `by` is an agent the owner named as an administrator and the request is a protected one (the only ones an administrator reads besides its own). A task credential is never one. */
+  async #isNamedAdmin(by: Principal, b: MaintenanceBody): Promise<boolean> { return b.class === "protected" && by.kind === "agent" && by.taskScope === undefined && (await this.#settings()).eff.administrators.includes(by.id); }
   async #shown(id: string, a: Aggregate): Promise<JsonObject> {
     const b = a.body as unknown as MaintenanceBody;
     const want = b.kind === "package" || b.kind === "extension";
@@ -498,6 +545,7 @@ export class MaintenanceService {
         if ((q.status !== undefined && b.status !== q.status) || (agent !== undefined && b.agentId !== agent)) continue;
         let seen = by.kind === "owner" || by.id === b.agentId || by.id === b.requestedBy;
         if (!seen) { if (!cache.has(b.agentId)) cache.set(b.agentId, await this.#isSupervisorOf(by, b.agentId)); seen = cache.get(b.agentId)!; }
+        if (!seen) seen = await this.#isNamedAdmin(by, b);
         if (!seen) continue;
         items.push(await this.#shown(r.id, r));
         if (items.length >= limit) break;
@@ -638,8 +686,10 @@ export class MaintenanceService {
 
   // ---- deciding ------------------------------------------------------------------------------------------------------------------
 
-  async #decider(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<"owner" | "supervisor"> {
+  async #decider(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<"owner" | "administrator" | "supervisor"> {
     if (by.kind === "owner") return "owner";
+    // An administrator the owner named decides the protected kinds, and only those; being a supervisor, however placed, is no part of it.
+    if (b.class === "protected" && await this.#adminFor(by, b, eff)) return "administrator";
     // A supervisor role alone never reaches the protected base or host policy, nor any kind the owner has not handed over; a task credential never decides; nobody decides their own request.
     if (by.id === b.agentId || by.id === b.requestedBy || !(await this.#bossFor(by, b, eff))) throw new DomainError("forbidden", `${by.id} may not decide this maintenance request`);
     return "supervisor";
@@ -769,6 +819,7 @@ export class MaintenanceService {
     if (b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") return { standing: "denied", guard: [] };
     const d = b.decision;
     if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return { standing: "lapsed", guard: [] };
+    if (d.via === "administrator") return { standing: b.class === "protected" && await this.#adminFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed", guard: [] };
     if (d.via === "supervisor") return { standing: await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed", guard: [] };
     // A rule approval is judged again; a standing permission also fences the claim with the grant records it rests on, so a revocation written between this check and the claim fails the claim.
     if (d.via === "rule") { const again = await this.#autoDecision(b.agentId, b.kind, b.class, b.spec, s, this.#runner.now()); return again?.verdict === "approve" && again.rule === d.rule ? { standing: "ok", guard: again.guard ?? [] } : { standing: "lapsed", guard: [] }; }
@@ -1051,9 +1102,9 @@ export class MaintenanceService {
   }
 
   /** Full form: `requests`, `bosses`, `rules` (true, false, or null for the profile's default), `sites` ({ site: "allow" | "deny" | null }), `catalogueAdd` and `catalogueRemove`. */
-  async change(owner: Principal, command: NoActor & { requests?: boolean | null; bosses?: boolean | null; rules?: boolean | null; bossKinds?: unknown; leaseMinutes?: number | null; requestsPerDay?: number | null; pendingPerAgent?: number | null; attempts?: number | null; applyTimeoutMinutes?: number | null; closeWaitSeconds?: number | null; maxApplies?: number | null; tickSeconds?: number | null; sites?: unknown; catalogueAdd?: unknown; catalogueRemove?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
+  async change(owner: Principal, command: NoActor & { requests?: boolean | null; bosses?: boolean | null; rules?: boolean | null; bossKinds?: unknown; administrators?: unknown; leaseMinutes?: number | null; requestsPerDay?: number | null; pendingPerAgent?: number | null; attempts?: number | null; applyTimeoutMinutes?: number | null; closeWaitSeconds?: number | null; maxApplies?: number | null; tickSeconds?: number | null; sites?: unknown; catalogueAdd?: unknown; catalogueRemove?: unknown; expectedRevision?: number }): Promise<{ revision: number }> {
     this.#owner(owner, "change the maintenance settings");
-    onlyKnown(command, ["commandId", "requests", "bosses", "rules", "bossKinds", "leaseMinutes", "requestsPerDay", ...Object.keys(LIMIT_SETTINGS), "sites", "catalogueAdd", "catalogueRemove", "expectedRevision"]);
+    onlyKnown(command, ["commandId", "requests", "bosses", "rules", "bossKinds", "administrators", "leaseMinutes", "requestsPerDay", ...Object.keys(LIMIT_SETTINGS), "sites", "catalogueAdd", "catalogueRemove", "expectedRevision"]);
     const flag = (v: unknown, f: string): boolean | null | undefined => (v === undefined || v === null || typeof v === "boolean" ? (v as never) : bad(f, "must be true, false or null"));
     const flags = { requests: flag(command.requests, "requests"), bosses: flag(command.bosses, "bosses"), rules: flag(command.rules, "rules") };
     const sites = command.sites === undefined ? undefined : this.#sites(command.sites);
@@ -1070,8 +1121,9 @@ export class MaintenanceService {
     }
     const lease = num(command.leaseMinutes, "leaseMinutes", MAINTENANCE_LIMITS.leaseMinMs / 60_000, MAINTENANCE_LIMITS.leaseMaxMs / 60_000), perDay = num(command.requestsPerDay, "requestsPerDay", 0, 100_000);
     const kinds = command.bossKinds === undefined || command.bossKinds === null ? (command.bossKinds as null | undefined) : Array.isArray(command.bossKinds) && command.bossKinds.every((k) => (BOSS_KINDS as readonly unknown[]).includes(k)) && new Set(command.bossKinds).size === command.bossKinds.length ? (command.bossKinds as MaintenanceKind[]) : bad("bossKinds", `must be a list of kinds from ${BOSS_KINDS.join(", ")} (host-policy and base are never handed to supervisors), or null`);
-    if (Object.values(flags).every((v) => v === undefined) && lease === undefined && perDay === undefined && Object.keys(limits).length === 0 && kinds === undefined && sites === undefined && add === undefined && remove === undefined) bad("requests", "name at least one setting to change");
-    return this.#write("maintenance.settings.set", owner, command.commandId, command.expectedRevision, { flags: Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined)) as unknown as JsonObject, lease: lease ?? null, perDay: perDay ?? null, limits: limits as unknown as JsonObject, kinds: (kinds ?? null) as unknown as JsonObject, sites: (sites ?? null) as unknown as JsonObject, add: (add ?? null) as unknown as JsonObject, remove: (remove ?? null) as unknown as JsonObject }, (before) => this.#merge(before, flags, sites, add, remove, { lease, perDay, kinds, limits }));
+    const admins = command.administrators === undefined || command.administrators === null ? (command.administrators as null | undefined) : Array.isArray(command.administrators) && command.administrators.length <= MAINTENANCE_LIMITS.administrators ? [...new Set(command.administrators.map((a, i) => inputAgent(a, `administrators[${i}]`)))] : bad("administrators", `must be a list of at most ${MAINTENANCE_LIMITS.administrators} agent IDs, or null`);
+    if (Object.values(flags).every((v) => v === undefined) && admins === undefined && lease === undefined && perDay === undefined && Object.keys(limits).length === 0 && kinds === undefined && sites === undefined && add === undefined && remove === undefined) bad("requests", "name at least one setting to change");
+    return this.#write("maintenance.settings.set", owner, command.commandId, command.expectedRevision, { flags: Object.fromEntries(Object.entries(flags).filter(([, v]) => v !== undefined)) as unknown as JsonObject, lease: lease ?? null, perDay: perDay ?? null, limits: limits as unknown as JsonObject, kinds: (kinds ?? null) as unknown as JsonObject, administrators: (admins ?? null) as unknown as JsonObject, sites: (sites ?? null) as unknown as JsonObject, add: (add ?? null) as unknown as JsonObject, remove: (remove ?? null) as unknown as JsonObject }, (before) => this.#merge(before, flags, sites, add, remove, { lease, perDay, kinds, limits, admins }));
   }
 
   /** Turns one switch (or all) on or off: `requests` (agents may ask), `bosses` (supervisors may decide what is not protected), `rules` (preapproved catalogue and allowed sites approve by themselves). */
@@ -1124,10 +1176,11 @@ export class MaintenanceService {
       return { name: name(x["name"], `${field}[${i}].name`, PKG_NAME), version: lone(x["version"], `${field}[${i}].version`, 40, VERSION), digest: lone(x["digest"], `${field}[${i}].digest`, 80, DIGEST), source: checkSource(x["source"], `${field}[${i}].source`), ...(x["installScripts"] === true ? { installScripts: true } : {}) };
     });
   }
-  #merge(before: SettingsBody | undefined, flags: { requests?: boolean | null | undefined; bosses?: boolean | null | undefined; rules?: boolean | null | undefined }, sites: Record<string, SiteRule | null> | undefined, add: CatalogueEntry[] | undefined, remove: CatalogueEntry[] | undefined, more: { lease?: number | null | undefined; perDay?: number | null | undefined; kinds?: MaintenanceKind[] | null | undefined; limits?: Record<string, number | null> } = {}): Omit<SettingsBody, "updatedBy" | "updatedAt"> {
-    const out: { limits?: Record<string, number>; requests?: boolean; bosses?: boolean; rules?: boolean; bossKinds?: MaintenanceKind[]; leaseMinutes?: number; requestsPerDay?: number; sites?: Record<string, SiteRule>; catalogue?: CatalogueEntry[] } = {};
+  #merge(before: SettingsBody | undefined, flags: { requests?: boolean | null | undefined; bosses?: boolean | null | undefined; rules?: boolean | null | undefined }, sites: Record<string, SiteRule | null> | undefined, add: CatalogueEntry[] | undefined, remove: CatalogueEntry[] | undefined, more: { lease?: number | null | undefined; perDay?: number | null | undefined; kinds?: MaintenanceKind[] | null | undefined; admins?: string[] | null | undefined; limits?: Record<string, number | null> } = {}): Omit<SettingsBody, "updatedBy" | "updatedAt"> {
+    const out: { limits?: Record<string, number>; requests?: boolean; bosses?: boolean; rules?: boolean; bossKinds?: MaintenanceKind[]; administrators?: string[]; leaseMinutes?: number; requestsPerDay?: number; sites?: Record<string, SiteRule>; catalogue?: CatalogueEntry[] } = {};
     for (const k of ["requests", "bosses", "rules"] as const) { const v = flags[k] === undefined ? before?.[k] : flags[k]; if (typeof v === "boolean") out[k] = v; }
     const kinds = more.kinds === undefined ? before?.bossKinds : more.kinds ?? undefined; if (kinds !== undefined && kinds.length > 0) out.bossKinds = [...kinds];
+    const admins = more.admins === undefined ? before?.administrators : more.admins ?? undefined; if (admins !== undefined && admins.length > 0) out.administrators = [...admins];
     const lease = more.lease === undefined ? before?.leaseMinutes : more.lease ?? undefined; if (lease !== undefined) out.leaseMinutes = lease;
     const perDay = more.perDay === undefined ? before?.requestsPerDay : more.perDay ?? undefined; if (perDay !== undefined) out.requestsPerDay = perDay;
     const lim: Record<string, number> = { ...(before?.limits ?? {}) };
