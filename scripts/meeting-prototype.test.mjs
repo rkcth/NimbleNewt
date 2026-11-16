@@ -241,7 +241,7 @@ test("clock: a pause longer than the whole meeting is cut to the total and the m
   let n = 0;
   const { summary } = await withClock(() => { n += 1; return n === reads ? 1_000_000 + 1000 + 1 : 1_000_000 + n * 1000; }, () => meet(ownerScenario(), variant("m00-full"), { statement: ownerAnswer }));
   assert.equal(n, reads, "the same number of reads in both runs");
-  assert.deepEqual(clockOf(summary), { total: 1, paused: 1, meeting: 0 });
+  assert.deepEqual(clockOf(summary), { total: 1, paused: 1, meeting: 0 }, "this test assumes the closing clockMs read is the run's last Date.now() read; if a read was added after it, change which read is moved");
 });
 
 test("clock: with no owner inquiry nothing is paused, and total and meeting agree even while the clock moves", async () => {
