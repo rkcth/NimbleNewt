@@ -147,20 +147,27 @@ async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) =>
 
 /** Why a private desk record stays: a catalog version names it as its instructions or its executable source (an agent may register a personal tool or skill from its own accepted private records). */
 export const CATALOG_SOURCE_REASON = "a catalogued tool or skill reads its instructions or code from this record";
-/** Why a record stays when the catalog could not be read to the end (fail closed). */
-export const CATALOG_SOURCES_UNREAD = "the check of which records a catalogued tool reads did not finish, so nothing is archived or removed";
+/** Why a finished task's private `plan` record stays: a decision link names it as its subject, and would point at an empty record once the text was archived or removed. */
+export const PLAN_LINK_REASON = "a decision link names this plan as its subject";
+/** Why a record stays when the holds could not be read to the end (fail closed). */
+export const CATALOG_SOURCES_UNREAD = "the check of which records a catalogued tool or a decision link still relies on did not finish, so nothing is archived or removed";
 /**
- * The IDs of every desk record that a catalog version names as `instructional.recordId` or `executable.recordId` (revoked versions included, like the backup scope tier: a revoked text is blanked by its own rule).
- * `undefined` when the read could not finish (bounded scan reached its limit, or the read failed): the caller must then remove nothing that this answer would have protected.
+ * The desk records the scratch rule and the owner's task archive must leave whole, with the reason for each: every record a catalog version names as `instructional.recordId` or `executable.recordId` (revoked versions
+ * included, like the backup scope tier: a revoked text is blanked by its own rule), and every record a decision link names as the subject of kind `plan` (links in any state).
+ * `undefined` when a read could not finish (bounded scan reached its limit, or the read failed): the caller must then remove nothing that this answer would have protected.
  */
-async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<Set<string> | undefined> {
-  const ids = new Set<string>();
+async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<Map<string, string> | undefined> {
+  const ids = new Map<string, string>();
   try {
     const complete = await scan(runner, "catalog-version", (a) => {
       const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
-      for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") ids.add(s.recordId);
+      for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") ids.set(s.recordId, CATALOG_SOURCE_REASON);
     }, limit);
-    return complete ? ids : undefined;
+    if (!complete) return undefined;
+    const linked = await scan(runner, "decision-reliance", (a) => {
+      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string" && !ids.has(l.subject.id)) ids.set(l.subject.id, PLAN_LINK_REASON);
+    }, limit);
+    return linked ? ids : undefined;
   } catch { return undefined; }
 }
 
@@ -625,7 +632,7 @@ export class RetentionService {
         else if (archiveCut === undefined && purgeCut !== undefined && Date.parse(a.updatedAt) < purgeCut) action = "scratch-purge";
         if (action === undefined || !(await isFinal(b.taskId))) continue;
         const why = material.why("desk-record", a.id)?.filter((w) => !w.includes(`written for task ${b.taskId}`) && (action === "scratch-purge" || !isReplayReason(w)));
-        if (sources?.has(a.id) === true) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: [...(why ?? []), CATALOG_SOURCE_REASON] }); continue; }
+        if (sources?.has(a.id) === true) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: [...(why ?? []), sources.get(a.id)!] }); continue; }
         if (why !== undefined && why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "desk-record", id: a.id, reasons: why }); continue; }
         candidates.push({ kind: action, id: a.id, revision: a.revision, projectId, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
       }
@@ -687,10 +694,10 @@ export class RetentionService {
       const material = await RetainedMaterial.build(this.#runner.storage, { routeArchive: batch.some((c) => c.kind === "ctx-route-archive"), transcripts: batch.some((c) => c.kind === "chat-turn") });
       // The catalog's source records are read again for a batch with scratch work (a tool may be registered while the run goes); an unfinished read holds the whole batch's scratch work.
       const scratchInBatch = batch.some((c) => c.kind === "scratch-archive" || c.kind === "scratch-purge");
-      const sourcesNow = scratchInBatch ? await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit) : new Set<string>();
+      const sourcesNow = scratchInBatch ? await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit) : new Map<string, string>();
       if (sourcesNow === undefined) sourcesUnread = true;
       for (const c of batch) {
-        if ((c.kind === "scratch-archive" || c.kind === "scratch-purge") && (sourcesNow === undefined || sourcesNow.has(c.id))) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: [sourcesNow === undefined ? CATALOG_SOURCES_UNREAD : CATALOG_SOURCE_REASON] }); continue; }
+        if ((c.kind === "scratch-archive" || c.kind === "scratch-purge") && (sourcesNow === undefined || sourcesNow.has(c.id))) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: [sourcesNow === undefined ? CATALOG_SOURCES_UNREAD : sourcesNow.get(c.id)!] }); continue; }
         // The tiers of card K06b act on desk records under their own names; an archive is not stopped by a replay's citation (it keeps the original), a removal is.
         const heldAs = c.kind === "scratch-archive" || c.kind === "scratch-purge" ? "desk-record" : c.kind;
         const why = c.kind === "pi-thinking" ? undefined : material.why(heldAs, c.id)?.filter((w) => !(c.kind === "scratch-archive" && isReplayReason(w)) && !((c.kind === "scratch-archive" || c.kind === "scratch-purge") && w.includes("written for task")));
@@ -970,7 +977,7 @@ export class RetentionService {
       if (rule.holdCatalogSources === true) {
         const sources = await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit);
         if (sources === undefined) held.push({ kind: "desk-record", id: command.recordId, reasons: [CATALOG_SOURCES_UNREAD] });
-        else for (const a of members) if (sources.has(a.id)) held.push({ kind: "desk-record", id: a.id, reasons: [CATALOG_SOURCE_REASON] });
+        else for (const a of members) if (sources.has(a.id)) held.push({ kind: "desk-record", id: a.id, reasons: [sources.get(a.id)!] });
       }
       return held;
     };
@@ -1163,7 +1170,7 @@ export class RetentionService {
           if (kind === "desk-record") {
             await this.#deps.beforeArchiveWrite?.(rec.id);
             const now = await catalogSourceIds(this.#runner, this.#deps.catalogScanLimit);
-            if (now === undefined || now.has(rec.id)) { heldBy = now === undefined ? CATALOG_SOURCES_UNREAD : CATALOG_SOURCE_REASON; throw new DomainError("stale_revision", heldBy); }
+            if (now === undefined || now.has(rec.id)) { heldBy = now === undefined ? CATALOG_SOURCES_UNREAD : now.get(rec.id)!; throw new DomainError("stale_revision", heldBy); }
           }
           const ref = { kind: "retention-archive", id: archiveId };
           const arch = { recordId: rec.id, recordKind: kind, taskId: command.taskId, projectId: String(fb["projectId"] ?? ""), original: fresh.body, originalRevision: fresh.revision, stubRevision: fresh.revision + 1, at, by: owner.id, ...(command.reason === undefined ? {} : { reason: command.reason }) } as unknown as JsonObject;
@@ -1181,7 +1188,7 @@ export class RetentionService {
       // The task's own records count as held only because the task can resume; a finished task's are free, unless another resumable task cites them.
       const outside = why?.filter((w) => !w.includes(`written for task ${command.taskId}`) && !isReplayReason(w));
       if (!material.complete || (outside !== undefined && outside.length > 0)) { retained.push({ kind: "desk-record", id: rec.id, reasons: outside ?? why ?? [] }); continue; }
-      if (sources === undefined || sources.has(rec.id)) { retained.push({ kind: "desk-record", id: rec.id, reasons: [sources === undefined ? CATALOG_SOURCES_UNREAD : CATALOG_SOURCE_REASON] }); continue; }
+      if (sources === undefined || sources.has(rec.id)) { retained.push({ kind: "desk-record", id: rec.id, reasons: [sources === undefined ? CATALOG_SOURCES_UNREAD : sources.get(rec.id)!] }); continue; }
       if (await one("desk-record", rec, (fb, archiveId) => ({ ...fb, title: "(archived)", body: "", archived: { at, by: owner.id, archiveId } }) as JsonObject)) done.add(rec.id);
     }
     // What was made from an archived source goes with it (summaries keep their project and sources; the text returns on restore).
