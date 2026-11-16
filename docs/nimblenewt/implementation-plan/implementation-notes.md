@@ -11926,6 +11926,25 @@ Branch `card20-t8b`. Only `continuation/resume.ts` changed. No operation text ch
 ASSUMPTION: a busy check is `unavailable` (the code the runner already uses for "send the same command again") rather than a new error code, the smallest and most reversible choice.
 ASSUMPTION: a blocker is closed only for the ended-attempt case; other failures keep it open because the same command ID reuses it on retry.
 
+### T8b first review (Claude agent, Opus 5.5, 2026-11-16)
+
+Each claim was driven end to end on all four backends (reference store, SQLite, SQLite worker thread, PostgreSQL), not only read.
+
+**Found and fixed.**
+- *Wrong statement in both busy messages.* "nothing was written, and it is looked at again" is not true everywhere: a check at `ready` that an owner commits through `resume.commit` (no attempt) is not advanced by any sweep, so nothing looks at it again; and for the start over of a pruned capture the commit had already been written before the start over was refused. Both now say what holds in every case: "...on each of 6 tries, so this start over was not written; the same request can be made again" and "...on each of 6 tries, so this change was not written; the same request can be made again". Not shown in a notification (no cap applies); about 140 characters.
+- *A churn blocker opened for a check that had moved on.* `#restart` read the check again on each try but never looked at its phase. When another advance had meanwhile blocked the check for another reason (say an earlier effect of unknown outcome, which has no blocker) in its last round, the start over opened a `resume_churn` blocker for the task and then wrote nothing (the write's phase check refused it), leaving the owner an open blocker no check names. `#restart` now returns when the check is no longer in a phase it starts over from, before any blocker is opened (the write would have done nothing anyway).
+- *Two behaviours without a test* (the implementer's own list), both feasible deterministically, now tested. (1) The blocker the check names is not closed: a second advance of the check (the dispatcher's principal, so it is not the very same write) blocks it with that blocker inside the first advance's write, the task is released, the first write is refused; the blocker stays open and the check names it. (2) The six-try bounds: the six lost races test now counts exactly 6 tried writes; a new test has every second read of the check show it one round on, so the start over is judged again 6 times (12 reads, no write tried) and then answers `unavailable`, with nothing written, and the same call made again starts the check over once.
+- *Notes.* The churn path is the only one that can meet the ended attempt: `missing_context` blocks are written without the attempt guard, so "(or `missing_context`)" in item (a) describes code that closes such a blocker but cannot be reached for it today.
+
+**Checked and found right.** A blocker is closed only for the ended-attempt refusal; a storage error or a busy check keeps it. The close's own command ID (`<check>-blk-end-<blocks>`) is stable, so a repeat answers as made, and a blocker already resolved is left alone. The busy test's "same call again" goes through; `unavailable` reaches the dispatcher's skip line and the sweep's `failed` list unchanged in shape.
+
+**Mutation checks** (built `resume.js`, each alone, restored byte for byte, `continuation/resume-busy-rounds` and `dispatch/resume-pruned-capture` run): close even when the check names it: 4 fail (before this review: 0); 60 tries in `#restart`: 4 fail; 60 tries in `#update`: 4 fail (before: 0); phase check removed: 4 fail; the close call skipped (re-run of the implementer's): 4 fail.
+
+**NOT done.** A block write that fails for another reason (a storage error) leaves its blocker open for the retry; if the attempt ends before that retry, the retry is cancelled before it reaches the block and the blocker stays open (the gap item (a) closes, one step earlier). Blockers are opened once per task and type, so a blocker left open by an earlier, cancelled check of the same task is the one a later check gets; when that later check's attempt ends mid-write, the earlier blocker is closed with the ended-attempt resolution. Neither changed here.
+
+ASSUMPTION: an owner-facing busy text says the same request can be made again rather than that something will look at it again, because the second is not true for every caller.
+ASSUMPTION: a start over finding the check in a phase it does not start over from does nothing, as the write it would make already does; no churn blocker is opened for it.
+
 ## A09 follow-up T6: administrators are told of requests, and the claim checks the agent records the administrator check read (Claude agent, Sonnet 5.5, 2026-11-15)
 
 Card A09 is NOT flipped. Base 16ef7406, branch `task-t6-a09b`. This closes two items the ninth slice and its reviews left open.

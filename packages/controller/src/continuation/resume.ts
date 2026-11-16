@@ -639,6 +639,8 @@ export class ResumeCheckService {
     // the read and the write. Judged on the old round the write would take the check past its limit without the block; so it is read and judged again, a bounded number of times.
     for (let tries = 1; ; tries++) {
       const b = (await this.#runner.get(KIND, id))!.body as unknown as ResumeCheckBody;
+      // Moved on meanwhile (another advance blocked, committed or cancelled it): nothing to start over, and no churn blocker is opened for a check that would not name it (T8b review).
+      if (!from.includes(b.phase)) return;
       if (b.round + 1 >= b.maxRounds) {
         if (guard !== undefined) await guard();
         await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, from, guard);
@@ -652,7 +654,7 @@ export class ResumeCheckService {
         return;
       } catch (error) {
         if (!(error instanceof DomainError) || error.message !== ROUND_MOVED) throw error;
-        if (tries >= 6) throw new DomainError("unavailable", "the resume check was started over by other advances on each of 6 tries; nothing was written, and it is looked at again");
+        if (tries >= 6) throw new DomainError("unavailable", "the resume check was started over by other advances on each of 6 tries, so this start over was not written; the same request can be made again");
       }
     }
   }
@@ -714,7 +716,7 @@ export class ResumeCheckService {
       } catch (error) {
         if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict")) throw error;
         // T8b: six lost races in a row used to surface as a bare stale_revision, which reads as a fault of the caller. It is a busy check: nothing was written, and the same call can be made again.
-        if (attempt >= 6) throw new DomainError("unavailable", "the resume check was changed by other writers on each of 6 tries; nothing was written, and it is looked at again");
+        if (attempt >= 6) throw new DomainError("unavailable", "the resume check was changed by other writers on each of 6 tries, so this change was not written; the same request can be made again");
       }
     }
   }

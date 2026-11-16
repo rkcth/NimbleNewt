@@ -171,4 +171,64 @@ for (const backend of backends) {
       assert.equal((await real.advance(c.owner, { checkId: own.id })).phase, "cancelled", "repeatable");
     } finally { await store.close(); }
   });
+
+  // T8b review: the same, but a second advance of the check blocks it with that very blocker (opened once per task) before the attempt ends, while the first one's write is under way. The first
+  // write is refused (the attempt ended) and the check names the blocker: it stays open, for the owner to look at.
+  test(`${backend.name}: a churn blocker the check names is not closed when another advance of it is refused because the attempt ended`, async () => {
+    const store = await backend.open();
+    try {
+      const c = await buildWorld(store.storage);
+      const options = { clock: c.options.clock!, maxRounds: 1 };
+      const continuations = ContinuationService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+      const dependencies = DependencyService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+      const ann = await c.agent("ann", workGrants(c.project, []));
+      const { taskId, attemptId } = await c.task("long job", ann);
+      let prune = true;
+      const racing = new Proxy(continuations, { get: (target, prop) => {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop === "resume") return async (...args: unknown[]) => {
+          if (prune) { prune = false; for (let i = 0; i < CONTINUATION_KEEP + 1; i++) await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(100 + i) }); }
+          return (target.resume as (...a: unknown[]) => unknown).apply(target, args);
+        };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as ContinuationService;
+      // 0: idle; 1: the first advance opened the churn blocker; 2: the second advance runs, then the task is released.
+      let state = 0; let real!: ResumeCheckService; let checkId = ""; let second: unknown;
+      const blockers = new Proxy(c.blockers, { get: (target, prop) => {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop === "openBlocker") return async (...args: unknown[]) => { const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args); if (state === 0) state = 1; return r; };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as typeof c.blockers;
+      // The first advance's block write reads the check (still executing); just then the second advance blocks it, and the task is released before the first write is made.
+      const late = new Proxy(store.storage, { get: (target, prop) => {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop === "getAggregate") return async (ref: { kind: string; id: string }) => {
+          const r = await (target.getAggregate as (r: unknown) => Promise<unknown>).call(target, ref);
+          if (state === 1 && ref.kind === "resume-check") {
+            state = 2;
+            // The dispatcher's principal, so its block is not the very same write as the first advance's (which would then answer as already made).
+            second = await real.advance(c.dispatcherPrincipal, { checkId });
+            const asg = (await c.assignments.getAssignment(taskId))!;
+            await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId, expectedRevision: asg.revision });
+          }
+          return r;
+        };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as typeof store.storage;
+      real = ResumeCheckService.withEpoch(late, c.epoch, { continuations: racing, dependencies, blockers, ports: controllerResumePorts(store.storage, { observe: async () => ({}), review: async () => ({}) }) }, options);
+      await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(1) });
+      await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(2) });
+      const own = await real.start(c.owner, { commandId: cid("s"), taskId, attemptId: attemptId!, model: { provider: "local", id: "m1" }, after: "continue", checkpointDigest: dg(1) });
+      checkId = own.id;
+      assert.equal(own.round + 1, own.maxRounds, "the check is in its last round");
+      const after = await real.commit(c.owner, { commandId: cid("k"), checkId: own.id });
+      assert.equal(state, 2, "the second advance ran inside the first one's write");
+      assert.equal((second as { phase?: string }).phase, "blocked", "the second advance blocked the check");
+      assert.equal(after.phase, "blocked", JSON.stringify(after.history));
+      assert.equal(after.blocked?.type, "resume_churn");
+      const open = await c.blockers.openFor("resume_churn", { kind: "task", id: taskId });
+      assert.equal(open?.id, after.blocked?.blockerId, "the blocker the check names stays open");
+      assert.equal(await c.blockers.occurrences("resume_churn", { kind: "task", id: taskId }), 1, "one blocker, shared by both advances");
+    } finally { await store.close(); }
+  });
 }
