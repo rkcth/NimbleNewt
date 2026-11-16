@@ -272,6 +272,8 @@ export class CatalogService {
           ref: vref, creates: true,
           changes: [
             { type: "create", ref: vref, body: full as unknown as JsonObject },
+            // The source records must still be as they were read: retention may archive or remove one between that read and this write (it reads the catalog's sources just before its own write).
+            ...[instructions, ...(executable === undefined ? [] : [executable])].filter((src, i, all) => all.findIndex((o) => o.recordId === src.recordId) === i).map((src) => ({ type: "check" as const, ref: { kind: "desk-record", id: src.recordId }, expectedRevision: src.revision })),
             entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
           ],
           detail: { name: canonical, version, kind: command.kind, layer: parsed.layer },
@@ -702,6 +704,7 @@ export class CatalogService {
     if (record.visibility === "private") throw new DomainError("forbidden", "private scratch cannot be released; ask the agent to publish it to the desk first");
     if (record.status !== "accepted") throw new DomainError("invalid_command", "only an accepted record can be released", { field: "recordId" });
     if (record.origin !== undefined || record.copiedFrom !== undefined) throw new DomainError("forbidden", "a copy of another desk's content cannot be released as a skill or tool");
+    if ((record as { archived?: unknown; deleted?: unknown }).archived !== undefined || (record as { deleted?: unknown }).deleted !== undefined) throw new DomainError("invalid_command", "that record is archived or deleted; restore it or write the work again", { field: "recordId" });
     return { recordId: found.id, revision: found.revision, digest: sha(record.body), author: record.owner };
   }
 
