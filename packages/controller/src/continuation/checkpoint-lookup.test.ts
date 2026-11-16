@@ -118,7 +118,9 @@ for (const backend of backends) {
   suite("a resume check follows the capture of the checkpoint the attempt restores, and the latest when that checkpoint has no complete capture", async ({ storage, svc, owner, stranger, task, epoch }) => {
     const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(40, true) });
     const b = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(41, true) });
-    const ports: ResumePorts = { observe: async () => ({}), missingContext: async () => [], uncertainEffects: async () => [], review: async () => ({}) };
+    // Which capture the context and effects checks were handed: the one the check follows, not merely the latest.
+    const examined: { context: string[]; effects: string[] } = { context: [], effects: [] };
+    const ports: ResumePorts = { observe: async () => ({}), missingContext: async (_t, c) => { examined.context.push(c.id); return []; }, uncertainEffects: async (_t, c) => { examined.effects.push(c.id); return []; }, review: async () => ({}) };
     const checks = ResumeCheckService.withEpoch(storage, epoch, {
       continuations: svc,
       dependencies: { check: async () => [] },
@@ -134,6 +136,7 @@ for (const backend of backends) {
     const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(40) });
     assert.equal(own.continuationId, a.id, "the check follows the checkpoint the attempt restores");
     assert.equal(own.phase, "ready");
+    assert.deepEqual([examined.context.at(-1), examined.effects.at(-1)], [a.id, a.id], "missing context and uncertain effects are looked for in the checkpoint's own capture");
     // A newer capture between the review and the commit does not make a check of an older checkpoint stale: it still names the one it was made against.
     const late = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(42, true) });
     assert.ok(late.id !== a.id);
