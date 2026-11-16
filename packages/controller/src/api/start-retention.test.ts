@@ -6,6 +6,9 @@ import { test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { unguarded } from "../retention/index.js";
+import { quotaNotice } from "../retention/service.js";
+import { NOTIFICATION_LIMITS } from "../notifications/notifications.js";
+import { text } from "../domain/model.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -328,6 +331,8 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
     for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
     const notes = (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("Storage quota"));
     assert.equal(notes.length, 1, "told once");
+    // K06d: the notice points at something the owner can say in chat, not at an API operation name.
+    assert.match(JSON.stringify(notes[0]!.body), /Ask in chat how much room is left\./); assert.ok(JSON.stringify(notes[0]!.body).length > 0); assert.doesNotMatch(JSON.stringify(notes[0]!.body), /retention\.status/);
     // The per-agent quota is separate and also optional.
     assert.ok((await call(boot.token, "retention.settings.set", { quotaProjectBytes: null, quotaAgentBytes: 2000 }, "q4")).ok);
     assert.match(((await write("agentover", big).catch((e) => e)) as Error).message, /storage quota/);
@@ -369,6 +374,34 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
   } finally { await c.close(); clean(d); }
 });
 
+test("K06d: a quota notice for the longest agent name still fits the notice detail limit and reaches the owner; the ID is shortened, not the warning lost, and the retention pass goes on", async () => {
+  // The text alone: every scope and level fits, a short ID is shown whole, a long one is shortened with "...".
+  const full = "its quota; new records from it are refused until you raise the quota or delete something";
+  for (const id of ["proj-abcdefghijklmnopqrst", `agent:${"a".repeat(40)}`, "x".repeat(500), "", `agent:${"\u{1F600}".repeat(60)}`, `agent:a${"\u{1F600}".repeat(60)}`, `agent:...${"b".repeat(200)}`]) for (const reached of [full, "80% of its quota"]) for (const scope of ["project", "agent"]) {
+    const t = quotaNotice(scope, id, reached);
+    assert.ok(t.length <= NOTIFICATION_LIMITS.detail, `${t.length}: ${t}`);
+    // Second review: the text passes the notification service's own check (UTF-16 units, no half surrogate pair).
+    assert.equal(text(t, "detail", { min: 1, max: NOTIFICATION_LIMITS.detail }), t);
+    assert.match(t, /^Storage quota: .* has reached .*\. Ask in chat how much room is left\.$/);
+    if (t.includes(id)) assert.equal(t, `Storage quota: ${scope} ${id} has reached ${reached}. Ask in chat how much room is left.`); else assert.match(t, /\.\.\. has reached/);
+  }
+  assert.ok(quotaNotice("agent", `agent:${"a".repeat(40)}`, full).includes("..."), "the longest agent ID does not fit whole beside the full-quota text");
+  // Through the real controller: an agent with the longest name allowed goes over its quota; the notice still arrives, once.
+  const d = mkdtempSync(join(tmpdir(), "nn-qlong-"));
+  const { c, boot, call, project, agent } = await world(d, { retention: { defaults: { reserveBytes: 0 } } });
+  try {
+    const name = `a${"b".repeat(39)}`;
+    const w = await agent(name);
+    await c.services.desks.write(w.p, { commandId: "big1", projectId: project, kind: "note", title: "big1", body: "x".repeat(3000), visibility: "shared" });
+    assert.ok((await call(boot.token, "retention.settings.set", { quotaAgentBytes: 2000 }, "ql1")).ok);
+    for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
+    const notes = (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("Storage quota"));
+    assert.equal(notes.length, 1, "the full-quota notice for the long agent name is sent, once");
+    const body = JSON.stringify(notes[0]!.body);
+    assert.match(body, /Storage quota: agent agent:abbb[b]*\.\.\. has reached its quota/); assert.match(body, /Ask in chat how much room is left\./);
+  } finally { await c.close(); clean(d); }
+});
+
 test("a restart keeps the settings, the quota and the reserve; a missing reserve is set aside again; a damaged setting is an error, not a silent default (card K06)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-restart-"));
   const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 }, retention: { defaults: { reserveBytes: 0 } } } as never);
@@ -400,7 +433,7 @@ test("a restart keeps the settings, the quota and the reserve; a missing reserve
     assert.equal(bad.error?.code, "unavailable");
     // The chat view tells the owner the way out (and only for this error, not for any storage trouble).
     const told = (await c.api.handle(boot.token, { v: 1, op: "status.ask", args: { request: { kind: "retention" } } } as never) as Reply);
-    assert.deepEqual(told.result.item.lines.map((l: any) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
+    assert.deepEqual(told.result.item.lines.map((l: any) => l.text), ["The stored retention setting is damaged, so the disk, quota, backup and deletion figures cannot be read and retention does not run. Setting any retention value writes it again; the values you had set before must be set again."]);
     assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.run", args: {}, commandId: "r1" } as never) as Reply).error?.code, "unavailable", "the runner does not guess");
     assert.ok(((await c.api.handle(boot.token, { v: 1, op: "retention.settings.set", args: { derivedDays: 60 }, commandId: "s2" } as never)) as Reply).ok, "and the owner can repair it");
     damaged = false;

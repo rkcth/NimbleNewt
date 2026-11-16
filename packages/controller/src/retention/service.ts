@@ -16,6 +16,8 @@ import { RetainedMaterial, isReplayReason } from "./references.js";
 import { RETENTION_FIELDS, type RetentionSettingsService, type RetentionValues } from "./settings.js";
 import type { ThinkingStorePort } from "./thinking-stores.js";
 import { DISPATCH_KIND } from "../dispatch/model.js";
+import { NOTIFICATION_LIMITS } from "../notifications/notifications.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 
 const DAY = 86_400_000;
 const RUN_LIMIT = { default: 200, max: 1000 } as const;
@@ -48,6 +50,8 @@ export interface BackupPort {
 export interface QuotaClassUsage { readonly quota: number; readonly scopes: number; readonly totalBytes: number; readonly top: readonly { readonly id: string; readonly used: number }[] }
 export type QuotaUsage = { readonly project?: QuotaClassUsage; readonly agent?: QuotaClassUsage };
 const RUNS_LISTED = 5;
+/** How many of the kept backups the status names, newest first (card K06d); the count covers the rest. */
+const BACKUPS_LISTED = 10;
 export interface IncidentPort {
   archive(by: Principal, options: { olderThanDays?: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
   purge(by: Principal, options: { olderThanDays: number; limit?: number; projectId?: string; ids?: readonly string[] }): Promise<number>;
@@ -219,6 +223,19 @@ export interface DeletionReport {
 }
 
 /**
+ * Card K06d: the quota notice text. A notice's detail is refused above `NOTIFICATION_LIMITS.detail` characters, and a refused notice would stop the
+ * dispatcher's retention pass (the warning and the automatic run) on every tick, so a long writer ID (an agent principal is up to 46 characters) is
+ * shortened with "..." to make the whole text fit; the full ID and figures are in the chat `retention` view. The command ID keeps the full ID.
+ */
+export function quotaNotice(scope: string, id: string, reached: string): string {
+  const make = (shown: string): string => `Storage quota: ${scope} ${shown} has reached ${reached}. Ask in chat how much room is left.`;
+  const room = NOTIFICATION_LIMITS.detail - make("").length;
+  // Lengths are UTF-16 units, as the notification limit counts them; a cut never splits a surrogate pair (half a pair is refused as malformed text).
+  const text = make(id.length <= room ? id : `${safeSlice(id, Math.max(0, room - 3))}...`);
+  return text.length <= NOTIFICATION_LIMITS.detail ? text : safeSlice(text, NOTIFICATION_LIMITS.detail);
+}
+
+/**
  * Retention, quotas, archive, export and deletion (card K06). Nothing here deletes unless the owner asked or set a rule: each rule acts only when its own value is set, a user-requested deletion is an owner command, and what a resumable task
  * or a replay needs is refused as retained. Every removal is a guarded delete with an audit record (and a storage tombstone), so it is recorded and a stale holder cannot write over it.
  */
@@ -253,7 +270,10 @@ export class RetentionService {
     const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown }; return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0 }; });
     const backupList = this.#deps.backups === undefined ? undefined : await this.#deps.backups.list();
     // The newest backup by its time (ties by name), whether it can be trusted, and how many cannot.
-    const newest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1))[0];
+    const byNewest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1));
+    const newest = byNewest?.[0];
+    // Which backups are kept (card K06d): the newest few by name and time, so the owner can name one in chat (to test-restore, restore or delete it); the count says how many more.
+    const recentBackups = (byNewest ?? []).slice(0, BACKUPS_LISTED).map((b) => ({ name: b.manifest.name, at: b.at, trusted: b.trusted }));
     // How many of the records that only grow are stored (bounded count), so the owner sees what the checkRecordDays and concernDays rules would work on.
     const growth: Record<string, number | string> = {};
     // Stored model thinking (card K06c, shown by card K06d): the setting, whether the dispatcher removes it by itself, how many task copies are kept and removed and how many conversation stores were cleaned. Counts only, never a word of the thinking.
@@ -283,7 +303,7 @@ export class RetentionService {
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
       quotaLimits: { projectBytes: values.quotaProjectBytes, agentBytes: values.quotaAgentBytes, warnPercent: values.quotaWarnPercent },
       quotaUsage: usage as unknown as JsonObject,
-      backups: backupList === undefined ? { configured: false } : { configured: true, count: backupList.length, untrusted: backupList.filter((b) => !b.trusted).length, ...(newest === undefined ? {} : { latest: { name: newest.manifest.name, at: newest.at, trusted: newest.trusted } }), counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
+      backups: backupList === undefined ? { configured: false } : { configured: true, count: backupList.length, untrusted: backupList.filter((b) => !b.trusted).length, ...(newest === undefined ? {} : { latest: { name: newest.manifest.name, at: newest.at, trusted: newest.trusted } }), recent: recentBackups, counts: { daily: values.backupDaily, weekly: values.backupWeekly } },
       deletions: deletions as unknown as JsonObject[],
       runs: runs as unknown as JsonObject[],
     } as unknown as JsonObject;
@@ -302,6 +322,8 @@ export class RetentionService {
       }
     };
     add("project", usage.byProject, values.quotaProjectBytes); add("agent", usage.byAgent, values.quotaAgentBytes);
+    // Fullest first (card K06d, second review), so a list that is cut keeps the scopes whose new records are refused; ties by scope and ID.
+    quotas.sort((a, b) => b.percent - a.percent || (a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     // What each class holds against its quota (bounded: the count, the total and the three biggest), so the owner sees the room left and not only the scopes near the limit.
     const summary = (map: ReadonlyMap<string, number>, quota: number | null): QuotaClassUsage | undefined => {
       if (quota === null) return undefined;
@@ -926,11 +948,13 @@ export class RetentionService {
     const week = Math.floor(Date.parse(this.#runner.now()) / (7 * DAY));
     const { quotas } = await this.#quotaLevels(values).catch(() => ({ quotas: [] as { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] }));
     // The text is the same for a given ID (the figures are in the status), so a retried notice is the one already sent; a clash is not an error of the sweep.
-    const tell = async (n: Parameters<NonNullable<RetentionDeps["notify"]>>[0]): Promise<void> => { try { await notify(n); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; } };
+    // Card K06d, second review: a notice that is refused for any other reason (the owner's inbox is full, a text limit, storage trouble) is not sent this tick and is tried again on the next one
+    // (its command ID is per week); it never stops the rest of the pass, the automatic run and the removal of stored thinking, which read the same figures for themselves.
+    const tell = async (n: Parameters<NonNullable<RetentionDeps["notify"]>>[0]): Promise<void> => { try { await notify(n); } catch { /* not sent this tick; see above */ } };
     for (const q of quotas) {
-      await tell({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: `Storage quota: ${q.scope} ${q.id} has reached ${q.level === "full" ? "its quota; new records from it are refused until you raise the quota or delete something" : `${values.quotaWarnPercent}% of its quota`}. See retention.status.`, ref: q.scope === "project" ? { kind: "project", id: q.id } : { kind: "quota", id: `a-${createHash("sha256").update(q.id).digest("hex").slice(0, 20)}` } });
+      await tell({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: quotaNotice(q.scope, q.id, q.level === "full" ? "its quota; new records from it are refused until you raise the quota or delete something" : `${values.quotaWarnPercent}% of its quota`), ref: q.scope === "project" ? { kind: "project", id: q.id } : { kind: "quota", id: `a-${createHash("sha256").update(q.id).digest("hex").slice(0, 20)}` } });
     }
-    if (this.#deps.reserve?.released === true) await tell({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made.", ref: { kind: "installation", id: "main" } });
+    if (this.#deps.reserve?.released === true) await tell({ commandId: cmdId("rtw", "reserve", week), text: "The data disk is nearly full and the reserve for shutdown and recovery records is in use. Only those records are written until room is made. Ask in chat how much room is left.", ref: { kind: "installation", id: "main" } });
   }
 
   // ---- user-requested deletion ----------------------------------------------------------------------------------------------

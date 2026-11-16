@@ -2420,7 +2420,7 @@ Result: `{ item: { revision, settings, defaults, effective } }`.
 
 #### `retention.status`
 
-Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts, the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short) and the latest deletions.
+Owner only: the retention state: values in force, the data disk and the reserve for shutdown and recovery records, quota use with warnings, the backup counts and the newest ten backups kept (`backups.recent`: name, time, trusted), the stored model thinking rule with counts of kept and removed copies and cleaned conversation stores (`thinking`, counts only; `partial` when counting was cut short) and the latest deletions.
 
 Arguments:
 
