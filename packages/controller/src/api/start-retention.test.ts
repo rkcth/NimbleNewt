@@ -328,6 +328,8 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
     for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
     const notes = (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("Storage quota"));
     assert.equal(notes.length, 1, "told once");
+    // K06d: the notice points at something the owner can say in chat, not at an API operation name.
+    assert.match(JSON.stringify(notes[0]!.body), /Ask in chat how much room is left\./); assert.ok(JSON.stringify(notes[0]!.body).length > 0); assert.doesNotMatch(JSON.stringify(notes[0]!.body), /retention\.status/);
     // The per-agent quota is separate and also optional.
     assert.ok((await call(boot.token, "retention.settings.set", { quotaProjectBytes: null, quotaAgentBytes: 2000 }, "q4")).ok);
     assert.match(((await write("agentover", big).catch((e) => e)) as Error).message, /storage quota/);
