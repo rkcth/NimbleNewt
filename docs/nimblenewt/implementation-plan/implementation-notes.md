@@ -11217,7 +11217,7 @@ Card A09 is NOT flipped. This slice finishes the offline items the eighth slice'
 **NOT done.**
 1. macOS and Windows routes for network and mount (A03b, H12i's route): unchanged, out of scope here.
 2. The administrator does not get its own notice when a protected request is made (only the owner is told); it finds requests by listing. The owner is the one who is notified.
-3. An existing agent-site count is created the first time a site is added after this change (one scan); it is not tested against records written before the count existed beyond that first-use path.
+3. An existing agent-site count is created the first time a site is added or a last request ends after this change (one scan). (Review: now tested against records written before the count existed, in both race orders; see below.)
 4. A cap race is bounded by the retries; a controller that loses five times in a row reports the stale error to the applier, which retries as for any failed application.
 5. Windows and macOS CI was not run here; the new tests use no signals, no fixed pauses and no platform-specific paths.
 
@@ -11225,6 +11225,23 @@ ASSUMPTION: an administrator is an agent the owner names, never a new principal 
 ASSUMPTION: administrators decide only host policy and the shared base (the two protected kinds) and do not read other requests, the smallest scope that meets "owner or administrator" in the card.
 ASSUMPTION: administrators are named with agent IDs written as the owner wrote them (the chat checks each ID appears in the owner's own words), because a model must not be able to name one.
 ASSUMPTION: ending a request while another still stands behind the site keeps connections open (the site is allowed), rather than the earlier conservative close.
+
+### A09 ninth slice review (Claude agent, Opus 5.5, 2026-11-15)
+
+Reviewed `card-a09-fu` at 73234787 (base 93896fe0, which was still origin/main: no merge needed).
+
+**Found and fixed.**
+1. *An administrator could decide for its own team.* The fences stopped an administrator that created the requester or chose its supervisor, but not one that IS the requester's supervisor (or further up), nor one whose own supervisor is the requester, nor one that made an agent that made the requester. Such an administrator can direct the requester to ask and then approve. Now `#adminFor` refuses when the administrator is in the requester's line of management (supervisor and creator links, bounded to 6 steps and 32 agents), or the requester (or whoever made the request) is in the administrator's. The claim re-judges the same way, so a team formed after the approval sends the request back to pending. A peer under the same supervisor may still decide (ASSUMPTION below).
+2. *The count could drift one too high.* When no count record existed yet (sites from before it), `end` wrote none; a first `allow` scanning at the same moment counted the site that was ending and created the count one too high, permanently (the agent then meets the cap one site early). `end` now creates the missing count from its own scan, so the two commands collide on the create and one is retried; `end` got the same bounded retry as `allow`.
+3. *A model could name a prefix of the owner's agent ID as administrator.* `administrators` was matched as a substring of the owner's message (owner says `agt-ops12`, model writes `agt-ops1`). It is now a whole-word key like `hostId`. The proposal is still shown first.
+
+**Checked and found sound.** Naming is owner-only (`#owner` in `change`; agents refused; chat is propose-then-yes); IDs are normalised to `agent:` so the self check holds; task credentials, held, gate-unreadable and inactive administrators are refused; an administrator reads only protected requests; the claim write already carries a check on the settings revision, so a role taken back between the re-judgement and the claim fails the claim. The relay closes by agent and destination only for `via: "maintenance"` views, and the view names the agent, so another agent's connection is untouched. The backup scope tiers do not leave out site or count records.
+
+**Tests added.** `maintenance-admin.test.ts`: the team test (direct and indirect supervisor, the requester above the administrator, made by an agent it made, a peer allowed, a team formed after approval caught at the claim) x 4 backends. `agent-sites.test.ts`: the count stays true with records from before the count, in both orders (a first allow held at its write while an end commits; an end held at its write while a first allow commits) x 4 backends. `chat/release-words.test.ts`: administrators are whole words.
+
+**Breakages (each alone on the built file; restored).** End without a count makes none (4 failures); the requester's line ignored (4); the administrator's line ignored (4); administrators matched as a substring (1); an administrator's approval always stands at the claim (8); `end` not retried (4); the relay closes only by request ID (the test times out, reported cancelled).
+
+ASSUMPTION: "its team" means the administrator's line of management with the requester (above or below by supervisor or creator links), not peers under the same supervisor; excluding peers would leave an administrator unable to decide for most agents in a flat team, and the owner always decides.
 
 ## K01c: the configurable backup system (Claude agent, Sonnet 5.5, 2026-11-14)
 

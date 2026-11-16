@@ -197,6 +197,44 @@ for (const [index, backend] of backends.entries()) {
     });
   });
 
+  test(`an administrator does not decide for its own team: not for an agent it supervises directly or further up, not for one above it, not for one made by an agent it made; a peer it may decide for, and a team formed after the approval stops it at the claim (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const adm = await w.make("Admin");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
+      const ask = async (p: Principal) => (await request(w, p, "base", { change: `change ${cid("x")}` })).maintenanceId;
+      // The administrator is the requester's supervisor, or its supervisor's supervisor.
+      const direct = await w.make("Direct", w.owner, adm.id);
+      { const id = await ask(direct.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      const under = await w.make("Under", w.owner, direct.id);
+      { const id = await ask(under.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      // The requester is the administrator's supervisor.
+      const lead = await w.make("Lead");
+      await plant(w, adm.id, { supervisorId: lead.id });
+      { const id = await ask(lead.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      // The requester was made by an agent the administrator made.
+      const made = await w.make("Made"); await plant(w, made.id, { createdBy: adm.principal.id });
+      const grand = await w.make("Grand"); await plant(w, grand.id, { createdBy: made.principal.id });
+      { const id = await ask(grand.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      // A peer under the same supervisor is not its team in this sense: it decides.
+      const boss = await w.make("Boss");
+      await plant(w, adm.id, { supervisorId: boss.id });
+      const peer = await w.make("Peer", w.owner, boss.id);
+      const ok = await ask(peer.principal);
+      assert.equal((await decideBy(w, adm.principal, ok)).status, "applied");
+      // Approved while unrelated, then the administrator is made the requester's supervisor before the host takes it: back to waiting, never applied.
+      const later = await w.make("Later");
+      const one = await ask(later.principal);
+      w.applier.nextApply.push({ outcome: "unsupported", reason: "the host cannot take it now" });
+      assert.equal((await decideBy(w, adm.principal, one)).status, "approved");
+      const asked = w.applier.calls.filter((c) => c.id === one).length;
+      await plant(w, later.id, { supervisorId: adm.id });
+      for (let i = 0; i < 2; i++) { await w.m.tick(); await w.m.resume(); }
+      await w.m.idle();
+      assert.equal((await w.body(one)).status, "pending");
+      assert.equal(w.applier.calls.filter((c) => c.id === one).length, asked, "the applier was not asked again");
+    });
+  });
+
   test(`a review service that is down leaves every change pending while the approved environment keeps working; when it returns it decides each once, and a repeat of its decision applies nothing twice (${backend.name})`, async () => {
     // The in-process review service: it reads what waits as its supervisor principal and decides. Its outage is a stop, a crash between reading and deciding, a pause gate that holds it, and a gate that cannot be read.
     const held = new Set<string>(); let gateBroken = false;

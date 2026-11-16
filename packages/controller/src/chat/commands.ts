@@ -634,7 +634,7 @@ export function otherPlatform(words: string, key: "os" | "arch", value: string):
 export const platformChoices = (key: "os" | "arch"): readonly string[] => Object.keys(PLATFORM_WORDS[key]);
 
 /** Keys whose value is a machine or record name rather than a sentence: the owner must have said it as a whole word, not merely as the start of a longer one. Release IDs (which `foreignValue`'s `strict` set makes checked) are matched the same way. */
-export const WHOLE_WORD_KEYS: ReadonlySet<string> = new Set(["hostId"]);
+export const WHOLE_WORD_KEYS: ReadonlySet<string> = new Set(["hostId", "administrators"]);
 
 /** The first text value of a command's arguments that is not the owner's own words (and not a record reference or fixed choice), or undefined. */
 /** The owner's meeting controls that act on one motion, found by the owner's words (card M02h). */

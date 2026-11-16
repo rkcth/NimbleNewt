@@ -5,6 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { MAINTENANCE_PRINCIPAL } from "../environments/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { AGENT_SITE_LIMITS, AgentSiteAllowances, NetworkGrantService, NetworkRefused, NetworkRelay, type TunnelEvents } from "./index.js";
 
 // Card A09, network application: the sites an agent's environment holds through approved maintenance requests are read by the relay and the web tool like a grant, at every connection, with the request ID as the grant.
@@ -33,7 +34,8 @@ for (const backend of backends) {
   interface Ctx {
     sites: AgentSiteAllowances; grants: NetworkGrantService; owner: Principal; denied: Set<string>; deniedThrows: { on: boolean };
     ctx: { taskId: string; projectId: string; attemptId: string; agentId?: string }; end(): Promise<void>;
-    relay(extra?: Record<string, unknown>): NetworkRelay; /** Another controller on the same storage, with its own view of the owner's rule. */ second(denied?: (h: string, p: number) => Promise<boolean>): AgentSiteAllowances; dials: Array<{ address: string; port: number }>;
+    relay(extra?: Record<string, unknown>): NetworkRelay; /** Another controller on the same storage, with its own view of the owner's rule. */ second(denied?: (h: string, p: number) => Promise<boolean>): AgentSiteAllowances;
+    /** Another controller whose storage writes go through `wrap` (to hold a command between building and writing), and the storage itself. */ on(wrap: (s: ControllerStorage) => ControllerStorage): AgentSiteAllowances; storage: ControllerStorage; dials: Array<{ address: string; port: number }>;
     connect(opener: ReturnType<NetworkRelay["forAttempt"]>, host: string): Promise<{ tunnel: Awaited<ReturnType<ReturnType<NetworkRelay["forAttempt"]>["open"]>>; got: Buffer[]; closed: Promise<string> }>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
@@ -62,7 +64,8 @@ for (const backend of backends) {
         };
         const end = async (): Promise<void> => { const t = await projects.getTask(taskId); await projects.transitionTask({ commandId: cid("end"), actor: "owner:rob", taskId, expectedRevision: t!.revision, to: "cancelled" }); };
         const second: Ctx["second"] = (d) => AgentSiteAllowances.withEpoch(world.storage, projects.epoch, MAINTENANCE_PRINCIPAL, d === undefined ? {} : { denied: d });
-        await body({ sites, grants, owner, denied, deniedThrows, second, ctx: { taskId, projectId, attemptId: "att-1", agentId: ANN }, end, relay, dials, connect });
+        const on: Ctx["on"] = (wrap) => AgentSiteAllowances.withEpoch(wrap(world.storage), projects.epoch, MAINTENANCE_PRINCIPAL, {});
+        await body({ sites, grants, owner, denied, deniedThrows, second, on, storage: world.storage, ctx: { taskId, projectId, attemptId: "att-1", agentId: ANN }, end, relay, dials, connect });
       } finally { for (const r of relays) r.close(); await server.close(); await world.close(); }
     });
 
@@ -268,5 +271,53 @@ for (const backend of backends) {
     await c.sites.allow(REQ(905), ANN, "taken.example.com", 443);
     await assert.rejects(() => c.sites.allow(REQ(906), ANN, host(0), 443), /at most 200/, "an ended site allowed again counts against the cap");
     assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent);
+  });
+
+  suite("the count of an agent's sites stays true when sites stood before the count existed and a first new site races with a site that ends", async (c) => {
+    const COUNT = "net-agent-site-count";
+    const countOf = async (): Promise<number | undefined> => {
+      const all = await c.storage.listAggregates(COUNT, { limit: 100 });
+      return (all.find((a) => (a.body as { agentId?: string }).agentId === ANN)?.body as { count?: number } | undefined)?.count;
+    };
+    for (let i = 0; i < 3; i++) await c.sites.allow(REQ(700 + i), ANN, `old${i}.example.com`, 443);
+    assert.equal(await countOf(), 3);
+    // Records written before the count existed: the count record is taken away.
+    const rec = (await c.storage.listAggregates(COUNT, { limit: 100 })).find((a) => (a.body as { agentId?: string }).agentId === ANN)!;
+    await c.storage.applyOperation({ operationId: cid("legacy"), epoch: await c.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-11-15T10:00:00.000Z", changes: [{ type: "delete", ref: { kind: COUNT, id: rec.id }, expectedRevision: rec.revision }], audit: [{ type: "test.legacy", subject: { kind: COUNT, id: rec.id }, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    assert.equal(await countOf(), undefined);
+    // Controller A adds a new site: it scans (three stand), builds, and is held just before it writes. Meanwhile one old site ends on this controller.
+    let reached!: () => void; const atWrite = new Promise<void>((r) => { reached = r; });
+    let release!: () => void; const go = new Promise<void>((r) => { release = r; });
+    let held = false;
+    const a = c.on((st) => new Proxy(st, { get(t, p) {
+      if (p === "applyOperation") return async (input: unknown) => { if (!held) { held = true; reached(); await go; } return (t.applyOperation as (i: unknown) => Promise<unknown>).call(t, input); };
+      const v = Reflect.get(t, p) as unknown; return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+    } }));
+    const adding = a.allow(REQ(710), ANN, "new.example.com", 443);
+    await atWrite;
+    assert.deepEqual(await c.sites.end(REQ(700), ANN, "old0.example.com", 443), { stillAllowed: false });
+    release();
+    await adding;
+    const real = (await c.sites.list(c.owner, ANN)).length;
+    assert.equal(real, 3, "old1, old2 and the new one stand");
+    assert.equal(await countOf(), real, "the count is what stands, not one more");
+    // The other order: with no count again, an end on controller B is held at its write while a first new site is added here; the end is tried again and both count.
+    const rec2 = (await c.storage.listAggregates(COUNT, { limit: 100 })).find((x) => (x.body as { agentId?: string }).agentId === ANN)!;
+    await c.storage.applyOperation({ operationId: cid("legacy"), epoch: await c.storage.currentEpoch(), actor: "owner:test", correlationId: cid("co"), at: "2026-11-15T10:00:00.000Z", changes: [{ type: "delete", ref: { kind: COUNT, id: rec2.id }, expectedRevision: rec2.revision }], audit: [{ type: "test.legacy", subject: { kind: COUNT, id: rec2.id }, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    let reached2!: () => void; const atWrite2 = new Promise<void>((r) => { reached2 = r; });
+    let release2!: () => void; const go2 = new Promise<void>((r) => { release2 = r; });
+    let held2 = false;
+    const b = c.on((st) => new Proxy(st, { get(t, p) {
+      if (p === "applyOperation") return async (input: unknown) => { if (!held2) { held2 = true; reached2(); await go2; } return (t.applyOperation as (i: unknown) => Promise<unknown>).call(t, input); };
+      const v = Reflect.get(t, p) as unknown; return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+    } }));
+    const ending = b.end(REQ(701), ANN, "old1.example.com", 443);
+    await atWrite2;
+    await c.sites.allow(REQ(711), ANN, "new2.example.com", 443);
+    release2();
+    assert.deepEqual(await ending, { stillAllowed: false });
+    const real2 = (await c.sites.list(c.owner, ANN)).length;
+    assert.equal(real2, 3, "old2, new and new2 stand");
+    assert.equal(await countOf(), real2);
   });
 }

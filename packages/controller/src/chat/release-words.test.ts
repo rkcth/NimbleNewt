@@ -93,3 +93,10 @@ test("the platforms the owner's words name, so a message naming two of a kind ca
   // The order the choices are listed in is stable whatever order the owner wrote them in.
   assert.deepEqual(platformsNamed("windows, not linux", "os"), ["win32"], "the denial leaves one");
 });
+
+test("an administrator the chat names for the owner is an agent ID the owner said as a whole word, never one a longer ID only starts with (card A09)", () => {
+  const own = "make agt-ops12 an administrator for host policy";
+  assert.equal(foreignValue({ administrators: ["agt-ops12"] }, own), undefined, "the agent the owner named");
+  assert.equal(foreignValue({ administrators: ["agt-ops1"] }, own), "administrators[0]", "agt-ops12 does not name agt-ops1");
+  assert.equal(foreignValue({ administrators: ["agt-ops12", "agt-eve"] }, own), "administrators[1]", "an agent the owner never named is foreign");
+});

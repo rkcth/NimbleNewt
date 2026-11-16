@@ -414,7 +414,7 @@ export class MaintenanceService {
   }
   /**
    * Whether `by` may decide this protected request as an administrator: the owner named it (`administrators`), it is an active agent no pause, suspend or stop gate holds (fail closed), it is not a task credential, it is not the requester,
-   * and it is not the requester's own hand (it did not create the requester or choose its supervisor, and nobody the requester controls made it). The supervisor role plays no part.
+   * it is not the requester's own hand (it did not create the requester or choose its supervisor, and nobody the requester controls made it), and it is not in the requester's line of management either way (its team). The supervisor role plays no part.
    */
   async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<boolean> {
     if (b.class !== "protected" || by.kind !== "agent" || by.taskScope !== undefined || !by.id.startsWith("agent:") || !eff.administrators.includes(by.id)) return false;
@@ -423,7 +423,31 @@ export class MaintenanceService {
     if (this.#options.held !== undefined) { let held = true; try { held = await this.#options.held(by.id.slice("agent:".length)); } catch { held = true; } if (held) return false; }
     const target = await this.#agent(b.agentId);
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
+    // Not its own team either: an administrator above the requester (its supervisor, or further up by supervisor or creator) would approve what it can direct the requester to ask for, and one below the requester is directed by it.
+    const requesters = [b.agentId, ...(b.requestedBy.startsWith("agent:") && b.requestedBy !== b.agentId ? [b.requestedBy] : [])];
+    for (const r of requesters) if ((await this.#upline(r)).has(by.id)) return false;
+    const mine = await this.#upline(by.id);
+    if (requesters.some((r) => mine.has(r))) return false;
     return !(await this.#madeByRequesterSide(by.id, b, target));
+  }
+  /**
+   * The agents above `agentId` in its line of management: its supervisor and whoever created it, and theirs, bounded (at most 6 steps and 32 agents). An unreadable step ends that branch.
+   */
+  async #upline(agentId: string): Promise<Set<string>> {
+    const seen = new Set<string>();
+    let frontier = [agentId];
+    for (let hops = 0; hops < 6 && frontier.length > 0 && seen.size < 32; hops++) {
+      const next: string[] = [];
+      for (const at of frontier) {
+        const a = await this.#agent(at);
+        for (const up of [a?.supervisorId === undefined ? undefined : `agent:${a.supervisorId}`, a?.createdBy]) {
+          if (up === undefined || !up.startsWith("agent:") || up === agentId || seen.has(up)) continue;
+          seen.add(up); next.push(up);
+        }
+      }
+      frontier = next;
+    }
+    return seen;
   }
   #owner(by: Principal, what: string): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not ${what}`); }
 

@@ -133,23 +133,11 @@ export class AgentSiteAllowances {
     const before = await this.#runner.get(KIND, id);
     const standing = (before?.body as unknown as AgentSiteBody | undefined)?.requests.some((r) => r.id === requestId) === true;
     // As for `allow`: the revision in the command ID makes a second end of the same request (after it was allowed again) a new command, so it is never answered from the first end while the site stays allowed.
-    if (standing) await this.#runner.command("network.agent-site.end", { commandId: `nas-end:${requestId}:${before?.revision ?? 0}`, actor: this.#service.id }, async () => ({
-      payload: { requestId, agentId, host: d.host, port: d.port },
-      build: async () => {
-        const found = await this.#runner.get(KIND, id);
-        const prior = found?.body as unknown as AgentSiteBody | undefined;
-        if (found === undefined || prior === undefined) throw new DomainError("not_found", "no such site");
-        if (!prior.requests.some((r) => r.id === requestId)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { agentId, host: d.host, port: d.port, unchanged: true } };
-        const body: AgentSiteBody = { ...prior, requests: prior.requests.filter((r) => r.id !== requestId), updatedAt: now };
-        const counter: Change[] = [];
-        if (body.requests.length === 0) {
-          const have = await this.#runner.get(COUNT_KIND, countId(agentId));
-          // No record yet (sites that stood before the count existed): none is made here; the next new site counts them and creates it.
-          if (have !== undefined) counter.push({ type: "update", ref: { kind: COUNT_KIND, id: have.id }, expectedRevision: have.revision, body: { agentId, count: Math.max(0, (have.body as unknown as { count: number }).count - 1) } });
-        }
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }, ...counter], detail: { agentId, host: d.host, port: d.port, requestId, ended: true } };
-      },
-    }));
+    // As for `allow`, another controller writing this agent's count at the same moment makes this command stale; it is tried again a few times against what that one wrote.
+    if (standing) for (let attempt = 0; ; attempt++) {
+      try { await this.#endOnce(requestId, agentId, d, id, ref, now, before?.revision ?? 0); break; }
+      catch (e) { if (attempt < 4 && e instanceof DomainError && (e.code === "stale_revision" || e.code === "command_conflict")) continue; throw e; }
+    }
     const after = await this.#runner.get(KIND, id);
     const b = after?.body as unknown as AgentSiteBody | undefined;
     const stillAllowed = (b?.requests.length ?? 0) > 0;
@@ -160,6 +148,29 @@ export class AgentSiteAllowances {
       for (const l of [...this.#listeners]) { try { l(view); } catch { /* a listener never changes the record */ } }
     }
     return { stillAllowed };
+  }
+
+  async #endOnce(requestId: string, agentId: string, d: { host: string; port: number }, id: string, ref: AggregateRef, now: string, seen: number): Promise<void> {
+    await this.#runner.command("network.agent-site.end", { commandId: `nas-end:${requestId}:${seen}`, actor: this.#service.id }, async () => ({
+      payload: { requestId, agentId, host: d.host, port: d.port },
+      build: async () => {
+        const found = await this.#runner.get(KIND, id);
+        const prior = found?.body as unknown as AgentSiteBody | undefined;
+        if (found === undefined || prior === undefined) throw new DomainError("not_found", "no such site");
+        if (!prior.requests.some((r) => r.id === requestId)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { agentId, host: d.host, port: d.port, unchanged: true } };
+        const body: AgentSiteBody = { ...prior, requests: prior.requests.filter((r) => r.id !== requestId), updatedAt: now };
+        const counter: Change[] = [];
+        if (body.requests.length === 0) {
+          const cref: AggregateRef = { kind: COUNT_KIND, id: countId(agentId) };
+          const have = await this.#runner.get(COUNT_KIND, cref.id);
+          // No record yet (sites that stood before the count existed): it is made here from a scan (which still sees this site standing), so a first allow scanning at the same moment collides with it instead of
+          // counting this site after it ended and leaving the count one too high.
+          if (have !== undefined) counter.push({ type: "update", ref: cref, expectedRevision: have.revision, body: { agentId, count: Math.max(0, (have.body as unknown as { count: number }).count - 1) } });
+          else counter.push({ type: "create", ref: cref, body: { agentId, count: Math.max(0, (await this.#standingCount(agentId)) - 1) } });
+        }
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }, ...counter], detail: { agentId, host: d.host, port: d.port, requestId, ended: true } };
+      },
+    }));
   }
 
   /** The sites of one agent that stand now, counted by reading every site record (used once, to start the count of an agent that has none). */
