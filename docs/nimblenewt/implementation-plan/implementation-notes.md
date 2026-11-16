@@ -11714,3 +11714,5 @@ The browser now has an **Administration** tab with ten sections, one at a time: 
 **ASSUMPTION:** the profile the page offers is derived (recommended for testing and development) or strict; autonomous is chosen only in chat.
 **ASSUMPTION:** the secret length bound of 8 KiB and the reserved-name list are the launcher's own choices, not configurable from the page.
 **ASSUMPTION:** a provider added from the page is shown first like any provider addition, and carries a secret by name only.
+
+**U08c mutation checks** (each applied, a test failed, then restored): the reserved secret-name refusal removed (web test fails); the owner-only check of the admin reads removed (4 `admin.test` failures); the key-looking-sentence refusal removed (web test fails); the secret field not emptied before the request (views test fails); the Apply of `pedit-` IDs from the page removed (4 `admin-views` failures).
