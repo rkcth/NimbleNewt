@@ -1,3 +1,4 @@
+import { AssertionError } from "node:assert";
 import { AgentService } from "../agents/index.js";
 import { DecisionService } from "../decisions/index.js";
 import { ProjectService } from "../domain/service.js";
@@ -43,11 +44,30 @@ export class Script {
   readonly gates: Map<string, Promise<void>> = new Map();
   inflight = 0;
   maxInflight = 0;
+  readonly #waiters: { match: (r: TurnRequest) => boolean; resolve: (r: TurnRequest) => void }[] = [];
   on(rule: (r: TurnRequest) => TurnReply | undefined | Promise<TurnReply | undefined>): void { this.rules.unshift(rule); }
   reset(): void { this.rules.length = 0; this.calls.length = 0; this.gates.clear(); }
   of(kind: TurnRequest["kind"]): TurnRequest[] { return this.calls.filter((c) => c.kind === kind); }
+  /**
+   * Resolves when a call that `match`es has been made (at once if one already was). A test waits on that event itself, never on a fixed count of event-loop turns: storage on a worker thread or over a socket needs
+   * many turns per step, more on a slow machine (Windows CI ran past 20,000). `running` is the drive or advance the test started: when it settles first without such a call, the wait fails at once instead of hanging.
+   */
+  until(what: string, match: (r: TurnRequest) => boolean, running?: Promise<unknown>): Promise<TurnRequest> {
+    const seen = this.calls.find(match);
+    if (seen !== undefined) return Promise.resolve(seen);
+    return new Promise<TurnRequest>((resolve, reject) => {
+      const waiter = { match, resolve };
+      this.#waiters.push(waiter);
+      const gone = (): boolean => { const i = this.#waiters.indexOf(waiter); if (i < 0) return false; this.#waiters.splice(i, 1); return true; };
+      running?.then(
+        () => { if (gone()) reject(new AssertionError({ message: `never became true: ${what} (the run ended without it)` })); },
+        (error: unknown) => { if (gone()) reject(error); },
+      );
+    });
+  }
   async turn(req: TurnRequest): Promise<TurnReply> {
     this.calls.push(req);
+    for (const w of [...this.#waiters]) if (w.match(req)) { this.#waiters.splice(this.#waiters.indexOf(w), 1); w.resolve(req); }
     this.inflight += 1; this.maxInflight = Math.max(this.maxInflight, this.inflight);
     try {
       for (const rule of this.rules) { const v = await rule(req); if (v !== undefined) return v; }
