@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
-import { CoverageGapService } from "../projects/index.js";
+import { CoverageGapService, ResponsibilityChecks } from "../projects/index.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -71,5 +71,50 @@ test("through the running controller: a provider outage is listed only for a res
     assert.match(local1[0]!.summary, /was suspended with its team\./);
     assert.equal(local1[0]!.by, "service:stop-notes");
     assert.deepEqual([(await noteOf(rBroad)).length, (await noteOf(rUnknown)).length], [0, 0], "agents outside the team are not noted");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("through the running controller: stopping a task that carries a responsibility's check notes that responsibility, and a note that cannot be written does not cost the task its lifecycle entry (T3 second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-t3p04-task-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const owner = await c.services.principals.authenticate(boot.token);
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    const project = (await call("project.create", { name: "Ops" }, "p1")).result.id as string;
+    const agent = (await call("agent.create", { friendlyName: "Watcher" }, "a1")).result.id as string;
+    const mk = async (title: string, id: string) => (await call("responsibility.create", { projectId: project, title, objective: "Up", everyMinutes: 60, ownerId: `agent:${agent}`, escalation: { to: "owner" } }, id)).result.id as string;
+    const duty = await mk("Web up", "r1"); const duty2 = await mk("Db up", "r2");
+    const checks = ResponsibilityChecks.withEpoch(c.storage, c.epoch, c.services.responsibilities);
+    const slot = new Date().toISOString();
+    for (const [id, seq] of [[duty, 1], [duty2, 2]] as const) assert.ok(await checks.recordEvent(owner, project, id, { kind: "event", source: "files", events: 1, firstSeq: seq, lastSeq: seq, kinds: ["changed"] }, slot));
+    const owed = (await checks.pending(owner, project))!;
+    const ofDuty = owed.find((x) => x.responsibilityId === duty)!; const ofDuty2 = owed.find((x) => x.responsibilityId === duty2)!;
+    assert.ok(ofDuty !== undefined && ofDuty2 !== undefined, "checks are owed");
+    const taskA = (await call("task.create", { projectId: project, title: "check A" }, "t1")).result.id as string;
+    const taskB = (await call("task.create", { projectId: project, title: "check B" }, "t2")).result.id as string;
+    await checks.noteRun(owner, ofDuty.id, { how: "task", at: slot, taskId: taskA, attempt: 1, summary: "task opened" });
+    await checks.noteRun(owner, ofDuty2.id, { how: "task", at: slot, taskId: taskB, attempt: 1, summary: "task opened" });
+    const notes = async (of = duty) => ((await call("responsibility.history", { responsibilityId: of, limit: 20 })).result.items as { kind: string; summary: string; by?: string }[]).filter((h) => h.kind === "note");
+    const lifecycle = async (task: string) => ((await call("activity.steps", { taskId: task })).result.steps as { kind: string; summary: string }[]).filter((x) => x.kind === "lifecycle");
+
+    const a = await call("lifecycle.stop", { scope: { kind: "task", id: taskA }, mode: "stop", reason: "night" }, "s1");
+    assert.deepEqual([a.result.phase, a.result.outcome.state], ["done", "stopped"]);
+    const first = await notes();
+    assert.equal(first.length, 1, JSON.stringify(first));
+    assert.match(first[0]!.summary, /^A task that took up one of this responsibility's checks was stopped\..*stays owed until a check entry is recorded/);
+    assert.equal(first[0]!.by, "service:stop-notes");
+    assert.equal((await lifecycle(taskA)).length, 1);
+    assert.equal((await notes(duty2)).length, 0, "the other task's responsibility is not noted");
+
+    // The note cannot be written this time: the stop still ends, and the task still gets its lifecycle entry.
+    const record = c.services.responsibilities.record.bind(c.services.responsibilities);
+    c.services.responsibilities.record = (async () => { throw new Error("the history could not be written"); }) as typeof record;
+    try {
+      const b = await call("lifecycle.stop", { scope: { kind: "task", id: taskB }, mode: "suspend", reason: "night" }, "s2");
+      assert.deepEqual([b.result.phase, b.result.outcome.state], ["done", "suspended"]);
+    } finally { c.services.responsibilities.record = record; }
+    assert.equal((await notes(duty2)).length, 0, "no note was written");
+    assert.ok((await lifecycle(taskB)).some((x) => /Suspension suspended/.test(x.summary)), "the lifecycle entry is written although the note failed");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
