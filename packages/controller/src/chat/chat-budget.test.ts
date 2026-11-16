@@ -210,7 +210,7 @@ for (const backend of backends) {
     assert.equal(tenfold!.status, "proposed");
     assert.match(JSON.stringify(tenfold), /at most 20,000,000 tokens a UTC day/, "the shown number is the one written, not the one the owner said");
     assert.equal(await cap(), undefined, "nothing is set before the yes");
-    const [tenDone] = await submit("Yes.", [{ kind: "apply_proposal", proposalId: tenfold!.proposalId, evidence: "Yes", basis: "owner" }]);
+    const [tenDone] = await submit("Yes, go ahead with that.", [{ kind: "apply_proposal", proposalId: tenfold!.proposalId, evidence: "go ahead with that", basis: "owner" }]);
     assert.equal(tenDone!.status, "applied", JSON.stringify(tenDone));
     assert.equal(await cap(), 20_000_000, "the yes applied exactly the number shown");
     const [offAgain] = await submit("Remove the cap again.", [say("chat.budget.set", { maxTokensPerDay: null }, "Remove the cap again.")]);
@@ -221,8 +221,11 @@ for (const backend of backends) {
     const t4 = "Cap yourself at a very large number of tokens a day.";
     const [huge] = await submit(t4, [say("chat.budget.set", { maxTokensPerDay: 5_000_000_000 }, t4)]);
     assert.equal(huge!.status, "proposed");
-    const [refused] = await submit("Yes.", [{ kind: "apply_proposal", proposalId: huge!.proposalId, evidence: "yes", basis: "owner" }]);
+    // The yes is a phrase of the owner's own message, so the refusal below is the range check's, not the chat's refusal of an unsupported yes.
+    const [refused] = await submit("Yes, go ahead with the large one.", [{ kind: "apply_proposal", proposalId: huge!.proposalId, evidence: "go ahead with the large one", basis: "owner" }]);
     assert.notEqual(refused!.status, "applied", JSON.stringify(refused));
+    assert.notEqual((refused as { code?: string }).code, "untrusted_authority", JSON.stringify(refused));
+    assert.match(JSON.stringify(refused), /maxTokensPerDay|invalid_command|1000000000/, JSON.stringify(refused));
     assert.equal(await cap(), undefined, "an out-of-range cap was not set");
   });
 
