@@ -38,7 +38,7 @@ test("the owner's chat view of retention, from a running controller: the disk an
     const told = (await ask())!.lines;
     assert.ok(told.every((l) => l.cites.length > 0), "every line cites a record");
     const text0 = told.map((l) => l.text).join("\n");
-    assert.match(text0, /^Retention values in force/);
+    assert.match(text0, /^The data disk has /m); assert.match(told[told.length - 1]!.text, /^The installation's/, "the figures first, the values last (card K06d review: a chat answer shows its first 30 lines)");
     assert.match(text0, /The data disk has .* free of /);
     assert.match(text0, /1\.0 MiB is set aside as the reserve/);
     assert.match(text0, /No storage quota is set for projects or agents\./);

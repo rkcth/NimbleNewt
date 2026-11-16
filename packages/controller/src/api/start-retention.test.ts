@@ -6,6 +6,8 @@ import { test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { unguarded } from "../retention/index.js";
+import { quotaNotice } from "../retention/service.js";
+import { NOTIFICATION_LIMITS } from "../notifications/notifications.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -368,6 +370,32 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
     for (let i = 0; i < 2; i++) await c.dispatch!.dispatcher.tick();
     assert.equal(existsSync(file), true, "the reserve was set aside again");
     await write("resumed", "ok");
+  } finally { await c.close(); clean(d); }
+});
+
+test("K06d: a quota notice for the longest agent name still fits the notice detail limit and reaches the owner; the ID is shortened, not the warning lost, and the retention pass goes on", async () => {
+  // The text alone: every scope and level fits, a short ID is shown whole, a long one is shortened with "...".
+  const full = "its quota; new records from it are refused until you raise the quota or delete something";
+  for (const id of ["proj-abcdefghijklmnopqrst", `agent:${"a".repeat(40)}`, "x".repeat(500), ""]) for (const reached of [full, "80% of its quota"]) for (const scope of ["project", "agent"]) {
+    const t = quotaNotice(scope, id, reached);
+    assert.ok(t.length <= NOTIFICATION_LIMITS.detail, `${t.length}: ${t}`);
+    assert.match(t, /^Storage quota: .* has reached .*\. Ask in chat how much room is left\.$/);
+    if (t.includes(id)) assert.equal(t, `Storage quota: ${scope} ${id} has reached ${reached}. Ask in chat how much room is left.`); else assert.match(t, /\.\.\. has reached/);
+  }
+  assert.ok(quotaNotice("agent", `agent:${"a".repeat(40)}`, full).includes("..."), "the longest agent ID does not fit whole beside the full-quota text");
+  // Through the real controller: an agent with the longest name allowed goes over its quota; the notice still arrives, once.
+  const d = mkdtempSync(join(tmpdir(), "nn-qlong-"));
+  const { c, boot, call, project, agent } = await world(d, { retention: { defaults: { reserveBytes: 0 } } });
+  try {
+    const name = `a${"b".repeat(39)}`;
+    const w = await agent(name);
+    await c.services.desks.write(w.p, { commandId: "big1", projectId: project, kind: "note", title: "big1", body: "x".repeat(3000), visibility: "shared" });
+    assert.ok((await call(boot.token, "retention.settings.set", { quotaAgentBytes: 2000 }, "ql1")).ok);
+    for (let i = 0; i < 3; i++) await c.dispatch!.dispatcher.tick();
+    const notes = (await c.storage.listAggregates("notification-item", { limit: 100 })).filter((n) => JSON.stringify(n.body).includes("Storage quota"));
+    assert.equal(notes.length, 1, "the full-quota notice for the long agent name is sent, once");
+    const body = JSON.stringify(notes[0]!.body);
+    assert.match(body, /Storage quota: agent agent:abbb[b]*\.\.\. has reached its quota/); assert.match(body, /Ask in chat how much room is left\./);
   } finally { await c.close(); clean(d); }
 });
 

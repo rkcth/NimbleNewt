@@ -278,7 +278,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
-  retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups and the latest one, whether and when stored model thinking is removed (counts only), and the latest deletions and retention runs (counts and record IDs only). Use it for how much room is left, which quotas are near their limit, which backups are kept, whether the model's stored thinking is being removed and what retention deleted lately" },
+  retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups kept (the newest ten by name) and the latest one, whether and when stored model thinking is removed (counts only), and the latest deletions and retention runs (counts and record IDs only). Use it for how much room is left, which quotas are near their limit, which backups are kept, whether the model's stored thinking is being removed and what retention deleted lately" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
   access: { keys: ["agent|agentName"], about: "what approved environment requests give one agent right now: the network sites its attempts may reach through the relay and the host resources mounted read-only for its next attempts, each with the request behind it; a part this controller does not enforce is said so (owner only)" },
@@ -418,7 +418,7 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: s
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
-const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5 } as const;
+const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330 } as const;
 
 const obj = (v: unknown): Record<string, unknown> | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
@@ -441,23 +441,9 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
       lines.push(line(wanted === 0 ? "No room is set aside for shutdown and recovery records (reserveBytes is 0)." : reserve["inUse"] === true ? `The ${bytesWord(wanted)} reserve for shutdown and recovery records is in use: only those records are written until room is made.` : reserve["short"] === true ? `The disk has too little room to set the ${bytesWord(wanted)} reserve aside.` : `${bytesWord(wanted)} is set aside as the reserve for shutdown and recovery records${free === undefined ? "" : free >= wanted ? `; the free room is above it` : `; the free room is below it`}.`, settings));
     }
   }
-  const think = obj(st["thinking"]);
-  if (think !== undefined) {
-    const days = count(think["days"]);
-    const kept = count(think["copiesKept"]) ?? 0; const removed = count(think["copiesRemoved"]) ?? 0; const cleaned = count(think["storesCleaned"]) ?? 0; const without = count(think["storesWithout"]) ?? 0; const blocks = count(think["blocksRemoved"]) ?? 0;
-    lines.push(line(`Stored model thinking is removed ${days === undefined ? "some" : days} days after its task is done${think["auto"] === true ? ", by itself" : ", only when you run retention (the automatic removal is off)"}; the chat keeps none: it holds the words said, never the thinking. Backups are not changed: thinking inside a backup stays until that backup is deleted, and restoring one brings its thinking back until the rule removes it again.`, settings));
-    lines.push(line(`${kept} task cop${kept === 1 ? "y" : "ies"} of thinking ${kept === 1 ? "is" : "are"} kept and ${removed} ${removed === 1 ? "was" : "were"} removed; ${think["storesReached"] === true ? `the model's own conversation stores were cleaned for ${cleaned} attempt(s) (${blocks} block(s) removed) and ${without} had none` : "the model's own conversation stores are not reached on this installation"}${think["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings));
-  }
   const limits = obj(st["quotaLimits"]); const usage = obj(st["quotaUsage"]);
   const pq = limits === undefined ? undefined : count(limits["projectBytes"]); const aq = limits === undefined ? undefined : count(limits["agentBytes"]);
   if (limits !== undefined && pq === undefined && aq === undefined) lines.push(line("No storage quota is set for projects or agents.", settings));
-  for (const [scope, label] of [["project", "Project"], ["agent", "Agent"]] as const) {
-    const u = obj(usage?.[scope]); if (u === undefined) continue;
-    const quota = count(u["quota"]); const scopes = count(u["scopes"]); const totalBytes = count(u["totalBytes"]);
-    if (quota === undefined || scopes === undefined || totalBytes === undefined) continue;
-    const top = Array.isArray(u["top"]) ? (u["top"] as unknown[]).map(obj).filter((t): t is Record<string, unknown> => t !== undefined && typeof t["id"] === "string" && count(t["used"]) !== undefined).slice(0, 3) : [];
-    lines.push(line(`${label} quota: ${bytesWord(quota)} each (warning at ${count(limits?.["warnPercent"]) ?? "?"}%); ${scopes} ${scope}${scopes === 1 ? " holds" : "s hold"} ${bytesWord(totalBytes)} in all${top.length === 0 ? "" : `; the most: ${top.map((t) => `${shown(String(t["id"]), 60)} ${bytesWord(count(t["used"])!)}`).join(", ")}`}${st["quotaUsagePartial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings, ...top.map((t) => quotaRef(scope, String(t["id"])))));
-  }
   const near = Array.isArray(st["quotas"]) ? (st["quotas"] as unknown[]).map(obj).filter((q): q is Record<string, unknown> => q !== undefined && typeof q["id"] === "string" && (q["scope"] === "project" || q["scope"] === "agent")) : [];
   for (const q of near.slice(0, RETENTION_SHOWN.quotaScopes)) {
     const used = count(q["used"]); const quota = count(q["quota"]); const percent = count(q["percent"]);
@@ -465,6 +451,13 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
     lines.push(line(`${q["scope"] === "project" ? "Project" : "Agent"} ${shown(String(q["id"]), 80)} is at ${percent}% of its storage quota (${bytesWord(used)} of ${bytesWord(quota)})${q["level"] === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, quotaRef(String(q["scope"]), String(q["id"])), settings));
   }
   if (near.length > RETENTION_SHOWN.quotaScopes) lines.push(line(`${near.length - RETENTION_SHOWN.quotaScopes} more scope(s) are near their quota and not listed.`, settings));
+  for (const [scope, label] of [["project", "Project"], ["agent", "Agent"]] as const) {
+    const u = obj(usage?.[scope]); if (u === undefined) continue;
+    const quota = count(u["quota"]); const scopes = count(u["scopes"]); const totalBytes = count(u["totalBytes"]);
+    if (quota === undefined || scopes === undefined || totalBytes === undefined) continue;
+    const top = Array.isArray(u["top"]) ? (u["top"] as unknown[]).map(obj).filter((t): t is Record<string, unknown> => t !== undefined && typeof t["id"] === "string" && count(t["used"]) !== undefined).slice(0, 3) : [];
+    lines.push(line(`${label} quota: ${bytesWord(quota)} each (warning at ${count(limits?.["warnPercent"]) ?? "?"}%); ${scopes} ${scope}${scopes === 1 ? " holds" : "s hold"} ${bytesWord(totalBytes)} in all${top.length === 0 ? "" : `; the most: ${top.map((t) => `${shown(String(t["id"]), 60)} ${bytesWord(count(t["used"])!)}`).join(", ")}`}${st["quotaUsagePartial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings, ...top.map((t) => quotaRef(scope, String(t["id"])))));
+  }
   const backups = obj(st["backups"]);
   if (backups !== undefined) {
     if (backups["configured"] !== true) lines.push(line("No backups are set up on this installation.", settings));
@@ -473,6 +466,16 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
       lines.push(line(`${n} backup${n === 1 ? " is" : "s are"} kept${bad > 0 ? ` (${bad} cannot be trusted)` : ""}; the rules keep ${count(counts?.["daily"]) ?? "?"} daily and ${count(counts?.["weekly"]) ?? "?"} weekly.`, settings));
       if (latest !== undefined && typeof latest["name"] === "string" && typeof latest["at"] === "string") lines.push(line(`The latest backup is ${shown(latest["name"], 80)}, made ${shown(latest["at"], 40)}${latest["trusted"] === true ? "" : " (it cannot be trusted)"}.`, cite("backup", latest["name"])));
       else if (n === 0) lines.push(line("No backup has been made yet.", settings));
+      // Which backups are kept (card K06d): the others after the latest, newest first, by the name the owner gives to test-restore, restore or delete one; one bounded line, the rest counted.
+      const recent = Array.isArray(backups["recent"]) ? (backups["recent"] as unknown[]).map(obj).filter((b): b is Record<string, unknown> => b !== undefined && typeof b["name"] === "string" && typeof b["at"] === "string" && b["name"] !== latest?.["name"]).slice(0, RETENTION_SHOWN.backups) : [];
+      let listed = ""; const named: Record<string, unknown>[] = [];
+      for (const b of recent) {
+        const next = `${listed}${named.length === 0 ? "" : "; "}${shown(String(b["name"]), 80)}, made ${shown(String(b["at"]), 40)}${b["trusted"] === true ? "" : " (it cannot be trusted)"}`;
+        if (next.length > RETENTION_SHOWN.backupLine) break;
+        listed = next; named.push(b);
+      }
+      const shownCount = named.length + (latest !== undefined && typeof latest["name"] === "string" ? 1 : 0);
+      if (named.length > 0) lines.push(line(`Also kept, newest first: ${listed}${n > shownCount ? `; and ${n - shownCount} older` : ""}.`, ...named.map((b) => cite("backup", String(b["name"])))));
     }
   }
   const deletions = Array.isArray(st["deletions"]) ? (st["deletions"] as unknown[]).map(obj).filter((d): d is Record<string, unknown> => d !== undefined && typeof d["id"] === "string") : [];
@@ -486,6 +489,13 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
   const runs = Array.isArray(st["runs"]) ? (st["runs"] as unknown[]).map(obj).filter((r): r is Record<string, unknown> => r !== undefined && typeof r["id"] === "string") : [];
   if (runs.length === 0) lines.push(line("Retention has not run yet.", settings));
   for (const r of runs.slice(0, RETENTION_SHOWN.runs)) lines.push(line(`Retention run ${shown(String(r["id"]), 60)} (${r["auto"] === true ? "automatic" : "by you"}), ${shown(typeof r["at"] === "string" ? r["at"] : "?", 40)}: ${count(r["removed"]) ?? 0} record(s) removed, ${count(r["backupsDeleted"]) ?? 0} backup(s) deleted, ${count(r["incidentsArchived"]) ?? 0} incident(s) archived, ${count(r["incidentsPurged"]) ?? 0} archived incident(s) removed.`, cite("retention-run", String(r["id"]))));
+  const think = obj(st["thinking"]);
+  if (think !== undefined) {
+    const days = count(think["days"]);
+    const kept = count(think["copiesKept"]) ?? 0; const removed = count(think["copiesRemoved"]) ?? 0; const cleaned = count(think["storesCleaned"]) ?? 0; const without = count(think["storesWithout"]) ?? 0; const blocks = count(think["blocksRemoved"]) ?? 0;
+    lines.push(line(`Stored model thinking is removed ${days === undefined ? "some" : days} days after its task is done${think["auto"] === true ? ", by itself" : ", only when you run retention (the automatic removal is off)"}; the chat keeps none: it holds the words said, never the thinking. Backups are not changed: thinking inside a backup stays until that backup is deleted, and restoring one brings its thinking back until the rule removes it again.`, settings));
+    lines.push(line(`${kept} task cop${kept === 1 ? "y" : "ies"} of thinking ${kept === 1 ? "is" : "are"} kept and ${removed} ${removed === 1 ? "was" : "were"} removed; ${think["storesReached"] === true ? `the model's own conversation stores were cleaned for ${cleaned} attempt(s) (${blocks} block(s) removed) and ${without} had none` : "the model's own conversation stores are not reached on this installation"}${think["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings));
+  }
   return lines;
 }
 
@@ -942,7 +952,7 @@ export class StatusService {
 
   /** Whether one record or tool version is kept from deletion, and why: one line per reason, each citing what is kept. Owner only. */
   async retentionHoldLines(by: Principal, query: { recordKind: string; id?: string; name?: string; version?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
+    if (this.#deps.retention === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     if (typeof query.recordKind !== "string" || query.recordKind === "") invalid("recordKind", "needs the kind of record, or catalog-version for a tool version");
     // A tool version is named by its tool and version (nobody is shown the version record's ID); every other record by its ID.
     const byName = query.recordKind === "catalog-version" && query.id === undefined;
@@ -1387,7 +1397,7 @@ export class StatusService {
 
   /** The retention values in force and which of them the owner set. Owner only. */
   async retentionLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (this.#deps.retention === undefined || by.kind !== "owner") return undefined;
+    if (this.#deps.retention === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     let got;
     try { got = await this.#deps.retention.settings(by); } catch (error) {
       if (error instanceof DomainError && (error.code === "forbidden" || (error.code === "unavailable" && error.field !== "settings"))) return undefined;
@@ -1396,19 +1406,35 @@ export class StatusService {
       throw error;
     }
     const c = cite("retention-settings", "main", got.revision === 0 ? undefined : got.revision);
-    const word = (v: unknown): string => (v === null ? "none (off or unlimited)" : String(v));
-    const lines: Line[] = [
-      line(`Retention values in force (settings revision ${got.revision}); the ones marked "set" are yours, the others are the installation's:`, c),
-      ...Object.keys(got.effective).sort().map((k) => line(`${shown(k, 60)}: ${shown(word(got.effective[k]), 60)}${Object.prototype.hasOwnProperty.call(got.settings, k) ? " (set)" : ""}`, c)),
+    // Card K06d: a chat answer shows its first 30 lines, so the figures the owner asks about (room, quotas, backups, deletions) come first and the values follow packed a few to a line.
+    const word = (v: unknown): string => (v === null ? "none" : String(v));
+    const keys = Object.keys(got.effective).sort();
+    const pack = (label: string, names: readonly string[]): Line[] => {
+      const out: Line[] = []; let cur = "";
+      for (const k of names) {
+        const item = `${shown(k, 60)}: ${shown(word(got.effective[k]), 60)}`;
+        if (cur !== "" && cur.length + 2 + item.length > RETENTION_SHOWN.valueLine) { out.push(line(`${cur}.`, c)); cur = ""; }
+        cur = cur === "" ? `${out.length === 0 ? label : `${label} (continued)`}: ${item}` : `${cur}; ${item}`;
+      }
+      if (cur !== "") out.push(line(`${cur}.`, c));
+      return out;
+    };
+    const mine = keys.filter((k) => Object.prototype.hasOwnProperty.call(got.settings, k));
+    const values: Line[] = [
+      line(`Retention values in force (settings revision ${got.revision}); "none" means off or unlimited:`, c),
+      ...(mine.length === 0 ? [line("You have set none of them; all are the installation's.", c)] : pack("Set by you", mine)),
+      ...pack("The installation's", keys.filter((k) => !mine.includes(k))),
     ];
+    const lines: Line[] = [];
     if (this.#deps.retention.status !== undefined) {
       let st: Readonly<Record<string, unknown>> | undefined;
       try { st = await this.#deps.retention.status(by); } catch (error) {
         if (error instanceof DomainError && error.code === "forbidden") return undefined;
-        lines.push(line("The disk, quota, backup and deletion figures could not be read just now; the values above are from your settings.", c));
+        lines.push(line("The disk, quota, backup and deletion figures could not be read just now; the values below are from your settings.", c));
       }
       if (st !== undefined) lines.push(...retentionStatusLines(st, c));
     }
+    lines.push(...values);
     return { observedAt: this.#runner.now(), lines };
   }
 

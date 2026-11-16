@@ -1789,7 +1789,7 @@ for (const backend of backends) {
     assert.match(said((await status.ask(c.owner, { kind: "retention_hold", recordKind: "desk-record", id: "dsk-free" }))!.lines), /dsk-free is not held by anything retention knows of/);
     const values = (await status.ask(c.owner, { kind: "retention" }))!.lines;
     cited(values);
-    assert.deepEqual(values.map((l) => l.text), ['Retention values in force (settings revision 3); the ones marked "set" are yours, the others are the installation\'s:', "backupDaily: 7", "catalogVersionsKept: 2 (set)", "derivedDays: none (off or unlimited)"]);
+    assert.deepEqual(values.map((l) => l.text), ['Retention values in force (settings revision 3); "none" means off or unlimited:', "Set by you: catalogVersionsKept: 2.", "The installation's: backupDaily: 7; derivedDays: none."]);
     const reader = await c.agent("eve", [{ action: "task.read", project: "*" }]);
     for (const request of [{ kind: "retention_hold", recordKind: "catalog-version", name: "toolbox.check", version: "1.0.0" }, { kind: "retention" }] as const) {
       assert.equal(await status.ask(reader, request), undefined, "only the owner is told");
@@ -1825,7 +1825,9 @@ for (const backend of backends) {
     const lines = (await status.ask(c.owner, { kind: "retention" }))!.lines;
     cited(lines);
     const text = said(lines);
-    assert.deepEqual(lines.slice(0, 2).map((l) => l.text.slice(0, 20)), ["Retention values in ", "derivedDays: none (o"], "the values come first, as before");
+    // Card K06d review: a chat answer shows its first 30 lines, so the figures come first and the values last, packed.
+    assert.match(lines[0]!.text, /^The data disk has /, "the figures come first");
+    assert.deepEqual(lines.slice(-3).map((l) => l.text), ['Retention values in force (settings revision 3); "none" means off or unlimited:', "You have set none of them; all are the installation's.", "The installation's: derivedDays: none."], "the values come last");
     assert.match(text, /The data disk has 2\.33 GiB free of 9\.31 GiB \(25% free\)\./);
     assert.match(text, /1\.0 MiB is set aside as the reserve for shutdown and recovery records; the free room is above it\./);
     assert.match(text, /Project quota: 976\.6 KiB each \(warning at 80%\); 2 projects hold 1\.1 MiB in all; the most: proj-big 878\.9 KiB, proj-small 293\.0 KiB \(counting was cut short, so these figures are low\)\./);
