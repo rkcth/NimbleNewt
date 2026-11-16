@@ -149,6 +149,16 @@ export class ResponsibilityChecks {
     return may(by, "responsibility.read", body.projectId) ? view<CheckBody>(found) : undefined;
   }
 
+  /**
+   * The responsibilities whose checks were taken up by this task (a check task, or one that a check rides on), for the Suspend note when that task is stopped (card P04 follow-up T3). Controller only (the owner or the
+   * controller's own service); the scan fails closed above the scan limit like the other scans of check records.
+   */
+  async responsibilitiesOfTask(by: Principal, taskId: string): Promise<string[]> {
+    if (by.kind !== "owner" && by.kind !== "service") throw hidden(by, "list the checks of a task");
+    const found = await scanAll(this.#runner, KIND, 50_000, (a) => (a.body as unknown as CheckBody).run?.taskId === taskId);
+    return [...new Set(found.map((a) => (a.body as unknown as CheckBody).responsibilityId))].sort();
+  }
+
   /** The checks still owed in a project (their slot is after the responsibility's last check), oldest slot first. `undefined` for a project the caller may not read. */
   async pending(by: Principal, projectIdValue: string): Promise<View<CheckBody>[] | undefined> {
     const projectId = checkProjectId(projectIdValue);
