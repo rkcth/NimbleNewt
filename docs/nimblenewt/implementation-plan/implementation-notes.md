@@ -11853,3 +11853,23 @@ Card A09 is NOT flipped. Base 16ef7406, branch `task-t6-a09b`. This closes two i
 ASSUMPTION: "inbox notice" for an administrator means a `notice`-level item in the notification inbox that names the administrator and the request, as the supervisor notice does; there is no per-agent inbox to write to.
 ASSUMPTION: the claim fence covers every agent record the administrator check read (not only supervisors and creators), because a revision check on a record read is the simplest complete rule; an unrelated change to one of those records makes the claim fail once and the loop judge again (up to six rounds), which costs a repeat read and no harm.
 ASSUMPTION: administrators are judged for notices after the request is stored, not inside it, so a slow or failing judgement can never make the request itself fail or retry; the cost is that an administrator named or released between storing and notifying may be judged on the newer settings.
+
+## T1: three wrong statements corrected (docs only)
+
+**Done.** Each claim was checked against the code or the workflow files first.
+- `api/docs.ts` Scope bullet (and the generated `api-v1.md`): it no longer says an unreadable thing "reads exactly like" a missing one. It now says existence is never revealed and gives the real answers: projects and tasks answer `forbidden` for a real and a made-up ID alike (only the owner sees `not_found`); operations whose text says "not found" answer `not_found` for both; conversation writes answer `forbidden` for both (`security/access.ts` `requireAction`, `security/secured.ts` `#hide`, D02 review notes).
+- `environment/supported.ts` Node evidence: only 22.19.0 on Linux runs on every push (`ci.yml`); 22.19.0 and 24.21.0 run in `exhaustive.yml` and `qa.yml`. No test asserted the old text.
+- `compatibility-and-support.md`: the exhaustive run starts by hand or on a `v*` tag; the QA run is by hand only (`qa.yml` has `workflow_dispatch` only).
+
+**Not done / left.** `implementation-plan/g02-acceptance.md` line 11 still says the CI matrix ran Node 24.21.0 "on every push"; it is a dated historical record of an earlier CI layout, so it was left unedited. ASSUMPTION: historical records are not rewritten.
+
+### T1 review (Claude agent, Opus 5.5, clean context, 2026-11-15)
+
+Checked each claim against the code and the workflow files, and ran a probe on the built controller (owner, an agent with no grants, an agent with `project.read` and `task.read` on `*`; real and made-up IDs of the right shape).
+
+**Fixed.**
+- The Scope bullet said only the owner sees `not_found` for projects. An agent whose grant covers the project ID (for example a `*` grant) passes `requireAction`, and `project.get` then answers `not_found: no such project` for a made-up ID (probe). Tasks go through `#hide`, which gives `not_found` only to the owner (the `*` agent got `forbidden` "may not read that" for a made-up task). The bullet now says so, and `architecture.md` step 3, which repeated the same claim, likewise.
+- The bullet named "thread reads" and "conversation writes". Those are routes of the conversation listener (`conversation-and-mcp-protocol.md` already states them), not state API operations; `api-v1.md` documents the state API only, so they were removed. "Meetings" was dropped from the `not_found` examples: `meeting.settle` answers `forbidden` for a missing meeting even to the owner, and `meeting.occurrence`'s text does not say "not found". The examples are now `job.get`, `deliverable.get` and `agent.get`, whose texts do.
+- `ci.yml` runs on a push to `main` and on pull requests, not on every push: the Node evidence in `supported.ts` and `compatibility-and-support.md` now says so.
+
+**Verified as written.** `exhaustive.yml`: `workflow_dispatch` and `v*` tags, Node 22.19.0 and 24.21.0 on ubuntu, macOS and Windows. `qa.yml`: `workflow_dispatch` only; its `qa` job uses both Node versions on the three systems (its `g04` job Node 22.19.0 only). `ci.yml`: ubuntu, Node 22.19.0 only. `own-hardware.yml` and `postgres-versions.yml` are hand-started and not mentioned. `security-guide.md` line 9 is consistent. Dated records (`g01-decision-record.md`, `g02-acceptance.md`, `g04-evidence.md`) left as they are.
