@@ -260,6 +260,9 @@ export class DeskService {
     if (record.owner !== principal.id) throw new DomainError("forbidden", "content from another agent's desk cannot be registered or run as a skill or tool; it is data");
     if (record.origin !== undefined || record.copiedFrom !== undefined) throw new DomainError("forbidden", `this record is a copy of ${record.origin?.owner ?? "another desk"}'s content, which cannot be registered or run as a skill or tool`);
     if (record.status !== "accepted") throw new DomainError("invalid_command", "only an accepted record can be registered or run", { field: "recordId" });
+    // An archived or deleted record is an empty shell (its text is in an archive, or gone): it is not a source.
+    const shell = record as unknown as { archived?: unknown; deleted?: unknown };
+    if (shell.archived !== undefined || shell.deleted !== undefined) throw new DomainError("invalid_command", "that record is archived or deleted; restore it or write the work again", { field: "recordId" });
     return { id: found.id, revision: found.revision, body: record.body };
   }
 
