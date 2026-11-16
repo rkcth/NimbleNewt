@@ -34,7 +34,7 @@ function openaiProvider(cfg) {
       const body = {
         model: cfg.model,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        [maxParam]: maxTokens,
+        [maxParam]: cfg.fixedMaxTokens ?? maxTokens,
         ...(cfg.temperature === undefined ? {} : { temperature: cfg.temperature }),
         ...(cfg.seed === undefined ? {} : { seed: cfg.seed }),
         ...(cfg.extraBody ?? {}),

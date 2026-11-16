@@ -35,7 +35,7 @@ Prototype additions made for this completion (all in `prototypes/meeting/`): a s
 | Role personalities and information habits, notes from the first round, tabling | Yes (earlier batch); tabling again here with a scenario where research matters | rules 13, 19 |
 | Blind or open first round | Yes (earlier batch, and all new `m00-full` runs are blind) | rule 3 |
 | One or two comment rounds | Partly: `one-round` ran 3 times here; it also drops chair questions and desk notes, so it is not a clean comparison | rule 2 |
-| Whole transcript against a short summary of each turn written by the speaker (the summary chain), full text kept and retrievable, against a digest | Summary chain and facts-style summaries: yes (earlier batch); full text is kept in `transcript.md`; a separate digest variant was not built at the time of the runs; it is now built and tested offline (variant `digest`, see the implementation notes, M00 finish) but not yet run with a model | rule 14 |
+| Whole transcript against a short summary of each turn written by the speaker (the summary chain), full text kept and retrievable, against a digest | Summary chain and facts-style summaries: yes (earlier batch); full text is kept in `transcript.md`; a separate digest variant was not built at the time of the runs; it is built (variant `digest`, see the implementation notes, M00 finish) and was run three times on the local model (see "Local model batch" below) | rule 14 |
 | Turn limits counted in output tokens | Yes, all runs, measured | rule 14 |
 | Shared-first against agent-first prompt order, cache hit rate on a hosted provider | Yes: 12 OpenRouter meetings, 3 per model and variant | rule 15 |
 | A question to a non-present subordinate answered from its checkpoint | Yes: 18 answers on 3 models | rule 17 |
@@ -159,7 +159,34 @@ The "no" votes on the chair reading an absent member's desk (an owner-decided de
 - Which route each result comes from: the subscription route (`gpt-6.1-sol`, with `gpt-6-astra` in seat a1 of 4 meetings) for rules 1, 2 (one-round), 4 to 6, 9 to 13, 16, 17 (Sol and Astra answers) and 20, and for the whole earlier batch except its mixed seats; OpenRouter (`z-ai/glm-5.3-prime`, `qwen/qwen3.8-max-prime`) for rule 15, the Qwen and GLM part of rule 14 and the GLM checkpoint answers. Cost and time are not comparable across routes (subscription against paid OpenRouter).
 - The OpenRouter dollar figure is computed from reported tokens and listed prices.
 - Prototype shortcuts that affect results: the chair is not on the roster (so only the casting-vote branch of the tie rule is exercised); the owner is a script; the correction while a vote is open ran only on the fake provider; restart survival, idle reminders and the interface warning are controller behaviour and not modelled; the leak check compares the first 50 characters of each held answer with every delivery.
-- Local-engine cache behaviour was not measured (G10).
+- Local-engine cache behaviour was only observed in the three-meeting local batch below; the dedicated measurement stays with G10.
+
+## Local model batch (Radiance, 2026-11-15)
+
+Run on Rob's local server (Radiance, model `qwen3.8-flash-next-iq4r`, port 8002), one connection at a time, scenario `tool-adoption` (eight members). This is the first M00 data from the local model, so it does not compare with the cloud numbers above (different model, thinking on). Samples are tiny: three meetings per variant. Raw runs: `prototypes/meeting/runs/2026-11-15T23-*` (gitignored).
+
+**Setup that mattered**
+- The model thinks by default and the thinking counts against the output cap. With the meeting's small per-turn caps (80 to 300 tokens) every reply came back empty and all eight members abstained (run `23-04-45`: all 26 calls finished with `length`). That run is invalid and is not counted. A run with thinking switched off (`23-06-47`, `23-07-20`, `23-07-42`) also worked but is not what the product would use, so it is not counted either.
+- Counted runs use `reasoning_effort: medium` and one fixed output cap of 6,000 tokens on every call (`--fixed-max 6000 --extra-body '{"reasoning_effort":"medium"}'`). Word limits stay in the prompts. All calls in the counted runs ended with `stop`.
+- The server has no `/slots` route, so `--check-slots` always refuses on it. Each run instead checked `GET /health` for `in_flight` of 0 before starting. The variants were run with `parallel: 1` (copies named `*-p1`) because only one connection was allowed. The key was passed in the process environment only (`--env-file /dev/null` makes the runner send it to a non-OpenAI host).
+
+**Results (three meetings each, in run order)**
+
+| Variant | Outcome | Calls | Input tokens | Output tokens | Cached input | Wall time |
+|---|---|---|---|---|---|---|
+| `m00-one-round` | tabled, tabled, tabled | 20, 20, 20 | 14.8k, 14.6k, 14.2k | 15.8k, 16.1k, 11.8k | 0% | 95 s, 103 s, 86 s |
+| `m00-structural` (two rounds) | passed 8-0 three times | 53, 35, 35 | 96k, 69k, 64k | 31k, 23k, 22k | 50%, 57%, 55% | 199 s, 148 s, 137 s |
+| `digest` | passed 7-1, 8-0, 8-0 | 37, 46, 46 | 35k, 55k, 51k | 29k, 35k, 35k | 18%, 29%, 26% | 170 s, 213 s, 222 s |
+
+An extra `m00-one-round` run made while testing the setup (`23-09-56`) passed 5-2-1 (27 calls, 49k tokens, 49% cached), so one round does not always table the motion.
+
+**What it suggests (small samples, read with care)**
+- One comment round tabled the motion in three of four meetings; with two rounds all six meetings passed. As in the cloud batch, the second round matters, and `m00-one-round` is not a clean comparison because it differs from `m00-structural` in more than the round count (the structural question check is also on).
+- The digest variant cut input tokens (35k to 55k against 64k to 96k) and the cache hit rate fell (18 to 29 percent against 50 to 57). Its output grew (the digest is written by the model) and it made more calls, so total tokens were about equal to structural in runs 2 and 3 (90k and 86k against 92k and 86k) and wall time was longer (170 to 222 s against 137 to 199 s). Run 1 of structural was a 53-call outlier. On this server the digest did not save time or total tokens; it would only help where input tokens, not output, are the cost.
+- The server reports cached input, so the local cache can be measured (card G10): structural runs reused about half of their input. The one-round runs show none; they are short.
+- Every counted call ended normally, so the 6,000-token cap was never reached.
+
+**Not covered:** other scenarios, `parallel` above 1, thinking at other levels, more than three meetings per cell, and any comparison against the cloud models with identical settings.
 
 ## Reproduce
 
