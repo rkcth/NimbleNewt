@@ -37,7 +37,7 @@ else if (kind === "pi") {
   const { piProvider } = await import("./lib/pi-provider.mjs");
   provider = await piProvider({ model: args.model ?? "gpt-6.1-sol", reasoningEffort: args.effort ?? "low", sessionId: args.session });
 } else if (kind === "openai") {
-  provider = makeProvider({ kind: "openai", model: args.model, baseUrl: args["base-url"], noAuth: args["no-auth"] === "true", maxTokensParam: args["max-param"], extraBody: args["extra-body"] ? JSON.parse(args["extra-body"]) : undefined });
+  provider = makeProvider({ kind: "openai", model: args.model, baseUrl: args["base-url"], envFile: args["env-file"], fixedMaxTokens: args["fixed-max"] ? Number(args["fixed-max"]) : undefined, noAuth: args["no-auth"] === "true", maxTokensParam: args["max-param"], extraBody: args["extra-body"] ? JSON.parse(args["extra-body"]) : undefined });
 } else provider = makeProvider({ kind: "fake" });
 
 // Mixed roster: --chair pi:gpt-6.1-sol --members a1=pi:gpt-6-astra,a2=or:z-ai/glm-5.3-prime,a3=or:qwen/qwen3.8-max-prime
