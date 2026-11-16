@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { MemoryStorage } from "../storage/index.js";
 import { BackupEncryption, BackupProofStore, PasscodeRefused, RecoveryCodeInvalid, SealedFileBad, UnlockFailed, addPasscode, createBackup, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, recoveryKeyFromCode, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, verifyBackup, type Keyring } from "./index.js";
@@ -244,14 +246,25 @@ test("a proof record or key creation time that cannot be read makes a proof due 
   assert.equal(e.status().proofDue, true);
 });
 
-test("without a test seam the command line still makes Argon2id wrappers at the real settings (the quick settings are a test seam only)", async () => {
+test("without a test seam the command line still makes Argon2id wrappers at the real settings (the quick settings are a test seam only)", { timeout: 300_000 }, async () => {
   const d = tmp();
   try {
     const pf = join(d, "pass"); writeFileSync(pf, `${PASS}\n`, { mode: 0o600 });
-    const keyringFile = join(d, "keyring.json");
-    assert.equal(await runBackupCli(["encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", join(d, "rec.json")], () => undefined), 0);
-    const k = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
-    const w = k.wrappers.find((x) => x.kind === "passcode");
-    assert.ok(w !== undefined && w.kind === "passcode" && w.kdf.name === "argon2id" && w.kdf.m >= 65_536 && w.kdf.t >= 3);
+    const check = (keyringFile: string): void => {
+      const k = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
+      const w = k.wrappers.filter((x) => x.kind === "passcode");
+      assert.equal(w.length, 1);
+      assert.ok(w.every((x) => x.kind === "passcode" && x.kdf.name === "argon2id" && x.kdf.m >= 65_536 && x.kdf.t >= 3), JSON.stringify(w.map((x) => x.kind === "passcode" ? x.kdf : null)));
+    };
+    // The function's default (no fourth argument)...
+    const inProcess = join(d, "keyring-a.json");
+    assert.equal(await runBackupCli(["encryption-setup", inProcess, "--passcode-file", pf, "--recovery-out", join(d, "rec-a.json")], () => undefined), 0);
+    check(inProcess);
+    // ...and the real entry point the owner runs (cli-main), so a seam passed there is caught too.
+    const real = join(d, "keyring-b.json");
+    const entry = fileURLToPath(new URL("./cli-main.js", import.meta.url));
+    const r = spawnSync(process.execPath, [entry, "encryption-setup", real, "--passcode-file", pf, "--recovery-out", join(d, "rec-b.json")], { encoding: "utf8", timeout: 280_000 });
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    check(real);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
