@@ -680,7 +680,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The routing table is refused unless the coordinator, the safety supervisor and every other role in it have a valid fallback list (card R04).
     const routing = RoutingService.withEpoch(storage, epoch, {}, {});
     const setupReadiness = SetupReadinessService.withEpoch(storage, epoch, { startedAt: new Date().toISOString() }); // the local host setting is recorded on the system clock
-    const setupProviders = SetupProviderService.withEpoch(storage, epoch, {}, {}, () => [...(options.adminSecrets?.reserved ?? []), ...(options.backup?.signing?.secretName === undefined ? [] : [options.backup.signing.secretName])]);
+    // The names a provider's credential may not use (task T4): the Secrets form's reserved list, a renamed backup signing key, and the transfer targets' address secrets, which the controller knows from its own options even
+    // when it is started without the launcher and without `adminSecrets`.
+    const transferSecretNames = (options.transfer?.targetEntries ?? []).flatMap((t) => { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; return typeof n === "string" ? [n] : []; });
+    const setupProviders = SetupProviderService.withEpoch(storage, epoch, {}, {}, () => [...(options.adminSecrets?.reserved ?? []), ...(options.backup?.signing?.secretName === undefined ? [] : [options.backup.signing.secretName]), ...transferSecretNames]);
     const localHost = LocalHostSettingService.withEpoch(storage, epoch);
     // A speed given in the start options wins; otherwise the reading speed a route declares in the routing table is used until the route has been measured (card V01c).
     const declaredSpeed: NonNullable<StartOptions["stall"]>["declaredSpeed"] = async (route, hostId) => {

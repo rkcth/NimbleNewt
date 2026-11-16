@@ -102,3 +102,16 @@ test("a started controller refuses the names its secrets option reserves when a 
     assert.equal((await add("spare-key", "r-ok")).ok, true);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+test("a controller started without the launcher and without a secrets option still refuses its transfer targets' address secrets as a provider's credential (task T4 review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-t4-xfer-"));
+  const entries = [{ name: "big-pg", kind: "postgres", url: { secret: "Xfer-Url" }, schema: "xfer_unused", maxBytes: 900_000_000 }];
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" }, filesystem: async () => ({ type: "ext4", network: false }), transfer: { stateDirectory: join(d, "transfer"), targets: [], targetEntries: entries, secrets: async (n: string) => (n === "Xfer-Url" ? "postgres://u:pw-not-real@127.0.0.1:1/db" : undefined) } } as never);
+  try {
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const add = (credentialName: string, commandId: string) => c.api.handle(boot.token, { v: 1, op: "routing.provider.add", commandId, args: { providers: [mine, spare(credentialName)] } } as never) as Promise<R>;
+    for (const name of ["xfer-url", "XFER-URL", "backup-signing-key"]) { const r = await add(name, `x-${name}`); assert.equal(r.ok, false, name); assert.match(r.error!.message, /never sent to a model server/, name); }
+    assert.deepEqual(await c.services.setupProviders.endpoints(), []);
+    assert.equal((await add("xfer-url-2", "x-ok")).ok, true);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

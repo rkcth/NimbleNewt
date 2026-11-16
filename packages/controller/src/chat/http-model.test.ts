@@ -74,3 +74,17 @@ test("the chat model call keeps only the words of the reply: reasoning fields a 
     assert.ok(!JSON.stringify(out).includes(canary), "no reasoning text in what the call returns");
   }
 });
+
+test("a key that cannot be read stops the call before anything is sent, and the failure says why without a secret value (task T4 review)", async () => {
+  let sent = 0;
+  const failures: string[] = [];
+  const reason = "the secret name \"backup-signing-key\" cannot be a model provider's credential: the installation keeps that secret for something else; name another secret";
+  const m = new HttpModelCall({ endpoint: () => ({ url: "http://x/v1", headers: async () => { throw new Error(reason); } }), fetch: async () => { sent += 1; return new Response("{}", { status: 200 }); }, onFailure: (_r, _k, text) => failures.push(text) });
+  await assert.rejects(m.complete("p/m", { system: "s", user: "u" }), (e: Error) => e.message.includes("could not be read") && e.message.includes("cannot be a model provider's credential"));
+  assert.equal(sent, 0, "nothing reached the model server");
+  assert.match(failures[0]!, /backup-signing-key/);
+  // A reason that holds something shaped like a key is redacted before it is shown or reported.
+  const leaky = new HttpModelCall({ endpoint: () => ({ url: "http://x/v1", headers: async () => { throw new Error("store said sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD"); } }), fetch: async () => { sent += 1; return new Response("{}", { status: 200 }); } });
+  await assert.rejects(leaky.complete("p/m", { system: "s", user: "u" }), (e: Error) => e.message.includes("could not be read") && !e.message.includes("abcdefghijklmnopqrstuvwxyz0123456789"));
+  assert.equal(sent, 0);
+});

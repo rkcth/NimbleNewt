@@ -106,3 +106,35 @@ test("PostgreSQL: a provider record naming the database address's secret is refu
     await harness.withClient(server.url(), async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }).catch(() => undefined);
   }
 });
+
+test("sqlite: the chat's own model client refuses a provider record that was changed to name the backup signing key: no request carries it and the secret store is never asked for it (task T4 review)", async () => {
+  const dir = dirOf();
+  const seen: (string | null)[] = [];
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    seen.push(new Headers(init?.headers).get("authorization"));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify([{ kind: "none", reason: "nothing asked" }]) } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const keyed: LauncherConfig["models"]["providers"] = { primary: { adapter: "openai-compatible", endpoint: "http://127.0.0.1:8002/v1", credential: { secret: "primary-key" }, enabled: true, paid: false, models: ["local-x"] }, backup: providers["backup"]! };
+    const config: LauncherConfig = { installation: { name: "t4", dataDir: dir }, controller: { storage: { kind: "sqlite", path: join(dir, "controller.sqlite") } }, models: { providers: keyed } };
+    const secrets = memorySecrets({ "primary-key": "sk-primary-one", "backup-key": "sk-backup-one", "backup-signing-key": "sk-signing-value" });
+    const l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+    try {
+      const say = (text: string) => l.controller.chat!.submit(l.ownerToken, { messageId: `m-${Math.random().toString(36).slice(2)}`, text });
+      // The ordinary key reaches the chat's model server through this client.
+      const first = await say("What is the status of my projects?");
+      assert.match(JSON.stringify(first.reply), /nothing asked/, JSON.stringify(first));
+      assert.deepEqual(seen, ["Bearer sk-primary-one"]);
+      // The record is changed by hand (or by an older version) to name the signing key.
+      const ref = { kind: "provider-endpoint", id: "primary" };
+      const have = (await l.controller.storage.getAggregate(ref))!;
+      await l.controller.storage.applyOperation({ operationId: "t4-edit", epoch: l.controller.epoch, actor: "owner:test", correlationId: "t4-edit", at: "2026-11-15T10:00:00.000Z", audit: [{ type: "provider.recorded", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [],
+        changes: [{ type: "update", ref, expectedRevision: have.revision, body: { ...(have.body as Record<string, unknown>), credentialName: "Backup-Signing-Key" } }] } as never);
+      secrets.asked.length = 0; seen.length = 0;
+      await say("And what is the status now?").catch(() => undefined); // the chat may answer that the model failed or use the other route; what matters is what was sent
+      assert.equal(seen.some((a) => a?.includes("sk-signing-value") === true), false, "no request carried the signing key");
+      assert.equal(seen.includes("Bearer sk-primary-one"), false, "the edited provider's call was not made with a key");
+      assert.equal(secrets.asked.some((n) => n.toLowerCase() === "backup-signing-key"), false, "the secret store was never asked for the signing key");
+    } finally { await l.close(); }
+  } finally { clean(dir); }
+});
