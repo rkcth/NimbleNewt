@@ -164,10 +164,21 @@ async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<
       for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") ids.set(s.recordId, CATALOG_SOURCE_REASON);
     }, limit);
     if (!complete) return undefined;
-    const linked = await scan(runner, "decision-reliance", (a) => {
-      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string" && !ids.has(l.subject.id)) ids.set(l.subject.id, PLAN_LINK_REASON);
+    const linked = await planLinkIds(runner, limit);
+    if (linked === undefined) return undefined;
+    for (const id of linked) if (!ids.has(id)) ids.set(id, PLAN_LINK_REASON);
+    return ids;
+  } catch { return undefined; }
+}
+
+/** The desk records a decision link (current or superseded) names as its subject of kind `plan`; `undefined` when the bounded read could not finish (fail closed, like `catalogSourceIds`). */
+async function planLinkIds(runner: CommandRunner, limit?: number): Promise<Set<string> | undefined> {
+  const ids = new Set<string>();
+  try {
+    const complete = await scan(runner, "decision-reliance", (a) => {
+      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string") ids.add(l.subject.id);
     }, limit);
-    return linked ? ids : undefined;
+    return complete ? ids : undefined;
   } catch { return undefined; }
 }
 
@@ -322,7 +333,7 @@ export class RetentionService {
 
   /**
    * The retention runner. Preview (the default) lists what each rule would remove (derived data, model replies, route records, backups, old catalogue versions, revoked executable text), and gives a digest; running it needs that digest back (`confirm`), so what is removed is what was shown.
-   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). The preview also counts the resolved incidents to archive and the archived ones to remove (`incidents.wouldArchive` and `wouldPurge`) when their windows are set; the digest covers their IDs and a confirmed run acts on those (each is checked again when handled; one that no longer qualifies is skipped, so `incidents.archived` or `purged` can be lower than the preview's counts). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained (a revoked executable text that something cites when the run reads it is left out of `revokedBytes`; one that becomes cited during the run stays listed there but is not blanked, so `blanked` is lower; neither is listed as retained).
+   * Each rule acts only when its own value is set (the revoked-text rule also needs `revokedBytesBlank`). The preview also counts the resolved incidents to archive and the archived ones to remove (`incidents.wouldArchive` and `wouldPurge`) when their windows are set; the digest covers their IDs and a confirmed run acts on those (each is checked again when handled; one that no longer qualifies is skipped, so `incidents.archived` or `purged` can be lower than the preview's counts). Incident archive and purge follow their own ages when set. A resumable task's or a replay's material is skipped and shown as retained (a revoked executable text that something cites when the run reads it, or a `plan` record a decision link names, is left out of `revokedBytes`; one that becomes cited during the run stays listed there but is not blanked, so `blanked` is lower; neither is listed as retained).
    */
   async run(by: Principal, options: { dryRun?: boolean; confirm?: string; limit?: number; commandId?: string } = {}): Promise<RunReport> {
     if (!isOwner(by)) throw new DomainError("forbidden", `${by.id} may not run retention by hand`);
@@ -543,7 +554,9 @@ export class RetentionService {
       const found = await this.#deps.catalog.revokedExecutables(by, values.revokedBytesDays, limit);
       // A record something still cites (a resumable task's context or checkpoint, a dependency manifest) is not blanked.
       const material = await RetainedMaterial.build(this.#runner.storage);
-      revoked = { items: found.items.filter((r) => material.why("desk-record", r.recordId) === undefined), partial: found.partial };
+      // A revoked tool's executable may be the agent's own `plan` record that a decision link names (card K06b follow-up T5): it is not blanked; an unfinished read of the links blanks nothing.
+      const links = found.items.length === 0 ? new Set<string>() : await planLinkIds(this.#runner, this.#deps.catalogScanLimit);
+      revoked = { items: links === undefined ? [] : found.items.filter((r) => !links.has(r.recordId) && material.why("desk-record", r.recordId) === undefined), partial: found.partial || links === undefined };
       if (revoked.partial) partial = true;
     }
     const counts = { daily: values.backupDaily, weekly: values.backupWeekly, preRestoreKept: values.preRestoreKept, preRestoreMaxAgeDays: values.preRestoreMaxAgeDays, maxAgeDays: values.backupMaxAgeDays };
@@ -789,6 +802,9 @@ export class RetentionService {
           if (fresh === undefined || fresh.revision !== found.revision) throw new DomainError("stale_revision", "changed since the preview");
           // Writing a dependency manifest that cites the record does not change the record's revision, so the citations are read again here, as the last thing before the guarded write: a task that took the record after the first read keeps it.
           if ((await RetainedMaterial.build(this.#runner.storage)).why("desk-record", r.recordId) !== undefined) throw new DomainError("stale_revision", "something cites it since the preview");
+          // A decision link does not change the record's revision either: the links are read here too, and an unfinished read keeps the record.
+          const links = await planLinkIds(this.#runner, this.#deps.catalogScanLimit);
+          if (links === undefined || links.has(r.recordId)) throw new DomainError("stale_revision", links === undefined ? CATALOG_SOURCES_UNREAD : PLAN_LINK_REASON);
           const ref = { kind: "desk-record", id: r.recordId };
           const stub = stubDeskBody(body, { at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), contentDigest: digestOf({ title: body["title"] ?? "", body: body["body"] ?? "" }) });
           return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: fresh.revision, body: stub as JsonObject }], detail: { rule: "revoked-bytes-days", name: r.name, version: r.version } };
