@@ -23,7 +23,7 @@ import { MeetingRecordService, type RecordOptions as MeetingRecordOptions, budge
 import { EventService, EventSourceSettingsService, type EventSource } from "../events/index.js";
 import { BudgetService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { CriticalPathService } from "../critical/index.js";
-import { NotificationService, UrgentWatch, workSource, type ChannelAdapter } from "../notifications/index.js";
+import { NOTIFICATION_LIMITS, NotificationService, UrgentWatch, workSource, type ChannelAdapter } from "../notifications/index.js";
 import { EscalationLadderService, RecoveryLadderService, StallService, type RecoveryEffects, type StallOptions } from "../health/index.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
@@ -102,7 +102,7 @@ import { WorkerLimitsSettingsService } from "./worker-limits-settings.js";
 import { CapacityLimitsService } from "../admission/caps.js";
 import { StreamSettingsService } from "../generation/index.js";
 import { DispatchLimitsSettingsService } from "./dispatch-limits-settings.js";
-import { MaintenanceService, EnvironmentChangeApplier, AccessChangeApplier, AgentMounts, MAINTENANCE_PRINCIPAL, StorageJournal, noApplier, type EnvironmentRuntime, type MaintenanceApplier, type MountResources } from "../maintenance/index.js";
+import { MaintenanceService, EnvironmentChangeApplier, type MaintenanceNotice, AccessChangeApplier, AgentMounts, MAINTENANCE_PRINCIPAL, StorageJournal, noApplier, type EnvironmentRuntime, type MaintenanceApplier, type MountResources } from "../maintenance/index.js";
 import { EnvironmentService } from "../environments/index.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
@@ -464,6 +464,25 @@ export async function startController(options: StartOptions): Promise<Controller
     const close = controller.close;
     return { ...controller, close: async () => { try { await close(); } finally { await box.lock?.release(); } } };
   } catch (error) { await box.lock?.release(); throw error; }
+}
+
+/**
+ * The owner's inbox text for a maintenance request that waits on the owner: IDs and the kind only (the request's own text stays in the request, which only its readers see). For a protected request it names the
+ * administrators who may decide it too, as many as fit in the inbox's detail limit, and how many more there are (card A09 follow-up T6, review).
+ */
+export function maintenanceOwnerDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorIds">): string {
+  const max = NOTIFICATION_LIMITS.detail;
+  const admins = n.administratorIds ?? [];
+  if (admins.length === 0) return `${n.agentId} asked for an environment change (${n.kind}) that you decide. Read it with maintenance.get and decide with maintenance.decide.`.slice(0, max);
+  const head = `${n.agentId} asked for a ${n.kind} change that you decide (maintenance.decide); administrators may too: `;
+  const named: string[] = [];
+  for (const [i, a] of admins.entries()) {
+    const rest = admins.length - i - 1;
+    if ((head + [...named, a].join(", ") + (rest === 0 ? "." : ` +${rest} more.`)).length > max) break;
+    named.push(a);
+  }
+  const more = admins.length - named.length;
+  return (named.length === 0 ? `${head}${admins.length} (maintenance.settings.get names them).` : `${head}${named.join(", ")}${more === 0 ? "." : ` +${more} more.`}`).slice(0, max);
 }
 
 async function startControllerWith(options: StartOptions, takeLock: (() => Promise<DataLockKeeper | undefined>) | undefined): Promise<Controller> {
@@ -1368,10 +1387,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => { if (n.to === "administrator") await notifications.emitFromController({ commandId: `mnt-adm-${n.maintenanceId}-${createHash("sha256").update(n.administratorId ?? "").digest("hex").slice(0, 16)}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}) that you may decide as an administrator (${n.administratorId ?? ""}). maintenance.list shows it to you; decide it with maintenance.decide. The owner can decide it too.`.slice(0, 400) });
-      else if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}) that you decide. Read it with maintenance.get and decide with maintenance.decide.`.slice(0, 400) });
+    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+      // An administrator's notice is not an inbox item of its own: the owner's inbox keeps one item per request (a second emit for the same request would fold into the owner's item), and an agent has
+      // no inbox outside a task, so the owner's item names the administrators who may decide it and each administrator finds it with maintenance.list. Card A09 follow-up T6, review.
+      if (n.to === "administrator") return;
+      if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: maintenanceOwnerDetail(n) });
       // The supervisor who may decide it is named to the owner at the lower level (an agent has no inbox outside a task; it reads its reports' requests with maintenance.list), so the owner knows who was asked.
-      else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, 400) }); } });
+      else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, NOTIFICATION_LIMITS.detail) }); } });
     // Card K03: the migration guard (upgrades, tested pairs, the rollback period, destructive migrations waiting for the owner, the rollout policy). The schema version is read from a snapshot, as K02d does.
     const schemaNow = options.releases?.schemaVersion ?? (async () => { const snap = await storage.snapshot(); try { return snap.schemaVersion; } finally { await snap.close(); } });
     const migrationGuard = migrationGuardRef = MigrationGuardService.withEpoch(storage, epoch, {

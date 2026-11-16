@@ -364,9 +364,9 @@ const afterRead = (storage: World["storage"], id: string, nth: number, act: () =
 for (const [index, backend] of backends.entries()) {
   test(`each named administrator who could decide a host-policy or base request gets one notice; not the requester, a held or team administrator, nor for other kinds or a repeated request (${backend.name})`, async () => {
     const held = new Set<string>();
-    const told: Array<{ id: string; to: string; admin: string | undefined; kind: string }> = [];
+    const told: Array<{ id: string; to: string; admin: string | undefined; kind: string; admins?: readonly string[] }> = [];
     await world(index, async (w) => {
-      const m = w.service({ held: async (id) => held.has(id), notify: async (n) => { told.push({ id: n.maintenanceId, to: n.to, admin: n.administratorId, kind: n.kind }); } });
+      const m = w.service({ held: async (id) => held.has(id), notify: async (n) => { told.push({ id: n.maintenanceId, to: n.to, admin: n.administratorId, kind: n.kind, ...(n.administratorIds === undefined ? {} : { admins: n.administratorIds }) }); } });
       const lead = await w.make("Lead");
       const ann = await w.make("Ann", w.owner, lead.id);
       const a1 = await w.make("AdminOne"); const a2 = await w.make("AdminTwo"); const a3 = await w.make("AdminThree"); const a4 = await w.make("AdminFour");
@@ -379,6 +379,9 @@ for (const [index, backend] of backends.entries()) {
       // a1 and a2 are free; a3 is held; a4 is below the requester (its team). The owner is told as before.
       assert.deepEqual(adminsOf(one.maintenanceId), [a1.principal.id, a2.principal.id].sort());
       assert.equal(told.filter((t) => t.id === one.maintenanceId && t.to === "owner").length, 1);
+      // The owner's notice names the same administrators, and it comes before theirs.
+      assert.deepEqual([...(told.find((t) => t.id === one.maintenanceId && t.to === "owner")?.admins ?? [])].sort(), [a1.principal.id, a2.principal.id].sort());
+      assert.equal(told.findIndex((t) => t.id === one.maintenanceId) , told.findIndex((t) => t.id === one.maintenanceId && t.to === "owner"));
       // The same request again (a replay) tells nobody again.
       const again = await m.request(ann.principal, { commandId: label, kind: "base", spec: { change: "newer interpreter" }, reason: "needed", rollbackPlan: "undo it" });
       assert.equal(again.replayed, true);
@@ -394,6 +397,7 @@ for (const [index, backend] of backends.entries()) {
       const none = await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "another" }, reason: "needed", rollbackPlan: "undo it" });
       assert.deepEqual(adminsOf(none.maintenanceId), []);
       assert.equal(told.filter((t) => t.id === none.maintenanceId && t.to === "owner").length, 1);
+      assert.equal(told.find((t) => t.id === none.maintenanceId && t.to === "owner")?.admins, undefined, "no administrator is named when none may decide");
     });
   });
 
@@ -436,6 +440,15 @@ for (const [index, backend] of backends.entries()) {
       assert.equal(r3.fired(), true, "the creator was set in the window");
       assert.equal(out3, "pending");
       assert.equal(w.applier.calls.filter((c) => c.id === three).length, asked3, "the applier was not asked");
+      // The requester's record is read twice (as the request's agent, then in its line of management); its supervisor is chosen by the administrator between those two reads. The claim must check the
+      // revision of the first read (where who chose the supervisor is judged), not only that of the second (review).
+      const fifth = await w.make("Fifth");
+      const five = await ask(fifth.principal);
+      const asked5 = await approveAndWait(five);
+      const r5 = afterRead(w.storage, fifth.id, 2, async () => { await plant(w, fifth.id, { supervisorSetBy: adm.principal.id }); });
+      assert.equal(await w.serviceOn(r5.view).drive(five), "pending");
+      assert.equal(r5.fired(), true, "the supervisor was chosen in the window");
+      assert.equal(w.applier.calls.filter((c) => c.id === five).length, asked5, "the applier was not asked");
       // Nothing changes in the window: the request is applied (the guard does not stop an ordinary claim).
       const four = await ask((await w.make("Fourth")).principal);
       await approveAndWait(four);

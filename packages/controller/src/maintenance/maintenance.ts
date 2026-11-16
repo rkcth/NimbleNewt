@@ -270,7 +270,7 @@ export interface MaintenanceApplier {
 /** The applier used when none is wired: nothing can be applied safely, so approved changes wait. */
 export const noApplier: MaintenanceApplier = { apply: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }), revert: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }) };
 
-export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor" | "administrator"; readonly supervisorId?: string; /** Set when `to` is "administrator": the named administrator this notice is for (one notice per administrator per request). */ readonly administratorId?: string }
+export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor" | "administrator"; readonly supervisorId?: string; /** Set when `to` is "administrator": the named administrator this notice is for (one notice per administrator per request). */ readonly administratorId?: string; /** Set on the owner's notice of a protected request: the named administrators who may decide it too (judged as the decision judges them, at the time of the request). */ readonly administratorIds?: readonly string[] }
 
 export interface MaintenanceOptions {
   readonly applier?: MaintenanceApplier; readonly notify?: (n: MaintenanceNotice) => Promise<void>;
@@ -360,11 +360,12 @@ export class MaintenanceService {
       return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true, bossKinds: body?.bossKinds ?? [], administrators: body?.administrators ?? [], leaseMs: (body?.leaseMinutes ?? MAINTENANCE_LIMITS.leaseMs / 60_000) * 60_000, ...limitsOf(body) } };
     } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false, bossKinds: [], administrators: [], leaseMs: MAINTENANCE_LIMITS.leaseMs, ...limitsOf(undefined) } }; }
   }
-  /** Reads an agent record; when `reads` is given the revision read is kept in it (by agent key), so a later write can check that none of the records a judgement rested on has changed. */
+  /** Reads an agent record; when `reads` is given the first revision read is kept in it (by agent key), so a later write can check that none of the records a judgement rested on has changed. */
   async #agent(id: string, reads?: Map<string, number>): Promise<{ state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined> {
     const key = id.slice("agent:".length);
     const found = await this.#runner.get("agent", key);
-    if (reads !== undefined && found !== undefined) reads.set(key, found.revision);
+    // The first revision read is kept: a record read twice in one judgement (the requester as the request's agent, then in its line) that changed in between fails the check, as the first read was judged too.
+    if (reads !== undefined && found !== undefined && !reads.has(key)) reads.set(key, found.revision);
     return found?.body as unknown as { state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined;
   }
   async #isSupervisorOf(by: Principal, agentId: string): Promise<boolean> {
@@ -619,14 +620,16 @@ export class MaintenanceService {
         return { ref, creates: true, changes, detail: { agentId, kind, class: cls, status: body.status, specDigest, ...(auto === undefined ? {} : { rule: auto.rule }) }, contention: async () => new DomainError("stale_revision", "another request of this agent was made at the same moment; ask again") };
       },
     }));
-    if (!result.replayed && notice !== undefined && this.#notify !== undefined) await this.#notify(notice).catch(() => undefined);
-    // Each administrator the owner named who could decide this request is told once (not the requester, not one held, inactive or in the requester's team: the same check as the decision's). A failed notice never fails the request.
+    // Each administrator the owner named who could decide this request (the decision's own check: not the requester, not one held, inactive or in the requester's team) is judged first, so the owner's
+    // notice can name them, and is then told once. Judging one that fails (a read error) leaves that one out and goes on; a failed notice never fails the request.
+    const admins: string[] = [];
     if (!result.replayed && protectedBody !== undefined && this.#notify !== undefined) {
-      try {
-        const eff = (await this.#settings()).eff;
-        for (const adminId of eff.administrators) if (await this.#adminFor({ id: adminId, kind: "agent" } as Principal, protectedBody, eff)) await this.#notify({ maintenanceId: id, agentId, kind, class: cls, to: "administrator", administratorId: adminId }).catch(() => undefined);
-      } catch { /* the owner was told; an administrator that cannot be judged now finds the request by listing */ }
+      let eff: MaintenanceEffective | undefined;
+      try { eff = (await this.#settings()).eff; } catch { eff = undefined; }
+      for (const adminId of eff?.administrators ?? []) { try { if (await this.#adminFor({ id: adminId, kind: "agent" } as Principal, protectedBody, eff!)) admins.push(adminId); } catch { /* not named; it finds the request by listing */ } }
     }
+    if (!result.replayed && notice !== undefined && this.#notify !== undefined) await this.#notify(admins.length === 0 ? notice : { ...notice, administratorIds: admins }).catch(() => undefined);
+    for (const adminId of admins) await this.#notify!({ maintenanceId: id, agentId, kind, class: cls, to: "administrator", administratorId: adminId }).catch(() => undefined);
     // The owner's standing permission approved this request, so it was used (card A07h): a grant with an idle window starts its window again (the grant the approval rests on, and those its chain rests on).
     if (!result.replayed && standingUsed.length > 0) await recordGrantUse(this.#runner, "service:dispatcher", standingUsed, this.#runner.now()).catch(() => undefined);
     const a = await this.#runner.get(REQ, id);
