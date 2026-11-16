@@ -33,7 +33,7 @@ for (const backend of backends) {
   interface Ctx {
     sites: AgentSiteAllowances; grants: NetworkGrantService; owner: Principal; denied: Set<string>; deniedThrows: { on: boolean };
     ctx: { taskId: string; projectId: string; attemptId: string; agentId?: string }; end(): Promise<void>;
-    relay(extra?: Record<string, unknown>): NetworkRelay; dials: Array<{ address: string; port: number }>;
+    relay(extra?: Record<string, unknown>): NetworkRelay; /** Another controller on the same storage, with its own view of the owner's rule. */ second(denied?: (h: string, p: number) => Promise<boolean>): AgentSiteAllowances; dials: Array<{ address: string; port: number }>;
     connect(opener: ReturnType<NetworkRelay["forAttempt"]>, host: string): Promise<{ tunnel: Awaited<ReturnType<ReturnType<NetworkRelay["forAttempt"]>["open"]>>; got: Buffer[]; closed: Promise<string> }>;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
@@ -61,7 +61,8 @@ for (const backend of backends) {
           return { tunnel: await opener.open({ host, port: 443 }, events), got, closed };
         };
         const end = async (): Promise<void> => { const t = await projects.getTask(taskId); await projects.transitionTask({ commandId: cid("end"), actor: "owner:rob", taskId, expectedRevision: t!.revision, to: "cancelled" }); };
-        await body({ sites, grants, owner, denied, deniedThrows, ctx: { taskId, projectId, attemptId: "att-1", agentId: ANN }, end, relay, dials, connect });
+        const second: Ctx["second"] = (d) => AgentSiteAllowances.withEpoch(world.storage, projects.epoch, MAINTENANCE_PRINCIPAL, d === undefined ? {} : { denied: d });
+        await body({ sites, grants, owner, denied, deniedThrows, second, ctx: { taskId, projectId, attemptId: "att-1", agentId: ANN }, end, relay, dials, connect });
       } finally { for (const r of relays) r.close(); await server.close(); await world.close(); }
     });
 
@@ -195,5 +196,77 @@ for (const backend of backends) {
       assert.deepEqual(await c.sites.end(REQ(12), ANN, "docs.example.com", 443), { stillAllowed: false });
       assert.equal((await c.grants.check(c.ctx.taskId, "docs.example.com", 443, ANN)).live, false, `ended in round ${round}`);
     }
+  });
+
+  suite("two requests stand behind one site and the newer one ends: connections opened under it keep working, and they close at once when the last one ends", async (c) => {
+    await c.sites.allow(REQ(20), ANN, "docs.example.com", 443);
+    await c.sites.allow(REQ(21), ANN, "docs.example.com", 443);
+    const relay = c.relay({ recheckMs: 60_000 }); // only the push can end it here
+    const { tunnel, got, closed } = await c.connect(relay.forAttempt(c.ctx), "docs.example.com");
+    assert.equal((await c.grants.connections(c.owner, c.ctx.taskId))[0]!.grantId, REQ(21), "opened under the newer request");
+    // The relay's own recheck must not be what ends anything here: it always finds the site live, so only the controller's push can close the connection.
+    const realCheck = c.grants.check.bind(c.grants);
+    c.grants.check = async (...x: Parameters<NetworkGrantService["check"]>) => ({ ...(await realCheck(...x)), live: true });
+    assert.deepEqual(await c.sites.end(REQ(21), ANN, "docs.example.com", 443), { stillAllowed: true });
+    // The site is still allowed, so the connection is not closed; it still carries data.
+    await tunnel.write(Buffer.from("x")); await until("the echo after the newer request ended", () => Buffer.concat(got).toString() === "x");
+    assert.equal(relay.open, 1);
+    // The last request ends: the connection opened under the other (already ended) request closes at once.
+    assert.deepEqual(await c.sites.end(REQ(20), ANN, "docs.example.com", 443), { stillAllowed: false });
+    assert.match(await closed, /revoked/);
+    assert.equal(relay.open, 0);
+    // Another agent's connection to the same destination is not touched by this agent's site ending.
+    await c.sites.allow(REQ(22), ANN, "docs.example.com", 443);
+    await c.sites.allow(REQ(23), BOB, "docs.example.com", 443);
+    const mine = await c.connect(relay.forAttempt(c.ctx), "docs.example.com");
+    const his = await c.connect(relay.forAttempt({ ...c.ctx, agentId: BOB }), "docs.example.com");
+    await c.sites.end(REQ(22), ANN, "docs.example.com", 443);
+    assert.match(await mine.closed, /revoked/);
+    await his.tunnel.write(Buffer.from("b")); await until("the other agent's echo", () => Buffer.concat(his.got).toString() === "b");
+    assert.equal(relay.open, 1);
+    his.tunnel.close();
+  });
+
+  suite("a connection kept open under an ended request is still judged at each recheck by the request that remains, and is ended there when that one goes", async (c) => {
+    await c.sites.allow(REQ(24), ANN, "docs.example.com", 443);
+    await c.sites.allow(REQ(25), ANN, "docs.example.com", 443);
+    const relay = c.relay({ recheckMs: 20 });
+    const { tunnel, got, closed } = await c.connect(relay.forAttempt(c.ctx), "docs.example.com");
+    await c.sites.end(REQ(25), ANN, "docs.example.com", 443);
+    let rechecks = 0;
+    const real = c.grants.check.bind(c.grants);
+    c.grants.check = async (...a: Parameters<NetworkGrantService["check"]>) => { rechecks++; return real(...a); };
+    await until("rechecks after the end", () => rechecks >= 4);
+    await tunnel.write(Buffer.from("k")); await until("echo", () => Buffer.concat(got).toString() === "k");
+    assert.equal(relay.open, 1, "still open");
+    await c.sites.end(REQ(24), ANN, "docs.example.com", 443);
+    assert.match(await closed, /revoked/);
+  });
+
+  suite("the cap of 200 sites for an agent holds when two controllers add a site at the same moment, counts a site allowed again after its end, and frees a place when a site ends", async (c) => {
+    const host = (i: number): string => `s${i}.example.com`;
+    for (let i = 0; i < AGENT_SITE_LIMITS.sitesPerAgent - 1; i++) await c.sites.allow(REQ(300 + i), ANN, host(i), 443);
+    assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent - 1);
+    // Two controllers read the same count and both add the last place: both reach the same step before either writes (each waits for the other at the owner's-rule lookup).
+    let arrived = 0; let open!: () => void; const both = new Promise<void>((r) => { open = r; });
+    const gate = async (): Promise<boolean> => { if (++arrived >= 2) open(); await both; return false; };
+    const a = c.second(gate), b = c.second(gate);
+    const results = await Promise.allSettled([a.allow(REQ(900), ANN, "last-a.example.com", 443), b.allow(REQ(901), ANN, "last-b.example.com", 443)]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "exactly one of the two got the last place");
+    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.match(String((lost.reason as Error).message), /at most 200/);
+    assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent);
+    // Full: another site is refused, another agent is not affected, and a second request for a site that stands is not a new site.
+    await assert.rejects(() => c.sites.allow(REQ(902), ANN, "over.example.com", 443), /at most 200/);
+    await c.sites.allow(REQ(903), BOB, "over.example.com", 443);
+    await c.sites.allow(REQ(904), ANN, host(0), 443);
+    // A site that ended frees its place; the same site allowed again takes one, so it is refused again once someone else took the place.
+    await c.sites.end(REQ(300), ANN, host(0), 443);
+    assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent, "another request still stands behind it");
+    await c.sites.end(REQ(904), ANN, host(0), 443);
+    assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent - 1);
+    await c.sites.allow(REQ(905), ANN, "taken.example.com", 443);
+    await assert.rejects(() => c.sites.allow(REQ(906), ANN, host(0), 443), /at most 200/, "an ended site allowed again counts against the cap");
+    assert.equal((await c.sites.list(c.owner, ANN)).length, AGENT_SITE_LIMITS.sitesPerAgent);
   });
 }

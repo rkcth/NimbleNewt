@@ -3,7 +3,7 @@ import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { canonicalHost, canonicalPort, neverReachable, isPrivate } from "./destination.js";
 import type { GrantView } from "./grants.js";
 
@@ -31,6 +31,9 @@ export type AgentSiteView = AgentSiteBody & { readonly id: string; readonly revi
 export const AGENT_SITE_LIMITS = { sitesPerAgent: 200, requestsPerSite: 20 } as const;
 
 const KIND = "net-agent-site";
+/** One small record for each agent: how many of its sites stand now. Every command that makes a site stand or stop standing writes it with the revision it read, so two controllers adding at the same moment cannot both pass the cap. */
+const COUNT_KIND = "net-agent-site-count";
+const countId = (agentId: string): string => `nasc-${createHash("sha256").update(agentId).digest("hex").slice(0, 32)}`;
 const REQUEST_ID = /^mnt-[a-z2-7]{20}$/;
 const siteId = (agentId: string, host: string, port: number): string => `nas-${createHash("sha256").update(`${agentId}\0${host}\0${port}`).digest("hex").slice(0, 32)}`;
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -83,29 +86,38 @@ export class AgentSiteAllowances {
     // The command ID carries the revision the record had: a retry of this step is the same command, but an allow after an earlier allow and end of the same request (an application that ended unclearly, was reverted and is
     // applied again) is a new command and is carried out, instead of being answered from the first one with nothing written.
     const seen = (await this.#runner.get(KIND, id))?.revision ?? 0;
+    // Another controller writing the same agent's count, or the same site, at the same moment makes this command fail as stale; it is tried again a few times against what that one wrote (a refusal by the cap then comes out as such).
+    for (let attempt = 0; ; attempt++) {
+      try { await this.#allowOnce(requestId, agentId, d, id, ref, now, seen, (v) => { created = v; }); break; }
+      catch (e) { if (attempt < 4 && e instanceof DomainError && (e.code === "stale_revision" || e.code === "command_conflict")) continue; throw e; }
+    }
+    return { id, created };
+  }
+
+  async #allowOnce(requestId: string, agentId: string, d: { host: string; port: number }, id: string, ref: AggregateRef, now: string, seen: number, setCreated: (v: boolean) => void): Promise<void> {
     await this.#runner.command("network.agent-site.allow", { commandId: `nas-allow:${requestId}:${seen}`, actor: this.#service.id }, async () => ({
       payload: { requestId, agentId, host: d.host, port: d.port },
       build: async () => {
         const found = await this.#runner.get(KIND, id);
         const prior = found?.body as unknown as AgentSiteBody | undefined;
         if (prior?.requests.some((r) => r.id === requestId)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found!.revision }], detail: { agentId, host: d.host, port: d.port, unchanged: true } };
-        if (prior === undefined) {
-          let count = 0;
-          for (let after: string | undefined; ;) {
-            const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
-            for (const p of page) { after = p.id; const b = p.body as unknown as AgentSiteBody; if (b.agentId === agentId && b.requests.length > 0) count++; }
-            if (page.length < 1000) break;
-          }
-          if (count >= AGENT_SITE_LIMITS.sitesPerAgent) throw new DomainError("invalid_command", `an agent may hold at most ${AGENT_SITE_LIMITS.sitesPerAgent} approved network sites`);
+        const becomesStanding = prior === undefined || prior.requests.length === 0;
+        const counter: Change[] = [];
+        if (becomesStanding) {
+          const cref: AggregateRef = { kind: COUNT_KIND, id: countId(agentId) };
+          const have = await this.#runner.get(COUNT_KIND, cref.id);
+          const standing = have === undefined ? await this.#standingCount(agentId) : (have.body as unknown as { count: number }).count;
+          if (standing >= AGENT_SITE_LIMITS.sitesPerAgent) throw new DomainError("invalid_command", `an agent may hold at most ${AGENT_SITE_LIMITS.sitesPerAgent} approved network sites`);
+          // Written in this same command with the revision just read (or created, when there is none): a second command that read the same count fails here instead of passing the cap by one.
+          counter.push(have === undefined ? { type: "create", ref: cref, body: { agentId, count: standing + 1 } } : { type: "update", ref: cref, expectedRevision: have.revision, body: { agentId, count: standing + 1 } });
         }
         if ((prior?.requests.length ?? 0) >= AGENT_SITE_LIMITS.requestsPerSite) throw new DomainError("invalid_command", "too many approved requests stand behind this site");
-        created = prior === undefined || prior.requests.length === 0;
+        setCreated(becomesStanding);
         const body: AgentSiteBody = { agentId, host: d.host, port: d.port, requests: [...(prior?.requests ?? []), { id: requestId, at: now }], updatedAt: now };
         const change = found === undefined ? { type: "create" as const, ref, body: body as unknown as JsonObject } : { type: "update" as const, ref, expectedRevision: found.revision, body: body as unknown as JsonObject };
-        return { ref, creates: found === undefined, changes: [change], detail: { agentId, host: d.host, port: d.port, requestId } };
+        return { ref, creates: found === undefined, changes: [change, ...counter], detail: { agentId, host: d.host, port: d.port, requestId } };
       },
     }));
-    return { id, created };
   }
 
   /**
@@ -129,14 +141,35 @@ export class AgentSiteAllowances {
         if (found === undefined || prior === undefined) throw new DomainError("not_found", "no such site");
         if (!prior.requests.some((r) => r.id === requestId)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { agentId, host: d.host, port: d.port, unchanged: true } };
         const body: AgentSiteBody = { ...prior, requests: prior.requests.filter((r) => r.id !== requestId), updatedAt: now };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { agentId, host: d.host, port: d.port, requestId, ended: true } };
+        const counter: Change[] = [];
+        if (body.requests.length === 0) {
+          const have = await this.#runner.get(COUNT_KIND, countId(agentId));
+          // No record yet (sites that stood before the count existed): none is made here; the next new site counts them and creates it.
+          if (have !== undefined) counter.push({ type: "update", ref: { kind: COUNT_KIND, id: have.id }, expectedRevision: have.revision, body: { agentId, count: Math.max(0, (have.body as unknown as { count: number }).count - 1) } });
+        }
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }, ...counter], detail: { agentId, host: d.host, port: d.port, requestId, ended: true } };
       },
     }));
     const after = await this.#runner.get(KIND, id);
     const b = after?.body as unknown as AgentSiteBody | undefined;
-    const view: GrantView = { taskId: "", projectId: "", host: d.host, port: d.port, allowPrivate: false, state: "revoked", requestedBy: agentId, requestedAt: now, via: "maintenance", endedAt: now, endedBy: this.#service.id, id: requestId, revision: after?.revision ?? 0 };
-    for (const l of [...this.#listeners]) { try { l(view); } catch { /* a listener never changes the record */ } }
-    return { stillAllowed: (b?.requests.length ?? 0) > 0 };
+    const stillAllowed = (b?.requests.length ?? 0) > 0;
+    // While another request still stands behind the site, the destination stays allowed: connections opened under the ended request are not closed (the relay judges a connection by its destination at each recheck, so it keeps working
+    // under the request that remains). When the last request ends, the relay closes every connection of this agent to this destination, whichever request it was opened under.
+    if (!stillAllowed) {
+      const view: GrantView = { taskId: "", projectId: "", host: d.host, port: d.port, allowPrivate: false, state: "revoked", requestedBy: agentId, requestedAt: now, via: "maintenance", endedAt: now, endedBy: this.#service.id, id: requestId, revision: after?.revision ?? 0 };
+      for (const l of [...this.#listeners]) { try { l(view); } catch { /* a listener never changes the record */ } }
+    }
+    return { stillAllowed };
+  }
+
+  /** The sites of one agent that stand now, counted by reading every site record (used once, to start the count of an agent that has none). */
+  async #standingCount(agentId: string): Promise<number> {
+    let count = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+      for (const p of page) { after = p.id; const b = p.body as unknown as AgentSiteBody; if (b.agentId === agentId && b.requests.length > 0) count++; }
+      if (page.length < 1000) return count;
+    }
   }
 
   async #isDenied(host: string, port: number): Promise<boolean> {
