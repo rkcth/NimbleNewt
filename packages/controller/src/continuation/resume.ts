@@ -103,6 +103,8 @@ const KIND = "resume-check";
 /** One record per `resume.decline` command (by its scoped command ID): which check it declined, so the same command again answers as it did. */
 const DECLINE_KIND = "resume-decline";
 const ORPHANED = "not committed: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so nothing is resumed";
+/** Internal: a start over refused because this check's own resume was recorded meanwhile (the check then ends done from that record). */
+const RECORDED_MEANWHILE = "not started over: this check's resume was recorded meanwhile";
 const NOT_APPROVED_ORPHANED = "not approved: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so there is nothing to let go on";
 const ACTIVE = "resume-active";
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -431,6 +433,37 @@ export class ResumeCheckService {
         } catch (error) {
           if (error instanceof DomainError && error.message === ORPHANED) { await this.#update(id, (x) => ({ ...x, phase: "cancelled", history: this.#push(x, "cancelled", by.id, ENDED_CANCEL) }), ["executing"]); continue; }
           if (error instanceof DomainError && error.code === "stale_revision") continue;
+          // The capture the check was made against was pruned meanwhile (more than CONTINUATION_KEEP newer ones), or this check's resume command ID already holds a resume against another capture.
+          // If this check's resume is recorded, the resume happened: the check is done from that record. That covers a stop right after the record (its replay answers not_found for the pruned capture)
+          // and a second advance of the same check (the resume sweep beside the dispatcher) that recorded it just before the prune while this one started the check over (the next commit then answers
+          // command_conflict). Never a second record: the command ID stays the check's own. Otherwise nothing was recorded, so a check whose capture is gone starts over against what exists now (bounded
+          // by its rounds); left as it was, it would answer the same not_found at every retry and the attempt would never start. Any other not_found or conflict is thrown as before.
+          const pruned = error instanceof DomainError && error.code === "not_found" && b.continuationId !== undefined && await this.#runner.get("continuation", b.continuationId) === undefined;
+          const resumeRef: AggregateRef = { kind: "continuation-resume", id: derivedId("cnr", scopedCommandId(RESUMER.id, `${id}-resume`)) };
+          if (pruned || (error instanceof DomainError && error.code === "command_conflict")) {
+            const recorded = (await this.#runner.get(resumeRef.kind, resumeRef.id))?.body as { taskId?: string; continuationId?: string } | undefined;
+            if (recorded !== undefined && recorded.taskId === b.taskId) {
+              const gone = await this.#runner.get("continuation", String(recorded.continuationId)) === undefined;
+              await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${String(recorded.continuationId)}${gone ? " (that capture has since been pruned)" : ""}`) }), ["executing"]);
+              continue;
+            }
+          }
+          if (pruned) {
+            // The start over is written only while the check's attempt is still the task's active one (one that ended is cancelled, as when the capture still exists; never started over), and is
+            // refused when this check's resume is found recorded just before the write (another advance of the check recorded it after the look above: the loop then ends the check done from it).
+            // Storage has no "absent" check, so a record committed between that read and the write is not excluded; the check then starts over with its resume recorded, and its next commit
+            // answers command_conflict (or the replay not_found) and ends it done from that record: never a second record or a second start.
+            const notResumed = async (): Promise<readonly Change[]> => {
+              if (await this.#runner.get(resumeRef.kind, resumeRef.id) !== undefined) throw new DomainError("invalid_transition", RECORDED_MEANWHILE);
+              return this.#attemptGuard(b)();
+            };
+            try { await this.#restart(by, id, "the continuation it was made against was pruned", ["executing"], notResumed); } catch (refusal) {
+              if (refusal instanceof DomainError && refusal.message === ORPHANED) { await this.#update(id, (x) => ({ ...x, phase: "cancelled", history: this.#push(x, "cancelled", by.id, ENDED_CANCEL) }), ["executing"]); continue; }
+              if (refusal instanceof DomainError && refusal.message === RECORDED_MEANWHILE) continue;
+              throw refusal;
+            }
+            continue;
+          }
           throw error;
         }
         await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${r.continuation.id}`) }), ["executing"]);
@@ -599,19 +632,24 @@ export class ResumeCheckService {
   }
 
   /** The inputs moved after the review: start over, or stop as churn when the rounds are used up. */
-  async #restart(by: Principal, id: string, why: string): Promise<void> {
+  /** `guard`: extra changes the start over (or the churn block) is written with; it may refuse by throwing, and is asked once before a churn blocker is opened, so a refused one opens none. */
+  async #restart(by: Principal, id: string, why: string, from: readonly ResumePhase[] = ["ready"], guard?: () => Promise<readonly Change[]>): Promise<void> {
     const b = (await this.#runner.get(KIND, id))!.body as unknown as ResumeCheckBody;
-    if (b.round + 1 >= b.maxRounds) { await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, ["ready"]); return; }
-    await this.#update(id, (x) => ({ ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) }), ["ready"]);
+    if (b.round + 1 >= b.maxRounds) {
+      if (guard !== undefined) await guard();
+      await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, from, guard);
+      return;
+    }
+    await this.#update(id, (x) => ({ ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) }), from, guard);
   }
 
-  async #block(by: Principal, id: string, b: ResumeCheckBody, type: NonNullable<ResumeCheckBody["blocked"]>["type"], reason: string, from: readonly ResumePhase[] = LIVE): Promise<void> {
+  async #block(by: Principal, id: string, b: ResumeCheckBody, type: NonNullable<ResumeCheckBody["blocked"]>["type"], reason: string, from: readonly ResumePhase[] = LIVE, guard?: () => Promise<readonly Change[]>): Promise<void> {
     let blockerId: string | undefined;
     if (type === "missing_context" || type === "resume_churn") {
       const opened = await this.#blockers.openBlocker({ commandId: `${id}-blk-${type}-${b.blocks}`, actor: "system", type, subject: { kind: "task", id: b.taskId }, summary: short(reason), resolver: "owner" });
       blockerId = opened.id;
     }
-    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from);
+    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from, guard);
   }
 
   /**
