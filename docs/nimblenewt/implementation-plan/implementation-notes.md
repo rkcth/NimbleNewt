@@ -12087,3 +12087,30 @@ ASSUMPTION: the owner chat's interpreter stays unmetered (what ships), rather th
 - Checked and left as is: no other path reads the records (no operation lists the audit log or the `chat-budget`/`chat-spend` aggregates); the meeting steward's "daily cap" is `meeting.decision.maxPolicyWideningPerDay`, not this cap; a cap below today's count refuses every new metered call and in-flight calls still count (overshoot by their own size, documented); a call that ends after midnight UTC counts toward the new day.
 
 ASSUMPTION: no `expectedRevision` on `chat.budget.set` (last write wins) is acceptable: the value is absolute, not a change relative to a read, every set is shown to the owner with its exact number first and audited, so two owner sessions cannot lose an update the owner did not see; the last yes is the owner's latest instruction.
+
+### CI platform repair: Windows meeting-floor test (run 43794149449, sha 16ef7406)
+
+Two jobs of 18 failed, both on Windows shard 2 (Node 22.19.0 and Node 24.21.0). In both, the same test failed on SQLite on a worker thread and on PostgreSQL: `floor-unify-review.test.ts`, "a revision turn answered as an inquiry opens is set aside ...". The reported error was an `unhandledRejection` saying "the storage is closed".
+
+**Cause: a test bug, not a product bug.**
+- The test started a `drive` without waiting for it, then polled for the model's revision call for a fixed 20,000 event-loop turns. The drive first takes two more ballots before it asks for the revision.
+- The reference store and SQLite finish each storage step without giving up the event loop, so the wait took 1 turn. Storage on a worker thread or over a socket gives up the event loop on every step. On Linux the wait took 8,293 turns on the worker backend and 3,802 on PostgreSQL; a second run on a busier machine took 2,844 and 6,669, so the count follows machine load. On the Windows runners it went past 20,000.
+- When the wait gave up, it failed the test. The suite's `finally` then closed the storage while the drive was still taking a ballot. That drive's storage-closed rejection reached Node's test runner before the test's own failure did, and the runner keeps only the first error, so it hid the real one.
+- Evidence:
+  - The CI stack is the ballot branch of the procedure's `#voting` (`procedure.js:572/573` = `#rec`/`#save` after a cast), not the revision branch. So the body had ended before the revision was asked, and the only code in that window is the wait.
+  - The async stack ends at `MeetingFloorService.drive` with no test frame, which is the un-awaited drive.
+  - A small node test shows the runner reports a late rejection that lands during `finally` in place of an earlier assertion failure.
+  - The log's timestamps are one flush (all 03:10:30.85), so they cannot order events.
+
+**Fix:**
+- The floor test harness's `Script.until(what, match, running)` waits on the model call itself. If the drive or advance it was given ends first without making that call, it fails at once. There is no turn budget.
+- The test, and the same pattern in `floor-review.test.ts` (an inquiry opened while a ballot is being answered: 2,457 turns on PostgreSQL), now always release the gate and wait for their background run to settle before the test can end. A failure is therefore reported as itself, and nothing runs against the closed storage.
+
+**Regression test:** the same scenario runs again on all four backends with every ballot turn held for 25,000 event-loop turns, which is more than the old budget.
+- With the old wait, it fails on all four backends. The stray drive then rejects with "storage could not complete the request: the storage is closed", the CI error.
+- With the fix, it passes.
+
+- Not done: `floor.test.ts` keeps its own 30-second wall-clock poll (`setTimeout` 5 ms). It is not tied to a turn count and did not fail. Its two waits could also move to `until`. Its two background runs already carry a `.catch`, so a teardown error cannot hide a failure there, and the calls they wait behind never return, so nothing writes after the test. No other meetings or `api/start-meeting*` test waits on a count of event-loop turns.
+
+**Review (Opus):** the diagnosis was checked against the log and the code. `procedure.ts`, `floor.ts` and `runner.ts` are unchanged since 16ef7406, and lines 572/573 of the built `procedure.js` are the ballot branch, so the drive was still on a ballot when the storage closed. `drive` awaits each step and starts no background work, so no late write can come from a drive that was awaited. Only an un-awaited drive whose test had already ended explains the stack, and the only code that can fail in that window is the wait. Only the two backends that give up the event loop failed, on both Node versions, which matches. A probe with the old wait showed the stray drive rejecting with the CI error on all four backends about 200 ms after the wait failed. On Linux that lands after the test's own failure; in CI it landed during the suite's `close`. Added a storage-free test of `Script.until`: a call already made, a later matching call, a run that ends without the call, and a run that fails. With the fail-fast branch removed it fails at once instead of hanging.
+- ASSUMPTION: the regression test simulates the slow storage by holding the scripted model's ballot turns, not by slowing the storage itself. The effect on the wait is the same, and it runs the same way on every backend and machine.

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { stopServer } from "../domain/testing/backends.js";
 import { TurnWaitsOnTool } from "./floor.js";
-import type { FloorBody } from "./floor-types.js";
-import { floorSuite, type FloorWorld } from "./floor-suite.js";
+import type { FloorBody, TurnRequest } from "./floor-types.js";
+import { floorSuite, Script, type FloorWorld } from "./floor-suite.js";
 import { MeetingProcedureService } from "./procedure.js";
 import type { DecisionRecordBody, MotionBody } from "./record-types.js";
 
@@ -23,10 +23,6 @@ const decisionOf = async (w: FloorWorld, motionId: string): Promise<DecisionReco
 const untilVoteOpen = async (w: FloorWorld, rec: string, motionId: string): Promise<void> => {
   for (let i = 0; i < 200; i += 1) { if ((await motionOf(w, motionId)).state === "voting") return; await w.floor.advance(w.service, { recordId: rec }); }
   assert.fail("the vote never opened");
-};
-const waitFor = async (what: string, ok: () => boolean | Promise<boolean>): Promise<void> => {
-  for (let i = 0; i < 20_000; i += 1) { if (await ok()) return; await new Promise<void>((r) => setImmediate(r)); }
-  assert.fail(`never became true: ${what}`);
 };
 const setProject = async (w: FloorWorld, state: "archived" | "active"): Promise<void> => {
   await w.projects.updateProject({ commandId: cid("ps"), actor: w.owner.id, projectId: w.project, expectedRevision: (await w.projects.getProject(w.project))!.revision, state } as never);
@@ -66,13 +62,22 @@ floorSuite(test, "a voter whose ballot turn waits on a tool is not named to the 
   assert.equal(((await w.floor.waiting(w.owner, rec)) as { who?: string }).who, asked, "the owner sees who it waits on");
 });
 
-floorSuite(test, "a revision turn answered as an inquiry opens is set aside and offered again when the vote resumes, not taken from what was said before", async (w) => {
+/**
+ * The revision-turn scenario. `slowBallotTurns` holds every ballot turn for that many event-loop turns before it answers, the way storage on a worker thread or over a socket stretches each step on a slow machine. Windows CI
+ * (run 43794149449) took the drive's two other ballots past the fixed 20,000 turns an earlier wait allowed: the wait gave up, the world's storage was closed under the drive still running, and that drive's storage-closed rejection
+ * was reported in place of the wait's own failure. The test now waits on the revision call itself, and the drive it starts is always settled before the test ends.
+ */
+const revisionSetAside = async (w: FloorWorld, o: { slowBallotTurns?: number } = {}): Promise<void> => {
   const { rec } = await w.meet();
   const motionId = await start(w, rec);
   await untilVoteOpen(w, rec, motionId);
   await w.floor.advance(w.service, { recordId: rec }); // the first ballot
   const first = w.script.of("ballot")[0]!.agent;
   await w.procedure.ownerMessage(w.owner, { commandId: cid("om"), recordId: rec, text: "Please also think about the backup window before you settle." });
+  if (o.slowBallotTurns !== undefined) {
+    const turns = o.slowBallotTurns;
+    w.script.on(async (r) => { if (r.kind === "ballot") for (let i = 0; i < turns; i += 1) await new Promise<void>((s) => setImmediate(s)); return undefined; });
+  }
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
   let gated = false;
@@ -82,11 +87,18 @@ floorSuite(test, "a revision turn answered as an inquiry opens is set aside and 
     return { text: "VOTE: yes\nREASON: still fine after the owner's questions.", usage: { visibleTokens: 10, hiddenTokens: 0 } };
   });
   const pending = w.floor.drive(w.service, { recordId: rec });
-  await waitFor("the revision turn is being asked", () => w.script.of("revision").length === 1);
-  assert.equal(w.script.of("revision")[0]!.agent, first);
-  assert.equal((await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec })).voteHeld, true);
-  release();
-  const held = await pending;
+  let held: Awaited<typeof pending>;
+  try {
+    const asked = await w.script.until("the revision turn is being asked", (r) => r.kind === "revision", pending);
+    assert.equal(asked.agent, first);
+    assert.equal((await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec })).voteHeld, true);
+    release();
+    held = await pending;
+  } finally {
+    // A failure above must not leave the drive running into the storage the suite then closes: its rejection would be reported instead of the failure.
+    release();
+    await pending.catch(() => undefined);
+  }
   assert.equal("waiting" in held.last && held.last.waiting, "owner", JSON.stringify(held));
   await w.floor.endInquiry(w.owner, { commandId: cid("ie"), recordId: rec });
   await w.floor.drive(w.service, { recordId: rec });
@@ -94,6 +106,28 @@ floorSuite(test, "a revision turn answered as an inquiry opens is set aside and 
   assert.equal((await motionOf(w, motionId)).state, "adopted", "the answer given after the inquiry is the one that counts");
   const table = (await decisionOf(w, motionId)).table as unknown as { voter?: string; agent?: string; value?: string }[];
   assert.equal(JSON.stringify(table).includes("said before the inquiry"), false, "the set-aside answer was never cast");
+};
+
+floorSuite(test, "a revision turn answered as an inquiry opens is set aside and offered again when the vote resumes, not taken from what was said before", async (w) => revisionSetAside(w));
+
+floorSuite(test, "the revision-turn wait holds however long the ballots before it take: each ballot held past 20,000 event-loop turns (as slow storage on Windows CI did), the revision is still awaited and nothing runs after the test", async (w) => revisionSetAside(w, { slowBallotTurns: 25_000 }));
+
+// The harness wait itself, without storage: it never hangs when the run it watches ends without the call (the time limit only turns a regression into a failure instead of a ten-minute wait).
+test("Script.until: a call already made or made later resolves it; a run that ends or fails without the call fails it at once", { timeout: 60_000 }, async () => {
+  const s = new Script();
+  s.on(() => ({ text: "ok", usage: { visibleTokens: 1, hiddenTokens: 0 } }));
+  const call = (kind: TurnRequest["kind"], agent: string): Promise<unknown> => s.turn({ kind, agent, recordId: "r", prompt: [] as never, maxVisibleTokens: 1, maxHiddenTokens: 1, signal: new AbortController().signal });
+  await call("ballot", "a");
+  assert.equal((await s.until("a ballot", (r) => r.kind === "ballot", new Promise(() => undefined))).agent, "a", "a call already made");
+  let finish!: () => void;
+  const run = new Promise<void>((r) => { finish = r; });
+  const later = s.until("b's revision", (r) => r.kind === "revision" && r.agent === "b", run);
+  await call("revision", "c");
+  await call("revision", "b");
+  assert.equal((await later).agent, "b", "a later call that matches, not an earlier one that does not");
+  finish();
+  await assert.rejects(s.until("a statement", (r) => r.kind === "statement", run), /never became true: a statement \(the run ended without it\)/);
+  await assert.rejects(s.until("a statement", (r) => r.kind === "statement", Promise.reject(new Error("the drive failed"))), /the drive failed/);
 });
 
 floorSuite(test, "an inquiry that holds the vote just as a ballot is cast sets the ballot aside: the voter is asked again, never recorded as giving no ballot", async (w) => {
