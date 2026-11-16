@@ -73,6 +73,7 @@ import type { MeetingProcedureService } from "../meetings/procedure.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { CoordinatorService } from "../chat/coordinator.js";
+import type { ChatSpendService } from "../chat/routed-model.js";
 import type { StandupService } from "../standups/standups.js";
 import type { ActivityService } from "../activity/activity.js";
 import type { ReplayService } from "../activity/replay.js";
@@ -182,6 +183,7 @@ export interface StateApiDeps {
   readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
   readonly recoveryStep?: Pick<StallService, "recover">;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
+  readonly chatSpend?: Pick<ChatSpendService, "view" | "setBudget">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked. */
@@ -405,6 +407,7 @@ export class StateApi {
         ...(this.#deps.approvals === undefined ? {} : { approvals: this.#deps.approvals }),
         ...(this.#deps.admin === undefined ? {} : { admin: this.#deps.admin }),
         ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
+        ...(this.#deps.chatSpend === undefined ? {} : { chatSpend: this.#deps.chatSpend }),
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),
         ...(this.#deps.coordinator === undefined ? {} : { coordinator: this.#deps.coordinator }),

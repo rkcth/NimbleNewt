@@ -270,7 +270,7 @@ export interface MaintenanceApplier {
 /** The applier used when none is wired: nothing can be applied safely, so approved changes wait. */
 export const noApplier: MaintenanceApplier = { apply: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }), revert: async () => ({ outcome: "unsupported", reason: "no environment applier is wired into this controller" }) };
 
-export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor"; readonly supervisorId?: string }
+export interface MaintenanceNotice { readonly maintenanceId: string; readonly agentId: string; readonly kind: MaintenanceKind; readonly class: MaintenanceClass; readonly to: "owner" | "supervisor" | "administrator"; readonly supervisorId?: string; /** Set when `to` is "administrator": the named administrator this notice is for (one notice per administrator per request). */ readonly administratorId?: string; /** Set on the owner's notice of a protected request: the named administrators who may decide it too (judged as the decision judges them, at the time of the request). */ readonly administratorIds?: readonly string[] }
 
 export interface MaintenanceOptions {
   readonly applier?: MaintenanceApplier; readonly notify?: (n: MaintenanceNotice) => Promise<void>;
@@ -360,7 +360,14 @@ export class MaintenanceService {
       return { found, body, readable: true, eff: { requests: body?.requests ?? true, bosses: body?.bosses ?? profile !== "strict", rules: body?.rules ?? true, bossKinds: body?.bossKinds ?? [], administrators: body?.administrators ?? [], leaseMs: (body?.leaseMinutes ?? MAINTENANCE_LIMITS.leaseMs / 60_000) * 60_000, ...limitsOf(body) } };
     } catch { return { found: undefined, body: undefined, readable: false, eff: { requests: true, bosses: false, rules: false, bossKinds: [], administrators: [], leaseMs: MAINTENANCE_LIMITS.leaseMs, ...limitsOf(undefined) } }; }
   }
-  async #agent(id: string): Promise<{ state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined> { return (await this.#runner.get("agent", id.slice("agent:".length)))?.body as unknown as { state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined; }
+  /** Reads an agent record; when `reads` is given the first revision read is kept in it (by agent key), so a later write can check that none of the records a judgement rested on has changed. */
+  async #agent(id: string, reads?: Map<string, number>): Promise<{ state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined> {
+    const key = id.slice("agent:".length);
+    const found = await this.#runner.get("agent", key);
+    // The first revision read is kept: a record read twice in one judgement (the requester as the request's agent, then in its line) that changed in between fails the check, as the first read was judged too.
+    if (reads !== undefined && found !== undefined && !reads.has(key)) reads.set(key, found.revision);
+    return found?.body as unknown as { state?: string; supervisorId?: string; createdBy?: string; supervisorSetBy?: string } | undefined;
+  }
   async #isSupervisorOf(by: Principal, agentId: string): Promise<boolean> {
     if (by.kind !== "agent" || !by.id.startsWith("agent:") || by.id === agentId) return false;
     const me = await this.#agent(by.id);
@@ -393,11 +400,11 @@ export class MaintenanceService {
    * Whether the decider is the requester's own hand: whoever the decider was created by (and by whom those were created, bounded) is the requester, someone the requester controls, or whoever made the requester or chose its supervisor.
    * A puppet decides nothing for the one that made it.
    */
-  async #madeByRequesterSide(deciderId: string, b: MaintenanceBody, target: { createdBy?: string; supervisorSetBy?: string } | undefined): Promise<boolean> {
+  async #madeByRequesterSide(deciderId: string, b: MaintenanceBody, target: { createdBy?: string; supervisorSetBy?: string } | undefined, reads?: Map<string, number>): Promise<boolean> {
     const requester = b.agentId.startsWith("agent:") ? b.agentId : `agent:${b.agentId}`;
     const madeBy = new Set<string>();
     for (let at: string | undefined = deciderId, hops = 0; at !== undefined && hops < 6; hops++) {
-      const creator: string | undefined = (await this.#agent(at))?.createdBy;
+      const creator: string | undefined = (await this.#agent(at, reads))?.createdBy;
       if (creator === undefined || madeBy.has(creator)) break;
       madeBy.add(creator);
       at = creator.startsWith("agent:") ? creator : undefined;
@@ -405,7 +412,7 @@ export class MaintenanceService {
     for (const creator of madeBy) {
       if (creator === requester) return true;
       if (creator.startsWith("agent:")) {
-        const c = await this.#agent(creator);
+        const c = await this.#agent(creator, reads);
         if (c?.supervisorId !== undefined && `agent:${c.supervisorId}` === requester) return true;
         if (target !== undefined && (creator === target.createdBy || creator === target.supervisorSetBy)) return true;
       }
@@ -416,32 +423,32 @@ export class MaintenanceService {
    * Whether `by` may decide this protected request as an administrator: the owner named it (`administrators`), it is an active agent no pause, suspend or stop gate holds (fail closed), it is not a task credential, it is not the requester,
    * it is not the requester's own hand (it did not create the requester or choose its supervisor, and nobody the requester controls made it), and it is not in the requester's line of management either way (its team). The supervisor role plays no part.
    */
-  async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective): Promise<boolean> {
+  async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, reads?: Map<string, number>): Promise<boolean> {
     if (b.class !== "protected" || by.kind !== "agent" || by.taskScope !== undefined || !by.id.startsWith("agent:") || !eff.administrators.includes(by.id)) return false;
     if (by.id === b.agentId || by.id === b.requestedBy) return false;
-    if ((await this.#agent(by.id))?.state !== "active") return false;
+    if ((await this.#agent(by.id, reads))?.state !== "active") return false;
     if (this.#options.held !== undefined) { let held = true; try { held = await this.#options.held(by.id.slice("agent:".length)); } catch { held = true; } if (held) return false; }
-    const target = await this.#agent(b.agentId);
+    const target = await this.#agent(b.agentId, reads);
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // Not its own team either: an administrator above the requester (its supervisor, or further up by supervisor or creator) would approve what it can direct the requester to ask for, and one below the requester is directed by it.
     const requesters = [b.agentId, ...(b.requestedBy.startsWith("agent:") && b.requestedBy !== b.agentId ? [b.requestedBy] : [])];
     // A line of management longer or wider than the bound is not read to its end, so whether the administrator stands in it is unknown: that is refused (the owner decides), never taken as "not its team".
-    for (const r of requesters) { const up = await this.#upline(r); if (!up.complete || up.seen.has(by.id)) return false; }
-    const mine = await this.#upline(by.id);
+    for (const r of requesters) { const up = await this.#upline(r, reads); if (!up.complete || up.seen.has(by.id)) return false; }
+    const mine = await this.#upline(by.id, reads);
     if (!mine.complete || requesters.some((r) => mine.seen.has(r))) return false;
-    return !(await this.#madeByRequesterSide(by.id, b, target));
+    return !(await this.#madeByRequesterSide(by.id, b, target, reads));
   }
   /**
    * The agents above `agentId` in its line of management: its supervisor and whoever created it, and theirs, bounded (at most 6 steps and 32 agents). A step whose record is missing ends that branch; a cycle ends where it meets an agent already seen.
    * `complete` is false when an agent lies beyond the bound (a seventh step, or a 33rd agent): the caller then cannot say who is not in the line.
    */
-  async #upline(agentId: string): Promise<{ seen: Set<string>; complete: boolean }> {
+  async #upline(agentId: string, reads?: Map<string, number>): Promise<{ seen: Set<string>; complete: boolean }> {
     const seen = new Set<string>();
     let frontier = [agentId];
     for (let hops = 0; frontier.length > 0; hops++) {
       const next: string[] = [];
       for (const at of frontier) {
-        const a = await this.#agent(at);
+        const a = await this.#agent(at, reads);
         for (const up of [a?.supervisorId === undefined ? undefined : `agent:${a.supervisorId}`, a?.createdBy]) {
           if (up === undefined || !up.startsWith("agent:") || up === agentId || seen.has(up)) continue;
           if (hops >= 6 || seen.size >= 32) return { seen, complete: false };
@@ -579,6 +586,7 @@ export class MaintenanceService {
     const id = derivedId("mnt", commandId);
     const ref: AggregateRef = { kind: REQ, id };
     let notice: MaintenanceNotice | undefined;
+    let protectedBody: MaintenanceBody | undefined;
     let standingUsed: string[] = [];
     const result = await this.#runner.command("maintenance.request", { commandId, actor: by.id }, async () => ({
       payload: { agentId, kind, spec, reason, rollbackPlan: rollbackPlan ?? null },
@@ -603,6 +611,7 @@ export class MaintenanceService {
           if (s.eff.pendingPerAgent !== undefined && open >= s.eff.pendingPerAgent) throw new DomainError("invalid_command", `${agentId} already has ${open} requests waiting for a decision; wait for them to be decided or withdraw some`, { field: "agentId" });
           changes.push(idx === undefined ? { type: "create", ref: { kind: OPEN, id: openKey(agentId) }, body: { open: open + 1 } } : { type: "update", ref: { kind: OPEN, id: openKey(agentId) }, expectedRevision: idx.revision, body: { open: open + 1 } });
           body = { ...base, status: "pending" };
+          if (cls === "protected") protectedBody = body;
           const toBoss = cls !== "protected" && s.eff.bosses && s.eff.bossKinds.includes(kind) && agent.supervisorId !== undefined;
           notice = { maintenanceId: id, agentId, kind, class: cls, to: toBoss ? "supervisor" : "owner", ...(toBoss ? { supervisorId: `agent:${agent.supervisorId}` } : {}) };
         }
@@ -611,7 +620,16 @@ export class MaintenanceService {
         return { ref, creates: true, changes, detail: { agentId, kind, class: cls, status: body.status, specDigest, ...(auto === undefined ? {} : { rule: auto.rule }) }, contention: async () => new DomainError("stale_revision", "another request of this agent was made at the same moment; ask again") };
       },
     }));
-    if (!result.replayed && notice !== undefined && this.#notify !== undefined) await this.#notify(notice).catch(() => undefined);
+    // Each administrator the owner named who could decide this request (the decision's own check: not the requester, not one held, inactive or in the requester's team) is judged first, so the owner's
+    // notice can name them, and is then told once. Judging one that fails (a read error) leaves that one out and goes on; a failed notice never fails the request.
+    const admins: string[] = [];
+    if (!result.replayed && protectedBody !== undefined && this.#notify !== undefined) {
+      let eff: MaintenanceEffective | undefined;
+      try { eff = (await this.#settings()).eff; } catch { eff = undefined; }
+      for (const adminId of eff?.administrators ?? []) { try { if (await this.#adminFor({ id: adminId, kind: "agent" } as Principal, protectedBody, eff!)) admins.push(adminId); } catch { /* not named; it finds the request by listing */ } }
+    }
+    if (!result.replayed && notice !== undefined && this.#notify !== undefined) await this.#notify(admins.length === 0 ? notice : { ...notice, administratorIds: admins }).catch(() => undefined);
+    for (const adminId of admins) await this.#notify!({ maintenanceId: id, agentId, kind, class: cls, to: "administrator", administratorId: adminId }).catch(() => undefined);
     // The owner's standing permission approved this request, so it was used (card A07h): a grant with an idle window starts its window again (the grant the approval rests on, and those its chain rests on).
     if (!result.replayed && standingUsed.length > 0) await recordGrantUse(this.#runner, "service:dispatcher", standingUsed, this.#runner.now()).catch(() => undefined);
     const a = await this.#runner.get(REQ, id);
@@ -819,7 +837,12 @@ export class MaintenanceService {
     if (b.kind === "network" && s.readable && siteRule(s.body?.sites, b.spec["site"] as string, b.spec["port"] as number) === "deny") return { standing: "denied", guard: [] };
     const d = b.decision;
     if (d === undefined || d.verdict !== "approve" || d.specDigest !== b.specDigest || sha({ agentId: b.agentId, kind: b.kind, spec: b.spec, rollbackPlan: b.rollbackPlan ?? null }) !== b.specDigest) return { standing: "lapsed", guard: [] };
-    if (d.via === "administrator") return { standing: b.class === "protected" && await this.#adminFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed", guard: [] };
+    if (d.via === "administrator") {
+      // The agent records the judgement read (the administrator, the requester, their supervisors and creators) fence the claim: a supervisor or creator changed between this check and the claim fails the claim, and the loop judges again.
+      const reads = new Map<string, number>();
+      const ok = b.class === "protected" && await this.#adminFor({ id: d.by, kind: "agent" } as Principal, b, s.eff, reads);
+      return { standing: ok ? "ok" : "lapsed", guard: ok ? [...reads].map(([id, rev]): Change => ({ type: "check", ref: { kind: "agent", id }, expectedRevision: rev })) : [] };
+    }
     if (d.via === "supervisor") return { standing: await this.#bossFor({ id: d.by, kind: "agent" } as Principal, b, s.eff) ? "ok" : "lapsed", guard: [] };
     // A rule approval is judged again; a standing permission also fences the claim with the grant records it rests on, so a revocation written between this check and the claim fails the claim.
     if (d.via === "rule") { const again = await this.#autoDecision(b.agentId, b.kind, b.class, b.spec, s, this.#runner.now()); return again?.verdict === "approve" && again.rule === d.rule ? { standing: "ok", guard: again.guard ?? [] } : { standing: "lapsed", guard: [] }; }

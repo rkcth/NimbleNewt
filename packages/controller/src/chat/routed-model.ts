@@ -16,7 +16,8 @@ import type { ModelCall, ModelReply } from "./model-interpreter.js";
  * - **Routes come from the routing table** (R01), by role, in the table's order, and only the routes the table lets this call use (data may leave the installation only if the owner said so; paid routes only if spending is authorized).
  * - **Failures are classified and acted on** (R02): a credit or authentication failure blocks that provider's routes until the owner changes something (a restart clears it); a rate limit blocks the route for a minute and an outage for five;
  *   anything else fails that route for that call alone. A blocked route is skipped without being asked, and every route failing means the chat is unavailable and nothing was done.
- * - **A cumulative budget is respected**: the owner may cap the tokens the chat and coordinator use in a UTC day; at the cap no call is made (the chat says it is unavailable) until the next day. The count is the provider's own, recorded after each
+ * - **A cumulative budget is respected** when the guard is given a `ChatSpendService`: the owner may cap the tokens such calls use in a UTC day; at the cap no call is made until the next day. The shipped controller meters only
+ *   its reviewing agents (resume reviewer, report interrogator); the owner chat's interpreter is deliberately not metered, so a cap can never stop the owner from changing it by chat (T2). The count is the provider's own, recorded after each
  *   call; calls in flight together can overshoot by their own size.
  * - **No effects.** These calls carry no tools and change nothing, so trying another route repeats nothing and R02's rule against repeating an effect has nothing to protect here.
  */
@@ -49,7 +50,7 @@ export interface GuardOptions {
   readonly onSpendFailure?: (error: unknown) => void;
 }
 
-/** A `ModelCall` that skips blocked routes, blocks a route after the failure it classifies, and keeps within the chat's token budget. */
+/** A `ModelCall` that skips blocked routes, blocks a route after the failure it classifies, and, when given a spend service, keeps within the owner's daily cap on the controller's own model calls. */
 export class GuardedModelCall implements ModelCall {
   readonly #inner: ModelCall;
   readonly #o: GuardOptions;
@@ -82,7 +83,7 @@ export class GuardedModelCall implements ModelCall {
     if (why !== undefined) throw new Error(`blocked: ${why}`);
     if (this.#o.spend !== undefined) {
       const room = await this.#o.spend.allow();
-      if (!room.allowed) throw new Error(`budget: the chat's token budget for today (${room.cap}) is used`);
+      if (!room.allowed) throw new Error(`budget: the daily cap on the controller's own model calls (${room.cap} tokens) is reached for today (UTC); the owner chat is not under it`);
     }
     let reply: ModelReply;
     try {
@@ -105,10 +106,12 @@ export class GuardedModelCall implements ModelCall {
 
 export interface ChatBudgetBody { readonly maxTokensPerDay?: number; readonly setBy: string; readonly at: string }
 export interface ChatSpendBody { readonly day: string; readonly tokens: number; readonly calls: number }
+/** What `chat.budget.get` answers: the owner's cap (or `null`), today's UTC day, the provider-counted tokens and calls so far, and what is left under the cap. */
+export interface ChatBudgetView { readonly maxTokensPerDay: number | null; readonly setBy?: string; readonly setAt?: string; readonly day: string; readonly tokens: number; readonly calls: number; readonly remaining: number | null }
 export const CHAT_BUDGET_LIMITS = { maxTokensPerDay: 1_000_000_000 } as const;
 const BUDGET_REF: AggregateRef = { kind: "chat-budget", id: "chat-budget" };
 
-/** The owner's cap on the tokens the chat and the coordinator use in a UTC day, and the day's count. */
+/** The owner's cap on the tokens the metered model calls (in the shipped controller: the reviewing agents) use in a UTC day, and the day's count. */
 export class ChatSpendService {
   readonly #runner: CommandRunner;
   readonly #now: () => string;
@@ -134,6 +137,21 @@ export class ChatSpendService {
       },
     })));
     return { replayed: r.replayed };
+  }
+
+  /**
+   * What the owner reads: the cap in force, who set it and when, and today's count. Owner only, never from a task credential.
+   * `maxTokensPerDay` is `null` when there is no cap; `remaining` is `null` then too, and never below 0.
+   */
+  async view(owner: Principal): Promise<ChatBudgetView> {
+    if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads the chat budget");
+    const budget = await this.budget();
+    const { day, ref } = this.#dayId();
+    const found = await this.#runner.get(ref.kind, ref.id);
+    const spent = found === undefined ? undefined : (found.body as unknown as ChatSpendBody);
+    const cap = budget?.maxTokensPerDay ?? null;
+    const tokens = spent?.tokens ?? 0;
+    return { maxTokensPerDay: cap, ...(budget === undefined ? {} : { setBy: budget.setBy, setAt: budget.at }), day, tokens, calls: spent?.calls ?? 0, remaining: cap === null ? null : Math.max(0, cap - tokens) };
   }
 
   async budget(): Promise<ChatBudgetBody | undefined> {

@@ -91,7 +91,7 @@ for (const backend of backends) {
       assert.equal(await spend.used(), 100, "a reply with no usage adds nothing");
       await g.complete("local/a", ask);
       assert.equal(await spend.used(), 200);
-      await assert.rejects(() => g.complete("local/a", ask), /budget: the chat's token budget for today \(150\) is used/);
+      await assert.rejects(() => g.complete("local/a", ask), /budget: the daily cap on the controller's own model calls \(150 tokens\) is reached/);
       assert.equal(model.asked.length, 3, "at the cap no call is made");
       day = "2026-10-27T00:00:00.000Z";
       assert.equal((await spend.allow()).allowed, true, "a new UTC day");
