@@ -17,7 +17,7 @@ export interface PlatformSupport {
 }
 
 export const SUPPORTED_ENVIRONMENT = {
-  node: { minimum: "22.19.0", evidence: "Node 22.19.0 and 24.21.0 pass CI on every push" },
+  node: { minimum: "22.19.0", evidence: "Node 22.19.0 (Linux) passes CI on every push to main and every pull request; 22.19.0 and 24.21.0 pass the exhaustive and QA runs on Linux, macOS and Windows" },
   postgres: { minimumMajor: 17, evidence: "PostgreSQL 17 and 18 pass the full suites on Linux, macOS and Windows (card F04g); 14 to 16 also pass but are not claimed" },
   platforms: [
     { platform: "linux", arch: "x64", name: "Linux x64", evidence: "GitHub-hosted Ubuntu runner (kernel 6.17) and the development server (Ubuntu 26.04, kernel 7.0)" },
