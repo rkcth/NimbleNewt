@@ -76,7 +76,8 @@ test("through the running controller: a provider outage is listed only for a res
 
 test("through the running controller: stopping a task that carries a responsibility's check notes that responsibility, and a note that cannot be written does not cost the task its lifecycle entry (T3 second review)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-t3p04-task-"));
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+  const printed: string[] = [];
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: (line: string) => { printed.push(line); }, facts: supported, filesystem: ext4, features: [], harnesses: [] });
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const owner = await c.services.principals.authenticate(boot.token);
@@ -106,6 +107,7 @@ test("through the running controller: stopping a task that carries a responsibil
     assert.equal(first[0]!.by, "service:stop-notes");
     assert.equal((await lifecycle(taskA)).length, 1);
     assert.equal((await notes(duty2)).length, 0, "the other task's responsibility is not noted");
+    assert.equal(printed.filter((l) => /note on the affected responsibilities/.test(l)).length, 0, "nothing is logged when the note is written");
 
     // The note cannot be written this time: the stop still ends, and the task still gets its lifecycle entry.
     const record = c.services.responsibilities.record.bind(c.services.responsibilities);
@@ -116,5 +118,7 @@ test("through the running controller: stopping a task that carries a responsibil
     } finally { c.services.responsibilities.record = record; }
     assert.equal((await notes(duty2)).length, 0, "no note was written");
     assert.ok((await lifecycle(taskB)).some((x) => /Suspension suspended/.test(x.summary)), "the lifecycle entry is written although the note failed");
+    // The stop swallows the failure (best effort), so the operator log is where it shows (T3 third check).
+    assert.ok(printed.some((l) => l.startsWith("A Suspend finished") && l.includes("could not all be written (the history could not be written)") && l.endsWith("was suspended.")), JSON.stringify(printed.slice(-3)));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
