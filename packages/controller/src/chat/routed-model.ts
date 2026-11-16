@@ -50,7 +50,7 @@ export interface GuardOptions {
   readonly onSpendFailure?: (error: unknown) => void;
 }
 
-/** A `ModelCall` that skips blocked routes, blocks a route after the failure it classifies, and keeps within the chat's token budget. */
+/** A `ModelCall` that skips blocked routes, blocks a route after the failure it classifies, and, when given a spend service, keeps within the owner's daily cap on the controller's own model calls. */
 export class GuardedModelCall implements ModelCall {
   readonly #inner: ModelCall;
   readonly #o: GuardOptions;
@@ -83,7 +83,7 @@ export class GuardedModelCall implements ModelCall {
     if (why !== undefined) throw new Error(`blocked: ${why}`);
     if (this.#o.spend !== undefined) {
       const room = await this.#o.spend.allow();
-      if (!room.allowed) throw new Error(`budget: the chat's token budget for today (${room.cap}) is used`);
+      if (!room.allowed) throw new Error(`budget: the daily cap on the controller's own model calls (${room.cap} tokens) is reached for today (UTC); the owner chat is not under it`);
     }
     let reply: ModelReply;
     try {

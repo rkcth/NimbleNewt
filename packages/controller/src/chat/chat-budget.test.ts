@@ -5,7 +5,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import type { Principal } from "../security/principals.js";
-import { CHAT_OPS, acceptedArgs } from "./index.js";
+import { CHAT_OPS, acceptedArgs, describe } from "./index.js";
 import { ModelInterpreter, type ModelCall, type ModelReply } from "./model-interpreter.js";
 import { CHAT_BUDGET_LIMITS, ChatSpendService, GuardedModelCall } from "./routed-model.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
@@ -35,6 +35,17 @@ test("the interpreter prompt describes both operations from the tables, and the 
   assert.ok(system.includes(`chat_budget(${kind.keys.join(", ")}) - ${kind.about}`), "the status kind comes from the table");
   for (const words of ["two million", "take the daily token cap off", "how much of today's allowance", "null"]) assert.ok(system.includes(words), words);
   assert.equal(CHAT_OPS["chat.budget.set"]!.mode, "propose", "always shown first");
+  // The line the owner says yes to: the verb whole (not cut), the exact number applied, the same number grouped in words, and null said as removing the cap (never as a cap of nothing).
+  const two = describe("chat.budget.set", { maxTokensPerDay: 2_000_000 }, {});
+  assert.ok(two.startsWith(`${CHAT_OPS["chat.budget.set"]!.verb} (`) && !two.includes("..."), two);
+  assert.match(two, /at most 2,000,000 tokens a UTC day/);
+  assert.match(two, /maxTokensPerDay=2000000$/);
+  assert.match(describe("chat.budget.set", { maxTokensPerDay: 1_000_000_000 }, {}), /at most 1,000,000,000 tokens/);
+  assert.match(describe("chat.budget.set", { maxTokensPerDay: 999 }, {}), /at most 999 tokens/);
+  const off = describe("chat.budget.set", { maxTokensPerDay: null }, {});
+  assert.match(off, /removes the cap: the reviewing agents' model calls have no daily limit/);
+  assert.match(off, /maxTokensPerDay=null$/);
+  assert.doesNotMatch(describe("chat.budget.set", { maxTokensPerDay: 1.5 }, {}), /at most/, "a value the service refuses gets no reading in words");
   assert.ok(OPERATIONS.some((o) => o.name === "chat.budget.get" && o.kind === "query"));
   assert.ok(OPERATIONS.some((o) => o.name === "chat.budget.set" && o.kind === "command"));
 });
@@ -121,7 +132,7 @@ for (const backend of backends) {
     await guard.complete("local/reviewer", { system: "s", user: "u" });
     const mid = (await call(w, w.ownerToken, "chat.budget.get", {})).result.item;
     assert.deepEqual({ tokens: mid.tokens, calls: mid.calls, remaining: mid.remaining }, { tokens: 120, calls: 2, remaining: 0 }, "the API reads what the guard recorded; remaining is never negative");
-    await assert.rejects(guard.complete("local/reviewer", { system: "s", user: "u" }), /budget: the chat's token budget for today \(100\) is used/);
+    await assert.rejects(guard.complete("local/reviewer", { system: "s", user: "u" }), /budget: the daily cap on the controller's own model calls \(100 tokens\) is reached/);
     assert.equal(reviewer.calls, 2, "at the cap the reviewer's route is not called");
     // Raising the cap through the API lets the next call through at once; lowering it below the count stops it again.
     assert.ok((await call(w, w.ownerToken, "chat.budget.set", { maxTokensPerDay: 1000 }, "r-up")).ok);
@@ -192,7 +203,21 @@ for (const backend of backends) {
     const [none] = await submit("is there a daily token cap now?", [ask({ kind: "chat_budget" }, "is there a daily token cap now?")]);
     assert.match(none!.lines!.map((l) => l.text).join("\n"), /There is no daily cap on the tokens/);
 
-    // A number that is not in the owner's words never becomes a cap: an out-of-range value is refused when applied.
+    // The interpreter's number is not compared with the owner's words (numbers never are): what protects the owner is that the proposal shows the exact number, grouped,
+    // and the yes applies exactly that number. Here the model wrote ten times what was said; the owner sees 20,000,000 before agreeing, and that is what is set.
+    const t5 = "Cap your own model use at two million tokens a day.";
+    const [tenfold] = await submit(t5, [say("chat.budget.set", { maxTokensPerDay: 20_000_000 }, t5)]);
+    assert.equal(tenfold!.status, "proposed");
+    assert.match(JSON.stringify(tenfold), /at most 20,000,000 tokens a UTC day/, "the shown number is the one written, not the one the owner said");
+    assert.equal(await cap(), undefined, "nothing is set before the yes");
+    const [tenDone] = await submit("Yes.", [{ kind: "apply_proposal", proposalId: tenfold!.proposalId, evidence: "Yes", basis: "owner" }]);
+    assert.equal(tenDone!.status, "applied", JSON.stringify(tenDone));
+    assert.equal(await cap(), 20_000_000, "the yes applied exactly the number shown");
+    const [offAgain] = await submit("Remove the cap again.", [say("chat.budget.set", { maxTokensPerDay: null }, "Remove the cap again.")]);
+    assert.equal((await submit("Yes, remove it.", [{ kind: "apply_proposal", proposalId: offAgain!.proposalId, evidence: "remove it", basis: "owner" }]))[0]!.status, "applied");
+    assert.equal(await cap(), undefined);
+
+    // An out-of-range value is refused when applied, even after a yes.
     const t4 = "Cap yourself at a very large number of tokens a day.";
     const [huge] = await submit(t4, [say("chat.budget.set", { maxTokensPerDay: 5_000_000_000 }, t4)]);
     assert.equal(huge!.status, "proposed");
