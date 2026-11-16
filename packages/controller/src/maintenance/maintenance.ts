@@ -425,29 +425,32 @@ export class MaintenanceService {
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // Not its own team either: an administrator above the requester (its supervisor, or further up by supervisor or creator) would approve what it can direct the requester to ask for, and one below the requester is directed by it.
     const requesters = [b.agentId, ...(b.requestedBy.startsWith("agent:") && b.requestedBy !== b.agentId ? [b.requestedBy] : [])];
-    for (const r of requesters) if ((await this.#upline(r)).has(by.id)) return false;
+    // A line of management longer or wider than the bound is not read to its end, so whether the administrator stands in it is unknown: that is refused (the owner decides), never taken as "not its team".
+    for (const r of requesters) { const up = await this.#upline(r); if (!up.complete || up.seen.has(by.id)) return false; }
     const mine = await this.#upline(by.id);
-    if (requesters.some((r) => mine.has(r))) return false;
+    if (!mine.complete || requesters.some((r) => mine.seen.has(r))) return false;
     return !(await this.#madeByRequesterSide(by.id, b, target));
   }
   /**
-   * The agents above `agentId` in its line of management: its supervisor and whoever created it, and theirs, bounded (at most 6 steps and 32 agents). An unreadable step ends that branch.
+   * The agents above `agentId` in its line of management: its supervisor and whoever created it, and theirs, bounded (at most 6 steps and 32 agents). A step whose record is missing ends that branch; a cycle ends where it meets an agent already seen.
+   * `complete` is false when an agent lies beyond the bound (a seventh step, or a 33rd agent): the caller then cannot say who is not in the line.
    */
-  async #upline(agentId: string): Promise<Set<string>> {
+  async #upline(agentId: string): Promise<{ seen: Set<string>; complete: boolean }> {
     const seen = new Set<string>();
     let frontier = [agentId];
-    for (let hops = 0; hops < 6 && frontier.length > 0 && seen.size < 32; hops++) {
+    for (let hops = 0; frontier.length > 0; hops++) {
       const next: string[] = [];
       for (const at of frontier) {
         const a = await this.#agent(at);
         for (const up of [a?.supervisorId === undefined ? undefined : `agent:${a.supervisorId}`, a?.createdBy]) {
           if (up === undefined || !up.startsWith("agent:") || up === agentId || seen.has(up)) continue;
+          if (hops >= 6 || seen.size >= 32) return { seen, complete: false };
           seen.add(up); next.push(up);
         }
       }
       frontier = next;
     }
-    return seen;
+    return { seen, complete: true };
   }
   #owner(by: Principal, what: string): void { if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not ${what}`); }
 

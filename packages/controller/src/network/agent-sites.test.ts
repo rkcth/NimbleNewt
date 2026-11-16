@@ -228,6 +228,16 @@ for (const backend of backends) {
     await his.tunnel.write(Buffer.from("b")); await until("the other agent's echo", () => Buffer.concat(his.got).toString() === "b");
     assert.equal(relay.open, 1);
     his.tunnel.close();
+    await until("the other agent's connection closed", () => relay.open === 0);
+    // The task's own grant to the same destination stands apart from the agent's site: a connection opened under it is not closed when the site ends.
+    await c.grants.grant(c.owner, { commandId: cid("g"), taskId: c.ctx.taskId, host: "docs.example.com", port: 443 });
+    await c.sites.allow(REQ(26), ANN, "docs.example.com", 443);
+    const byTask = await c.connect(relay.forAttempt(c.ctx), "docs.example.com");
+    assert.ok((await c.grants.connections(c.owner, c.ctx.taskId)).some((x) => x.host === "docs.example.com" && x.grantId?.startsWith("ngr-") === true), "opened under the task's grant");
+    assert.deepEqual(await c.sites.end(REQ(26), ANN, "docs.example.com", 443), { stillAllowed: false });
+    await byTask.tunnel.write(Buffer.from("t")); await until("the echo under the task's grant", () => Buffer.concat(byTask.got).toString() === "t");
+    assert.equal(relay.open, 1, "the task's connection is still open");
+    byTask.tunnel.close();
   });
 
   suite("a connection kept open under an ended request is still judged at each recheck by the request that remains, and is ended there when that one goes", async (c) => {

@@ -235,6 +235,51 @@ for (const [index, backend] of backends.entries()) {
     });
   });
 
+  test(`a line of management too long or too wide to read to its end is refused rather than taken as unrelated, and a cycle in it neither hangs nor lets the administrator through (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const adm = await w.make("Admin");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
+      const ask = async (p: Principal) => (await request(w, p, "base", { change: `change ${cid("x")}` })).maintenanceId;
+      // A chain of agents each made by the one before, starting from the administrator: six steps and seven steps down.
+      const chain: { id: string; principal: Principal }[] = [];
+      for (let i = 0, up = adm.principal.id; i < 7; i++) { const a = await w.make(`Chain${i}`); await plant(w, a.id, { createdBy: up }); chain.push(a); up = a.principal.id; }
+      { const id = await ask(chain[5]!.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      { const id = await ask(chain[6]!.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      // The same below the administrator: the requester seven steps above it.
+      const top = await w.make("Top");
+      const below: { id: string; principal: Principal }[] = [];
+      for (let i = 0, up = top.principal.id; i < 6; i++) { const a = await w.make(`Below${i}`); await plant(w, a.id, { createdBy: up }); below.push(a); up = a.principal.id; }
+      await plant(w, adm.id, { createdBy: below[5]!.principal.id });
+      { const id = await ask(top.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      await plant(w, adm.id, { createdBy: "owner:rob" });
+      // Supervisor cycles among agents unrelated to the administrator, one back to the requester and one above it: read to their end without hanging, and the administrator decides.
+      const x = await w.make("X"), y = await w.make("Y"), z = await w.make("Z"), q = await w.make("Q");
+      await plant(w, x.id, { supervisorId: y.id }); await plant(w, y.id, { supervisorId: x.id });
+      { const id = await ask(x.principal); assert.equal((await decideBy(w, adm.principal, id)).status, "applied"); }
+      await plant(w, q.id, { supervisorId: z.id }); await plant(w, z.id, { supervisorId: y.id, createdBy: z.principal.id });
+      await plant(w, y.id, { supervisorId: z.id });
+      { const id = await ask(q.principal); assert.equal((await decideBy(w, adm.principal, id)).status, "applied", "a cycle above the requester is read once"); }
+      await plant(w, y.id, { supervisorId: x.id });
+      // A cycle that runs through the administrator is its team.
+      await plant(w, adm.id, { supervisorId: x.id }); await plant(w, y.id, { supervisorId: adm.id });
+      { const id = await ask(x.principal); await refuses("forbidden", () => decideBy(w, adm.principal, id)); }
+      const free = await w.make("Free"); await plant(w, adm.id, { supervisorId: free.id }); await plant(w, y.id, { supervisorId: x.id });
+      // Approved while short, then the chain above the requester grows past the bound before the host takes it: back to waiting.
+      const r = await w.make("R");
+      const one = await ask(r.principal);
+      w.applier.nextApply.push({ outcome: "unsupported", reason: "the host cannot take it now" });
+      assert.equal((await decideBy(w, adm.principal, one)).status, "approved");
+      const asked = w.applier.calls.filter((c) => c.id === one).length;
+      const far: { id: string; principal: Principal }[] = [];
+      for (let i = 0, up = top.principal.id; i < 7; i++) { const a = await w.make(`Far${i}`); await plant(w, a.id, { createdBy: up }); far.push(a); up = a.principal.id; }
+      await plant(w, r.id, { createdBy: far[6]!.principal.id });
+      for (let i = 0; i < 2; i++) { await w.m.tick(); await w.m.resume(); }
+      await w.m.idle();
+      assert.equal((await w.body(one)).status, "pending");
+      assert.equal(w.applier.calls.filter((c) => c.id === one).length, asked, "the applier was not asked again");
+    });
+  });
+
   test(`a review service that is down leaves every change pending while the approved environment keeps working; when it returns it decides each once, and a repeat of its decision applies nothing twice (${backend.name})`, async () => {
     // The in-process review service: it reads what waits as its supervisor principal and decides. Its outage is a stop, a crash between reading and deciding, a pause gate that holds it, and a gate that cannot be read.
     const held = new Set<string>(); let gateBroken = false;
