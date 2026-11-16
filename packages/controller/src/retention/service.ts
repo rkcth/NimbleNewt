@@ -150,6 +150,22 @@ function byKind(removed: readonly string[]): Record<string, number> {
   return out;
 }
 
+/**
+ * What a run record says it removed of each kind (card K06e review): its `removedByKind`, or for a run recorded before that field, the kinds of its listed IDs when the list is the whole of what it removed
+ * (it keeps the first 200). `undefined` when the run does not say, so the owner is told "not recorded" and never a 0 that may be false.
+ */
+function runKinds(b: { removedByKind?: unknown; removed?: unknown; removedCount?: unknown }): Record<string, number> | undefined {
+  const k = b.removedByKind;
+  if (typeof k === "object" && k !== null && !Array.isArray(k)) {
+    const out: Record<string, number> = {};
+    for (const [kind, n] of Object.entries(k)) { if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return undefined; out[kind] = n; }
+    return out;
+  }
+  if (b.removedCount === 0) return {};
+  if (typeof b.removedCount === "number" && Array.isArray(b.removed) && b.removed.length === b.removedCount && b.removed.every((r) => typeof r === "string" && r.indexOf("/") > 0)) return byKind(b.removed as string[]);
+  return undefined;
+}
+
 
 async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) => void, limit = SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
@@ -281,7 +297,7 @@ export class RetentionService {
     if (space !== undefined && space.totalBytes > 0 && space.freeBytes * 10 < space.totalBytes) warnings.push(`the data disk has ${Math.floor((space.freeBytes * 100) / space.totalBytes)}% free`);
     const deletions = (await this.#recent("retention-deletion", 20)).map((a) => ({ id: a.id, ...(a.body as object) }));
     // The last runs of the rules (card K06d): when, by whom, how many records and backups each removed. Counts and IDs only.
-    const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown; removedByKind?: unknown }; return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0, byKind: typeof b.removedByKind === "object" && b.removedByKind !== null && !Array.isArray(b.removedByKind) ? b.removedByKind : {} }; });
+    const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown; removedByKind?: unknown; removed?: unknown }; const kinds = runKinds(b); return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0, ...(kinds === undefined ? {} : { byKind: kinds }) }; });
     const backupList = this.#deps.backups === undefined ? undefined : await this.#deps.backups.list();
     // The newest backup by its time (ties by name), whether it can be trusted, and how many cannot.
     const byNewest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1));
@@ -722,20 +738,46 @@ export class RetentionService {
       // Card K06e, tier "bulk logs": the text of a message one agent sent another (`agent-message`). Only a message the recipient has dealt with is a log: answered, or handled with no deadline. A message still waiting (accepted, delivered), one with a
       // deadline that no reply has met (the escalation reads it), one the deadline list still names, and one a task's replay cites are kept. The age is the record's last change (its answer, or its handling).
       const cutoff = now - values.agentMessageDays * DAY;
-      const old: Aggregate[] = [];
-      if (!(await scan(this.#runner, "agent-message", (a) => {
-        const b = a.body as { state?: unknown; deadline?: unknown };
+      // Only what the rule needs is kept from the scan (a message holds up to 4,000 characters of text, and up to SCAN_LIMIT of them are read).
+      const old: { id: string; revision: number; projectId: string | undefined; updatedAt: string }[] = [];
+      // Review fix (K06e): messages name each other (a reply its request by `replyTo`, a request its reply by `replyId`, a request its escalation by `escalationId`, an escalation its request by `replyTo`).
+      // A message that a kept message names stays, so a reply still waiting to be read never loses the request it answers. Only the IDs are kept.
+      const names = new Map<string, string[]>();
+      const messagesComplete = await scan(this.#runner, "agent-message", (a) => {
+        const b = a.body as { state?: unknown; deadline?: unknown; replyTo?: unknown; replyId?: unknown; escalationId?: unknown; projectId?: unknown };
+        const named = [b.replyTo, b.replyId, b.escalationId].filter((x): x is string => typeof x === "string" && x !== a.id);
+        if (named.length > 0) names.set(a.id, named);
         if (Date.parse(a.updatedAt) >= cutoff) return;
-        if (b.state === "answered" || (b.state === "handled" && b.deadline === undefined)) old.push(a);
-      }))) partial = true;
+        if (b.state === "answered" || (b.state === "handled" && b.deadline === undefined)) old.push({ id: a.id, revision: a.revision, projectId: typeof b.projectId === "string" ? b.projectId : undefined, updatedAt: a.updatedAt });
+      });
+      // A scan cut short may have missed a message that names one it found: on such a view this rule removes nothing (as for stall speeds).
+      if (!messagesComplete) { partial = true; old.length = 0; }
       if (old.length > 0) {
         const listed = new Set(((await this.#runner.get("agent-deadlines", "all"))?.body as { open?: { id?: unknown }[] } | undefined)?.open?.map((o) => o.id) ?? []);
         const material = await RetainedMaterial.build(this.#runner.storage);
+        const own = (id: string): string[] => [...(material.why("agent-message", id) ?? []), ...(listed.has(id) ? ["the list of requests waiting for a reply still names it"] : [])];
+        // Which old messages may go: those with no hold of their own, less (until nothing changes) any that a message staying names.
+        const namedBy = new Map<string, string>();
+        const settle = (free: Set<string>): void => {
+          for (let changed = true; changed;) {
+            changed = false;
+            for (const [from, named] of names) {
+              if (free.has(from)) continue;
+              for (const id of named) if (free.has(id)) { free.delete(id); namedBy.set(id, from); changed = true; }
+            }
+          }
+        };
+        const free = new Set(old.filter((a) => own(a.id).length === 0).map((a) => a.id));
+        settle(free);
+        // The run's cap: the ones past it stay this time, so what they name stays too.
+        const room = Math.max(0, limit - candidates.length);
+        if (free.size > room) { partial = true; const kept = new Set([...free].slice(0, room)); free.clear(); for (const id of kept) free.add(id); settle(free); }
         for (const a of old) {
-          if (candidates.length >= limit) { partial = true; break; }
-          const why = [...(material.why("agent-message", a.id) ?? []), ...(listed.has(a.id) ? ["the list of requests waiting for a reply still names it"] : [])];
+          if (!free.has(a.id) && own(a.id).length === 0 && !namedBy.has(a.id)) continue;
+          const holder = namedBy.get(a.id);
+          const why = [...own(a.id), ...(holder === undefined ? [] : [`the message ${holder}, which is kept, names it`])];
           if (why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "agent-message", id: a.id, reasons: why }); continue; }
-          candidates.push({ kind: "agent-message", id: a.id, revision: a.revision, projectId: typeof (a.body as { projectId?: unknown }).projectId === "string" ? (a.body as { projectId: string }).projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+          candidates.push({ kind: "agent-message", id: a.id, revision: a.revision, projectId: a.projectId, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
         }
       }
     }

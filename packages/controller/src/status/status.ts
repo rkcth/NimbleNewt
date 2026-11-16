@@ -500,9 +500,13 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
   const bulkLogs = Array.isArray(st["bulkLogs"]) ? (st["bulkLogs"] as unknown[]).map(obj).filter((b): b is Record<string, unknown> => b !== undefined && typeof b["kind"] === "string" && typeof b["label"] === "string" && count(b["records"]) !== undefined && count(b["bytes"]) !== undefined) : [];
   const runShown = runs.slice(0, RETENTION_SHOWN.runs);
   const bulkParts: string[] = [];
+  // Review fix (K06e): a run recorded before the per-kind counts (with more removed than it lists) does not say what it removed of each kind; it is not counted as 0, the line says it is not recorded.
+  const recorded = runShown.filter((r) => obj(r["byKind"]) !== undefined);
+  const unrecorded = runShown.length - recorded.length;
   for (const b of bulkLogs.slice(0, RETENTION_SHOWN.bulkLogs)) {
-    const days = count(b["days"]); const gone = runShown.reduce((n, r) => n + (count(obj(r["byKind"])?.[String(b["kind"])]) ?? 0), 0);
-    bulkParts.push(`${shown(String(b["label"]), 60)}: ${count(b["records"])}${b["partial"] === true ? "+" : ""} record(s), ${bytesWord(count(b["bytes"])!)}${b["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}, ${days === undefined ? "kept (no retention is set)" : `removed ${days} days after their last change`}, ${gone} removed by the last ${runShown.length} retention run(s)`);
+    const days = count(b["days"]); const gone = recorded.reduce((n, r) => n + (count(obj(r["byKind"])?.[String(b["kind"])]) ?? 0), 0);
+    const removedPart = unrecorded === 0 ? `${gone} removed by the last ${runShown.length} retention run(s)` : recorded.length === 0 ? `how many of them the last ${runShown.length} retention run(s) removed is not recorded (those runs did not count it by kind)` : `${gone} removed by the last ${recorded.length} retention run(s); ${unrecorded} other run(s) did not record it by kind`;
+    bulkParts.push(`${shown(String(b["label"]), 60)}: ${count(b["records"])}${b["partial"] === true ? "+" : ""} record(s), ${bytesWord(count(b["bytes"])!)}${b["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}, ${days === undefined ? "kept (no retention is set)" : `removed ${days} days after their last change`}, ${removedPart}`);
   }
   if (bulkParts.length > 0) lines.push(line(`Bulk logs, one after the other: ${bulkParts.join(" / ")}.`, settings, ...runShown.map((r) => cite("retention-run", String(r["id"])))));
   const think = obj(st["thinking"]);

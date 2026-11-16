@@ -38,7 +38,7 @@ export interface RetentionValues {
   readonly transcriptDays: number | null;
   /** Bulk log tier (card K06b): the record of each message sent to the owner (`notification-delivery`, which holds the full text of the message) that was delivered is removed this many days after it was delivered. A delivery still waiting or failed (the owner may need it) is never removed, nor are the notices themselves (the inbox items). `null`: kept (default). */
   readonly deliveryLogDays: number | null;
-  /** Bulk log tier (card K06e): the text of a message one agent sent another (`agent-message`) that its recipient has dealt with (handled with no deadline, or answered) is removed this many days after its last change. A message still waiting, one with a deadline that is not answered, and one a task's replay cites stay. `null`: kept (default). */
+  /** Bulk log tier (card K06e): the text of a message one agent sent another (`agent-message`) that its recipient has dealt with (handled with no deadline, or answered) is removed this many days after its last change. A message still waiting, one with a deadline that is not answered, one a task's replay cites and one a kept message names (reply, request or escalation) stay. `null`: kept (default). */
   readonly agentMessageDays: number | null;
   /** The dispatcher runs the retention runner by itself each tick. Off: it runs only when the owner asks. */
   readonly autoRun: boolean;

@@ -99,3 +99,42 @@ for (const backend of backends) {
   scenario("the owner asks how much room the logs and messages use and what retention removed of them; the figures come from the real records and the real runs, every line cites a record, no stored word is repeated (card K06e)", false);
   scenario("with a large installation the answer stays within the lines the chat shows, the bulk-log lines kept and the longer lists shortened with a count (card K06e)", true);
 }
+
+// Review (K06e): runs recorded before the per-kind counts. One whose ID list is whole is counted from the list; one that removed more than it lists does not say what it removed of each kind, and the line says so rather than "0 removed".
+for (const backend of backends) {
+  test(`${backend.name}: a run recorded before the per-kind counts is not told as 0 removed of a bulk log when it does not say (card K06e review)`, async () => {
+    const script: Record<string, unknown> = {};
+    let built: { status: StatusService } | undefined;
+    let cannedBulk: object[] | undefined;
+    const w = await openWorld(backend, script, undefined, (storage, epoch, { assignments, waits, contracts }) => {
+      const settings = RetentionSettingsService.withEpoch(storage, epoch, options);
+      const retention = RetentionService.withEpoch(storage, epoch, { settings, meter: new QuotaMeter(storage), dataDirectory: tmpdir() }, options);
+      const status = StatusService.withEpoch(storage, epoch, { assignments, waits: waits ?? WaitService.withEpoch(storage, epoch, assignments, options), blockers: BlockerService.withEpoch(storage, epoch, options), contracts, retention: { status: async (by) => { const st = await retention.status(by); return cannedBulk === undefined ? st : { ...st, bulkLogs: cannedBulk as never }; }, check: (by, ref) => retention.check(by, ref), settings: async (by) => { const g = await settings.get(by); return { revision: g.revision, settings: { ...g.settings }, effective: { ...g.effective } }; } } }, options);
+      built = { status };
+      return { status, retention };
+    });
+    try {
+      const { status } = built!;
+      const storage = w.world.storage; const epoch = w.projects.epoch;
+      const run = async (id: string, body: object, daysAgo: number): Promise<void> => {
+        const at = new Date(NOW - daysAgo * DAY).toISOString();
+        await storage.applyOperation({ operationId: `put-${id}`, epoch, actor: "test", correlationId: "put", at, changes: [{ type: "create", ref: { kind: "retention-run", id }, body: { at, by: w.owner.id, auto: false, ...body } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      };
+      const lines = async (text: string) => { script[text] = [ask(text)]; const r = await w.chat({ status }).submit(w.ownerToken, { messageId: cid("m"), text }); const o = r.outcomes[0]!; assert.equal(o.status, "answered", JSON.stringify(o)); return o.lines!.map((l) => l.text).join("\n"); };
+      // Only a run that removed 250 and lists 200: what it removed of each kind is not recorded, and the line says so.
+      await run("rrn-cut", { removed: Array.from({ length: 200 }, (_, i) => `notification-delivery/ndl-x${i}`), removedCount: 250 }, 4);
+      const cut = await lines("how much room do the logs use");
+      assert.match(cut, /messages sent to you: 0 record\(s\), 0 bytes, kept \(no retention is set\), how many of them the last 1 retention run\(s\) removed is not recorded/);
+      assert.doesNotMatch(cut, /\d+ removed by the last/, "no figure is given over a run that does not say");
+      // A newer run whose list is whole: it is counted from its IDs, and the line says the other did not record it.
+      await run("rrn-whole", { removed: ["notification-delivery/ndl-1", "notification-delivery/ndl-2"], removedCount: 2 }, 3);
+      const mixed = await lines("how much room do the message logs take now");
+      assert.match(mixed, /messages sent to you: [^/]*, 2 removed by the last 1 retention run\(s\); 1 other run\(s\) did not record it by kind/);
+      assert.doesNotMatch(mixed, /removed by the last 2 retention run\(s\)/, "no figure is given over a run that does not say");
+      // A count cut short is told as a floor, never as the whole.
+      cannedBulk = [{ kind: "agent-message", label: "messages between agents", setting: "agentMessageDays", days: 60, records: 50000, bytes: 4096, partial: true }];
+      const floor = await lines("how much room do agent messages take");
+      assert.match(floor, /messages between agents: 50000\+ record\(s\), 4\.0 KiB \(counting was cut short, so these figures are low\), removed 60 days after their last change/);
+    } finally { await w.close(); }
+  });
+}
