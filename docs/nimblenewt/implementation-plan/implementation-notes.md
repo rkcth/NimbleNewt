@@ -11789,6 +11789,27 @@ Checked and left as is: every admin view and the secret route go through the doo
 
 **U08c second review breakages** (built files, each restored, a test failed each time): owner-prefix refusal removed (admin and web tests, 4 backends); `secretWriter` owner check removed (4); `admin.secrets` owner check removed (4); secret reply made cacheable (web test); provider endpoint redaction removed (admin test); the value no longer stripped from a forwarded store refusal (web test).
 
+## T7 (U08 follow-up): edit an agent and take a right back from the Administration page (Claude agent, Sonnet 5.5, 2026-11-15)
+
+**What was lacking.** U08c left the agents and the standing rights read-only on the page; changing them was by chat only.
+
+**What was built.** Two owner-only actions, both through existing operations (no new operation, `docs/nimblenewt/api-v1.md` unchanged by `npm run api:docs:write`):
+- **Edit an agent** (Agents and teams): a form per active agent with its name and its full list of roles (comma separated). `POST /web/admin/agent`, body exactly `{ agentId, friendlyName?, roles? }` (at least one; only what differs is sent). The door builds one sentence and one `agent.update` intent marked as a draft, so the chat shows it first and applies it only on Apply, even for a rename that would apply at once when typed. A retired agent has no form.
+- **Take a right back** (Policy): for every active standing right, a reason field and a "Take back" button that asks first. `POST /web/admin/grant-revoke`, body exactly `{ grantId, reason }`; the intent is `grant.revoke`, which the chat already shows first in every profile. The chat reads the revision itself, so a stale view is refused on Apply.
+- Same safeguards as U08c: the door's single owner session path, CSRF, an Idempotency-Key on every POST (the outbox item id), exact bodies (anything extra is 400), a sentence the redactor would change (a key-looking name or reason) is refused with 400, no secret appears anywhere, and the result of each form goes to a polite `role="status"` region.
+- Teams, API access, Operations and Migration stay read-only (a later task). The reserved secret-name list and `secretWriter` were not touched.
+
+**Tests.** `chat/admin-views.test.ts` (four storage backends): a rename is shown first and applied once on Apply, a second Apply changes nothing, roles are shown first and a discard changes nothing, a stale edit is refused and the other change stands, a right is taken back only on Apply and once, a right already taken back is refused, an agent without the right cannot do either through the API. `web/web.test.ts` (SQLite, as the other door tests): sessions, CSRF, key, method, 16 bad agent bodies and 11 bad revoke bodies, replay with the same key, Apply, history carries no key. `ui/views.test.ts` (fake DOM): forms only for active agents and rights, refusals for nothing-changed, bad role, quote in a name, empty reason, declined confirmation, exact bodies and headers, status region, hostile text as text.
+
+**Mutation checks** (built files, each applied, a test failed, restored): the draft flag removed from the agent intent (4 failures); extra body keys accepted on the agent edit; the key-looking sentence refusal removed; the grant-ID check removed; quotes allowed in a name; empty reason accepted on the page; no confirmation before take-back; an unchanged edit sent; retired agents editable; revoked rights revocable; the result region not live (3 failures).
+
+**Not done.** Retiring an agent, changing an agent's team, supervisor, profile or persona, granting a right, and the other four pages stay in chat. The web route tests run on SQLite only (the storage behaviour is covered on all four backends in the chat test, which uses the exact sentence and intent the door builds). Nothing was run against a real model.
+
+**ASSUMPTION:** the agent edit covers the name and the role list only, the two fields the table already shows; the rest is chat.
+**ASSUMPTION:** the agent intent is a draft (the chat's existing "show it first" flag) rather than a new rule, so its reason line reads "you asked for a draft"; every role change is shown first anyway as an authority change.
+**ASSUMPTION:** an empty role list, duplicate roles, a name with a quote or backslash, a name with leading or trailing space and a reason over 300 characters are refused by the door, so the sentence the owner sees is exactly what is checked against their words.
+**ASSUMPTION:** a take-back always needs a reason, in the owner's words, and a confirmation on the page before it is sent.
+
 ## K06b follow-up: the scratch rule holds the records a catalogued tool reads its text from (Claude agent, Sonnet 5.5, 2026-11-15)
 
 **The gap.** An agent may register a personal tool or skill from its own accepted private desk records (`instructional.recordId`, `executable.recordId` of a catalog version). Those records look like scratch of a finished task. With the owner's scratch archive or purge window set, the live rule could archive or remove them and the tool then failed with "the recorded executable is missing or has changed". The K01d backup scope tier already fixed the same thing for backups (second review); the live rule did not.

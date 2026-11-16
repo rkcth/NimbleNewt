@@ -505,3 +505,85 @@ test("an error on a part of an administration page is the controller's plain wor
   chip(prov, "Settings").click(); await settle();
   assert.match(text(page.doc.byId.get("view")!), /Could not load: the administration views are not available/);
 });
+
+// Follow-up to card U08: the agents and the standing rights can be edited and taken back from the Administration page, through the same outbox and the chat's own preview.
+const AGT = "agt-" + "a".repeat(20), AGT2 = "agt-" + "c".repeat(20), GRT = "grt-" + "b".repeat(20), GRT2 = "grt-" + "d".repeat(20);
+const ownerEditViews = () => ({
+  "admin-team": { agents: { items: [{ id: AGT, friendlyName: "Ann", roles: ["author"], state: "active" }, { id: AGT2, friendlyName: "Old Bob", roles: ["qa"], state: "retired" }] }, teams: { items: [] } },
+  "admin-policy": { readiness: { item: { items: [{ id: "profile", detail: "derived" }] } }, grants: { items: [{ id: GRT, grantee: "agent:ann", action: "task.update", project: "proj-1", state: "active", basis: HOSTILE }, { id: GRT2, grantee: "agent:old", action: "task.create", state: "revoked", basis: "x" }] }, settings: { item: { items: [] } } },
+});
+const queuedWith = (text: string) => ({ turnId: "t", replayed: false, text, reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "prop-1", preview: ["It would change."] }] });
+const live = (view: FakeElement): FakeElement => { const r = view.find((e) => e.getAttribute("role") === "status" && e.getAttribute("aria-live") === "polite"); assert.equal(r.length, 1, "one live region"); return r[0]!; };
+
+test("an agent is renamed or given other roles from the page: one outbox item under one key, exact body, a clear refusal when nothing differs or a role is not a name, and a retired agent has no form (card U08 follow-up)", async () => {
+  const page = boot(ownerEditViews(), [(c) => (c.path === "/web/admin/agent" ? { status: 201, body: queuedWith("Change the agent Ann to be called Annie with the roles author, reviewer") } : undefined)]);
+  const team = await admin(page, "team", "Agents and teams");
+  const cards = team.find((e) => e.className === "card" && e.textContent.startsWith("Edit "));
+  assert.deepEqual(cards.map((c) => c.find((e) => e.tag === "h4")[0]!.textContent), ["Edit Ann"], "only the active agent is editable");
+  const form = cards[0]!;
+  assert.equal((inputOf(form, "Name of Ann") as FakeElement).value, "Ann"); assert.equal(inputOf(form, "Roles of Ann (separated by commas)").value, "author");
+  assert.equal(chip(form, "Change agent").getAttribute("aria-label"), "Change the name or roles of Ann");
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /Nothing is different/); assert.equal(sent(page).length, 0);
+  inputOf(form, "Roles of Ann (separated by commas)").value = "author, Not A Name";
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /Roles are 1 to 20 different names/); assert.equal(sent(page).length, 0);
+  inputOf(form, "Roles of Ann (separated by commas)").value = "author, author";
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /different names/); assert.equal(sent(page).length, 0);
+  inputOf(form, "Name of Ann").value = 'Ann "the" best';
+  inputOf(form, "Roles of Ann (separated by commas)").value = "author";
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /quote or a backslash/); assert.equal(sent(page).length, 0);
+  inputOf(form, "Name of Ann").value = "Annie";
+  inputOf(form, "Roles of Ann (separated by commas)").value = "author, reviewer";
+  chip(form, "Change agent").click(); await settle();
+  const posts = sent(page);
+  assert.equal(posts.length, 1);
+  assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/agent", { agentId: AGT, friendlyName: "Annie", roles: ["author", "reviewer"] }]);
+  assert.match(posts[0]!.headers["idempotency-key"]!, /^m[0-9a-f]{24}$/); assert.equal(posts[0]!.headers["x-nn-csrf"], "csrf-1");
+  assert.match(text(page.doc.byId.get("log")!), /Change the agent Ann to be called Annie with the roles author, reviewer/, "the chat shows what was asked");
+  // Only what differs is sent.
+  await open(page, "admin");
+  const again = page.doc.byId.get("view")!.find((e) => e.className === "card" && e.textContent.startsWith("Edit "))[0]!;
+  inputOf(again, "Roles of Ann (separated by commas)").value = "author, qa";
+  chip(again, "Change agent").click(); await settle();
+  assert.deepEqual(sent(page)[1]!.body, { agentId: AGT, roles: ["author", "qa"] });
+  assert.notEqual(sent(page)[0]!.headers["idempotency-key"], sent(page)[1]!.headers["idempotency-key"], "each edit has its own key");
+  assert.deepEqual(page.doc.violations, []);
+});
+
+test("a standing right is taken back from the page with the owner's reason, after a question, as one outbox item; a revoked right has no button (card U08 follow-up)", async () => {
+  const page = boot(ownerEditViews(), [(c) => (c.path === "/web/admin/grant-revoke" ? { status: 201, body: queuedWith("Take back the right task.update for agent:ann") } : undefined)], () => false);
+  const policy = await admin(page, "policy", "Policy");
+  const cards = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: "));
+  assert.deepEqual(cards.map((c) => c.find((e) => e.tag === "h4")[0]!.textContent), ["Take back: task.update for agent:ann"], "the revoked right has no button");
+  const form = cards[0]!;
+  const why = inputOf(form, "Why take back task.update for agent:ann?");
+  assert.equal(why.getAttribute("maxlength"), "300");
+  chip(form, "Take back").click(); await settle();
+  assert.match(text(live(policy)), /Say why first/); assert.equal(sent(page).length, 0);
+  why.value = "the project is finished";
+  chip(form, "Take back").click(); await settle();
+  assert.equal(sent(page).length, 0, "declined: nothing sent");
+  page.confirmWith(() => true);
+  chip(form, "Take back").click(); await settle();
+  const posts = sent(page);
+  assert.equal(posts.length, 1);
+  assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/grant-revoke", { grantId: GRT, reason: "the project is finished" }]);
+  assert.match(posts[0]!.headers["idempotency-key"]!, /^m[0-9a-f]{24}$/); assert.equal(posts[0]!.headers["x-nn-csrf"], "csrf-1");
+  assert.match(text(page.doc.byId.get("log")!), /Take back the right task\.update for agent:ann/);
+  assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
+  assert.deepEqual(page.doc.violations, []);
+});
+
+test("the edit forms keep nothing but what the owner typed in the outbox, and a hostile name or right is only text (card U08 follow-up)", async () => {
+  const views = ownerEditViews();
+  (views["admin-team"].agents.items[0] as { friendlyName: string }).friendlyName = HOSTILE.slice(0, 80);
+  const page = boot(views, [(c) => (c.path.startsWith("/web/admin/") ? { status: 201, body: queuedWith("x") } : undefined)]);
+  const team = await admin(page, "team", "Agents and teams");
+  assert.ok(team.find((e) => e.tag === "h4" && e.textContent.startsWith("Edit <img")).length === 1, "shown as text");
+  assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
+  assert.doesNotMatch(JSON.stringify([...page.storage.map.values()]), /sk-|password/i);
+  assert.deepEqual(page.doc.violations, []);
+});

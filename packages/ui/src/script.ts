@@ -976,12 +976,16 @@ export const APP_JS = String.raw`(function (root) {
   }
 
   function pageAdminTeam(box, parts) {
-    adminHead(box, 'team', 'Agents and teams', 'Who is on the team, their roles and the team each belongs to. To add, change or retire one, tell the chat.');
+    adminHead(box, 'team', 'Agents and teams', 'Who is on the team, their roles and the team each belongs to. You can rename an agent or change its roles here: the change is shown to you in the chat first and applied only when you say so. To add or retire one, or to change anything else, tell the chat.');
+    var out = liveOut();
     if (!failed(box, 'Agents', parts.agents)) {
       var agents = list(obj(parts.agents) && parts.agents.items, 100).map(obj).filter(Boolean);
       var sec = region(box, 'Agents (' + agents.length + ')');
       if (!agents.length) note(sec, 'There are no agents yet. Tell the chat what the first one should be called and its role.');
-      else table(sec, 'Agents', ['Name', 'Roles', 'Team', 'State', 'Profile', 'Coordinator'], agents.map(function (a) { var c = obj(a.coordinator); return [clip(a.friendlyName, 80), list(a.roles, 10).map(function (r) { return clip(r, 30); }).join(', ') || '-', clip(a.teamId, 80) || '-', clip(a.state, 20), clip(a.defaultProfile, 60) || '-', c ? clip(c.state, 20) : '-']; }));
+      else {
+        table(sec, 'Agents', ['Name', 'Roles', 'Team', 'State', 'Profile', 'Coordinator'], agents.map(function (a) { var c = obj(a.coordinator); return [clip(a.friendlyName, 80), list(a.roles, 10).map(function (r) { return clip(r, 30); }).join(', ') || '-', clip(a.teamId, 80) || '-', clip(a.state, 20), clip(a.defaultProfile, 60) || '-', c ? clip(c.state, 20) : '-']; }));
+        agents.filter(function (a) { return a.state === 'active' && typeof a.id === 'string'; }).forEach(function (a, i) { agentEditor(sec, a, i, out); });
+      }
     }
     if (!failed(box, 'Teams', parts.teams)) {
       var teams = list(obj(parts.teams) && parts.teams.items, 100).map(obj).filter(Boolean);
@@ -989,6 +993,45 @@ export const APP_JS = String.raw`(function (root) {
       if (!teams.length) note(ts, 'There are no teams.');
       else table(ts, 'Teams', ['Team', 'ID', 'Reports into'], teams.map(function (t) { return [clip(t.name, 80), clip(t.id, 80), clip(t.parentTeamId, 80) || '-']; }));
     }
+    box.appendChild(out);
+  }
+
+  var ROLE_NAME_RE = /^[a-z][a-z0-9-]{0,39}$/;
+  /** One agent's edit form (card U08 follow-up): a new name, a new full list of roles, or both. Sent as an outbox item the chat shows first; the page never changes the agent itself. */
+  function agentEditor(parent, a, i, out) {
+    var card = el('div', 'card');
+    card.appendChild(el('h4', 'card-title', 'Edit ' + clip(a.friendlyName, 80)));
+    var name = labelled(card, 'nn-agent-name-' + i, 'Name of ' + clip(a.friendlyName, 80), field('input', 'text')); name.value = String(a.friendlyName || '').slice(0, 80);
+    var roles = labelled(card, 'nn-agent-roles-' + i, 'Roles of ' + clip(a.friendlyName, 80) + ' (separated by commas)', field('input', 'text')); roles.value = list(a.roles, 20).map(function (r) { return clip(r, 40); }).join(', ');
+    var row = el('div', 'row');
+    approvalButton(row, 'Change agent', 'Change the name or roles of ' + clip(a.friendlyName, 80), true, function () {
+      var body = { agentId: a.id };
+      var n = String(name.value).trim(); var r = String(roles.value).split(',').map(function (x) { return x.trim(); }).filter(function (x) { return x; });
+      var was = list(a.roles, 20).join(',');
+      if (n && n !== a.friendlyName) body.friendlyName = n;
+      if (r.join(',') !== was) body.roles = r;
+      var problem = !body.friendlyName && !body.roles ? 'Nothing is different from what the agent has now.' : body.friendlyName && /["\\]/.test(body.friendlyName) ? 'A name may not contain a quote or a backslash.' : body.roles && (!r.length || r.length > 20 || r.some(function (x) { return !ROLE_NAME_RE.test(x); }) || r.some(function (x, k) { return r.indexOf(x) !== k; })) ? 'Roles are 1 to 20 different names of lower-case letters, digits and hyphens.' : '';
+      if (problem) { clear(out); out.appendChild(el('p', 'error', problem)); return; }
+      sendAdmin('agent', body, 'Change the agent ' + clip(a.friendlyName, 60) + (body.friendlyName ? ' to be called ' + clip(body.friendlyName, 60) : '') + (body.roles ? ' with the roles ' + clip(body.roles.join(', '), 120) : ''), out);
+    });
+    card.appendChild(row);
+    parent.appendChild(card);
+  }
+
+  /** One standing right's take-back form (card U08 follow-up): the reason is the owner's own words and is required. The chat shows it first. */
+  function grantRevoker(parent, g, i, out) {
+    var card = el('div', 'card');
+    card.appendChild(el('h4', 'card-title', 'Take back: ' + clip(g.action, 80) + ' for ' + clip(g.grantee, 80)));
+    var why = labelled(card, 'nn-grant-why-' + i, 'Why take back ' + clip(g.action, 60) + ' for ' + clip(g.grantee, 60) + '?', field('input', 'text')); why.setAttribute('maxlength', '300');
+    var row = el('div', 'row');
+    approvalButton(row, 'Take back', 'Take back the right ' + clip(g.action, 60) + ' for ' + clip(g.grantee, 60), false, function () {
+      var reason = String(why.value).trim();
+      if (!reason) { clear(out); out.appendChild(el('p', 'error', 'Say why first; the reason is kept with the change.')); return; }
+      if (!root.confirm('Take back ' + clip(g.action, 60) + ' from ' + clip(g.grantee, 60) + '? You will see the change in the chat and can still decline it there.')) return;
+      sendAdmin('grant-revoke', { grantId: g.id, reason: reason }, 'Take back the right ' + clip(g.action, 60) + ' for ' + clip(g.grantee, 60), out);
+    });
+    card.appendChild(row);
+    parent.appendChild(card);
   }
 
   function pageAdminPolicy(box, parts) {
@@ -1004,7 +1047,8 @@ export const APP_JS = String.raw`(function (root) {
       var gsec = region(box, 'Rights you have given (' + gs.length + ' shown)');
       if (!gs.length) note(gsec, 'No right has been granted beyond the profile.');
       else table(gsec, 'Granted rights', ['Who', 'What', 'Project', 'State', 'Why'], gs.map(function (g) { return [clip(g.grantee, 80), clip(g.action, 80), clip(g.project, 80) || 'all', clip(g.state, 20), clip(g.basis, 160)]; }));
-      note(gsec, 'To take one back, tell the chat which right and why.');
+      gs.filter(function (g) { return g.state === 'active' && typeof g.id === 'string'; }).forEach(function (g, i) { grantRevoker(gsec, g, i, out); });
+      note(gsec, 'To take one back, give the reason below; it is shown to you in the chat first and counts only when you say so. You can also tell the chat which right and why.');
     }
     if (!failed(box, 'How long standing rules last', parts.settings)) {
       var items = list(itemOf(parts.settings) && itemOf(parts.settings).items, 20).map(obj).filter(Boolean);

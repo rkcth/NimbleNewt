@@ -167,6 +167,9 @@ export function thinkingIntent(body: Record<string, unknown>): { text: string; i
 const SETTING_NAME = /^[a-z][A-Za-z0-9_-]{0,39}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}){1,3}$/;
 const SECRET_NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const ADMIN_TEXT = /^[^\u0000-\u001f\u007f]*$/;
+const AGENT_ID = /^agt-[a-z2-7]{20}$/;
+const GRANT_ID = /^grt-[a-z2-7]{20}$/;
+const ROLE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 /** The most a secret written on the page may be (the secret store's own limit is 16 KiB; the request body is bounded below it). */
 const SECRET_VALUE_MAX = 8 * 1024;
 const adminText = (v: unknown, field: string, max: number): string => { if (typeof v !== "string" || v.trim().length === 0 || v.length > max || !ADMIN_TEXT.test(v)) throw new HttpError(400, "invalid_command", `${field} must be text of 1 to ${max} characters on one line`); return v; };
@@ -228,6 +231,37 @@ function adminIntentOf(what: string, body: Record<string, unknown>): { text: str
     const text = `Add the model provider ${name}, which runs ${location === "local" ? "locally" : "in the cloud"} at ${endpoint}, with the models ${names.join(", ")} and a context window of ${ct} tokens${spec["paid"] === true ? ", and it costs money" : ""}${spec["credentialName"] === undefined ? "" : `; its secret is named ${spec["credentialName"] as string}`}${spec["kind"] === undefined ? "" : `; it is a ${spec["kind"] as string} server`}`;
     if (text.length > 480) throw new HttpError(400, "invalid_command", "that provider is too long to say in one change from this page; say it in the chat");
     return { text, intent: { kind: "command", op: "routing.provider.add", args: { providers: [spec] }, evidence: text, basis: "owner" } };
+  }
+  if (what === "agent") {
+    // Edit an agent's label or its role list (card U08 follow-up). The operation is the chat's own `agent.update`; the intent is a draft, so the chat shows it first and applies it only on Apply whatever the profile.
+    only(["agentId", "friendlyName", "roles"]);
+    const agentId = body["agentId"];
+    if (typeof agentId !== "string" || !AGENT_ID.test(agentId)) throw new HttpError(400, "invalid_command", "agentId must be an agent's ID");
+    if (body["friendlyName"] === undefined && body["roles"] === undefined) throw new HttpError(400, "invalid_command", "give a new name, a new list of roles or both");
+    const parts: string[] = [];
+    const args: Record<string, unknown> = { agentId };
+    if (body["friendlyName"] !== undefined) {
+      const name = adminText(body["friendlyName"], "friendlyName", 80);
+      if (name.trim() !== name || /["\\]/.test(name)) throw new HttpError(400, "invalid_command", "friendlyName may not start or end with a space or contain a quote or a backslash");
+      args["friendlyName"] = name; parts.push(`its name is ${JSON.stringify(name)}`);
+    }
+    if (body["roles"] !== undefined) {
+      const roles = body["roles"];
+      if (!Array.isArray(roles) || roles.length < 1 || roles.length > 20 || roles.some((r) => typeof r !== "string" || !ROLE_NAME.test(r)) || new Set(roles).size !== roles.length) throw new HttpError(400, "invalid_command", "roles must list 1 to 20 different role names (lower-case letters, digits and hyphens)");
+      args["roles"] = roles; parts.push(`its roles are ${(roles as string[]).join(", ")}`);
+    }
+    const text = `Change the agent ${agentId} so ${parts.join(" and ")}`;
+    return { text, intent: { kind: "command", op: "agent.update", args, evidence: text, basis: "owner", draft: true } };
+  }
+  if (what === "grant-revoke") {
+    // Taking a right back (card U08 follow-up): `grant.revoke` is shown first in every profile; the chat reads the revision itself.
+    only(["grantId", "reason"]);
+    const grantId = body["grantId"];
+    if (typeof grantId !== "string" || !GRANT_ID.test(grantId)) throw new HttpError(400, "invalid_command", "grantId must be a grant's ID");
+    const reason = adminText(body["reason"], "reason", 300);
+    if (reason.trim() !== reason) throw new HttpError(400, "invalid_command", "reason may not start or end with a space");
+    const text = `Revoke the grant ${grantId}, because ${reason}`;
+    return { text, intent: { kind: "command", op: "grant.revoke", args: { grantId, reason }, evidence: text, basis: "owner" } };
   }
   throw new HttpError(404, "not_found", "no such change");
 }
