@@ -431,9 +431,21 @@ export class ResumeCheckService {
         } catch (error) {
           if (error instanceof DomainError && error.message === ORPHANED) { await this.#update(id, (x) => ({ ...x, phase: "cancelled", history: this.#push(x, "cancelled", by.id, ENDED_CANCEL) }), ["executing"]); continue; }
           if (error instanceof DomainError && error.code === "stale_revision") continue;
-          // The capture the check was made against was pruned meanwhile (more than CONTINUATION_KEEP newer ones): nothing was recorded, so the check starts over against what exists now. Left as it was, it would
-          // answer the same not_found at every retry and the attempt would never start.
-          if (error instanceof DomainError && error.code === "not_found" && b.continuationId !== undefined && await this.#runner.get("continuation", b.continuationId) === undefined) { await this.#restart(by, id, "the continuation it was made against was pruned", ["executing"]); continue; }
+          // The capture the check was made against was pruned meanwhile (more than CONTINUATION_KEEP newer ones), or this check's resume command ID already holds a resume against another capture.
+          // If this check's resume is recorded, the resume happened: the check is done from that record. That covers a stop right after the record (its replay answers not_found for the pruned capture)
+          // and a second advance of the same check (the resume sweep beside the dispatcher) that recorded it just before the prune while this one started the check over (the next commit then answers
+          // command_conflict). Never a second record: the command ID stays the check's own. Otherwise nothing was recorded, so a check whose capture is gone starts over against what exists now (bounded
+          // by its rounds); left as it was, it would answer the same not_found at every retry and the attempt would never start. Any other not_found or conflict is thrown as before.
+          const pruned = error instanceof DomainError && error.code === "not_found" && b.continuationId !== undefined && await this.#runner.get("continuation", b.continuationId) === undefined;
+          if (pruned || (error instanceof DomainError && error.code === "command_conflict")) {
+            const recorded = (await this.#runner.get("continuation-resume", derivedId("cnr", scopedCommandId(RESUMER.id, `${id}-resume`))))?.body as { taskId?: string; continuationId?: string } | undefined;
+            if (recorded !== undefined && recorded.taskId === b.taskId) {
+              const gone = await this.#runner.get("continuation", String(recorded.continuationId)) === undefined;
+              await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${String(recorded.continuationId)}${gone ? " (that capture has since been pruned)" : ""}`) }), ["executing"]);
+              continue;
+            }
+          }
+          if (pruned) { await this.#restart(by, id, "the continuation it was made against was pruned", ["executing"]); continue; }
           throw error;
         }
         await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${r.continuation.id}`) }), ["executing"]);

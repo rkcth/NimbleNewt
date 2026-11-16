@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
@@ -84,5 +85,103 @@ for (const backend of backends) {
     const done = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
     assert.equal(done.phase, "done");
     assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "one resume, against the capture that exists");
+  });
+
+  suite("a resume already recorded (the controller stopped right after the record) whose capture is pruned before the check is carried on: the check ends done from that record, never starts over or records a second resume", async ({ storage, svc, owner, task, epoch }) => {
+    const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });
+    let stop = true;
+    const racing = new Proxy(svc, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "resume") return async (...args: unknown[]) => {
+        const r = await (target.resume as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        if (stop) { stop = false; throw new Error("controller stopped after the record"); }
+        return r;
+      };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as ContinuationService;
+    const checks = ResumeCheckService.withEpoch(storage, epoch, { continuations: racing, dependencies: { check: async () => [] }, blockers: { getBlocker: async () => undefined, openBlocker: async () => ({ id: "blk-1" }) } as never, ports }, options);
+    const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(1) });
+    await assert.rejects(checks.commit(owner, { commandId: cid("k"), checkId: own.id }), /controller stopped/);
+    assert.equal((await checks.forTask(owner, task))?.phase, "executing");
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "the resume was recorded");
+    await fill(svc, owner, task, 100);
+    assert.equal(await storage.getAggregate({ kind: "continuation", id: a.id }), undefined, "the capture the resume was recorded against was pruned");
+    const after = await checks.advance(owner, { checkId: own.id });
+    assert.equal(after.phase, "done", JSON.stringify(after.history));
+    assert.equal(after.round, own.round, "not started over");
+    assert.ok(after.history.at(-1)?.note.includes(a.id), JSON.stringify(after.history));
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "still one resume");
+    assert.equal((await checks.advance(owner, { checkId: own.id })).phase, "done", "repeatable");
+  });
+
+  suite("a check started over while a second advance of it recorded its resume just before the prune: the next commit's command_conflict ends it done from that record, with no second record", async ({ storage, svc, owner, task, epoch }) => {
+    const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });
+    let first = true;
+    const racing = new Proxy(svc, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "resume") return async (...args: unknown[]) => {
+        if (first) { first = false; await fill(svc, owner, task, 100); }
+        return (target.resume as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+      };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as ContinuationService;
+    const checks = ResumeCheckService.withEpoch(storage, epoch, { continuations: racing, dependencies: { check: async () => [] }, blockers: { getBlocker: async () => undefined, openBlocker: async () => ({ id: "blk-1" }) } as never, ports }, options);
+    const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(1) });
+    const restarted = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
+    assert.equal(restarted.phase, "ready");
+    assert.equal(await storage.getAggregate({ kind: "continuation", id: a.id }), undefined);
+    // The other advance's record, under this check's own resume command ID, against a capture other than the one the restarted check now follows.
+    const kept = (await storage.getAggregate({ kind: "continuation-head", id: task }))!.body as { recent: { id: string }[] };
+    const other = kept.recent.map((e) => e.id).find((x) => x !== restarted.continuationId)!;
+    const resumer = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] } as unknown as Parameters<ContinuationService["resume"]>[0];
+    await svc.resume(resumer, { commandId: `${own.id}-resume`, taskId: task, continuationId: other, model, after: "continue" });
+    const after = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
+    assert.equal(after.phase, "done", JSON.stringify(after.history));
+    assert.ok(after.history.at(-1)?.note.includes(other), JSON.stringify(after.history));
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 1, "one resume");
+  });
+
+  suite("a not_found from the resume while the check's capture still exists is a real error: thrown, the check stays executing in its round, nothing recorded", async ({ storage, svc, owner, task, epoch }) => {
+    const a = await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });
+    const failing = new Proxy(svc, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "resume") return async () => { throw new DomainError("not_found", "no continuation was captured for that task"); };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as ContinuationService;
+    const checks = ResumeCheckService.withEpoch(storage, epoch, { continuations: failing, dependencies: { check: async () => [] }, blockers: { getBlocker: async () => undefined, openBlocker: async () => ({ id: "blk-1" }) } as never, ports }, options);
+    const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(1) });
+    await assert.rejects(checks.commit(owner, { commandId: cid("k"), checkId: own.id }), (e: Error & { code?: string }) => e.code === "not_found");
+    assert.notEqual(await storage.getAggregate({ kind: "continuation", id: a.id }), undefined);
+    const now = await checks.forTask(owner, task);
+    assert.equal(now?.phase, "executing");
+    assert.equal(now?.round, own.round, "not started over");
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 0);
+  });
+
+  suite("a capture pruned before every commit: the check starts over at most its rounds and then blocks as churn; nothing is recorded and it never loops", async ({ storage, svc, owner, task, epoch }) => {
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(1) });
+    await svc.capture(owner, { commandId: cid("c"), taskId: task, ...input(2) });
+    let calls = 0; let next = 1000;
+    // Each fill adds CONTINUATION_KEEP + 1 newer captures, so the one the check follows (the latest when it started over) is no longer the latest and is pruned before every resume.
+    const racing = new Proxy(svc, { get: (target, prop) => {
+      const v = Reflect.get(target, prop) as unknown;
+      if (prop === "resume") return async (...args: unknown[]) => {
+        calls++;
+        await fill(svc, owner, task, next); next += 1000;
+        return (target.resume as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+      };
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } }) as ContinuationService;
+    const checks = ResumeCheckService.withEpoch(storage, epoch, { continuations: racing, dependencies: { check: async () => [] }, blockers: { getBlocker: async () => undefined, openBlocker: async () => ({ id: "blk-1" }) } as never, ports }, options);
+    const own = await checks.start(owner, { commandId: cid("s"), taskId: task, model, after: "continue", checkpointDigest: dg(1) });
+    let last = own;
+    for (let i = 0; i < own.maxRounds + 2 && last.phase === "ready"; i++) last = await checks.commit(owner, { commandId: cid("k"), checkId: own.id });
+    assert.equal(last.phase, "blocked", JSON.stringify(last.history));
+    assert.equal(last.blocked?.type, "resume_churn");
+    assert.ok(calls <= own.maxRounds, `resume tried ${calls} times`);
+    assert.equal((await storage.listAggregates("continuation-resume", { limit: 10 })).length, 0, "nothing recorded");
   });
 }
