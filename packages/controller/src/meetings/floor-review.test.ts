@@ -34,11 +34,6 @@ const untilVoteOpen = async (w: FloorWorld, rec: string, motionId: string): Prom
   }
   assert.fail("the vote never opened");
 };
-/** Waits for a condition by letting the event loop turn, never by a fixed pause. */
-const waitFor = async (what: string, ok: () => boolean | Promise<boolean>): Promise<void> => {
-  for (let i = 0; i < 20_000; i += 1) { if (await ok()) return; await new Promise<void>((r) => setImmediate(r)); }
-  assert.fail(`never became true: ${what}`);
-};
 
 floorSuite(test, "the chair, a manager agent and a member see only what a member sees while a vote is open: not who has voted, not whose ballot is next", async (w) => {
   // the chair is a voter here
@@ -75,11 +70,18 @@ floorSuite(test, "an inquiry opened while a ballot is being answered holds the v
     return { text: "VOTE: yes\nREASON: formed before the inquiry.", usage: { visibleTokens: 10, hiddenTokens: 0 } };
   });
   const pending = w.floor.advance(w.service, { recordId: rec });
-  await waitFor("the first ballot is being asked", () => w.script.of("ballot").length === 1);
-  const voter = w.script.of("ballot")[0]!.agent;
-  assert.equal((await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec })).voteHeld, true);
-  release();
-  const r = await pending;
+  // waits on the ballot call itself (no fixed count of event-loop turns), and the advance is settled before the test can end, so a failure here is never hidden by its run into the closed storage
+  let voter: string;
+  let r: Awaited<typeof pending>;
+  try {
+    voter = (await w.script.until("the first ballot is being asked", (c) => c.kind === "ballot", pending)).agent;
+    assert.equal((await w.floor.openInquiry(w.owner, { commandId: cid("iq"), recordId: rec })).voteHeld, true);
+    release();
+    r = await pending;
+  } finally {
+    release();
+    await pending.catch(() => undefined);
+  }
   assert.equal("waiting" in r && r.waiting, "owner", "the ballot answered after the hold is not cast");
   assert.equal(await cast(w, motionId), 0);
   assert.ok((await floorOf(w, rec)).turns.some((t) => t.kind === "ballot" && t.agent === voter), "the set-aside call is still counted");
