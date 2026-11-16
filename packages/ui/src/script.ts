@@ -1010,7 +1010,7 @@ export const APP_JS = String.raw`(function (root) {
       var was = list(a.roles, 20).join(',');
       if (n && n !== a.friendlyName) body.friendlyName = n;
       if (r.join(',') !== was) body.roles = r;
-      var problem = !body.friendlyName && !body.roles ? 'Nothing is different from what the agent has now.' : body.friendlyName && /["\\]/.test(body.friendlyName) ? 'A name may not contain a quote or a backslash.' : body.roles && (!r.length || r.length > 20 || r.some(function (x) { return !ROLE_NAME_RE.test(x); }) || r.some(function (x, k) { return r.indexOf(x) !== k; })) ? 'Roles are 1 to 20 different names of lower-case letters, digits and hyphens.' : '';
+      var problem = !n ? 'An agent needs a name; type the name it should have.' : !body.friendlyName && !body.roles ? 'Nothing is different from what the agent has now.' : body.friendlyName && /["\\]/.test(body.friendlyName) ? 'A name may not contain a quote or a backslash.' : body.roles && (!r.length || r.length > 20 || r.some(function (x) { return !ROLE_NAME_RE.test(x); }) || r.some(function (x, k) { return r.indexOf(x) !== k; })) ? 'Roles are 1 to 20 different names of lower-case letters, digits and hyphens.' : '';
       if (problem) { clear(out); out.appendChild(el('p', 'error', problem)); return; }
       sendAdmin('agent', body, 'Change the agent ' + clip(a.friendlyName, 60) + (body.friendlyName ? ' to be called ' + clip(body.friendlyName, 60) : '') + (body.roles ? ' with the roles ' + clip(body.roles.join(', '), 120) : ''), out);
     });

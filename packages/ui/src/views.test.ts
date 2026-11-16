@@ -531,6 +531,14 @@ test("an agent is renamed or given other roles from the page: one outbox item un
   inputOf(form, "Roles of Ann (separated by commas)").value = "author, author";
   chip(form, "Change agent").click(); await settle();
   assert.match(text(live(team)), /different names/); assert.equal(sent(page).length, 0);
+  // Review: an emptied role list is refused, never sent as no roles or quietly dropped; an emptied name is refused, never left out without a word.
+  inputOf(form, "Roles of Ann (separated by commas)").value = " , ";
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /Roles are 1 to 20 different names/); assert.equal(sent(page).length, 0);
+  inputOf(form, "Roles of Ann (separated by commas)").value = "author, reviewer";
+  inputOf(form, "Name of Ann").value = "  ";
+  chip(form, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /needs a name/); assert.equal(sent(page).length, 0);
   inputOf(form, "Name of Ann").value = 'Ann "the" best';
   inputOf(form, "Roles of Ann (separated by commas)").value = "author";
   chip(form, "Change agent").click(); await settle();
@@ -550,6 +558,12 @@ test("an agent is renamed or given other roles from the page: one outbox item un
   chip(again, "Change agent").click(); await settle();
   assert.deepEqual(sent(page)[1]!.body, { agentId: AGT, roles: ["author", "qa"] });
   assert.notEqual(sent(page)[0]!.headers["idempotency-key"], sent(page)[1]!.headers["idempotency-key"], "each edit has its own key");
+  // Review: a rename alone sends no roles, so the agent's role list is left exactly as it is.
+  await open(page, "admin");
+  const third = page.doc.byId.get("view")!.find((e) => e.className === "card" && e.textContent.startsWith("Edit "))[0]!;
+  inputOf(third, "Name of Ann").value = " Anne ";
+  chip(third, "Change agent").click(); await settle();
+  assert.deepEqual(sent(page)[2]!.body, { agentId: AGT, friendlyName: "Anne" });
   assert.deepEqual(page.doc.violations, []);
 });
 

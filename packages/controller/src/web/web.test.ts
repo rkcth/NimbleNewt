@@ -594,6 +594,22 @@ test("editing an agent and taking a right back from the page: owner session, CSR
     assert.deepEqual([(await seenAgent()).friendlyName, (await seenAgent()).roles], ["Ann", ["author"]], "nothing changed before Apply");
     const replay = await go("agent", { key: "k-1", body: edit });
     assert.deepEqual([replay.status, replay.body.replayed, replay.body.turnId], [200, true, first.body.turnId]);
+    // Review: the same key with another body never becomes a second, different change.
+    const reused = await go("agent", { key: "k-1", body: { agentId: agent.id, friendlyName: "Mallory" } });
+    assert.notEqual(reused.status, 201, reused.text);
+    assert.equal(reused.text.includes("Mallory") && reused.status < 300 && reused.body.replayed !== true, false, reused.text);
+    // Review: an agent's own credential, sent as a bearer token instead of the owner's session, reaches neither route.
+    const annCred = await w.c.services.principals.issueCredential(owner, "agent:ann");
+    for (const [what, body] of [["agent", edit], ["grant-revoke", take]] as const) {
+      const r = await w.call("POST", `/web/admin/${what}`, { body, headers: { authorization: `Bearer ${annCred.token}`, "idempotency-key": `b-${what}` } });
+      assert.ok(r.status === 401 || r.status === 403, `${what}: ${r.status} ${r.text}`);
+    }
+    // Review: a well-formed ID of no agent or grant is never applied and is not a server error.
+    for (const [what, body] of [["agent", { agentId: "agt-" + "q".repeat(20), friendlyName: "Ghost" }], ["grant-revoke", { grantId: "grt-" + "q".repeat(20), reason: "no such right" }]] as const) {
+      const r = await go(what, { key: `ghost-${what}`, body });
+      assert.ok(r.status < 500, r.text);
+      if (r.status === 201 && r.body.outcomes[0].status === "proposed") assert.notEqual((await w.call("POST", `/web/proposals/${r.body.outcomes[0].proposalId}/apply`, { cookie: s.cookie, csrf: s.csrf, body: {}, headers: { "idempotency-key": `ghost-ap-${what}` } })).body.applied, true, what);
+    }
     const apply = (id: string, key: string) => w.call("POST", `/web/proposals/${id}/apply`, { cookie: s.cookie, csrf: s.csrf, body: {}, headers: { "idempotency-key": key } });
     const applied = await apply(first.body.outcomes[0].proposalId, "ap-1");
     assert.equal(applied.body.applied, true, applied.text);
