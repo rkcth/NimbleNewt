@@ -126,4 +126,49 @@ for (const backend of backends) {
       } finally { await store.close(); }
     });
   }
+
+  // T8b (a): the attempt ends in the middle of the write that blocks a check as churn, after its blocker was opened. The check ends cancelled; the blocker must not stay open for a check nobody will carry on.
+  test(`${backend.name}: a check whose attempt ends while its churn block is being written ends cancelled and its blocker is closed`, async () => {
+    const store = await backend.open();
+    try {
+      const c = await buildWorld(store.storage);
+      const options = { clock: c.options.clock!, maxRounds: 1 };
+      const continuations = ContinuationService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+      const dependencies = DependencyService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+      const ann = await c.agent("ann", workGrants(c.project, []));
+      const { taskId, attemptId } = await c.task("long job", ann);
+      let prune = true;
+      const racing = new Proxy(continuations, { get: (target, prop) => {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop === "resume") return async (...args: unknown[]) => {
+          if (prune) { prune = false; for (let i = 0; i < CONTINUATION_KEEP + 1; i++) await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(100 + i) }); }
+          return (target.resume as (...a: unknown[]) => unknown).apply(target, args);
+        };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as ContinuationService;
+      const opened: string[] = [];
+      const blockers = new Proxy(c.blockers, { get: (target, prop) => {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop === "openBlocker") return async (...args: unknown[]) => {
+          const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          opened.push(String((args[0] as { type?: string }).type));
+          const asg = (await c.assignments.getAssignment(taskId))!;
+          await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId, expectedRevision: asg.revision });
+          return r;
+        };
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as typeof c.blockers;
+      const real = ResumeCheckService.withEpoch(store.storage, c.epoch, { continuations: racing, dependencies, blockers, ports: controllerResumePorts(store.storage, { observe: async () => ({}), review: async () => ({}) }) }, options);
+      await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(1) });
+      await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(2) });
+      const own = await real.start(c.owner, { commandId: cid("s"), taskId, attemptId: attemptId!, model: { provider: "local", id: "m1" }, after: "continue", checkpointDigest: dg(1) });
+      assert.equal(own.round + 1, own.maxRounds, "the check is in its last round");
+      const after = await real.commit(c.owner, { commandId: cid("k"), checkId: own.id });
+      assert.deepEqual(opened, ["resume_churn"], "the churn blocker was opened");
+      assert.equal(after.phase, "cancelled", JSON.stringify(after.history));
+      assert.equal(await c.blockers.openFor("resume_churn", { kind: "task", id: taskId }), undefined, "no churn blocker stays open for it");
+      assert.equal((await c.blockers.occurrences("resume_churn", { kind: "task", id: taskId })), 1, "the blocker existed and was closed");
+      assert.equal((await real.advance(c.owner, { checkId: own.id })).phase, "cancelled", "repeatable");
+    } finally { await store.close(); }
+  });
 }

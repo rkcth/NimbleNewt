@@ -11908,6 +11908,24 @@ Merged origin/main 9f3704f3 (T5; the notes conflict kept both sections). No oper
 **Runs** (`NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard): `dist/continuation` 114/114; `dist/dispatch` 1560/1560; the 33 `dist/api` files that mention resume or continuation, plus the merged T5 tests (`retention/k06b-plan-link`, `retention/blank-race`, `backup/k01d-plan-link`): 191/191.
 
 
+## T8b: three narrow items the T8 reviews left in the resume check (Claude agent, Sonnet 5.5, 2026-11-16)
+
+Branch `card20-t8b`. Only `continuation/resume.ts` changed. No operation text changed, so `api-v1.md` is unchanged.
+
+**Done.**
+- *(a) A churn blocker left open when the attempt ends in the middle of the write.* When a check is blocked as `resume_churn` (or `missing_context`), its blocker is opened first and the block is written after. If the attempt ended between the two (the write carries the attempt guard, which answers "no longer the task's active attempt"), the check ends cancelled, as before, but its blocker stayed open and the owner was shown trouble for a check nobody will carry on. Now `#block` closes that blocker with a plain resolution ("the attempt this resume check was for ended before the check could be blocked, so nothing is waiting on this") when, and only when, the failure is that ended attempt and the check does not itself name the blocker (another advance of the check may have blocked it with the very same blocker). Any other failure (storage error, busy check) leaves the blocker open: the retry uses the same command ID and finds it again. `BlockerService.resolveBlocker` is an optional part of the blockers port, so existing fakes still fit; a lost race while closing is ignored, any other error is thrown.
+- *(b) Overlapping start-overs could take a check past its round limit.* `#restart` judged "is this the last round" on the round it read, then wrote `round + 1` on whatever round the check had by then. If another advance started the check over and brought it back to the same phase in between, the write skipped the limit and the churn block. The write now refuses when the round moved (internal reason), and the loop reads and judges again (at most 6 times, then `unavailable`, which says the same call can be made again).
+- *(c) Six lost races on one write were reported as a bare `stale_revision`.* The commit, the dispatcher's skip line and the sweep's failure then read as a fault of the caller. After 6 tries `#update` now answers `unavailable` ("the resume check was changed by other writers on each of 6 tries; nothing was written, and it is looked at again"). Nothing was written, and the next tick or call goes through.
+
+**Tests** (all four backends: reference store, SQLite, SQLite worker thread, PostgreSQL). `dispatch/resume-pruned-capture.test.ts` gains "a check whose attempt ends while its churn block is being written ends cancelled and its blocker is closed" (the task is released right after the blocker is opened; no open churn blocker remains; the blocker existed). New `continuation/resume-busy-rounds.test.ts`: two commits of one check overlap (the second runs its whole start over inside the first one's window) and the check blocks as churn within its rounds instead of passing them; six lost races give `unavailable` with nothing written, and the same call made again goes through.
+
+**Mutation checks** (built `resume.js`, each alone, restored byte for byte, both pruned-capture files and the new file run): round-moved refusal removed: 4 fail; bare error after 6 tries: 4 fail; blocker never closed: 4 fail; the close call skipped: 4 fail; a moved round thrown instead of judged again: 4 fail. Two changes made no test fail: closing a blocker even when the check names it (defence, no test builds that exact interleaving) and 60 tries instead of 6 (the constant-conflict test ends the same way).
+
+**NOT done.** The dispatcher's skip line for a busy check is not tested end to end (it prefixes the error text, as before). A blocker whose close fails for a reason other than a lost race is thrown, not retried by this change. The sweep's `failed` list still carries ids without reasons (changing its shape would change the API contract). The earlier L04d lists (real Pi process, remote hosts, a real model) are unchanged.
+
+ASSUMPTION: a busy check is `unavailable` (the code the runner already uses for "send the same command again") rather than a new error code, the smallest and most reversible choice.
+ASSUMPTION: a blocker is closed only for the ended-attempt case; other failures keep it open because the same command ID reuses it on retry.
+
 ## A09 follow-up T6: administrators are told of requests, and the claim checks the agent records the administrator check read (Claude agent, Sonnet 5.5, 2026-11-15)
 
 Card A09 is NOT flipped. Base 16ef7406, branch `task-t6-a09b`. This closes two items the ninth slice and its reviews left open.
