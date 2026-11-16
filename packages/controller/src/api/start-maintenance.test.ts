@@ -6,8 +6,10 @@ import { test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { FakeApplier, MAINTENANCE_LIMITS } from "../maintenance/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { PolicyService } from "../policy/index.js";
 import { startController } from "./index.js";
+import { maintenanceOwnerDetail } from "./start.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -404,4 +406,64 @@ test("a supervisor the owner paused cannot decide its report's request through t
     await c.close();
     rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("a host-policy or base request reaches the owner's inbox as one Needs-you item that names the administrators who may decide it; it carries IDs only, a replay adds nothing, and a request no administrator can decide names none (card A09 follow-up T6, review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-t6-"));
+  const applier = new FakeApplier();
+  const w = await boot(d, applier);
+  const { c, call, cid } = w;
+  try {
+    const lead = await w.agent("Lead");
+    const ann = await w.agent("Ann", lead.id);
+    const a1 = await w.agent("AdminOne");
+    const a2 = await w.agent("AdminTwo");
+    assert.ok((await call(w.owner, "maintenance.settings.set", { administrators: [a1.principal, a2.principal, lead.principal] }, cid("c"))).ok);
+    const inbox = async () => (await NotificationService.withEpoch(c.storage, c.epoch, {}).inbox(w.rob)).items.filter((i: any) => i.kind === "maintenance");
+    const secret = `the reason only readers of the request see ${cid("s")}`;
+    const asked = await call(ann.token, "maintenance.request", { kind: "base", spec: { change: "newer interpreter" }, reason: secret, rollbackPlan: "undo it" }, "t6-1");
+    assert.ok(asked.ok, JSON.stringify(asked));
+    const id = asked.result.maintenanceId as string;
+    const items = (await inbox()).filter((i: any) => i.ref.id === id);
+    assert.equal(items.length, 1, "one item for the request");
+    const it: any = items[0];
+    assert.equal(it.level, "needs-you", "the owner's item stays Needs you");
+    assert.match(it.detail, /that you decide/, "the text is addressed to the owner");
+    assert.doesNotMatch(it.detail, /as an administrator/, "the text is not one written for an administrator");
+    // a1 and a2 may decide it; the requester's supervisor (its team) may not, so it is not named.
+    assert.ok(it.detail.includes(a1.principal) && it.detail.includes(a2.principal), it.detail);
+    assert.ok(!it.detail.includes(lead.principal), it.detail);
+    assert.ok(!JSON.stringify(it).includes(secret), "the request's text is not copied into the item");
+    // A replay of the request adds nothing.
+    assert.ok((await call(ann.token, "maintenance.request", { kind: "base", spec: { change: "newer interpreter" }, reason: secret, rollbackPlan: "undo it" }, "t6-1")).ok);
+    assert.deepEqual((await inbox()).filter((i: any) => i.ref.id === id).map((i: any) => [i.count, i.detail]), [[it.count, it.detail]]);
+    // An administrator may read and decide it through the API.
+    const read = await call(a1.token, "maintenance.get", { maintenanceId: id });
+    assert.ok(read.ok, JSON.stringify(read));
+    // With no administrator who may decide it, the item names none.
+    assert.ok((await call(w.owner, "maintenance.settings.set", { administrators: [lead.principal] }, cid("c"))).ok);
+    const other = await call(ann.token, "maintenance.request", { kind: "host-policy", spec: { setting: "worker-limits", change: "more memory" }, reason: "needed", rollbackPlan: "undo it" }, "t6-2");
+    assert.ok(other.ok, JSON.stringify(other));
+    const lone: any = (await inbox()).find((i: any) => i.ref.id === other.result.maintenanceId);
+    assert.equal(lone.level, "needs-you");
+    assert.doesNotMatch(lone.detail, /administrator/, lone.detail);
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("the owner's maintenance text stays inside the inbox's detail limit with five long administrator IDs and says how many were left out (card A09 follow-up T6, review)", () => {
+  const id = (c: string) => `agent:agt-${c.repeat(20)}`;
+  const five = ["a", "b", "c", "d", "e"].map(id);
+  const text = maintenanceOwnerDetail({ agentId: id("r"), kind: "host-policy", administratorIds: five });
+  assert.ok(text.length <= 200, `${text.length}`);
+  assert.match(text, /that you decide/);
+  assert.ok(text.includes(five[0]!) && text.includes(five[1]!), text);
+  assert.match(text, / \+3 more\.$/);
+  assert.equal(maintenanceOwnerDetail({ agentId: id("r"), kind: "base", administratorIds: [id("a")] }).endsWith(`${id("a")}.`), true);
+  assert.equal(maintenanceOwnerDetail({ agentId: id("r"), kind: "base" }), `${id("r")} asked for an environment change (base) that you decide. Read it with maintenance.get and decide with maintenance.decide.`);
+  // An ID too long to name is counted, not cut in half.
+  const long = maintenanceOwnerDetail({ agentId: id("r"), kind: "base", administratorIds: [`agent:${"x".repeat(150)}`] });
+  assert.ok(long.length <= 200 && /may too: 1 \(maintenance\.settings\.get names them\)\.$/.test(long), long);
 });
