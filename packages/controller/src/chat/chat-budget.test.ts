@@ -201,6 +201,14 @@ for (const backend of backends) {
     assert.equal(await cap(), undefined, "an out-of-range cap was not set");
   });
 
+  suite("calls counted at the same moment by separate spend services (one per guard, as the controller builds them) are all counted, once each", async (w, _script, spend, _status, day) => {
+    const guards = Array.from({ length: 6 }, () => ChatSpendService.withEpoch(w.world.storage, w.projects.epoch, { clock: () => day.value }));
+    await Promise.all(guards.map((g, i) => g.record(10 + i, `same-moment-${i}`)));
+    await Promise.all(guards.map((g, i) => g.record(10 + i, `same-moment-${i}`)));
+    const v = await spend.view(w.owner);
+    assert.deepEqual({ tokens: v.tokens, calls: v.calls }, { tokens: 6 * 10 + 15, calls: 6 }, "every call counted once; a repeated key adds nothing");
+  });
+
   suite("an agent cannot read the cap by chat status or set it: the status view is the owner's alone", async (w, _script, _spend, status) => {
     const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
     assert.equal(await status.ask(ann.principal, { kind: "chat_budget" }), undefined);

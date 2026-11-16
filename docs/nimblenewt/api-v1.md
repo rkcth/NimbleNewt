@@ -154,7 +154,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `chat.budget.get`
 
-The owner's daily cap on the tokens the controller's own model calls may use (the owner chat's interpreter, the coordinator and the reviewing agents' calls), and today's count (owner only). The count is the provider's own figure for the current UTC day; at the cap no such call is made until the next day. No cap is set by default.
+The owner's daily cap on the tokens the controller's own model calls may use, which are the calls of the reviewing agents (the resume reviewer and the second agent that questions a done), and today's count (owner only). The count is the provider's own figure for the current UTC day; at the cap no such call is made until the next day. The owner chat's own interpreter, the meeting agents and the coordinator are not counted or stopped by it, so the owner can always change the cap by chat. No cap is set by default.
 
 Arguments:
 
@@ -2828,7 +2828,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `chat.budget.set`
 
-The owner sets the daily cap on the tokens the controller's own model calls may use, or removes it with null (owner only). It covers the owner chat's interpreter, the coordinator and the reviewing agents' calls, counted from the provider's own figures per UTC day; a call that would start at or over the cap is refused without being made, and calls already running may overshoot by their own size. It counts from the next call. Repeating the same command ID with the same value changes nothing; a different value under the same ID is refused.
+The owner sets the daily cap on the tokens the controller's own model calls may use, or removes it with null (owner only). It covers the calls of the reviewing agents (the resume reviewer and the second agent that questions a done), counted from the provider's own figures per UTC day; a call that would start at or over the cap is refused without being made, and calls already running may overshoot by their own size. The owner chat's own interpreter, the meeting agents and the coordinator are not counted or stopped by it, so the owner can always change the cap by chat. It counts from the next call. Repeating the same command ID with the same value changes nothing; a different value under the same ID is refused.
 
 Arguments:
 

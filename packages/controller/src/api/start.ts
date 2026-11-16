@@ -349,7 +349,7 @@ export interface StartOptions {
       /** How this host restarts the controller once a restore is staged (card K01i): `automatic` closes this controller and starts it again (called `delayMs` after the restore is staged, so the owner's reply goes out first); `instruction` is what the owner must do here when it is not automatic. Absent: the owner is told to stop and start the controller the usual way. */
       readonly restart?: { readonly automatic?: () => void | Promise<void>; readonly instruction?: string; /** Default 1000 ms after the restore is staged. */ readonly delayMs?: number } } };
   /**
-   * Owner chat (card U03): the interpreter that reads the owner's messages (a model behind the routed client in production; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
+   * Owner chat (card U03): the interpreter that reads the owner's messages (in the launcher, a model on the routing table's coordinator routes, not metered against the daily cap so the owner can always change that cap by chat; a scripted one in tests) and, optionally, the persistent coordinator's model and credential. Absent: no chat service is built.
    * The approval profile (A07), status explanations (U05) and conversational policy edits (U04) are composed in. The coordinator is controller-managed and nothing depends on it: when it is paused, stopped or its routes fail, the chat and the rest of the controller carry on.
    */
   readonly chat?: {

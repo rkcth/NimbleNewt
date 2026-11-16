@@ -71,8 +71,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "stall.decide": { verb: "Answer a stuck agent's concern: confirm it is stuck, or dismiss it", mode: "profile", revision: "concern" },
   "escalation.ladder.set": { verb: "Change how long a stuck agent waits at each level of supervisors", mode: "propose" },
   // A ceiling on agreed raises and grants widens or narrows what a decision may carry out: shown first in every profile (owner decision 2026-10-30).
-  // A daily cap on the controller's own model calls limits what the chat, the coordinator and the reviewing agents may spend, and at the cap they stop answering: shown first in every profile (T2). null removes the cap.
-  "chat.budget.set": { verb: "Set the daily cap on the tokens the controller's own model calls (the chat, the coordinator and the reviewing agents) may use, as a whole number of tokens a day from 1 to 1000000000 (maxTokensPerDay), or remove the cap with null; at the cap those calls stop until the next UTC day", mode: "propose" },
+  // A daily cap on the reviewing agents' model calls: too low and reviews stop running (every resume waits for the owner), so it is shown first in every profile (T2). null removes the cap. The chat itself is never stopped by it.
+  "chat.budget.set": { verb: "Set the daily cap on the tokens the controller's own model calls of the reviewing agents (the resume reviewer and the second agent that questions a done) may use, as a whole number of tokens a day from 1 to 1000000000 (maxTokensPerDay), or remove the cap with null; at the cap those calls stop until the next UTC day; the chat itself is never stopped by it", mode: "propose" },
   "agreed.limits.change": { verb: "Change the limits on agreed raises and grants", mode: "propose" },
   // How long a stalled resume is retried before the owner is told is a work-and-spend decision: shown first in every profile.
   // The coverage-lapse alert is off by default and only tells the owner; turning it on or off, or changing its period, is reversible and applies at once (provisional, see the notes).
