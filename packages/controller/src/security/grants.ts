@@ -103,6 +103,21 @@ function holdsWith(byId: ReadonlyMap<string, GrantRecordBody>, now: string): (bo
   };
   return holds;
 }
+/**
+ * Whether one grant record holds at `now` as `effectiveOf` judges it: active, inside its window, not lapsed from non-use and, for a derived grant, resting on a chain of parents that hold
+ * (T7b review: an ended, lapsed or not yet started right, or one whose parent was taken back, gives nothing, so no running work can rely on it). Reads only the parents named on the chain.
+ */
+export async function holdsNow(runner: CommandRunner, body: GrantRecordBody, now: string): Promise<boolean> {
+  const byId = new Map<string, GrantRecordBody>();
+  let p = body;
+  for (let depth = 0; p.source === "derived" && p.parentId !== undefined && !byId.has(p.parentId) && depth <= MAX_DEPTH; depth++) {
+    const found = await runner.get("grant-record", p.parentId);
+    if (found === undefined) break;
+    p = found.body as unknown as GrantRecordBody;
+    byId.set(found.id, p);
+  }
+  return holdsWith(byId, now)(body, 0);
+}
 
 const ENVIRONMENT = /^[a-z][a-z0-9-]{0,39}$/;
 const HHMM = /^(?:[01]\d|2[0-3]):[0-5]\d$/;

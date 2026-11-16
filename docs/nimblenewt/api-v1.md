@@ -116,7 +116,7 @@ Arguments:
 
 - `grantId` (optional): the right's ID (`grt-...`); without it every active right is answered
 
-Result: `{ items, more }`: each `{ grantId, grantee, action, project, state, revision, total, items: [{ agentId, taskId, title, projectId, attemptId, attemptNumber }], complete }`; `complete` is false when the records could not all be read, so `total` is at least what was found; `more` is true when there are more active rights than answered. A right that does not exist is `not_found`.
+Result: `{ items, more }`: each `{ grantId, grantee, action, project, state, inForce, revision, total, items: [{ agentId, taskId, title, projectId, attemptId, attemptNumber }], complete }`; `inForce` is false for a right that gives nothing now (ended, lapsed, not started yet, or derived from one that no longer holds), which then has no running work; a title has credential-shaped runs removed; `complete` is false when the records could not all be read, so `total` is at least what was found; `more` is true when there are more active rights than answered. A right that does not exist is `not_found`.
 
 #### `setup.readiness`
 

@@ -1,7 +1,8 @@
 import type { AssignmentBody, AttemptBody } from "../domain/assignment-model.js";
 import type { TaskBody } from "../domain/model.js";
 import { view, type CommandRunner } from "../domain/runner.js";
-import type { GrantRecordBody } from "./grants.js";
+import { holdsNow, type GrantRecordBody } from "./grants.js";
+import { redactText } from "./redact.js";
 
 /**
  * Running work that relies on a standing right (follow-up to card T7). Before the owner takes a right back they are told which agent work is going on now that the right covers: an agent that holds
@@ -23,6 +24,8 @@ export interface Reliance {
   readonly action: string;
   readonly project: string;
   readonly state: "active" | "revoked";
+  /** Whether the right gives anything now (T7b review): an active right that ended, lapsed from non-use, has not started yet or rests on a parent that no longer holds is not in force, and no running work relies on it. */
+  readonly inForce: boolean;
   readonly revision: number;
   /** All the running work found, whatever the cap on `items`. */
   readonly total: number;
@@ -51,7 +54,7 @@ export async function runningWork(runner: CommandRunner): Promise<{ readonly wor
       const tb = task?.body as unknown as TaskBody | undefined;
       if (tb === undefined || FINAL.has(tb.state)) continue;
       if (work.length >= RELIANCE_RUNNING_MAX) { complete = false; break scanning; }
-      work.push({ agentId: bare(b.owner.id), taskId: b.taskId, title: tb.title, projectId: tb.projectId, attemptId: b.activeAttemptId, attemptNumber: ab.number });
+      work.push({ agentId: bare(b.owner.id), taskId: b.taskId, title: redactText(tb.title), projectId: tb.projectId, attemptId: b.activeAttemptId, attemptNumber: ab.number });
     }
     if (page.length < 500) break;
     if (seen >= RELIANCE_SCAN_MAX) { complete = false; break; }
@@ -60,9 +63,9 @@ export async function runningWork(runner: CommandRunner): Promise<{ readonly wor
   return { work, complete };
 }
 
-/** What of the running work one right covers. A revoked right covers nothing (it is already taken back). */
-export function covered(grant: GrantRecordBody, work: readonly RunningWork[]): RunningWork[] {
-  if (grant.state !== "active") return [];
+/** What of the running work one right covers. A revoked right covers nothing (it is already taken back), nor does one that is not in force now (`inForce`). */
+export function covered(grant: GrantRecordBody, work: readonly RunningWork[], inForce = true): RunningWork[] {
+  if (grant.state !== "active" || !inForce) return [];
   return work.filter((w) => `agent:${w.agentId}` === grant.grantee && (grant.project === "*" || grant.project === w.projectId) && (grant.resource === undefined || grant.resource.kind !== "task" || grant.resource.id === w.taskId));
 }
 
@@ -90,9 +93,12 @@ export async function relianceOf(runner: CommandRunner, query: { grantId?: strin
     }
   }
   const { work, complete } = await runningWork(runner);
-  const items = records.map(({ id, body, revision }): Reliance => {
-    const all = covered(body, work);
-    return { grantId: id, grantee: body.grantee, action: body.action, project: body.project, state: body.state, revision, total: all.length, items: all.slice(0, RELIANCE_LISTED), complete };
-  });
+  const now = runner.now();
+  const items: Reliance[] = [];
+  for (const { id, body, revision } of records) {
+    const inForce = await holdsNow(runner, body, now);
+    const all = covered(body, work, inForce);
+    items.push({ grantId: id, grantee: body.grantee, action: body.action, project: body.project, state: body.state, inForce, revision, total: all.length, items: all.slice(0, RELIANCE_LISTED), complete });
+  }
   return { items, more };
 }

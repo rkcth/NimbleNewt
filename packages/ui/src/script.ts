@@ -334,7 +334,8 @@ export const APP_JS = String.raw`(function (root) {
   // otherwise turn the rest of a line around ("... for <agent> in project <id>"), so the owner would read something other than what the record says.
   var UNSEEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
   function unseen(c) { return '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4); }
-  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); t = t.length > n ? t.slice(0, n - 3) + '...' : t; return t.replace(UNSEEN, unseen); }
+  // A cut never leaves half of a character written as two UTF-16 units (an emoji at the cut point is dropped whole, T7b review).
+  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); if (t.length > n) { var k = n - 3; var c = t.charCodeAt(k - 1); if (c >= 0xd800 && c <= 0xdbff) k -= 1; t = t.slice(0, k) + '...'; } return t.replace(UNSEEN, unseen); }
   function isNum(v) { return typeof v === 'number' && isFinite(v); }
   function obj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null; }
   function list(v, max) { return Array.isArray(v) ? v.slice(0, max || 200) : []; }
@@ -1027,6 +1028,7 @@ export const APP_JS = String.raw`(function (root) {
   function relianceLines(r) {
     if (r === undefined) return ['Which running work relies on this right could not be checked just now.'];
     if (r === null) return ['Which running work relies on this right is not known (it may be newer than this page).'];
+    if (r.inForce === false) return ['It is not in force now (it ended, lapsed or has not started), so no running work relies on it now.'];
     var items = list(r.items, 10).map(obj).filter(Boolean);
     var total = isNum(r.total) ? r.total : items.length;
     if (!total) return ['No running work relies on it' + (r.complete === false ? ', but not every record could be read, so some may not be listed' : '') + '.'];

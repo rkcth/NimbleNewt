@@ -118,6 +118,20 @@ for (const backend of backends) {
       assert.match(overall, /task\.update for agent:bob in every project/);
       assert.equal((await grants.getGrant(everywhere.id))!.state, "active", "asking and previewing change nothing");
 
+      // T7b review: a right that gives nothing now has no work relying on it, though it is still active: ended, not started yet, and derived from a right taken back (below, after Apply).
+      const expired = await grants.grant(w.owner, { commandId: cid("g"), grantee: "agent:ann", action: "task.update", project: a, source: "direct", basis: "test", expiresAt: "2026-10-01T00:00:00.000Z" });
+      const later = await grants.grant(w.owner, { commandId: cid("g"), grantee: "agent:ann", action: "task.update", project: a, source: "direct", basis: "test", notBefore: "2026-12-01T00:00:00.000Z" });
+      for (const g of [expired, later]) {
+        const r = (await as(w.ownerToken, "grant.reliance", { grantId: g.id })).result.items[0];
+        assert.deepEqual([r.state, r.inForce, r.total, r.items.length], ["active", false, 0, 0]);
+      }
+      const late = adminIntent("grant-revoke", { grantId: expired.id, reason: "tidy up" });
+      const lateShown = JSON.stringify((await chat.submit(w.ownerToken, { messageId: cid("ui"), text: late.text }, { fixedIntents: [late.intent] } as never)).outcomes);
+      assert.match(lateShown, /is not in force now/);
+      assert.doesNotMatch(lateShown, /may rely on it|Dig the first bed/, "an ended right is not shown as one that running work relies on");
+      const child = await grants.derive(w.owner, { commandId: cid("d"), parentId: inA.id, action: "task.update", project: a, basis: "a step under it" });
+      assert.deepEqual([(await rely(child.id)).total, ((await rely(child.id)) as any).inForce], [2, true], "a derived right in force covers its agent's work");
+
       // Apply the first take-back: the right is gone, a second look says so and counts no work.
       const applied = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: (proposed.outcomes[0] as any).proposalId } as never);
       assert.equal((applied as any).applied, true, JSON.stringify(applied));
@@ -125,6 +139,8 @@ for (const backend of backends) {
       assert.deepEqual([gone.state, gone.total], ["revoked", 0]);
       const q3 = `is anything still relying on ${inA.id}?`;
       assert.match(lines((await say(q3, [ask({ kind: "grant_reliance", grantId: inA.id }, q3)])).outcomes as never), /is already taken back/);
+      const orphan = await rely(child.id);
+      assert.deepEqual([orphan.state, (orphan as any).inForce, orphan.total], ["active", false, 0], "a derived right stops with the right it rests on, so no work relies on it any more");
 
       // Checked: a task credential and an agent are told nothing (forbidden / missing), a made-up or malformed ID and a stray field are refused, never a server error.
       const ann = await w.agent("eve", [{ action: "*", project: "*" }]);
@@ -134,6 +150,27 @@ for (const backend of backends) {
       assert.equal((await as(w.ownerToken, "grant.reliance", { grantId: inA.id, limit: 1 })).error?.code, "invalid_command");
       const asked = await w.api.handle(ann.token, { v: 1, op: "status.ask", args: { request: { kind: "grant_reliance" } } } as never) as any;
       assert.doesNotMatch(JSON.stringify(asked), /Dig the first bed/, "an agent is told no title");
+      // An agent with only read rights and a client (the chat's own kind of caller) are refused too, and no refusal names a title, a right or an agent's work.
+      const viewer = await w.agent("vic", [{ action: "task.read", project: "*" }]);
+      await w.principals.enroll(w.owner, { commandId: cid("e"), kind: "client", name: "phone", grants: [] });
+      const client = (await w.principals.issueCredential(w.owner, "client:phone")).token;
+      for (const token of [ann.token, viewer.token, client]) {
+        for (const args of [{}, { grantId: everywhere.id }]) {
+          const refused = await as(token, "grant.reliance", args);
+          assert.equal(refused.ok, false);
+          assert.ok(["forbidden", "unauthenticated"].includes(refused.error!.code), JSON.stringify(refused));
+          assert.doesNotMatch(JSON.stringify(refused), /Dig the first bed|Plant the beans|Paint the shed|task-|att-|agent:ann|grt-/, "a refusal carries no data");
+        }
+        const status = await w.api.handle(token, { v: 1, op: "status.ask", args: { request: { kind: "grant_reliance", grantId: everywhere.id } } } as never) as Call;
+        assert.equal(status.ok, false, JSON.stringify(status));
+        assert.doesNotMatch(JSON.stringify(status), /Dig the first bed|Paint the shed|may rely|agent:ann/);
+      }
+      // A read that fails is said so in the take-back preview, never read as "nothing relies on it".
+      const failing = w.chat({ status: statusSvc!, api: { handle: async (t: string, req: { op: string }) => (req.op === "grant.reliance" ? { ok: false, error: { code: "unavailable", message: "busy" } } : w.api.handle(t, req as never)) } as never });
+      const tb = adminIntent("grant-revoke", { grantId: everywhere.id, reason: "check failure" });
+      const failed = JSON.stringify((await failing.submit(w.ownerToken, { messageId: cid("ui"), text: tb.text }, { fixedIntents: [tb.intent] } as never)).outcomes);
+      assert.match(failed, /could not be checked just now/);
+      assert.doesNotMatch(failed, /no running work relies on it/i);
       await assert.rejects(statusSvc!.ask(w.owner, { kind: "grant_reliance", grantId: "bogus" } as never), /grantId/);
       await assert.rejects(statusSvc!.ask(w.owner, { kind: "grant_reliance", extra: 1 } as never), /extra|unknown/i);
     } finally { await w.close(); }
@@ -155,6 +192,7 @@ for (const backend of backends) {
       const given = await grants.grant(w.owner, { commandId: cid("g"), grantee: "agent:dan", action: "task.update", project: "*", source: "direct", basis: "test" });
       const read = ((await w.api.handle(w.ownerToken, { v: 1, op: "grant.reliance", args: { grantId: given.id } } as never)) as Call).result.items[0];
       assert.deepEqual([read.total, read.items.length, read.complete], [12, 10, true]);
+      assert.doesNotMatch(JSON.stringify(read), /sk-LEAK/, "the read the page draws from does not carry a credential-shaped run of a title (T7b review)");
 
       script[`what relies on ${given.id}`] = [ask({ kind: "grant_reliance", grantId: given.id }, `what relies on ${given.id}`)];
       const again = await chat.submit(w.ownerToken, { messageId: cid("m"), text: `what relies on ${given.id}` });

@@ -17,7 +17,7 @@ import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
 import { relianceOf } from "../security/reliance.js";
-import { relianceHead, relianceLines } from "./reliance-words.js";
+import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
 import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
@@ -1632,7 +1632,7 @@ export class StatusService {
       return { observedAt: this.#runner.now(), lines: relianceLines(r).map((text) => line(text, c)) };
     }
     const busy = got.items.filter((r) => r.total > 0);
-    lines.push(line(busy.length === 0 ? `No running work relies on any of the ${got.items.length}${got.more ? " or more" : ""} standing rights${got.items.every((r) => r.complete) ? "" : "; not every record could be read, so some may not be listed"}.` : `${busy.length} of the ${got.items.length}${got.more ? " or more" : ""} standing rights have running work that may rely on them.`, cite("grants", "active")));
+    lines.push(line(relianceSummary(got.items, got.more), cite("grants", "active")));
     for (const r of busy.slice(0, 10)) lines.push(line(relianceHead(r, 2), cite("grant", r.grantId, r.revision)));
     if (busy.length > 10) lines.push(line(`${busy.length - 10} more rights with running work are not listed; ask about one by its ID.`, cite("grants", "active")));
     return { observedAt: this.#runner.now(), lines };

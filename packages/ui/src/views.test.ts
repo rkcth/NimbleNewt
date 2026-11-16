@@ -639,6 +639,12 @@ test("the take-back card says so when nothing runs, when not every record could 
   const missing = await takeBack({ items: [] });
   assert.match(missing.shown[1]!, /is not known/);
   assert.match(missing.asked[0]!, /is not known/);
+  // T7b review: a right that gives nothing now (ended, lapsed, not started) is said so, and a title cut at an emoji never keeps half of it.
+  const off = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, inForce: false, items: [] }] });
+  assert.match(off.shown[1]!, /^It is not in force now \(it ended, lapsed or has not started\), so no running work relies on it now\.$/);
+  const cut = await takeBack({ items: [{ grantId: GRT, total: 1, complete: true, items: [{ ...work(1)[0]!, title: "x".repeat(56) + "\u{1F600}" + "y".repeat(20) }] }] });
+  assert.equal(cut.shown[2], '"' + "x".repeat(56) + '..." (task task-aaaaaaaaaaaaaaaaaaa0, agent ann, attempt 1)');
+  assert.ok(!/[\ud800-\udfff]/.test(cut.asked[0]!), "the question keeps no half of a character");
   const bad = await takeBack({ error: { code: "unavailable", message: "no" } });
   assert.match(bad.shown[1]!, /could not be checked just now/);
   assert.match(bad.asked[0]!, /could not be checked just now/);
