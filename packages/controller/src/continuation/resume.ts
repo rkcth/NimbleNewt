@@ -665,22 +665,33 @@ export class ResumeCheckService {
       const opened = await this.#blockers.openBlocker({ commandId: `${id}-blk-${type}-${b.blocks}`, actor: "system", type, subject: { kind: "task", id: b.taskId }, summary: short(reason), resolver: "owner" });
       blockerId = opened.id;
     }
+    let wrote: boolean;
     try {
-      await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from, guard);
+      wrote = await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from, guard);
     } catch (error) {
-      // The attempt ended between opening the blocker and writing the block (T8b): the check is cancelled by the caller and never blocked, so nothing is waiting for the owner. The blocker is closed
-      // unless the check itself names it (another advance of the check blocked it with this very blocker). Any other failure leaves it open: the same command ID finds it again at the next try.
-      if (blockerId !== undefined && error instanceof DomainError && error.message === ORPHANED) await this.#closeUnused(id, blockerId, b.blocks);
+      // The attempt ended between opening the blocker and writing the block (T8b): the check is cancelled by the caller and never blocked, so nothing is waiting for the owner. Likewise when this
+      // check's resume was recorded meanwhile (the caller then ends the check done from that record; T8b second review). The blocker is closed unless a check names it (another advance of this
+      // check blocked it with this very blocker, or the task's newer check did: blockers are one per task and type). Any other failure leaves it open: the same command ID finds it again at the next try.
+      if (blockerId !== undefined && error instanceof DomainError && (error.message === ORPHANED || error.message === RECORDED_MEANWHILE)) {
+        await this.#closeUnused(id, b.taskId, blockerId, b.blocks, error.message === ORPHANED ? "The attempt this resume check was for ended before the check could be blocked, so nothing is waiting on this." : "The task's resume was recorded before the check could be blocked, so nothing is waiting on this.");
+      }
       throw error;
     }
+    // The check moved on between opening the blocker and the write (T8b second review): another advance committed, cancelled (the dispatcher, when the attempt ended) or blocked it. The block was not
+    // written; the blocker is closed unless a check names it (the other advance blocked it with this very blocker).
+    if (!wrote && blockerId !== undefined) await this.#closeUnused(id, b.taskId, blockerId, b.blocks, "The resume check moved on (it was committed, cancelled or blocked for another reason) before it could be blocked, so nothing is waiting on this.");
   }
 
-  async #closeUnused(id: string, blockerId: string, blocks: number): Promise<void> {
-    if (((await this.#runner.get(KIND, id))?.body as unknown as ResumeCheckBody | undefined)?.blocked?.blockerId === blockerId) return;
+  async #closeUnused(id: string, taskId: string, blockerId: string, blocks: number, resolution: string): Promise<void> {
+    const names = async (checkId: string): Promise<boolean> => ((await this.#runner.get(KIND, checkId))?.body as unknown as ResumeCheckBody | undefined)?.blocked?.blockerId === blockerId;
     try {
       const open = await this.#blockers.getBlocker(blockerId);
       if (open === undefined || open.state !== "open") return;
-      await this.#blockers.resolveBlocker?.({ commandId: `${id}-blk-end-${blocks}`, actor: "system", blockerId, expectedRevision: open.revision, resolution: "The attempt this resume check was for ended before the check could be blocked, so nothing is waiting on this." });
+      // Read after the blocker: a check that names it (this one, or the task's current one, which may be a newer check that was given the same open blocker) keeps it open.
+      if (await names(id)) return;
+      const current = ((await this.#runner.get(ACTIVE, derivedId("rck", `active\0${taskId}`)))?.body as unknown as { checkId?: string } | undefined)?.checkId;
+      if (current !== undefined && current !== id && await names(current)) return;
+      await this.#blockers.resolveBlocker?.({ commandId: `${id}-blk-end-${blocks}`, actor: "system", blockerId, expectedRevision: open.revision, resolution });
     } catch (error) {
       if (!(error instanceof DomainError) || (error.code !== "invalid_command" && error.code !== "stale_revision" && error.code !== "not_found" && error.code !== "command_conflict")) throw error;
     }

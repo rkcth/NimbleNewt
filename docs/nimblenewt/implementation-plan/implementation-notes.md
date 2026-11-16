@@ -11945,6 +11945,27 @@ Each claim was driven end to end on all four backends (reference store, SQLite, 
 ASSUMPTION: an owner-facing busy text says the same request can be made again rather than that something will look at it again, because the second is not true for every caller.
 ASSUMPTION: a start over finding the check in a phase it does not start over from does nothing, as the write it would make already does; no churn blocker is opened for it.
 
+### T8b second review (Claude agent, Opus 5.5, clean context, 2026-11-16)
+
+Each case was driven with throwaway scenarios on all four backends before any change, then kept as repo tests.
+
+**Found and fixed (3), all in `#block`: a churn blocker opened for a block that is then not written.**
+- *Resume recorded meanwhile.* In the pruned-capture start over's last round the blocker is opened, and the block write's guard can then find the check's resume recorded by another advance (`RECORDED_MEANWHILE`). The check ends `done` from that record, but the blocker stayed open: the owner was told "the inputs kept changing ... rounds did not settle" for a task that had resumed. Now closed: "The task's resume was recorded before the check could be blocked, so nothing is waiting on this."
+- *The check moved on before the write.* A commit's start over carries no attempt guard, so an ended attempt reaches it as the dispatcher's cancel (`attempt-ended`), not as ORPHANED: the block write found the check cancelled, wrote nothing (`#update` answers false, no error), and the blocker stayed open. The same holds when another advance committed the check meanwhile. Item (a) only covered the pruned path. Now, when the write answers false, the blocker is closed ("The resume check moved on (it was committed, cancelled or blocked for another reason) before it could be blocked, so nothing is waiting on this.") unless a check names it.
+- *A blocker shared with the task's newer check.* Blockers are one per task and type. When the older check is cancelled (its attempt ended) and the task's newer check, for a new attempt, blocks as churn before the older check's close runs, the newer check is given the same open blocker, and the close then resolved it: the newer check became retryable and started over without the owner doing anything. The close now also leaves the blocker open when the task's current check (its active pointer) names it, and reads the checks after the blocker.
+
+A storage error or a busy (`unavailable`) block write still leaves the blocker open, as before: a retry of the same check opens it under the same command ID, which would replay a closed blocker.
+
+**Tests** (`dispatch/resume-pruned-capture.test.ts`, each on all four backends): "a churn blocker opened for a block that is not written (recorded / cancelled / newer check meanwhile)": closed with the matching resolution, repeatable; kept open and not retryable for the newer check that names it. The ended-attempt test now also checks its resolution text.
+
+**Mutation checks** (built `resume.js`, each alone, restored byte for byte and compared with `cmp`; the two pruned-capture files and `resume-busy-rounds` run, 76 runs): recorded-meanwhile not closed: 4 fail; moved-on not closed: 4; newer check's blocker not looked at: 4; ORPHANED not closed: 4; ORPHANED given the moved-on text: 4; round-moved refusal removed: 8; bare error after 6 tries in `#update`: 4; phase check in `#restart` removed: 4; this check's own blocker test removed: 4; 60 tries in `#restart`: 4.
+
+**Checked and found right.** Overlapping start-overs cannot pass the round limit (the round is read and the write refuses when it moved); `unavailable` texts are true for every caller; the same command again goes through; the sweep's `failed` list and the dispatcher's skip line keep their shape.
+
+**NOT done.** A check blocked with a blocker and then cancelled (the dispatcher's `attempt-ended`, `resume.cancel`, `resume.decline`) still leaves that blocker open; this is older than T8b and is the owner's to resolve. The close of a shared blocker reads the checks and then resolves; a newer check that is given the blocker inside that last step is not excluded (the resolve has no check on the pointer).
+
+ASSUMPTION: a churn blocker for a block that was not written and that no check names is closed whatever kept the write from happening (ended attempt, resume recorded, check moved on), each with its own resolution text; only failures that a retry of the same block repeats keep it open.
+
 ## A09 follow-up T6: administrators are told of requests, and the claim checks the agent records the administrator check read (Claude agent, Sonnet 5.5, 2026-11-15)
 
 Card A09 is NOT flipped. Base 16ef7406, branch `task-t6-a09b`. This closes two items the ninth slice and its reviews left open.

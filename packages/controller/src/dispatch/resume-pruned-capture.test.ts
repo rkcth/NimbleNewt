@@ -168,6 +168,9 @@ for (const backend of backends) {
       assert.equal(after.phase, "cancelled", JSON.stringify(after.history));
       assert.equal(await c.blockers.openFor("resume_churn", { kind: "task", id: taskId }), undefined, "no churn blocker stays open for it");
       assert.equal((await c.blockers.occurrences("resume_churn", { kind: "task", id: taskId })), 1, "the blocker existed and was closed");
+      const closed = (await store.storage.listAggregates("blocker", { limit: 100 })).filter((b) => b.body["type"] === "resume_churn");
+      assert.equal(closed.length, 1);
+      assert.match(String(closed[0]!.body["resolution"]), /attempt this resume check was for ended before the check could be blocked/, "the resolution says why");
       assert.equal((await real.advance(c.owner, { checkId: own.id })).phase, "cancelled", "repeatable");
     } finally { await store.close(); }
   });
@@ -231,4 +234,88 @@ for (const backend of backends) {
       assert.equal(await c.blockers.occurrences("resume_churn", { kind: "task", id: taskId }), 1, "one blocker, shared by both advances");
     } finally { await store.close(); }
   });
+
+  // T8b second review: the check's churn blocker is opened, and before the block is written something else happens to the check: its resume is recorded by another advance (the pruned-capture
+  // start over in its last round), or the dispatcher cancels it because its attempt ended (a commit's start over, which carries no attempt guard), or it is cancelled and the task's newer check,
+  // for a new attempt, blocks as churn with that same open blocker (blockers are one per task and type). The block is not written; a blocker no check names is closed with a true resolution, one a
+  // check names stays open.
+  for (const meanwhile of ["recorded", "cancelled", "newer check"] as const) {
+    test(`${backend.name}: a churn blocker opened for a block that is not written (${meanwhile} meanwhile) is ${meanwhile === "newer check" ? "kept for the newer check that names it" : "closed"}`, async () => {
+      const store = await backend.open();
+      try {
+        const c = await buildWorld(store.storage);
+        const continuations = ContinuationService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+        const dependencies = DependencyService.withEpoch(store.storage, c.epoch, { clock: c.options.clock! });
+        const ann = await c.agent("ann", workGrants(c.project, []));
+        const { taskId, attemptId } = await c.task("long job", ann);
+        const model = { provider: "local", id: "m1" };
+        let prune = meanwhile === "recorded"; let checkId = ""; let real!: ResumeCheckService; let fired = false; let newer: Awaited<ReturnType<ResumeCheckService["commit"]>> | undefined;
+        const racing = new Proxy(continuations, { get: (target, prop) => {
+          const v = Reflect.get(target, prop) as unknown;
+          if (prop === "resume") return async (...args: unknown[]) => {
+            if (prune) { prune = false; for (let i = 0; i < CONTINUATION_KEEP + 1; i++) await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(100 + i) }); }
+            return (target.resume as (...a: unknown[]) => unknown).apply(target, args);
+          };
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } }) as ContinuationService;
+        const blockers = new Proxy(c.blockers, { get: (target, prop) => {
+          const v = Reflect.get(target, prop) as unknown;
+          if (prop === "openBlocker") return async (...args: unknown[]) => {
+            const r = await (v as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+            if (fired) return r;
+            fired = true;
+            if (meanwhile === "recorded") {
+              // Another advance of the check records its resume (the check's own command ID, against the capture that exists).
+              const latest = (await continuations.latest(c.owner, taskId))!;
+              await continuations.resume({ id: "service:resume-check", kind: "service", name: "resume-check", grants: [] }, { commandId: `${checkId}-resume`, taskId, continuationId: latest.id, model, after: "continue" });
+              return r;
+            }
+            const asg = (await c.assignments.getAssignment(taskId))!;
+            await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId, expectedRevision: asg.revision });
+            await real.cancel(c.dispatcherPrincipal, { checkId, reason: "attempt-ended" });
+            if (meanwhile === "newer check") {
+              await c.assignments.assignTask({ commandId: cid("as"), actor: c.owner.id, taskId, owner: { kind: "agent", id: ann.aid }, expectedRevision: (await c.assignments.getAssignment(taskId))!.revision });
+              const a2 = (await c.assignments.getAssignment(taskId))!;
+              const att2 = await c.assignments.admitAttempt({ commandId: cid("ad"), actor: "inbox", taskId, expectedRevision: a2.revision, generation: a2.generation, owner: { kind: "agent", id: ann.aid }, harness: "pi" });
+              const next = await real.start(c.owner, { commandId: cid("s"), taskId, attemptId: att2.id, model, after: "continue" });
+              assert.equal(next.phase, "ready", JSON.stringify(next.history));
+              await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(4) });
+              newer = await real.commit(c.owner, { commandId: cid("k"), checkId: next.id });
+            }
+            return r;
+          };
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } }) as typeof c.blockers;
+        real = ResumeCheckService.withEpoch(store.storage, c.epoch, { continuations: racing, dependencies, blockers, ports: controllerResumePorts(store.storage, { observe: async () => ({}), review: async () => ({}) }) }, { clock: c.options.clock!, maxRounds: 1 });
+        await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(1) });
+        await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(2) });
+        const own = await real.start(c.owner, { commandId: cid("s"), taskId, attemptId: attemptId!, model, after: "continue", ...(meanwhile === "recorded" ? { checkpointDigest: dg(1) } : {}) });
+        checkId = own.id;
+        assert.equal(own.phase, "ready");
+        assert.equal(own.round + 1, own.maxRounds, "the check is in its last round");
+        // A capture after the review makes the commit start the check over (pruned: inside the resume).
+        if (meanwhile !== "recorded") await continuations.capture(c.owner, { commandId: cid("c"), taskId, ...input(3) });
+        const after = await real.commit(c.owner, { commandId: cid("k"), checkId: own.id });
+        assert.ok(fired, "the churn blocker was opened");
+        assert.equal(after.phase, meanwhile === "recorded" ? "done" : "cancelled", JSON.stringify(after.history));
+        assert.equal(after.blocked, undefined);
+        const churn = (await store.storage.listAggregates("blocker", { limit: 100 })).filter((b) => b.body["type"] === "resume_churn");
+        assert.equal(churn.length, 1);
+        const first = await c.blockers.getBlocker(churn[0]!.id);
+        assert.equal(await c.blockers.occurrences("resume_churn", { kind: "task", id: taskId }), 1, "one churn blocker existed");
+        if (meanwhile === "newer check") {
+          assert.equal(newer?.phase, "blocked", JSON.stringify(newer?.history));
+          assert.equal(newer?.blocked?.type, "resume_churn");
+          assert.equal(newer?.blocked?.blockerId, first?.id, "the newer check was given the same open blocker");
+          assert.equal(first?.state, "open", "the blocker the newer check names stays open");
+          assert.equal(await real.retryable((await real.get(c.owner, newer!.id))!), false, "the newer check still waits for the owner");
+        } else {
+          assert.equal(first?.state, "resolved", "no churn blocker stays open for a check that does not name it");
+          assert.match(String(first?.resolution), meanwhile === "recorded" ? /resume was recorded before the check could be blocked/ : /moved on \(it was committed, cancelled or blocked for another reason\)/);
+          assert.equal(await c.blockers.openFor("resume_churn", { kind: "task", id: taskId }), undefined);
+          assert.equal((await real.advance(c.owner, { checkId: own.id })).phase, after.phase, "repeatable");
+        }
+      } finally { await store.close(); }
+    });
+  }
 }
