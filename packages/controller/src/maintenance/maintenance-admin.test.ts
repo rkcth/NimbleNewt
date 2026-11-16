@@ -21,13 +21,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 interface World {
   readonly m: MaintenanceService; readonly applier: FakeApplier; readonly owner: Principal; readonly agents: AgentService; readonly grants: GrantService; readonly principals: PrincipalService;
   readonly time: { ms: number };
-  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number }): MaintenanceService;
+  service(extra?: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number }): MaintenanceService;
   make(name: string, by?: Principal, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
   body(id: string): Promise<MaintenanceBody & { revision: number }>;
   until(id: string, want: string): Promise<void>;
   storage: import("../storage/types.js").ControllerStorage;
   /** A service on another view of the same storage (to step into the middle of a command). */
-  serviceOn(storage: import("../storage/types.js").ControllerStorage): MaintenanceService;
+  serviceOn(storage: import("../storage/types.js").ControllerStorage, extra?: { held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]> }): MaintenanceService;
 }
 async function world(backendIndex: number, body: (w: World) => Promise<void>, heartbeatMs = 0): Promise<void> {
   const backend = backends[backendIndex]!;
@@ -41,7 +41,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     const grants = GrantService.withEpoch(open.storage, projects.epoch, options);
     const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
     const applier = new FakeApplier();
-    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
+    const service = (extra: { heartbeatMs?: number; applyTimeoutMs?: number; held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]>; inspector?: NonNullable<MaintenanceOptions["inspector"]>; inspectTimeoutMs?: number; inspectQueue?: number } = {}) => MaintenanceService.withEpoch(open.storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     const m = service();
     const make: World["make"] = async (friendlyName, by = owner, supervisorId) => {
       const created = await agents.create(by, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
@@ -49,7 +49,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     };
     const getBody = async (id: string) => { const a = (await open.storage.getAggregate({ kind: "maintenance", id }))!; return { ...(a.body as unknown as MaintenanceBody), revision: a.revision }; };
     const until = async (id: string, want: string): Promise<void> => { for (let i = 0; i < 200 && (await getBody(id)).status !== want; i++) await sleep(10); assert.equal((await getBody(id)).status, want); };
-    const serviceOn = (storage: import("../storage/types.js").ControllerStorage) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs }, options);
+    const serviceOn = (storage: import("../storage/types.js").ControllerStorage, extra: { held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]> } = {}) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage, serviceOn });
     await m.idle();
   } finally { await open.close(); }
@@ -344,6 +344,144 @@ for (const [index, backend] of backends.entries()) {
       for (const id of [first, second]) await m.decide(boss.principal, { commandId: `review:${id}`, maintenanceId: id, verdict: "approve", specDigest: await specOf(w, id) });
       await m.idle();
       for (const id of [first, second]) assert.equal(w.applier.calls.filter((c) => c.id === id && c.op === "apply").length, 1, "a repeated decision applies nothing again");
+    });
+  });
+}
+
+// ---- T6 (A09 follow-up): administrators are told, and the claim checks the agent records the administrator check read ----
+
+/** A view of the storage that runs `act` once, right after the `nth` read of the agent record `id` (the record read is the one from before `act`: a write that lands between the check and the claim). */
+const afterRead = (storage: World["storage"], id: string, nth: number, act: () => Promise<void>): { view: World["storage"]; fired: () => boolean } => {
+  let reads = 0, done = false;
+  const view = new Proxy(storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+    const found = await t.getAggregate(ref as never);
+    if (!done && ref.kind === "agent" && ref.id === id && ++reads === nth) { done = true; await act(); }
+    return found;
+  } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) });
+  return { view: view as World["storage"], fired: () => done };
+};
+
+for (const [index, backend] of backends.entries()) {
+  test(`each named administrator who could decide a host-policy or base request gets one notice; not the requester, a held or team administrator, nor for other kinds or a repeated request (${backend.name})`, async () => {
+    const held = new Set<string>();
+    const told: Array<{ id: string; to: string; admin: string | undefined; kind: string; admins?: readonly string[] }> = [];
+    await world(index, async (w) => {
+      const m = w.service({ held: async (id) => held.has(id), notify: async (n) => { told.push({ id: n.maintenanceId, to: n.to, admin: n.administratorId, kind: n.kind, ...(n.administratorIds === undefined ? {} : { admins: n.administratorIds }) }); } });
+      const lead = await w.make("Lead");
+      const ann = await w.make("Ann", w.owner, lead.id);
+      const a1 = await w.make("AdminOne"); const a2 = await w.make("AdminTwo"); const a3 = await w.make("AdminThree"); const a4 = await w.make("AdminFour");
+      await plant(w, a4.id, { supervisorId: ann.id });
+      await m.change(w.owner, { commandId: cid("adm"), administrators: [a1.id, a2.id, a3.id, a4.id] });
+      held.add(a3.id);
+      const adminsOf = (id: string) => told.filter((t) => t.id === id && t.to === "administrator").map((t) => t.admin).sort();
+      const label = cid("same");
+      const one = await m.request(ann.principal, { commandId: label, kind: "base", spec: { change: "newer interpreter" }, reason: "needed", rollbackPlan: "undo it" });
+      // a1 and a2 are free; a3 is held; a4 is below the requester (its team). The owner is told as before.
+      assert.deepEqual(adminsOf(one.maintenanceId), [a1.principal.id, a2.principal.id].sort());
+      assert.equal(told.filter((t) => t.id === one.maintenanceId && t.to === "owner").length, 1);
+      // The owner's notice names the same administrators, and it comes before theirs.
+      assert.deepEqual([...(told.find((t) => t.id === one.maintenanceId && t.to === "owner")?.admins ?? [])].sort(), [a1.principal.id, a2.principal.id].sort());
+      assert.equal(told.findIndex((t) => t.id === one.maintenanceId) , told.findIndex((t) => t.id === one.maintenanceId && t.to === "owner"));
+      // The same request again (a replay) tells nobody again.
+      const again = await m.request(ann.principal, { commandId: label, kind: "base", spec: { change: "newer interpreter" }, reason: "needed", rollbackPlan: "undo it" });
+      assert.equal(again.replayed, true);
+      assert.deepEqual(adminsOf(one.maintenanceId), [a1.principal.id, a2.principal.id].sort());
+      // An administrator that asks is not told of its own request; the others are (a4 is not in a1's team).
+      const mine = await m.request(a1.principal, { commandId: cid("r"), kind: "host-policy", spec: { setting: "worker-limits", change: "more memory" }, reason: "needed", rollbackPlan: "undo it" });
+      assert.deepEqual(adminsOf(mine.maintenanceId), [a2.principal.id, a4.principal.id].sort());
+      // A request of another kind does not reach administrators; one a rule decides tells nobody.
+      const pk = await m.request(ann.principal, { commandId: cid("r"), kind: "package", spec: pkg("notice-pkg"), reason: "needed", rollbackPlan: "undo it" });
+      assert.deepEqual(adminsOf(pk.maintenanceId), []);
+      // With the role taken back, nobody is told.
+      await m.change(w.owner, { commandId: cid("adm"), administrators: null });
+      const none = await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "another" }, reason: "needed", rollbackPlan: "undo it" });
+      assert.deepEqual(adminsOf(none.maintenanceId), []);
+      assert.equal(told.filter((t) => t.id === none.maintenanceId && t.to === "owner").length, 1);
+      assert.equal(told.find((t) => t.id === none.maintenanceId && t.to === "owner")?.admins, undefined, "no administrator is named when none may decide");
+    });
+  });
+
+  test(`the claim fails when an agent record the administrator check read changed in between: the administrator's own line, or the requester's (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const adm = await w.make("Admin");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
+      const ask = async (p: Principal) => (await request(w, p, "base", { change: `change ${cid("x")}` })).maintenanceId;
+      const approveAndWait = async (id: string): Promise<number> => {
+        w.applier.nextApply.push({ outcome: "unsupported", reason: "the host cannot take it now" });
+        assert.equal((await decideBy(w, adm.principal, id)).status, "approved");
+        await w.m.idle();
+        assert.equal((await w.body(id)).status, "approved");
+        return w.applier.calls.filter((c) => c.id === id).length;
+      };
+      // The requester's supervisor is set between the check and the claim.
+      const later = await w.make("Later");
+      const one = await ask(later.principal);
+      const asked1 = await approveAndWait(one);
+      const r1 = afterRead(w.storage, later.id, 2, async () => { await plant(w, later.id, { supervisorId: adm.id }); });
+      assert.equal(await w.serviceOn(r1.view).drive(one), "pending");
+      assert.equal(r1.fired(), true, "the supervisor was set in the window");
+      assert.equal(w.applier.calls.filter((c) => c.id === one).length, asked1, "the applier was not asked");
+      // A record in the administrator's own line (its supervisor) is given the requester as supervisor between the check and the claim.
+      const boss = await w.make("Boss");
+      await plant(w, adm.id, { supervisorId: boss.id });
+      const other = await w.make("Other");
+      const two = await ask(other.principal);
+      const asked2 = await approveAndWait(two);
+      const r2 = afterRead(w.storage, boss.id, 1, async () => { await plant(w, boss.id, { supervisorId: other.id }); });
+      assert.equal(await w.serviceOn(r2.view).drive(two), "pending");
+      assert.equal(r2.fired(), true, "the supervisor of the administrator's supervisor was set in the window");
+      assert.equal(w.applier.calls.filter((c) => c.id === two).length, asked2, "the applier was not asked");
+      // A creator change on the requester in the window fails the claim too.
+      const three = await ask((await w.make("Third")).principal);
+      const third = (await w.body(three)).agentId.replace(/^agent:/, "");
+      const asked3 = await approveAndWait(three);
+      const r3 = afterRead(w.storage, third, 2, async () => { await plant(w, third, { createdBy: adm.principal.id }); });
+      const out3 = await w.serviceOn(r3.view).drive(three);
+      assert.equal(r3.fired(), true, "the creator was set in the window");
+      assert.equal(out3, "pending");
+      assert.equal(w.applier.calls.filter((c) => c.id === three).length, asked3, "the applier was not asked");
+      // The requester's record is read twice (as the request's agent, then in its line of management); its supervisor is chosen by the administrator between those two reads. The claim must check the
+      // revision of the first read (where who chose the supervisor is judged), not only that of the second (review).
+      const fifth = await w.make("Fifth");
+      const five = await ask(fifth.principal);
+      const asked5 = await approveAndWait(five);
+      const r5 = afterRead(w.storage, fifth.id, 2, async () => { await plant(w, fifth.id, { supervisorSetBy: adm.principal.id }); });
+      assert.equal(await w.serviceOn(r5.view).drive(five), "pending");
+      assert.equal(r5.fired(), true, "the supervisor was chosen in the window");
+      assert.equal(w.applier.calls.filter((c) => c.id === five).length, asked5, "the applier was not asked");
+      // Nothing changes in the window: the request is applied (the guard does not stop an ordinary claim).
+      const four = await ask((await w.make("Fourth")).principal);
+      await approveAndWait(four);
+      assert.equal(await w.m.drive(four), "applied");
+    });
+  });
+
+  test(`an administrator whose record cannot be read when the request is filed is not named and the others still are; the owner gets one notice, and with every read failing it names none (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const a1 = await w.make("AdminOne"); const a2 = await w.make("AdminTwo"); const a3 = await w.make("AdminThree");
+      const ann = await w.make("Ann");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [a1.id, a2.id, a3.id] });
+      const failing = new Set<string>();
+      const view = new Proxy(w.storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+        if (ref.kind === "agent" && failing.has(ref.id)) throw new Error("storage read failed");
+        return t.getAggregate(ref as never);
+      } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) }) as World["storage"];
+      const told: Array<{ id: string; to: string; admin?: string; admins?: readonly string[] }> = [];
+      const m = w.serviceOn(view, { held: async () => false, notify: async (n) => { told.push({ id: n.maintenanceId, to: n.to, ...(n.administratorId === undefined ? {} : { admin: n.administratorId }), ...(n.administratorIds === undefined ? {} : { admins: n.administratorIds }) }); } });
+      // The first administrator in the list cannot be read: it is left out (fail closed), and the ones after it are still judged and named.
+      failing.add(a1.principal.id.slice("agent:".length));
+      const one = await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "one" }, reason: "needed", rollbackPlan: "undo it" });
+      const owner1 = told.filter((t) => t.id === one.maintenanceId && t.to === "owner");
+      assert.equal(owner1.length, 1);
+      assert.deepEqual([...(owner1[0]!.admins ?? [])].sort(), [a2.principal.id, a3.principal.id].sort());
+      assert.deepEqual(told.filter((t) => t.id === one.maintenanceId && t.to === "administrator").map((t) => t.admin).sort(), [a2.principal.id, a3.principal.id].sort());
+      // Every administrator unreadable: the owner is still told once, naming none.
+      failing.add(a2.principal.id.slice("agent:".length)); failing.add(a3.principal.id.slice("agent:".length));
+      const two = await m.request(ann.principal, { commandId: cid("r"), kind: "host-policy", spec: { setting: "worker-limits", change: "two" }, reason: "needed", rollbackPlan: "undo it" });
+      const owner2 = told.filter((t) => t.id === two.maintenanceId && t.to === "owner");
+      assert.equal(owner2.length, 1);
+      assert.equal(owner2[0]!.admins, undefined);
+      assert.equal(told.filter((t) => t.id === two.maintenanceId && t.to === "administrator").length, 0);
     });
   });
 }
