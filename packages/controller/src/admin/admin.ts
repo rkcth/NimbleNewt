@@ -48,18 +48,24 @@ export interface SettingItem {
 const STORE_NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 
 /**
+ * The start of every name an owner's credential is kept under in the secret store (the launcher's `OWNER_SECRET`): this installation's, the plain default name, and those of other installations that share the
+ * same store under the same account. None of them is ever written from the web page, whichever installation the page belongs to (letter case ignored, as the launcher's own check ignores it).
+ */
+export const OWNER_SECRET_PREFIX = "nimblenewt-owner-token";
+
+/**
  * The write behind the Secrets form of the web page (card U08), kept here so its checks are one tested function: only the owner's own credential (never an agent, a task credential, a client or a service), never
- * a name the installation itself depends on (`reserved`: its own credential, the database address, the transfer targets', the backup signing key), never a name that itself looks like a key (it would be shown and
+ * a name the installation itself depends on (`reserved`: its own credential, the database address, the transfer targets', the backup signing key; and any owner credential's name, `OWNER_SECRET_PREFIX`), never a name that itself looks like a key (it would be shown and
  * recorded). The value goes to the store and nowhere else; what comes back is the name and whether an earlier value was replaced.
  */
 export function secretWriter(authenticate: (token: string) => Promise<Principal>, store: { resolve(name: string): Promise<string | undefined>; set(name: string, value: string): Promise<void> }, reserved: readonly string[]): (token: string, name: string, value: string) => Promise<{ readonly name: string; readonly replaced: boolean }> {
-  const held = new Set(reserved);
+  const held = new Set(reserved.map((r) => r.toLowerCase()));
   return async (token, name, value) => {
     const who = await authenticate(token);
     if (who.kind !== "owner" || who.taskScope !== undefined) throw new DomainError("forbidden", "only the owner may write a secret");
     if (typeof name !== "string" || !STORE_NAME.test(name)) throw new DomainError("invalid_command", "that is not a secret name (a letter, then letters, digits, '.', '_' or '-', at most 64, no '__')", { field: "name" });
     if (redactText(name) !== name) throw new DomainError("invalid_command", "that name looks like a key; give the secret a name and put the key in the value field", { field: "name" });
-    if (held.has(name)) throw new DomainError("forbidden", `${name} is a name the installation itself depends on and is not written from the web page`);
+    if (held.has(name.toLowerCase()) || name.toLowerCase().startsWith(OWNER_SECRET_PREFIX)) throw new DomainError("forbidden", `${name} is a name the installation itself depends on and is not written from the web page`);
     const replaced = (await store.resolve(name).catch(() => undefined)) !== undefined;
     await store.set(name, value);
     return { name, replaced };

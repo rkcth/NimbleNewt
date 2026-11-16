@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
+import { OWNER_SECRET_PREFIX } from "../admin/index.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { narratorFrom, stewardFrom } from "../meetings/agents.js";
@@ -47,7 +48,7 @@ export interface LauncherConfig {
 }
 
 /** The start of the name the owner's credential is kept under in the secret store; see ownerSecretName. */
-export const OWNER_SECRET = "nimblenewt-owner-token";
+export const OWNER_SECRET = OWNER_SECRET_PREFIX;
 /**
  * The name of the owner's credential in the secret store for the installation in `dataDir` (an absolute path). The Linux Secret Service and the macOS Keychain are one store per user account, shared by
  * every installation of that account, so a fixed name would let a second installation's first start overwrite the first one's credential (which cannot be derived again). The name carries a digest of

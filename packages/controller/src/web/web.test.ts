@@ -13,6 +13,7 @@ import { checkTrustedProxy, type TrustedProxy } from "./proxy.js";
 import { WebSessionStore } from "./sessions.js";
 import { adminIntent, deviceLabel, type WebAssets } from "./door.js";
 import { readdirSync, readFileSync } from "node:fs";
+import { DomainError } from "../domain/errors.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -574,7 +575,8 @@ test("the sentence and the intent of every administration edit are built from fi
 test("the Secrets form is write only: it needs the owner's session, CSRF and a name, stores the value and returns, records and shows nothing but the name (card U08)", async () => {
   const store = new Map<string, string>();
   let failNext = false;
-  const adminSecrets = { store: { kind: "test-store", resolve: async (n: string) => store.get(n), set: async (n: string, v: string) => { if (failNext) { failNext = false; throw new Error(`the store refused ${n} ${v}`); } store.set(n, v); } }, reserved: ["owner-credential-x"] };
+  let refuseNext = false;
+  const adminSecrets = { store: { kind: "test-store", resolve: async (n: string) => store.get(n), set: async (n: string, v: string) => { if (failNext) { failNext = false; throw new Error(`the store refused ${n} ${v}`); } if (refuseNext) { refuseNext = false; throw new DomainError("invalid_command", `the store refused the value ${v}`); } store.set(n, v); } }, reserved: ["owner-credential-x"] };
   const w = await world({}, new ScriptedInterpreter(() => []), { adminSecrets });
   const LEAK = "sk-LEAK-0123456789abcdefLEAK";
   try {
@@ -589,6 +591,8 @@ test("the Secrets form is write only: it needs the owner's session, CSRF and a n
     const put = (name: string, o: { body?: unknown; csrf?: boolean; cookie?: boolean; method?: string } = {}) => w.call(o.method ?? "PUT", `/web/secrets/${name}`, { ...(o.cookie === false ? {} : { cookie: s.cookie }), ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? { value: LEAK } });
     assert.equal((await put("cloud-b-key", { cookie: false })).status, 401);
     assert.equal((await put("cloud-b-key", { csrf: false })).status, 403);
+    for (const h of [{ origin: "http://evil.example" }, { "sec-fetch-site": "cross-site" }]) assert.equal((await w.call("PUT", "/web/secrets/cloud-b-key", { cookie: s.cookie, csrf: s.csrf, body: { value: LEAK }, headers: h })).status, 403, "a cross-site write is refused");
+    assert.equal((await put("nimblenewt-owner-token-0123456789abcdef")).status, 403, "no owner credential's name is written from the page, this installation's or another's");
     assert.equal((await put("cloud-b-key", { method: "POST" })).status, 405);
     assert.equal((await put("cloud-b-key", { method: "GET" })).status, 405, "a secret cannot be read back through this route");
     assert.equal((await put("bad%20name")).status, 400);
@@ -609,6 +613,8 @@ test("the Secrets form is write only: it needs the owner's session, CSRF and a n
     const done = await put("cloud-b-key");
     assert.equal(done.status, 200, done.text);
     assert.deepEqual(done.body, { name: "cloud-b-key", set: true, replaced: false });
+    assert.equal(done.headers["cache-control"], "no-store", "the reply is never cached");
+    assert.equal(done.headers["referrer-policy"], "no-referrer");
     assert.doesNotMatch(done.text, /LEAK/);
     assert.equal(store.get("cloud-b-key"), LEAK);
     assert.equal((await put("cloud-b-key", { body: { value: `${LEAK}2` } })).body.replaced, true);
@@ -617,6 +623,12 @@ test("the Secrets form is write only: it needs the owner's session, CSRF and a n
     const failed = await put("cloud-b-key");
     assert.equal(failed.status, 503, failed.text);
     assert.doesNotMatch(failed.text, /LEAK|refused/);
+    // The store refusing in words that quote the value: the refusal reaches the page without it, also when the value is a plain password the redactor does not recognise.
+    refuseNext = true;
+    const refused = await put("cloud-b-key", { body: { value: "correct horse battery staple" } });
+    assert.equal(refused.status, 400, refused.text);
+    assert.doesNotMatch(refused.text, /horse battery/);
+    assert.notEqual(store.get("cloud-b-key"), "correct horse battery staple");
     // It now reads as set, and nothing the page can read carries the value: views, history, settings, the session.
     assert.equal((await list()).items[0].state, "set");
     const seen = [await w.call("GET", "/web/views/admin-providers", { cookie: s.cookie }), await w.call("GET", "/web/views/admin-secrets", { cookie: s.cookie }), await w.call("GET", "/web/views/admin-settings", { cookie: s.cookie }), await w.call("GET", "/web/history", { cookie: s.cookie }), await w.call("GET", "/web/session", { cookie: s.cookie }), await w.call("GET", "/web/settings", { cookie: s.cookie })];

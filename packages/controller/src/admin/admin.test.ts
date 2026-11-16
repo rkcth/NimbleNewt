@@ -152,6 +152,8 @@ for (const backend of backends) {
       await assert.rejects(() => write("not-a-real-token", "cloud-key", LEAK));
       await refuses("forbidden", () => write(ownerToken, "owner-credential-x", LEAK));
       await refuses("forbidden", () => write(ownerToken, "backup-signing-key", LEAK));
+      // Every owner credential's name, not only this installation's: the plain default, another installation's on the same store, and either in other letter case.
+      for (const n of ["nimblenewt-owner-token", "nimblenewt-owner-token-0123456789abcdef", "NimbleNewt-Owner-Token-fedcba9876543210", "OWNER-CREDENTIAL-X", "Backup-Signing-Key"]) await refuses("forbidden", () => write(ownerToken, n, LEAK));
       await refuses("invalid_command", () => write(ownerToken, "two__parts", LEAK));
       await refuses("invalid_command", () => write(ownerToken, "1abc", LEAK));
       await refuses("invalid_command", () => write(ownerToken, "sk-proj-0123456789abcdefABCDEF0123456789", LEAK));
@@ -175,4 +177,12 @@ test("a setting value the redactor recognises as a key is shown redacted, as a l
   assert.equal(got.items.length, 3);
   assert.doesNotMatch(JSON.stringify(got), /0123456789abcdefABCDEF/);
   assert.equal(got.items.find((i) => i.key === "x.long")!.valueClipped, true);
+  // A provider's address is checked for keys when it is recorded; one that holds a key all the same (an older record) is shown redacted.
+  const withKey = new AdminViewService({
+    configuration: { settings: () => [], effective: async () => ({ values: {}, problems: [] }) } as never,
+    routing: async () => undefined, endpoints: async () => [{ provider: "cloud-x", endpoint: `https://api.example.test/${KEY}/v1`, credentialName: "cloud-x-key", setBy: "owner:rob" }], hosts: async () => [],
+  });
+  const providers = await withKey.providers(owner);
+  assert.equal(providers.items[0]!.name, "cloud-x");
+  assert.doesNotMatch(JSON.stringify(providers), /0123456789abcdefABCDEF/);
 });
