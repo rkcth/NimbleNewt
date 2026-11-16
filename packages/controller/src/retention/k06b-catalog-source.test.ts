@@ -97,6 +97,8 @@ for (const backend of backends) {
       for (const id of [readme, code, late, lateDoc]) assert.equal(await title(id), "work");
       assert.equal(await content("executable"), CODE);
       assert.equal(await content("instructions"), README);
+      // A purged record is an empty shell: it is not a source either.
+      await assert.rejects(cat.register(ann, { commandId: cid("r"), name: "from-purged", kind: "skill", version: "1.0.0", manifest: { ...manifest, entryPoint: undefined, interpreter: undefined }, instructionsRecordId: scratch } as never), (e: Error & { code?: string }) => e.code === "invalid_command" && /archived or deleted/.test(e.message));
     } finally { await world.close(); }
   });
 }
@@ -131,8 +133,8 @@ for (const backend of backends) {
       await finish(t1);
       const name = (n: string): string => `${howtoName.slice(0, -"howto".length)}${n}`;
 
-      let archiveHook: (() => Promise<void>) | undefined; let listHook: ((kind: string) => Promise<void>) | undefined;
-      const watched = new Proxy(storage, { get: (t, k) => { const v = (t as never)[k] as unknown; if (k === "listAggregates") return async (kind: string, o: never) => { const page = await (t as ControllerStorage).listAggregates(kind, o); await listHook?.(kind); return page; }; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v; } }) as ControllerStorage;
+      let archiveHook: (() => Promise<void>) | undefined; let listHook: ((kind: string) => Promise<void>) | undefined; let failCatalog = false;
+      const watched = new Proxy(storage, { get: (t, k) => { const v = (t as never)[k] as unknown; if (k === "listAggregates") return async (kind: string, o: never) => { if (failCatalog && kind === "catalog-version") throw new Error("catalog read failed"); const page = await (t as ControllerStorage).listAggregates(kind, o); await listHook?.(kind); return page; }; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v; } }) as ControllerStorage;
       const at = (days: number, v: object = {}) => RetentionService.withEpoch(watched, epoch, { settings: { effective: async () => ({ ...off, ...v }) }, now: () => real + days * DAY, beforeArchiveWrite: async () => { const h = archiveHook; archiveHook = undefined; await h?.(); } } as never, { clock: () => new Date(real + days * DAY).toISOString(), pause: async () => undefined });
 
       // The owner archives the task. A tool is registered from two of its records inside the first guarded archive (after the archive's first read of the catalog): both are held, as is the skill's source.
@@ -151,6 +153,7 @@ for (const backend of backends) {
       await assert.rejects(skill("from-archive", plain), (e: Error) => /archived or deleted/.test(e.message));
       const t2 = await newTask();
       const racy = await write(t2, "racy 6645");
+      const published = (await desks.write(ann, { commandId: cid("w"), projectId: project, taskId: t2, kind: "note", title: "work", body: "published 6647", visibility: "shared", status: "accepted" } as never)).id;
       await finish(t2);
       let fired = false;
       const racing = new Proxy(storage, { get: (t, k) => { const v = (t as never)[k] as unknown; if (k === "applyOperation") return async (op: { changes: { type: string; ref: { kind: string } }[] }) => { if (!fired && op.changes.some((c) => c.type === "create" && c.ref.kind === "catalog-version")) { fired = true; await at(0).archive(owner, { commandId: cid("a"), taskId: t2 }); } return (t as ControllerStorage).applyOperation(op as never); }; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v; } }) as ControllerStorage;
@@ -159,6 +162,10 @@ for (const backend of backends) {
       assert.ok(fired);
       assert.equal(await title(racy), "(archived)");
       await assert.rejects(cat.content(ann, name("racy"), "1.0.0", "instructions"), "no version of the refused registration exists");
+      // The owner's release of a shared record that the task archive emptied is refused the same way.
+      assert.equal(await title(published), "(archived)");
+      await assert.rejects(cat.register(owner, { commandId: cid("r"), name: "toolbox.published", kind: "skill", version: "1.0.0", manifest: skillManifest, instructionsRecordId: published } as never), (e: Error & { code?: string }) => e.code === "invalid_command" && /archived or deleted/.test(e.message));
+
 
       // Scratch purge: a skill is registered from a record after the batch's read of the catalog and before the deletion's own check: the deletion holds it (and records that it did).
       const t3 = await newTask();
@@ -181,6 +188,16 @@ for (const backend of backends) {
       const del = await at(0).delete(owner, { commandId: cid("d"), recordId: skillDoc, reason: "owner removes it" });
       assert.equal(del.status, "deleted");
       await assert.rejects(cat.content(ann, name("howto"), "1.0.0", "instructions"), /was removed/);
+
+      // The catalog becomes unreadable between the archive's first read and its last one (inside the guarded write): the record is kept and the reason says the check did not finish.
+      const t4 = await newTask();
+      const kept = await write(t4, "kept 6648");
+      await finish(t4);
+      archiveHook = async () => { failCatalog = true; };
+      const blind = await at(0).archive(owner, { commandId: cid("a"), taskId: t4 }).finally(() => { failCatalog = false; });
+      assert.deepEqual(blind.archived, []);
+      assert.deepEqual(blind.retained.map((r) => [r.id, r.reasons.some((t) => /did not finish/.test(t))]), [[kept, true]]);
+      assert.equal(await title(kept), "work");
     } finally { await world.close(); }
   });
 }
