@@ -5,6 +5,21 @@ import type { Aggregate, ControllerStorage } from "../storage/types.js";
 /** The most records of one kind the reference scan reads. Past it the scan is `partial` and nothing it did not see may be treated as unreferenced. */
 export const REFERENCE_SCAN_LIMIT = 100_000;
 
+/**
+ * The IDs of the desk records a decision-link record names as the subject of kind `plan` (links in any state). Reads the stored shape defensively: a missing, non-list or malformed `links` (a null entry, a link with no subject,
+ * a subject whose ID is not text or is empty) names nothing and never throws, so one odd record cannot stop a retention or backup read. A link to a plan that is empty, archived or missing still names its ID (it is held, never blanked).
+ */
+export function planSubjectIds(body: unknown): string[] {
+  const links = (body as { links?: unknown } | null | undefined)?.links;
+  if (!Array.isArray(links)) return [];
+  const ids: string[] = [];
+  for (const l of links) {
+    const subject = (l as { subject?: { kind?: unknown; id?: unknown } } | null | undefined)?.subject;
+    if (subject?.kind === "plan" && typeof subject.id === "string" && subject.id !== "") ids.push(subject.id);
+  }
+  return ids;
+}
+
 const TERMINAL = new Set(["done", "cancelled"]);
 const RETIREMENT_KIND = "retirement";
 

@@ -12,7 +12,7 @@ import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { diskSpace, QuotaMeter, type ReserveFile } from "./guard.js";
 import { stubDeskBody, type DeletionLedger } from "./ledger.js";
-import { RetainedMaterial, isReplayReason } from "./references.js";
+import { RetainedMaterial, isReplayReason, planSubjectIds } from "./references.js";
 import { RETENTION_FIELDS, type RetentionSettingsService, type RetentionValues } from "./settings.js";
 import type { ThinkingStorePort } from "./thinking-stores.js";
 import { DISPATCH_KIND } from "../dispatch/model.js";
@@ -67,15 +67,18 @@ export interface CatalogRetentionPort {
 /** How many held records (and, apart, held versions) a report lists; past it the held ones are still held but not listed. */
 const RETAINED_LISTED = 200;
 
+/** Said when a run could not look at everything (a check that did not finish, or more candidates than one run takes): what it could not check is left as it is, never removed. */
+const PARTIAL_NOTE_RAN = (r: RunReport): string => r.partial ? " Not everything could be checked (a check did not finish, or there is more than one run takes), so whatever could not be checked was left as it is and nothing unchecked was removed." : "";
+
 /** The one-line account of a run that the owner reads (chat and API): a preview says what would happen and how to confirm it, a real run says what happened. Dropped versions and blanked texts are counted apart from expired records (derived summaries, model replies, route records). */
 export function describeRun(r: RunReport): string {
   // Held records and held tool versions both count as kept; each list stops at RETAINED_LISTED, so a full list means there may be more.
   const heldVersions = r.catalogVersions?.retained.length ?? 0;
   const kept = `${r.retained.length + heldVersions}${r.retained.length >= RETAINED_LISTED || heldVersions >= RETAINED_LISTED ? " or more" : ""}`;
-  if (r.dryRun) return `Retention preview: ${r.candidates.length} expired record(s) (derived summaries, model replies, route records) would be removed, ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment)${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.incidents?.wouldArchive === undefined ? "" : `, ${r.incidents.wouldArchive} resolved incident(s) would be archived, ${r.incidents.wouldPurge ?? 0} archived incident(s) would be removed${r.incidents.more === true ? " (there are more due than one run takes: at most 200 of each kind per project)" : ""}`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts would be deleted`}. To run exactly this for real, ask for it to be run (digest ${r.digest}).`;
+  if (r.dryRun) return `Retention preview: ${r.candidates.length} expired record(s) (derived summaries, model replies, route records) would be removed, ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment)${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.candidates.length} old tool version(s) would be dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.candidates.length} revoked tool text(s) would be blanked`}${r.incidents?.wouldArchive === undefined ? "" : `, ${r.incidents.wouldArchive} resolved incident(s) would be archived, ${r.incidents.wouldPurge ?? 0} archived incident(s) would be removed${r.incidents.more === true ? " (there are more due than one run takes: at most 200 of each kind per project)" : ""}`}${r.backups?.wouldDelete === undefined ? "" : `, ${r.backups.wouldDelete.length} backup(s) outside the counts would be deleted`}. To run exactly this for real, ask for it to be run (digest ${r.digest}).${PARTIAL_NOTE_RAN(r)}`;
   // `removed` counts everything taken away, so the dropped versions and blanked texts are taken out of the expired records.
   const derived = r.removed - (r.catalogVersions?.removed ?? 0) - (r.revokedBytes?.blanked ?? 0);
-  return `Retention ran: ${derived} expired record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) were deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}${r.incidents?.archived === undefined || (r.incidents.archiveDays === null && r.incidents.purgeDays === null) ? "" : `, ${r.incidents.archived} resolved incident(s) archived, ${r.incidents.purged ?? 0} archived incident(s) removed`}; ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment).`;
+  return `Retention ran: ${derived} expired record(s) removed${r.backups?.deleted === undefined ? "" : `, ${r.backups.deleted.length} backup(s) were deleted`}${r.catalogVersions === undefined ? "" : `, ${r.catalogVersions.removed} old tool version(s) dropped`}${r.revokedBytes === undefined ? "" : `, ${r.revokedBytes.blanked} revoked tool text(s) blanked`}${r.incidents?.archived === undefined || (r.incidents.archiveDays === null && r.incidents.purgeDays === null) ? "" : `, ${r.incidents.archived} resolved incident(s) archived, ${r.incidents.purged ?? 0} archived incident(s) removed`}; ${kept} kept because something still needs them (a resumable task, a replay or an agent's environment).${PARTIAL_NOTE_RAN(r)}`;
 }
 
 export interface RetentionDeps {
@@ -166,7 +169,7 @@ async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<
     const complete = await scan(runner, "catalog-version", (a) => {
       const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
       for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") ids.set(s.recordId, CATALOG_SOURCE_REASON);
-    }, limit);
+    }, limit ?? Number.POSITIVE_INFINITY);
     if (!complete) return undefined;
     const linked = await planLinkIds(runner, limit);
     if (linked === undefined) return undefined;
@@ -175,13 +178,13 @@ async function catalogSourceIds(runner: CommandRunner, limit?: number): Promise<
   } catch { return undefined; }
 }
 
-/** The desk records a decision link (current or superseded) names as its subject of kind `plan`; `undefined` when the bounded read could not finish (fail closed, like `catalogSourceIds`). */
+/** The desk records a decision link (current or superseded) names as its subject of kind `plan`; `undefined` when the bounded read could not finish (fail closed, like `catalogSourceIds`). Read page by page to the end with no cap (a cap would make the records past it look unreferenced); only a failed read, or a limit a test sets, stops it. */
 async function planLinkIds(runner: CommandRunner, limit?: number): Promise<Set<string> | undefined> {
   const ids = new Set<string>();
   try {
     const complete = await scan(runner, "decision-reliance", (a) => {
-      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string") ids.add(l.subject.id);
-    }, limit);
+      for (const id of planSubjectIds(a.body)) ids.add(id);
+    }, limit ?? Number.POSITIVE_INFINITY);
     return complete ? ids : undefined;
   } catch { return undefined; }
 }
