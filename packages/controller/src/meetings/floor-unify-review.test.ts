@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { stopServer } from "../domain/testing/backends.js";
 import { TurnWaitsOnTool } from "./floor.js";
-import type { FloorBody } from "./floor-types.js";
-import { floorSuite, type FloorWorld } from "./floor-suite.js";
+import type { FloorBody, TurnRequest } from "./floor-types.js";
+import { floorSuite, Script, type FloorWorld } from "./floor-suite.js";
 import { MeetingProcedureService } from "./procedure.js";
 import type { DecisionRecordBody, MotionBody } from "./record-types.js";
 
@@ -111,6 +111,24 @@ const revisionSetAside = async (w: FloorWorld, o: { slowBallotTurns?: number } =
 floorSuite(test, "a revision turn answered as an inquiry opens is set aside and offered again when the vote resumes, not taken from what was said before", async (w) => revisionSetAside(w));
 
 floorSuite(test, "the revision-turn wait holds however long the ballots before it take: each ballot held past 20,000 event-loop turns (as slow storage on Windows CI did), the revision is still awaited and nothing runs after the test", async (w) => revisionSetAside(w, { slowBallotTurns: 25_000 }));
+
+// The harness wait itself, without storage: it never hangs when the run it watches ends without the call (the time limit only turns a regression into a failure instead of a ten-minute wait).
+test("Script.until: a call already made or made later resolves it; a run that ends or fails without the call fails it at once", { timeout: 60_000 }, async () => {
+  const s = new Script();
+  s.on(() => ({ text: "ok", usage: { visibleTokens: 1, hiddenTokens: 0 } }));
+  const call = (kind: TurnRequest["kind"], agent: string): Promise<unknown> => s.turn({ kind, agent, recordId: "r", prompt: [] as never, maxVisibleTokens: 1, maxHiddenTokens: 1, signal: new AbortController().signal });
+  await call("ballot", "a");
+  assert.equal((await s.until("a ballot", (r) => r.kind === "ballot", new Promise(() => undefined))).agent, "a", "a call already made");
+  let finish!: () => void;
+  const run = new Promise<void>((r) => { finish = r; });
+  const later = s.until("b's revision", (r) => r.kind === "revision" && r.agent === "b", run);
+  await call("revision", "c");
+  await call("revision", "b");
+  assert.equal((await later).agent, "b", "a later call that matches, not an earlier one that does not");
+  finish();
+  await assert.rejects(s.until("a statement", (r) => r.kind === "statement", run), /never became true: a statement \(the run ended without it\)/);
+  await assert.rejects(s.until("a statement", (r) => r.kind === "statement", Promise.reject(new Error("the drive failed"))), /the drive failed/);
+});
 
 floorSuite(test, "an inquiry that holds the vote just as a ballot is cast sets the ballot aside: the voter is asked again, never recorded as giving no ballot", async (w) => {
   const { rec } = await w.meet();
