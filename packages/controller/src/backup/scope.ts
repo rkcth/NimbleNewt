@@ -118,6 +118,10 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
       const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
       for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") catalogSources.add(s.recordId);
     })) && ok;
+    // A decision link may name a finished task's private plan as its subject. The link is always in the backup, so the plan it names is kept too (otherwise a restore gives a link that points at nothing).
+    ok = (await eachOf(lister, "decision-reliance", (a) => {
+      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string") catalogSources.add(l.subject.id);
+    })) && ok;
     const l = line("scratch", "desk-record", values.scratchDays);
     const found: Aggregate[] = [];
     ok = (await eachOf(lister, "desk-record", (a) => {
