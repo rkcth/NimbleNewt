@@ -40,15 +40,19 @@ for (const backend of backends) {
       const decided = await decisions.record(owner, { commandId: cid("dec"), projectId: a, category: "decision", topic: "database", statement: "Use PostgreSQL", wording: "We will use PostgreSQL", source: { channel: "direct" }, basedOn: 0 } as never);
       assert.equal(decided.recorded, true);
       await decisions.link(ann, { commandId: cid("lk"), taskId: ta, subject: { kind: "plan", id: linked }, decisions: [(decided as { id: string }).id] } as never);
+      // A superseded link still holds its plan; a link of another subject kind whose ID equals a desk record's (planted directly: the decision service refuses it) holds nothing.
+      const old = await write("plan", "a plan behind a superseded link 8804");
+      const planted = (kind: string, id: string, state: string) => ({ id: `lnk-${kind}-${id}`, subject: { kind, id }, decisionId: (decided as { id: string }).id, version: 1, topic: "database", state, linkedBy: ann.id, linkedAt: options.clock() });
       const task = (await world.storage.getAggregate({ kind: "task", id: ta }))!;
-      await world.storage.applyOperation({ operationId: cid("op"), epoch: projects.epoch, actor: "owner:rob", correlationId: cid("co"), at: options.clock(), changes: [{ type: "update", ref: { kind: "task", id: ta }, expectedRevision: task.revision, body: { ...task.body, state: "cancelled" } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      await world.storage.applyOperation({ operationId: cid("op"), epoch: projects.epoch, actor: "owner:rob", correlationId: cid("co"), at: options.clock(), changes: [{ type: "update", ref: { kind: "task", id: ta }, expectedRevision: task.revision, body: { ...task.body, state: "cancelled" } }, { type: "create", ref: { kind: "decision-reliance", id: "drl-planted" }, body: { taskId: ta, projectId: a, links: [planted("plan", old, "superseded"), planted("review", free, "current"), planted("action", note, "current")], revalidations: 0, followUps: [] } }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
 
       const made = await createBackup(world.storage, { root, kind: "manual", version: "t", now: () => LATER, leaveOut: { scratchDays: 30, transcriptDays: null, logDays: null } });
       const text = readFileSync(join(made.path, "aggregates.jsonl"), "utf8");
       assert.ok(text.includes("the linked plan 8801"), "the plan a link names is kept");
+      assert.ok(text.includes("a plan behind a superseded link 8804"), "a superseded link still keeps its plan");
       assert.ok(!text.includes("an unlinked plan 8802") && !text.includes("plain scratch 8803"), "an unlinked plan and ordinary scratch are left out");
       const line = made.manifest.contentScope!.leftOut.find((l) => l.kind === "desk-record")!;
-      assert.deepEqual([line.left, line.heldBack], [2, 1]);
+      assert.deepEqual([line.left, line.heldBack], [2, 2], "links of another subject kind hold nothing");
 
       const target = await backend.open();
       try {

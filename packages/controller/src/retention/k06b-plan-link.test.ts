@@ -125,6 +125,18 @@ for (const backend of backends) {
       // The owner's own request to delete a named record is not held (unchanged).
       const del = await at(0).delete(owner, { commandId: cid("d"), recordId: keep, reason: "owner removes it" });
       assert.equal(del.status, "deleted");
+
+      // Links in any state hold the plan (a superseded link still names it), and only the subject kind `plan` holds a record: a link of another kind whose ID equals a desk record's does not (planted directly,
+      // since the decision service refuses such a link).
+      const t4 = await newTask();
+      const oldLinked = await write(t4, "plan", "plan behind a superseded link 7731"), otherKind = await write(t4, "plan", "named only by a review link 7732");
+      await finish(t4);
+      const planted = (kind: string, id: string, state: string) => ({ id: `lnk-${kind}-${id}`, subject: { kind, id }, decisionId, version: 1, topic: "database", state, linkedBy: ann.id, linkedAt: options.clock() });
+      await storage.applyOperation({ operationId: cid("plant"), epoch, actor: "test", correlationId: "plant", at: options.clock(), changes: [{ type: "create", ref: { kind: "decision-reliance", id: "drl-planted-t4" }, body: { taskId: t4, projectId: project, links: [planted("plan", oldLinked, "superseded"), planted("review", otherKind, "current")], revalidations: 0, followUps: [] } }], audit: [{ type: "test.plant", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      const mixed = await at(0).archive(owner, { commandId: cid("a"), taskId: t4 });
+      assert.deepEqual(mixed.archived, [otherKind], "a link of another subject kind does not hold a desk record");
+      assert.deepEqual(mixed.retained.map((r) => [r.id, r.reasons.join()]), [[oldLinked, PLAN_LINK_REASON]], "a superseded link still holds its plan");
+      assert.equal(await title(oldLinked), "work"); assert.equal(await title(otherKind), "(archived)");
     } finally { await world.close(); }
   });
 }
