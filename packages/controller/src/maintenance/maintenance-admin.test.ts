@@ -27,7 +27,7 @@ interface World {
   until(id: string, want: string): Promise<void>;
   storage: import("../storage/types.js").ControllerStorage;
   /** A service on another view of the same storage (to step into the middle of a command). */
-  serviceOn(storage: import("../storage/types.js").ControllerStorage): MaintenanceService;
+  serviceOn(storage: import("../storage/types.js").ControllerStorage, extra?: { held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]> }): MaintenanceService;
 }
 async function world(backendIndex: number, body: (w: World) => Promise<void>, heartbeatMs = 0): Promise<void> {
   const backend = backends[backendIndex]!;
@@ -49,7 +49,7 @@ async function world(backendIndex: number, body: (w: World) => Promise<void>, he
     };
     const getBody = async (id: string) => { const a = (await open.storage.getAggregate({ kind: "maintenance", id }))!; return { ...(a.body as unknown as MaintenanceBody), revision: a.revision }; };
     const until = async (id: string, want: string): Promise<void> => { for (let i = 0; i < 200 && (await getBody(id)).status !== want; i++) await sleep(10); assert.equal((await getBody(id)).status, want); };
-    const serviceOn = (storage: import("../storage/types.js").ControllerStorage) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs }, options);
+    const serviceOn = (storage: import("../storage/types.js").ControllerStorage, extra: { held?: (agentId: string) => Promise<boolean>; notify?: NonNullable<MaintenanceOptions["notify"]> } = {}) => MaintenanceService.withEpoch(storage, projects.epoch, { applier, heartbeatMs, ...extra }, options);
     await body({ m, applier, owner, agents, grants, principals, time, service, make, body: getBody, until, storage: open.storage, serviceOn });
     await m.idle();
   } finally { await open.close(); }
@@ -453,6 +453,35 @@ for (const [index, backend] of backends.entries()) {
       const four = await ask((await w.make("Fourth")).principal);
       await approveAndWait(four);
       assert.equal(await w.m.drive(four), "applied");
+    });
+  });
+
+  test(`an administrator whose record cannot be read when the request is filed is not named and the others still are; the owner gets one notice, and with every read failing it names none (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const a1 = await w.make("AdminOne"); const a2 = await w.make("AdminTwo"); const a3 = await w.make("AdminThree");
+      const ann = await w.make("Ann");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [a1.id, a2.id, a3.id] });
+      const failing = new Set<string>();
+      const view = new Proxy(w.storage, { get: (t, k) => k === "getAggregate" ? async (ref: { kind: string; id: string }) => {
+        if (ref.kind === "agent" && failing.has(ref.id)) throw new Error("storage read failed");
+        return t.getAggregate(ref as never);
+      } : (typeof (t as never)[k] === "function" ? ((t as never)[k] as (...a: unknown[]) => unknown).bind(t) : (t as never)[k]) }) as World["storage"];
+      const told: Array<{ id: string; to: string; admin?: string; admins?: readonly string[] }> = [];
+      const m = w.serviceOn(view, { held: async () => false, notify: async (n) => { told.push({ id: n.maintenanceId, to: n.to, ...(n.administratorId === undefined ? {} : { admin: n.administratorId }), ...(n.administratorIds === undefined ? {} : { admins: n.administratorIds }) }); } });
+      // The first administrator in the list cannot be read: it is left out (fail closed), and the ones after it are still judged and named.
+      failing.add(a1.principal.id.slice("agent:".length));
+      const one = await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "one" }, reason: "needed", rollbackPlan: "undo it" });
+      const owner1 = told.filter((t) => t.id === one.maintenanceId && t.to === "owner");
+      assert.equal(owner1.length, 1);
+      assert.deepEqual([...(owner1[0]!.admins ?? [])].sort(), [a2.principal.id, a3.principal.id].sort());
+      assert.deepEqual(told.filter((t) => t.id === one.maintenanceId && t.to === "administrator").map((t) => t.admin).sort(), [a2.principal.id, a3.principal.id].sort());
+      // Every administrator unreadable: the owner is still told once, naming none.
+      failing.add(a2.principal.id.slice("agent:".length)); failing.add(a3.principal.id.slice("agent:".length));
+      const two = await m.request(ann.principal, { commandId: cid("r"), kind: "host-policy", spec: { setting: "worker-limits", change: "two" }, reason: "needed", rollbackPlan: "undo it" });
+      const owner2 = told.filter((t) => t.id === two.maintenanceId && t.to === "owner");
+      assert.equal(owner2.length, 1);
+      assert.equal(owner2[0]!.admins, undefined);
+      assert.equal(told.filter((t) => t.id === two.maintenanceId && t.to === "administrator").length, 0);
     });
   });
 }
