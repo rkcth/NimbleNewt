@@ -5,6 +5,7 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
+import { keptSecretRefusal } from "../setup/reserved-secrets.js";
 import { SIGNING_SECRET_NAME } from "./signing.js";
 import { TARGET_KINDS, offsiteLocationProblem, type TargetKind } from "./targets.js";
 
@@ -84,10 +85,14 @@ export class BackupConfigService {
   readonly #runner: CommandRunner;
   readonly #hooks: ((change: ConfigChange) => Promise<void>)[] = [];
   #chain: Promise<unknown> = Promise.resolve();
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): BackupConfigService { return new BackupConfigService(new CommandRunner(storage, epoch, options)); }
+  readonly #kept: () => readonly string[];
+  private constructor(runner: CommandRunner, kept: () => readonly string[]) { this.#runner = runner; this.#kept = kept; }
+  /** `kept` gives the secret names the configuration keeps for something else (task T4: the database address, the transfer targets', a renamed backup signing key), read at each target added. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}, kept: () => readonly string[] = () => []): BackupConfigService { return new BackupConfigService(new CommandRunner(storage, epoch, options), kept); }
 
   now(): string { return this.#runner.now(); }
+  /** The secret names a target's credential may not use besides the fixed ones (task T4). */
+  keptSecrets(): readonly string[] { return this.#kept(); }
   onChanged(hook: (change: ConfigChange) => Promise<void>): void { this.#hooks.push(hook); }
 
   async #config(): Promise<{ revision: number; body: ConfigBody } | undefined> {
@@ -214,7 +219,7 @@ export class BackupConfigService {
     this.#owner(owner, "add a backup target");
     const unknown = Object.keys(command).filter((k) => !["commandId", "name", "kind", "location", "credential", "keepDays", "daily", "weekly", "expectedRevision"].includes(k));
     if (unknown.length > 0) invalid(unknown[0]!, "is not a field of this command");
-    const target = buildTarget(command, this.#runner.now(), owner.id, scopedCommandId(owner.id, command.commandId));
+    const target = buildTarget(command, this.#runner.now(), owner.id, scopedCommandId(owner.id, command.commandId), this.#kept());
     let existing: readonly TargetRecord[] = [];
     const r = await this.#write(owner, "backup.target.add", command, { id: target.id, name: target.name, kind: target.kind, location: target.location, credential: target.credential ?? null, keepDays: target.keepDays ?? null, daily: target.daily ?? null, weekly: target.weekly ?? null }, (cur) => {
       existing = cur.targets;
@@ -259,7 +264,7 @@ function trimPurges(all: readonly PurgeRecord[]): readonly PurgeRecord[] {
   return out;
 }
 
-export function buildTarget(c: { name?: unknown; kind?: unknown; location?: unknown; credential?: unknown; keepDays?: unknown; daily?: unknown; weekly?: unknown }, at: string, by: string, seed: string): TargetRecord {
+export function buildTarget(c: { name?: unknown; kind?: unknown; location?: unknown; credential?: unknown; keepDays?: unknown; daily?: unknown; weekly?: unknown }, at: string, by: string, seed: string, kept: readonly string[] = []): TargetRecord {
   if (typeof c.name !== "string" || !NAME.test(c.name.trim())) invalid("name", "1 to 60 letters, digits, spaces, dots, dashes or underscores");
   const name = (c.name as string).trim();
   if (typeof c.kind !== "string" || !TARGET_KINDS.includes(c.kind as TargetKind)) invalid("kind", "must be folder, disk or offsite");
@@ -275,6 +280,9 @@ export function buildTarget(c: { name?: unknown; kind?: unknown; location?: unkn
     if (typeof c.credential !== "string" || !CREDENTIAL.test(c.credential)) invalid("credential", "the name of a stored credential (letters, digits, dots, dashes, underscores): never the secret itself");
     // The backup-signing key stays on this machine (card K01b): it is never sent to a target as its credential.
     if (c.credential === SIGNING_SECRET_NAME) invalid("credential", "that is the backup-signing key, which never leaves this machine: name the credential of the off-machine store");
+    // Its value is sent to the target as a bearer token (task T4): no secret the installation keeps for something else (the owner's credential, the database address, a transfer target's), in any letter case.
+    const why = keptSecretRefusal(c.credential as string, kept, "a backup target");
+    if (why !== undefined) invalid("credential", `${why}; name the credential of the off-machine store`);
   }
   const days = (v: unknown, f: string, lo: number, hi: number): number | null | undefined => (v === undefined ? undefined : v === null ? null : whole(v, f, lo, hi));
   const keepDays = days(c.keepDays, "keepDays", 1, 3650); const daily = days(c.daily, "daily", 1, 365); const weekly = days(c.weekly, "weekly", 0, 520);
