@@ -92,7 +92,7 @@ for (const [index, backend] of backends.entries()) {
       assert.equal(s.digest, D("c"));
       assert.match(String(((await w.m.get(w.owner, mount.maintenanceId)).review as Record<string, unknown>).access), /read access to shared\.docs/);
       const b = (await w.m.get(w.owner, base.maintenanceId)).review as Record<string, unknown>;
-      assert.equal(b.reversible, false); assert.match(String(b.access), /owner decides/);
+      assert.equal(b.reversible, false); assert.match(String(b.access), /the owner, or an administrator the owner named, decides/);
       assert.equal((await w.body(plain.maintenanceId) as unknown as Record<string, unknown>).review, undefined, "the summary is derived from the record, not kept in it");
       assert.equal((await w.m.list(w.owner, { agentId: ann.principal.id })).items.every((i) => typeof i.review === "object"), true, "listing carries it too");
       await refuses("not_found", () => w.m.get(eve.principal, plain.maintenanceId));
