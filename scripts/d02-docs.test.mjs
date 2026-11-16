@@ -121,7 +121,6 @@ test("the durability guide matches the settings the storage code enforces (card 
   const outside = section("## What NimbleNewt does not own", "## How a developer");
   for (const event of ["process crash", "orderly shutdown", "power loss"]) assert.ok(outside.includes(event), `agent history: ${event}`);
   for (const call of ["file.sync()", "directory.sync()"]) assert.ok(readFileSync(join(root, "packages", "controller", "src", "artifacts", "blobs.ts"), "utf8").includes(call), `blobs.ts no longer calls ${call}`);
-  // Pi Durable's store is the one NimbleNewt leaves at SQLite's default: the guide says so, and the code sets nothing for it.
   // The agent process opens Pi Durable's JSONL store with its default options, under which nothing is flushed (the guide says so).
   assert.ok(/JSONL/.test(outside) && /nothing is flushed to disk/.test(outside) && /`fsync`/.test(outside), "the agent history section says the JSONL store is not flushed");
   const worker = readFileSync(join(root, "packages", "pi-adapter", "src", "worker", "process.ts"), "utf8");
