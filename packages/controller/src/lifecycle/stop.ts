@@ -916,7 +916,8 @@ export class StopService {
   async #settle(id: string, by: Principal, outcome: StopOutcome, phase: "done" | "recovery-required", note: string, from: readonly StopPhase[]): Promise<void> {
     await this.#update(id, (x) => ({ ...x, phase, blocked: undefined, outcome, history: this.#push(x, phase, by.id, note) }), from);
     const b = (await this.#runner.get(KIND, id))?.body as unknown as StopIntentBody | undefined;
-    if (b !== undefined) try { await this.#onSettled?.(by, { intentId: id, scope: b.scope, mode: b.mode, outcome }); } catch { /* the record of it is best effort */ }
+    // Told what the record says (T3 review): a request another caller already moved to a different end (recovery required) is not reported as stopped.
+    if (b !== undefined && b.phase === phase) try { await this.#onSettled?.(by, { intentId: id, scope: b.scope, mode: b.mode, outcome: b.outcome ?? outcome }); } catch { /* the record of it is best effort */ }
   }
 
   /** Tells the pause gate what was reached. The intent's own record is the durable source; a refusal here (the gate was resumed meanwhile) does not undo it. */
