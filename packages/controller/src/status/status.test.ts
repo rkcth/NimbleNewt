@@ -31,6 +31,9 @@ import type { ControllerStorage } from "../storage/types.js";
 import { CriticalPathService } from "../critical/index.js";
 import { STATUS_KINDS, StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
 import type { Line } from "./index.js";
+import { RETENTION_LINES } from "./status.js";
+import { RETENTION_FIELDS } from "../retention/settings.js";
+import { CHAT_LIMITS } from "../chat/interpreter.js";
 
 after(stopServer);
 
@@ -1800,7 +1803,10 @@ for (const backend of backends) {
     const damaged = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "the stored retention setting is damaged; set it again (retention.settings.set)", { field: "settings" }); } } });
     const told = (await damaged.ask(c.owner, { kind: "retention" }))!.lines;
     cited(told);
-    assert.deepEqual(told.map((l) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
+    // Card K06d, second review: in chat words (the owner tells a value; no API operation name), and saying what is lost.
+    assert.equal(told.length, 1);
+    assert.match(told[0]!.text, /^The stored retention setting is damaged, .*retention does not run\. Setting any retention value writes it again; the values you had set before must be set again\.$/);
+    assert.doesNotMatch(told[0]!.text, /retention\.settings\.set/);
     // Any other storage trouble is not a reason to tell the owner to set the values again.
     const outage = c.rebuild({}, { retention: { check: retention.check, settings: async () => { throw new DomainError("unavailable", "storage did not report a revision for retention-settings main"); } } });
     assert.equal(await outage.ask(c.owner, { kind: "retention" }), undefined);
@@ -1867,9 +1873,29 @@ for (const backend of backends) {
     cited(many);
     assert.equal(many.filter((l) => /^Deletion /.test(l.text)).length, 5);
     assert.equal(many.filter((l) => /^Retention run /.test(l.text)).length, 5);
-    assert.equal(many.filter((l) => /% of its storage quota/.test(l.text)).length, 10);
+    // Card K06d, second review: the whole answer stays inside the 30 lines the chat shows; here one scope line gives way (28 figure lines and 3 value lines).
+    assert.equal(many.length, RETENTION_LINES);
+    assert.equal(many.filter((l) => /% of its storage quota/.test(l.text)).length, 9);
     assert.match(said(many), /15 older deletion\(s\) are not listed\./);
-    assert.match(said(many), /15 more scope\(s\) are near their quota and not listed\./);
+    assert.match(said(many), /16 more scope\(s\) are near their quota and not listed\./);
+    assert.match(many[many.length - 1]!.text, /^The installation's: derivedDays: none\.$/, "the values are not cut");
+    // The worst case: every value set by the owner with its longest figure, 40 scopes near their quota in both classes in no order, 20 deletions, five runs and the stored-thinking lines.
+    // The fullest scopes are listed first (a full one before any that only warns), the lists give way down to three and the rest is counted; nothing is cut by the chat.
+    const every = Object.fromEntries(Object.keys(RETENTION_FIELDS).map((k) => [k, 1_073_741_824]));
+    const scopes = Array.from({ length: 40 }, (_, i) => { const percent = 60 + ((i * 37) % 60); return { scope: i % 3 === 0 ? "agent" : "project", id: i % 3 === 0 ? `agent:${String(i).padStart(2, "0")}${"n".repeat(38)}` : `proj-${String(i).padStart(20, "q")}`, used: percent * 10, quota: 1000, percent, level: percent >= 100 ? "full" : "warn" }; });
+    const worst = c.rebuild({}, { retention: { ...base, settings: async () => ({ revision: 9, settings: every, effective: every }), status: async () => ({ ...full, quotas: scopes, deletions: Array.from({ length: 20 }, (_, i) => deletion(i + 1)), runs: Array.from({ length: 5 }, (_, i) => ({ id: `rrun-${i}`, at: "2026-10-21T02:00:00.000Z", by: "o", auto: true, removed: 1, backupsDeleted: 0, incidentsArchived: 0, incidentsPurged: 0 })), backups: { ...full.backups, count: 50, recent: Array.from({ length: 10 }, (_, i) => ({ name: `backup-2026-10-${String(21 - i).padStart(2, "0")}-${"x".repeat(40)}`, at: "2026-10-21T01:00:00.000Z", trusted: true })) }, thinking: { days: 14, auto: true, copiesKept: 3, copiesRemoved: 4, storesReached: true, storesCleaned: 2, storesWithout: 1, blocksRemoved: 9 } }) } });
+    const worstLines = (await worst.ask(c.owner, { kind: "retention" }))!.lines;
+    cited(worstLines);
+    assert.ok(worstLines.length <= RETENTION_LINES, `${worstLines.length} lines:\n${said(worstLines)}`);
+    const percents = worstLines.filter((l) => /% of its storage quota/.test(l.text)).map((l) => Number(/ is at (\d+)%/.exec(l.text)![1]));
+    assert.ok(percents.length >= 3, said(worstLines));
+    assert.deepEqual(percents, [...percents].sort((a, b) => b - a), "fullest first");
+    assert.equal(percents[0], Math.max(...scopes.map((x) => x.percent)));
+    assert.match(said(worstLines), new RegExp(`^${40 - percents.length} more scope\\(s\\) are near their quota and not listed\\.$`, "m"));
+    assert.match(said(worstLines), /older deletion\(s\) are not listed\./);
+    assert.match(said(worstLines), /^Set by you: /m);
+    assert.match(said(worstLines), /kept and 4 were removed/, "the stored-thinking counts are not cut");
+    assert.equal(RETENTION_LINES, CHAT_LIMITS.statusLines, "the retention answer is kept to what the chat shows");
     // Nothing set up reads as nothing, not as an error.
     answer = { disk: { reserve: { wantedBytes: 0, inUse: false, short: false } }, quotaLimits: { projectBytes: null, agentBytes: null, warnPercent: 80 }, quotaUsage: {}, quotas: [], backups: { configured: false }, deletions: [], runs: [] };
     const none = said((await status.ask(c.owner, { kind: "retention" }))!.lines);

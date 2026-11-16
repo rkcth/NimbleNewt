@@ -17,6 +17,7 @@ import { RETENTION_FIELDS, type RetentionSettingsService, type RetentionValues }
 import type { ThinkingStorePort } from "./thinking-stores.js";
 import { DISPATCH_KIND } from "../dispatch/model.js";
 import { NOTIFICATION_LIMITS } from "../notifications/notifications.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 
 const DAY = 86_400_000;
 const RUN_LIMIT = { default: 200, max: 1000 } as const;
@@ -229,8 +230,9 @@ export interface DeletionReport {
 export function quotaNotice(scope: string, id: string, reached: string): string {
   const make = (shown: string): string => `Storage quota: ${scope} ${shown} has reached ${reached}. Ask in chat how much room is left.`;
   const room = NOTIFICATION_LIMITS.detail - make("").length;
-  const text = make(id.length <= room ? id : `${id.slice(0, Math.max(0, room - 3))}...`);
-  return text.length <= NOTIFICATION_LIMITS.detail ? text : text.slice(0, NOTIFICATION_LIMITS.detail);
+  // Lengths are UTF-16 units, as the notification limit counts them; a cut never splits a surrogate pair (half a pair is refused as malformed text).
+  const text = make(id.length <= room ? id : `${safeSlice(id, Math.max(0, room - 3))}...`);
+  return text.length <= NOTIFICATION_LIMITS.detail ? text : safeSlice(text, NOTIFICATION_LIMITS.detail);
 }
 
 /**
@@ -320,6 +322,8 @@ export class RetentionService {
       }
     };
     add("project", usage.byProject, values.quotaProjectBytes); add("agent", usage.byAgent, values.quotaAgentBytes);
+    // Fullest first (card K06d, second review), so a list that is cut keeps the scopes whose new records are refused; ties by scope and ID.
+    quotas.sort((a, b) => b.percent - a.percent || (a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     // What each class holds against its quota (bounded: the count, the total and the three biggest), so the owner sees the room left and not only the scopes near the limit.
     const summary = (map: ReadonlyMap<string, number>, quota: number | null): QuotaClassUsage | undefined => {
       if (quota === null) return undefined;
@@ -944,7 +948,9 @@ export class RetentionService {
     const week = Math.floor(Date.parse(this.#runner.now()) / (7 * DAY));
     const { quotas } = await this.#quotaLevels(values).catch(() => ({ quotas: [] as { scope: string; id: string; used: number; quota: number; percent: number; level: "warn" | "full" }[] }));
     // The text is the same for a given ID (the figures are in the status), so a retried notice is the one already sent; a clash is not an error of the sweep.
-    const tell = async (n: Parameters<NonNullable<RetentionDeps["notify"]>>[0]): Promise<void> => { try { await notify(n); } catch (error) { if (!(error instanceof DomainError && error.code === "command_conflict")) throw error; } };
+    // Card K06d, second review: a notice that is refused for any other reason (the owner's inbox is full, a text limit, storage trouble) is not sent this tick and is tried again on the next one
+    // (its command ID is per week); it never stops the rest of the pass, the automatic run and the removal of stored thinking, which read the same figures for themselves.
+    const tell = async (n: Parameters<NonNullable<RetentionDeps["notify"]>>[0]): Promise<void> => { try { await notify(n); } catch { /* not sent this tick; see above */ } };
     for (const q of quotas) {
       await tell({ commandId: cmdId("rtw", "quota", q.scope, q.id, q.level, week), text: quotaNotice(q.scope, q.id, q.level === "full" ? "its quota; new records from it are refused until you raise the quota or delete something" : `${values.quotaWarnPercent}% of its quota`), ref: q.scope === "project" ? { kind: "project", id: q.id } : { kind: "quota", id: `a-${createHash("sha256").update(q.id).digest("hex").slice(0, 20)}` } });
     }

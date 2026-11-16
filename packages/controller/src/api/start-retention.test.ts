@@ -8,6 +8,7 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { unguarded } from "../retention/index.js";
 import { quotaNotice } from "../retention/service.js";
 import { NOTIFICATION_LIMITS } from "../notifications/notifications.js";
+import { text } from "../domain/model.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -376,9 +377,11 @@ test("quotas are optional and warn; the reserve is a real file, and with the dis
 test("K06d: a quota notice for the longest agent name still fits the notice detail limit and reaches the owner; the ID is shortened, not the warning lost, and the retention pass goes on", async () => {
   // The text alone: every scope and level fits, a short ID is shown whole, a long one is shortened with "...".
   const full = "its quota; new records from it are refused until you raise the quota or delete something";
-  for (const id of ["proj-abcdefghijklmnopqrst", `agent:${"a".repeat(40)}`, "x".repeat(500), ""]) for (const reached of [full, "80% of its quota"]) for (const scope of ["project", "agent"]) {
+  for (const id of ["proj-abcdefghijklmnopqrst", `agent:${"a".repeat(40)}`, "x".repeat(500), "", `agent:${"\u{1F600}".repeat(60)}`, `agent:a${"\u{1F600}".repeat(60)}`, `agent:...${"b".repeat(200)}`]) for (const reached of [full, "80% of its quota"]) for (const scope of ["project", "agent"]) {
     const t = quotaNotice(scope, id, reached);
     assert.ok(t.length <= NOTIFICATION_LIMITS.detail, `${t.length}: ${t}`);
+    // Second review: the text passes the notification service's own check (UTF-16 units, no half surrogate pair).
+    assert.equal(text(t, "detail", { min: 1, max: NOTIFICATION_LIMITS.detail }), t);
     assert.match(t, /^Storage quota: .* has reached .*\. Ask in chat how much room is left\.$/);
     if (t.includes(id)) assert.equal(t, `Storage quota: ${scope} ${id} has reached ${reached}. Ask in chat how much room is left.`); else assert.match(t, /\.\.\. has reached/);
   }
@@ -430,7 +433,7 @@ test("a restart keeps the settings, the quota and the reserve; a missing reserve
     assert.equal(bad.error?.code, "unavailable");
     // The chat view tells the owner the way out (and only for this error, not for any storage trouble).
     const told = (await c.api.handle(boot.token, { v: 1, op: "status.ask", args: { request: { kind: "retention" } } } as never) as Reply);
-    assert.deepEqual(told.result.item.lines.map((l: any) => l.text), ["The stored retention setting is damaged; set it again (retention.settings.set)."]);
+    assert.deepEqual(told.result.item.lines.map((l: any) => l.text), ["The stored retention setting is damaged, so the disk, quota, backup and deletion figures cannot be read and retention does not run. Setting any retention value writes it again; the values you had set before must be set again."]);
     assert.equal((await c.api.handle(boot.token, { v: 1, op: "retention.run", args: {}, commandId: "r1" } as never) as Reply).error?.code, "unavailable", "the runner does not guess");
     assert.ok(((await c.api.handle(boot.token, { v: 1, op: "retention.settings.set", args: { derivedDays: 60 }, commandId: "s2" } as never)) as Reply).ok, "and the owner can repair it");
     damaged = false;

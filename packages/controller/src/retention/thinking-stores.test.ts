@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { ProjectService } from "../domain/index.js";
+import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -159,6 +160,16 @@ for (const backend of backends) {
       // With autoRun on the general pass does it as before.
       const general = await svc({ ...on, derivedDays: 7, autoRun: true }).sweep(owner);
       assert.ok(general !== undefined);
+      // Card K06d, second review: a quota notice that is refused (here: the owner has 1000 unanswered notifications) is not sent this tick, and the pass goes on: the stored thinking of
+      // another finished task is still removed. Before, any refusal but a command clash ended the whole pass on every tick while the scope stayed over its quota.
+      const task2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "finished too" })).id;
+      for (const step of ["ready", "in_progress", "done"]) await projects.transitionTask({ commandId: cid("mv"), actor: owner.id, taskId: task2, expectedRevision: (await projects.getTask(task2))!.revision, to: step as never });
+      await put("dispatch", "dsp-2", { taskId: task2, attemptId: "att-2", state: "finished" });
+      const refused: string[] = [];
+      const inboxFull = RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => ({ ...on, quotaProjectBytes: 100 }) }, now: () => clock.at + 60_000, autoEveryMs: 1000, thinkingStores: f.port, meter: { usage: async () => ({ byProject: new Map([[project, 5000]]), byAgent: new Map(), partial: false }) }, notify: async (n: { commandId: string }) => { refused.push(n.commandId); throw new DomainError("unavailable", "there are 1000 unanswered notifications; answer some first"); } } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      const went = await inboxFull.sweep(owner);
+      assert.equal(refused.length, 1, "the notice was tried");
+      assert.ok(went !== undefined && f.asked.some((a) => a.includes("att-2")), JSON.stringify({ went, asked: f.asked }));
     } finally { await world.close(); }
   });
 }

@@ -421,6 +421,12 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: s
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
 const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330 } as const;
+/**
+ * Card K06d, second review: the chat shows the first 30 lines of a status answer (`CHAT_LIMITS.statusLines`, the same number; a test holds them equal), so the whole retention answer is kept to that many
+ * lines. With many scopes near their quota and many deletions the figures alone passed 30 and the values were cut, with no narrower view to ask for. The lists shorten instead, the fullest scopes and the
+ * newest deletions staying, and what is left out is counted.
+ */
+export const RETENTION_LINES = 30;
 
 const obj = (v: unknown): Record<string, unknown> | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
@@ -432,7 +438,7 @@ const quotaRef = (scope: string, id: string): Cite => (scope === "project" ? cit
  * The owner's lines from the retention status (the same answer as `retention.status`, read only): the disk against the reserve, each quota class with its use and the scopes near it, the backups and the last one,
  * the last deletions and runs by record ID with counts only (never the text a record held or the reason typed for a deletion). Everything read from storage is quoted through `shown`, and the lists are bounded.
  */
-function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: Cite): Line[] {
+function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: Cite, budget = Number.POSITIVE_INFINITY): Line[] {
   const lines: Line[] = [];
   const disk = obj(st["disk"]);
   if (disk !== undefined) {
@@ -446,13 +452,11 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
   const limits = obj(st["quotaLimits"]); const usage = obj(st["quotaUsage"]);
   const pq = limits === undefined ? undefined : count(limits["projectBytes"]); const aq = limits === undefined ? undefined : count(limits["agentBytes"]);
   if (limits !== undefined && pq === undefined && aq === undefined) lines.push(line("No storage quota is set for projects or agents.", settings));
-  const near = Array.isArray(st["quotas"]) ? (st["quotas"] as unknown[]).map(obj).filter((q): q is Record<string, unknown> => q !== undefined && typeof q["id"] === "string" && (q["scope"] === "project" || q["scope"] === "agent")) : [];
-  for (const q of near.slice(0, RETENTION_SHOWN.quotaScopes)) {
-    const used = count(q["used"]); const quota = count(q["quota"]); const percent = count(q["percent"]);
-    if (used === undefined || quota === undefined || percent === undefined) continue;
-    lines.push(line(`${q["scope"] === "project" ? "Project" : "Agent"} ${shown(String(q["id"]), 80)} is at ${percent}% of its storage quota (${bytesWord(used)} of ${bytesWord(quota)})${q["level"] === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, quotaRef(String(q["scope"]), String(q["id"])), settings));
-  }
-  if (near.length > RETENTION_SHOWN.quotaScopes) lines.push(line(`${near.length - RETENTION_SHOWN.quotaScopes} more scope(s) are near their quota and not listed.`, settings));
+  // The scopes near their quota, fullest first (the service orders them so; sorted again here so the view never depends on it).
+  const near = Array.isArray(st["quotas"]) ? (st["quotas"] as unknown[]).map(obj).filter((q): q is Record<string, unknown> => q !== undefined && typeof q["id"] === "string" && (q["scope"] === "project" || q["scope"] === "agent") && count(q["used"]) !== undefined && count(q["quota"]) !== undefined && count(q["percent"]) !== undefined) : [];
+  near.sort((a, b) => count(b["percent"])! - count(a["percent"])! || (String(a["scope"]) < String(b["scope"]) ? -1 : String(a["scope"]) > String(b["scope"]) ? 1 : String(a["id"]) < String(b["id"]) ? -1 : String(a["id"]) > String(b["id"]) ? 1 : 0));
+  const nearLines = near.map((q) => line(`${q["scope"] === "project" ? "Project" : "Agent"} ${shown(String(q["id"]), 80)} is at ${count(q["percent"])}% of its storage quota (${bytesWord(count(q["used"])!)} of ${bytesWord(count(q["quota"])!)})${q["level"] === "full" ? "; new records from it are refused until you raise the quota or delete something" : ""}.`, quotaRef(String(q["scope"]), String(q["id"])), settings));
+  const nearAt = lines.length;
   for (const [scope, label] of [["project", "Project"], ["agent", "Agent"]] as const) {
     const u = obj(usage?.[scope]); if (u === undefined) continue;
     const quota = count(u["quota"]); const scopes = count(u["scopes"]); const totalBytes = count(u["totalBytes"]);
@@ -482,12 +486,12 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
   }
   const deletions = Array.isArray(st["deletions"]) ? (st["deletions"] as unknown[]).map(obj).filter((d): d is Record<string, unknown> => d !== undefined && typeof d["id"] === "string") : [];
   if (deletions.length === 0) lines.push(line("No record has been deleted by request yet.", settings));
-  for (const d of deletions.slice(0, RETENTION_SHOWN.deletions)) {
+  const delLines = deletions.map((d) => {
     const derived = obj(d["derived"]); let derivedCount = 0;
     if (derived !== undefined) for (const k of ["copies", "summaries", "compactions", "archives", "others"]) if (Array.isArray(derived[k])) derivedCount += derived[k].length;
-    lines.push(line(`Deletion ${shown(String(d["id"]), 60)} of record ${shown(typeof d["recordId"] === "string" ? d["recordId"] : "?", 60)}: ${shown(typeof d["status"] === "string" ? d["status"] : "?", 20)}, ${shown(typeof d["at"] === "string" ? d["at"] : "?", 40)}, ${derivedCount} derived item(s) with it.`, cite("retention-deletion", String(d["id"]))));
-  }
-  if (deletions.length > RETENTION_SHOWN.deletions) lines.push(line(`${deletions.length - RETENTION_SHOWN.deletions} older deletion(s) are not listed.`, settings));
+    return line(`Deletion ${shown(String(d["id"]), 60)} of record ${shown(typeof d["recordId"] === "string" ? d["recordId"] : "?", 60)}: ${shown(typeof d["status"] === "string" ? d["status"] : "?", 20)}, ${shown(typeof d["at"] === "string" ? d["at"] : "?", 40)}, ${derivedCount} derived item(s) with it.`, cite("retention-deletion", String(d["id"])));
+  });
+  const delAt = lines.length;
   const runs = Array.isArray(st["runs"]) ? (st["runs"] as unknown[]).map(obj).filter((r): r is Record<string, unknown> => r !== undefined && typeof r["id"] === "string") : [];
   if (runs.length === 0) lines.push(line("Retention has not run yet.", settings));
   for (const r of runs.slice(0, RETENTION_SHOWN.runs)) lines.push(line(`Retention run ${shown(String(r["id"]), 60)} (${r["auto"] === true ? "automatic" : "by you"}), ${shown(typeof r["at"] === "string" ? r["at"] : "?", 40)}: ${count(r["removed"]) ?? 0} record(s) removed, ${count(r["backupsDeleted"]) ?? 0} backup(s) deleted, ${count(r["incidentsArchived"]) ?? 0} incident(s) archived, ${count(r["incidentsPurged"]) ?? 0} archived incident(s) removed.`, cite("retention-run", String(r["id"]))));
@@ -498,6 +502,18 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
     lines.push(line(`Stored model thinking is removed ${days === undefined ? "some" : days} days after its task is done${think["auto"] === true ? ", by itself" : ", only when you run retention (the automatic removal is off)"}; the chat keeps none: it holds the words said, never the thinking. Backups are not changed: thinking inside a backup stays until that backup is deleted, and restoring one brings its thinking back until the rule removes it again.`, settings));
     lines.push(line(`${kept} task cop${kept === 1 ? "y" : "ies"} of thinking ${kept === 1 ? "is" : "are"} kept and ${removed} ${removed === 1 ? "was" : "were"} removed; ${think["storesReached"] === true ? `the model's own conversation stores were cleaned for ${cleaned} attempt(s) (${blocks} block(s) removed) and ${without} had none` : "the model's own conversation stores are not reached on this installation"}${think["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings));
   }
+  // The two long lists take what the budget leaves: first the scopes down to three, then the deletions down to three, then each down to one. What is left out is counted.
+  let nNear = Math.min(nearLines.length, RETENTION_SHOWN.quotaScopes); let nDel = Math.min(delLines.length, RETENTION_SHOWN.deletions);
+  const total = (): number => lines.length + nNear + (near.length > nNear ? 1 : 0) + nDel + (deletions.length > nDel ? 1 : 0);
+  for (const [floorNear, floorDel] of [[3, delLines.length], [3, 3], [1, 3], [1, 1]] as const) {
+    while (total() > budget && nNear > Math.min(floorNear, nNear)) nNear--;
+    while (total() > budget && nDel > Math.min(floorDel, nDel)) nDel--;
+  }
+  const delPart = [...delLines.slice(0, nDel), ...(deletions.length > nDel ? [line(`${deletions.length - nDel} older deletion(s) are not listed.`, settings)] : [])];
+  const nearPart = [...nearLines.slice(0, nNear), ...(near.length > nNear ? [line(`${near.length - nNear} more scope(s) are near their quota and not listed.`, settings)] : [])];
+  // Inserted from the later position first, so the earlier position stays right.
+  lines.splice(delAt, 0, ...delPart);
+  lines.splice(nearAt, 0, ...nearPart);
   return lines;
 }
 
@@ -1407,7 +1423,7 @@ export class StatusService {
     try { got = await this.#deps.retention.settings(by); } catch (error) {
       if (error instanceof DomainError && (error.code === "forbidden" || (error.code === "unavailable" && error.field !== "settings"))) return undefined;
       // A damaged stored setting (and only that: any other storage trouble is not a reason to re-set values) is told, with the way out, rather than reading like a view that is not there.
-      if (error instanceof DomainError && error.code === "unavailable") return { observedAt: this.#runner.now(), lines: [line("The stored retention setting is damaged; set it again (retention.settings.set).", cite("retention-settings", "main"))] };
+      if (error instanceof DomainError && error.code === "unavailable") return { observedAt: this.#runner.now(), lines: [line("The stored retention setting is damaged, so the disk, quota, backup and deletion figures cannot be read and retention does not run. Setting any retention value writes it again; the values you had set before must be set again.", cite("retention-settings", "main"))] };
       throw error;
     }
     const c = cite("retention-settings", "main", got.revision === 0 ? undefined : got.revision);
@@ -1437,7 +1453,7 @@ export class StatusService {
         if (error instanceof DomainError && error.code === "forbidden") return undefined;
         lines.push(line("The disk, quota, backup and deletion figures could not be read just now; the values below are from your settings.", c));
       }
-      if (st !== undefined) lines.push(...retentionStatusLines(st, c));
+      if (st !== undefined) lines.push(...retentionStatusLines(st, c, RETENTION_LINES - values.length));
     }
     lines.push(...values);
     return { observedAt: this.#runner.now(), lines };
