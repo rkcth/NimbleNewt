@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **278 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **279 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -110,7 +110,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 34% | 8 of 23 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 93% | 27 of 29 |
-| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓░░░` 81% | 18 of 22 |
+| Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 19 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
 | State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
@@ -257,7 +257,7 @@ Pause, suspend, stop, release and checked resume, interrupting a model mid-gener
 </details>
 
 <details>
-<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓░░░ 18 of 22</summary>
+<summary><strong>Security: identity, approvals and sandboxing</strong> — ▓▓▓▓▓▓▓▓▓▓░░ 19 of 22</summary>
 
 Authenticated principals, revisioned grants, the sandbox launchers, the protected filesystem and Git bridge, approval policy and resource limits.
 
@@ -282,7 +282,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A07h** · P28 · Expire a standing grant only after it goes unused, and renew it each time a worker uses it _(needs A07d, A02)_
 - [x] **A07f** · P30 · Derive protected branches in the controller and scope approval grants to branches _(needs A07, P01)_
 - [x] **A07g** · P31 · Let only an integrator's contract cover protected branches _(needs A07f)_
-- [ ] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
+- [x] **A09** · P32 · Implement reviewed environment changes and maintenance requests _(needs A08, A05, H05, L02, T06)_
 
 </details>
 
