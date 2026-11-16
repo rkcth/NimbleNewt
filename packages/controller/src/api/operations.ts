@@ -44,6 +44,7 @@ import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
 import type { AttendanceService } from "../meetings/attendance.js";
 import type { PolicyEditService } from "../chat/policy-edit.js";
 import type { CoordinatorService } from "../chat/coordinator.js";
+import type { ChatSpendService } from "../chat/routed-model.js";
 import type { StandupService } from "../standups/standups.js";
 import type { AgentMessageService } from "../messaging/index.js";
 import { shownLines } from "../standups/standups.js";
@@ -185,6 +186,8 @@ export interface Context {
   readonly recoveryLadder?: Pick<RecoveryLadderService, "get" | "set">;
   readonly recoveryStep?: Pick<StallService, "recover"> & Partial<Pick<StallService, "get" | "list" | "decide">>;
   readonly agreedLimits?: Pick<AgreedLimitsSettingsService, "get" | "change">;
+  /** The owner's daily cap on the controller's own model calls and today's count (T2). */
+  readonly chatSpend?: Pick<ChatSpendService, "view" | "setBudget">;
   readonly resumeSettings?: Pick<ResumeSettingsService, "get" | "set">;
   readonly quietHostSettings?: Pick<QuietHostSettingsService, "get" | "change">;
   /** The coordinator, looked up when asked (it is built after the state API). Absent, or answering undefined: the coordinator is not set up here. */
@@ -546,6 +549,7 @@ const maintenanceOf = (c: Context): NonNullable<Context["maintenance"]> => c.mai
 const networkGrantsOf = (c: Context): NonNullable<Context["networkGrants"]> => c.networkGrants ?? unavailable("network grants");
 const dispatchLimitsOf = (c: Context): NonNullable<Context["dispatchLimits"]> => c.dispatchLimits ?? unavailable("dispatcher limits");
 const workerLimitsOf = (c: Context): NonNullable<Context["workerLimits"]> => c.workerLimits ?? unavailable("worker limits");
+const chatSpendOf = (c: Context): NonNullable<Context["chatSpend"]> => c.chatSpend ?? unavailable("the chat budget");
 const agreedLimitsOf = (c: Context): NonNullable<Context["agreedLimits"]> => c.agreedLimits ?? unavailable("agreed limits");
 const setupProvidersOf = (c: Context): NonNullable<Context["setupProviders"]> => c.setupProviders ?? unavailable("guided provider editing");
 const setupOf = (c: Context): NonNullable<Context["setup"]> => c.setup ?? unavailable("the setup readiness view");
@@ -796,6 +800,10 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { only(a, []); return asJson({ item: await escalationLadderOf(c).get(c.principal) }); } },
   { name: "escalation.ladder.set", kind: "command", summary: "The owner sets how long a stall concern waits undecided at each level of the supervisor ladder (owner only): a stuck agent's concern goes to its supervisor first and, undecided after the level's time, to that supervisor's supervisor, and so on up to the owner. `hours` lists whole hours from 1 to 720 (30 days) for level 0 (the first supervisor), level 1 and so on, at most 16 levels; a level the list does not name waits 24 hours. The list replaces the earlier one; an empty list clears it. It counts from the next pass; a wait already running uses the new figure for its level.", args: { hours: "for example `[24, 48]`", "expectedRevision?": "the revision you read" }, result: "`{ revision }`.", completion: { kind: "completed" },
     run: async (c, a, id) => { only(a, ["hours", "expectedRevision"]); return asJson({ ...(await escalationLadderOf(c).set(c.principal, { commandId: need(id), ...(a as object) } as never)) }); } },
+  { name: "chat.budget.get", kind: "query", summary: "The owner's daily cap on the tokens the controller's own model calls may use (the owner chat's interpreter, the coordinator and the reviewing agents' calls), and today's count (owner only). The count is the provider's own figure for the current UTC day; at the cap no such call is made until the next day. No cap is set by default.", args: {}, result: "`{ item }`: `maxTokensPerDay` (a whole number, or null when there is no cap), `setBy` and `setAt` when a cap was ever set or cleared, `day` (the UTC day counted), `tokens` and `calls` used today, and `remaining` (null when there is no cap).", completion: { kind: "completed" },
+    run: async (c, a) => { only(a, []); ownerOnly(c, "read the chat budget"); notFromTask(c, "read the chat budget"); return asJson({ item: { ...(await chatSpendOf(c).view(c.principal)) } as unknown as JsonObject }); } },
+  { name: "chat.budget.set", kind: "command", summary: "The owner sets the daily cap on the tokens the controller's own model calls may use, or removes it with null (owner only). It covers the owner chat's interpreter, the coordinator and the reviewing agents' calls, counted from the provider's own figures per UTC day; a call that would start at or over the cap is refused without being made, and calls already running may overshoot by their own size. It counts from the next call. Repeating the same command ID with the same value changes nothing; a different value under the same ID is refused.", args: { maxTokensPerDay: "a whole number of tokens from 1 to 1000000000, or null for no cap" }, result: "`{ replayed }`.", completion: { kind: "completed" },
+    run: async (c, a, id) => { only(a, ["maxTokensPerDay"]); ownerOnly(c, "set the chat budget"); notFromTask(c, "set the chat budget"); if (!("maxTokensPerDay" in a)) invalid("args.maxTokensPerDay", "is required: a whole number of tokens, or null for no cap"); const cap = a["maxTokensPerDay"]; if (cap !== null && typeof cap !== "number") invalid("args.maxTokensPerDay", "must be a whole number of tokens, or null"); return asJson({ ...(await chatSpendOf(c).setBudget(c.principal, { commandId: need(id), maxTokensPerDay: cap as number | null })) }); } },
   { name: "agreed.limits.get", kind: "query", summary: "The optional ceilings on what a decision may carry out (owner only). None is set by default: an agreed raise or grant goes through as agreed.", args: {}, result: "`{ item }`: `revision` and `limits`, which has any of `raiseMaxCostMicros`, `raiseMaxComputeMs`, `grantMaxDays`.", completion: { kind: "completed" },
     run: async (c, a) => { only(a, []); return asJson({ item: await agreedLimitsOf(c).get(c.principal) }); } },
   { name: "agreed.limits.change", kind: "command", summary: "The owner sets or clears ceilings on agreed raises and grants (owner only; none by default). `set` has any of `raiseMaxCostMicros` (most money one raise carried out by the approval policy may add, in millionths, 1 to 1e15), `raiseMaxComputeMs` (most compute time one such raise may add, 1 to 1e12 ms) and `grantMaxDays` (longest a right granted by a decision may last, 1 to 3650); `unset` lists ceilings to remove. A ceiling counts from the next carry-out; the rights re-check at carry-out and every other check stay.", args: { "set?": "for example `{ \"grantMaxDays\": 90 }`", "unset?": "ceiling names to remove", "expectedRevision?": "the revision of the setting you read" }, result: "`{ revision }`.", completion: { kind: "completed" },

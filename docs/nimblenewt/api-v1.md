@@ -152,6 +152,18 @@ Result: `{ item }`: `revision`, `hours` (the owner's hours for level 0, 1, 2 ...
 
 Completion: finished when accepted (`completed: true`).
 
+#### `chat.budget.get`
+
+The owner's daily cap on the tokens the controller's own model calls may use (the owner chat's interpreter, the coordinator and the reviewing agents' calls), and today's count (owner only). The count is the provider's own figure for the current UTC day; at the cap no such call is made until the next day. No cap is set by default.
+
+Arguments:
+
+- none
+
+Result: `{ item }`: `maxTokensPerDay` (a whole number, or null when there is no cap), `setBy` and `setAt` when a cap was ever set or cleared, `day` (the UTC day counted), `tokens` and `calls` used today, and `remaining` (null when there is no cap).
+
+Completion: finished when accepted (`completed: true`).
+
 #### `agreed.limits.get`
 
 The optional ceilings on what a decision may carry out (owner only). None is set by default: an agreed raise or grant goes through as agreed.
@@ -2811,6 +2823,18 @@ Arguments:
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `chat.budget.set`
+
+The owner sets the daily cap on the tokens the controller's own model calls may use, or removes it with null (owner only). It covers the owner chat's interpreter, the coordinator and the reviewing agents' calls, counted from the provider's own figures per UTC day; a call that would start at or over the cap is refused without being made, and calls already running may overshoot by their own size. It counts from the next call. Repeating the same command ID with the same value changes nothing; a different value under the same ID is refused.
+
+Arguments:
+
+- `maxTokensPerDay`: a whole number of tokens from 1 to 1000000000, or null for no cap
+
+Result: `{ replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -296,6 +296,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
+  chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the controller's own model calls (the chat, the coordinator and the reviewing agents) may use, who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -383,6 +384,7 @@ export type StatusRequest =
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
   | { readonly kind: "wakes" }
   | { readonly kind: "retention_hold"; readonly recordKind: string; readonly id?: string; readonly name?: string; readonly version?: string }
@@ -506,6 +508,8 @@ export interface StatusDeps {
   /** The projects that have landing values of their own (a project layer of the configuration, or their own landing branch), each value as that project gets it and where it comes from (card H12u). Absent: the view lists the installation only. */
   readonly landingProjects?: () => Promise<{ readonly projects: readonly { readonly projectId: string; /** The branch the owner named for this project (`project.branches.set`, landing). */ readonly branch?: string; readonly values: Readonly<Record<string, { readonly value: unknown; readonly source: { readonly layer: string; readonly id: string }; readonly own?: unknown }>> }[]; readonly truncated: boolean }>;
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
+  /** The owner's daily cap on the controller's own model calls and today's count (T2). */
+  readonly chatBudget?: { view(by: Principal): Promise<{ readonly maxTokensPerDay: number | null; readonly setBy?: string; readonly setAt?: string; readonly day: string; readonly tokens: number; readonly calls: number; readonly remaining: number | null }> };
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates"> & {
@@ -862,6 +866,7 @@ export class StatusService {
       case "providers": { onlyKnown(request, ["kind"]); return this.providerLines(by); }
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
+      case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1544,6 +1549,22 @@ export class StatusService {
       line(defaults === false ? "Built-in protected files (CI configuration, hooks, ownership and package manager files): off (you set it)." : `Built-in protected files (CI configuration, hooks, ownership and package manager files): kept for your review (${mark("workspace.landing.protectDefaults")}).`, c),
       line(listed.length === 0 ? "Your extra protected paths: none." : `Your extra protected paths, kept for your review: ${listed.slice(0, 50).map((p) => shown(p, 120)).join(", ")}${listed.length > 50 ? ` and ${listed.length - 50} more` : ""}.`, c),
       ...projectLines,
+    ] };
+  }
+
+  /** The daily cap on the controller's own model calls and today's count. Owner only. */
+  async chatBudgetLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.chatBudget === undefined || by.kind !== "owner") return undefined;
+    let b;
+    try { b = await this.#deps.chatBudget.view(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const c = cite("chat-budget", "chat-budget");
+    const used = cite("chat-spend", `chs-${b.day}`);
+    return { observedAt: this.#runner.now(), lines: [
+      line(b.maxTokensPerDay === null ? "There is no daily cap on the tokens the controller's own model calls (the chat, the coordinator and the reviewing agents) may use." : `The controller's own model calls may use ${b.maxTokensPerDay} tokens a day (UTC), set by ${shown(b.setBy ?? "the owner", 80)}${b.setAt === undefined ? "" : ` at ${shown(b.setAt, 40)}`}. At the cap no such call is made until the next day.`, c),
+      line(`Today (${shown(b.day, 12)}) they used ${b.tokens} tokens in ${b.calls} counted call${b.calls === 1 ? "" : "s"}${b.remaining === null ? "" : `; ${b.remaining} tokens are left`}.`, used),
     ] };
   }
 

@@ -105,7 +105,9 @@ export class GuardedModelCall implements ModelCall {
 
 export interface ChatBudgetBody { readonly maxTokensPerDay?: number; readonly setBy: string; readonly at: string }
 export interface ChatSpendBody { readonly day: string; readonly tokens: number; readonly calls: number }
-export const CHAT_BUDGET_LIMITS = { maxTokensPerDay: 1_000_000_000 } as const;
+/** What `chat.budget.get` answers: the owner's cap (or `null`), today's UTC day, the provider-counted tokens and calls so far, and what is left under the cap. */
+export interface ChatBudgetView { readonly maxTokensPerDay: number | null; readonly setBy?: string; readonly setAt?: string; readonly day: string; readonly tokens: number; readonly calls: number; readonly remaining: number | null }
+export const CHAT_BUDGET_LIMITS ={ maxTokensPerDay: 1_000_000_000 } as const;
 const BUDGET_REF: AggregateRef = { kind: "chat-budget", id: "chat-budget" };
 
 /** The owner's cap on the tokens the chat and the coordinator use in a UTC day, and the day's count. */
@@ -134,6 +136,21 @@ export class ChatSpendService {
       },
     })));
     return { replayed: r.replayed };
+  }
+
+  /**
+   * What the owner reads: the cap in force, who set it and when, and today's count. Owner only, never from a task credential.
+   * `maxTokensPerDay` is `null` when there is no cap; `remaining` is `null` then too, and never below 0.
+   */
+  async view(owner: Principal): Promise<ChatBudgetView> {
+    if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", "only the owner reads the chat budget");
+    const budget = await this.budget();
+    const { day, ref } = this.#dayId();
+    const found = await this.#runner.get(ref.kind, ref.id);
+    const spent = found === undefined ? undefined : (found.body as unknown as ChatSpendBody);
+    const cap = budget?.maxTokensPerDay ?? null;
+    const tokens = spent?.tokens ?? 0;
+    return { maxTokensPerDay: cap, ...(budget === undefined ? {} : { setBy: budget.setBy, setAt: budget.at }), day, tokens, calls: spent?.calls ?? 0, remaining: cap === null ? null : Math.max(0, cap - tokens) };
   }
 
   async budget(): Promise<ChatBudgetBody | undefined> {
