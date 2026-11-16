@@ -139,3 +139,69 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+// Follow-up to card U08: the Administration page edits an agent and takes a right back through the chat's own operations (`agent.update`, `grant.revoke`). Whatever the profile, the change is shown
+// first and applied only on Apply; a second Apply changes nothing; a stale view is refused. All four storage backends.
+for (const backend of backends) {
+  test(`${backend.name}: an agent edit and a take-back of a right from the page are shown first, applied only on Apply, applied once, and refused when stale (card U08 follow-up)`, async () => {
+    const w = await openWorld(backend, {}, undefined, (storage, epoch) => ({ grants: GrantService.withEpoch(storage, epoch, options) }));
+    try {
+      const grants = GrantService.withEpoch(w.world.storage, w.projects.epoch, options);
+      const chat = w.chat();
+      const page = async (what: string, body: Record<string, unknown>) => { const b = adminIntent(what, body); return chat.submit(w.ownerToken, { messageId: cid("ui"), text: b.text }, { fixedIntents: [b.intent] } as never); };
+      const apply = (proposalId: string) => chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId } as never);
+      await w.agents.seedStandardRoles();
+      const ann = await w.agents.create(w.owner, { commandId: cid("a"), friendlyName: "Ann", roles: ["author"] });
+      const agentId = ann.id;
+
+      // A new name alone is an ordinary edit that the chat applies at once when typed; from the page it is shown first all the same.
+      const rename = await page("agent", { agentId, friendlyName: "Annie" });
+      assert.equal(rename.outcomes[0]!.status, "proposed", JSON.stringify(rename.outcomes));
+      assert.equal((await w.agents.get(w.owner, agentId))!.friendlyName, "Ann", "nothing changed before Apply");
+      const proposalId = (rename.outcomes[0] as any).proposalId as string;
+      const done = await apply(proposalId);
+      assert.equal((done as any).applied, true, JSON.stringify(done));
+      const afterRename = (await w.agents.get(w.owner, agentId))!;
+      assert.equal(afterRename.friendlyName, "Annie");
+      const again = await apply(proposalId);
+      assert.deepEqual([(again as any).applied, (again as any).replayed], [true, true]);
+      assert.equal((await w.agents.get(w.owner, agentId))!.revision, afterRename.revision, "a second Apply changes nothing");
+
+      // Roles are authority: shown first, and a discard leaves the agent as it was.
+      const roles = await page("agent", { agentId, roles: ["author", "reviewer"] });
+      assert.equal(roles.outcomes[0]!.status, "proposed");
+      assert.match(lines(roles.outcomes as never) + JSON.stringify(roles.outcomes), /reviewer/);
+      await chat.discardProposal(w.ownerToken, { commandId: cid("dp"), proposalId: (roles.outcomes[0] as any).proposalId });
+      assert.deepEqual((await w.agents.get(w.owner, agentId))!.roles, ["author"]);
+
+      // A view that went stale (the agent was changed after the page was drawn) is refused when applied, and the other change stands.
+      const stale = await page("agent", { agentId, friendlyName: "Anna" });
+      await w.agents.update(w.owner, { commandId: cid("u"), agentId, expectedRevision: (await w.agents.get(w.owner, agentId))!.revision, friendlyName: "Annette" });
+      const refused = await apply((stale.outcomes[0] as any).proposalId).catch((e) => ({ error: String(e) }));
+      assert.notEqual((refused as any).applied, true, JSON.stringify(refused));
+      assert.equal((await w.agents.get(w.owner, agentId))!.friendlyName, "Annette");
+
+      // Taking a right back: shown first in every profile, the reason is the owner's words, and the right counts until Apply.
+      await w.agent("ann", []);
+      const given = await grants.grant(w.owner, { commandId: cid("g"), grantee: "agent:ann", action: "task.update", project: "*", source: "direct", basis: "test" });
+      const revoke = await page("grant-revoke", { grantId: given.id, reason: "the project is finished" });
+      assert.equal(revoke.outcomes[0]!.status, "proposed", JSON.stringify(revoke.outcomes));
+      assert.equal((await grants.getGrant(given.id))!.state, "active", "still in force before Apply");
+      const taken = await apply((revoke.outcomes[0] as any).proposalId);
+      assert.equal((taken as any).applied, true, JSON.stringify(taken));
+      const after = (await grants.getGrant(given.id))!;
+      assert.equal(after.state, "revoked");
+      const rev = after.revision;
+      assert.equal((await apply((revoke.outcomes[0] as any).proposalId) as any).replayed, true);
+      assert.equal((await grants.getGrant(given.id))!.revision, rev, "a second Apply changes nothing");
+      // Already revoked: refused when asked again.
+      const twice = await page("grant-revoke", { grantId: given.id, reason: "once more" });
+      const twiceDone = twice.outcomes[0]!.status === "proposed" ? await apply((twice.outcomes[0] as any).proposalId).catch((e) => ({ error: String(e) })) : twice;
+      assert.notEqual((twiceDone as any).applied, true, JSON.stringify(twiceDone));
+      // The agent cannot do either through the API.
+      const annTok = await w.agent("bob", [{ action: "task.read", project: "*" }]);
+      for (const [op, args] of [["grant.revoke", { grantId: given.id, expectedRevision: 1, reason: "x" }], ["agent.update", { agentId, expectedRevision: 1, friendlyName: "Zed" }]] as const)
+        assert.equal(((await w.api.handle(annTok.token, { v: 1, op, commandId: cid("x"), args } as never)) as any).error?.code, "forbidden", op);
+    } finally { await w.close(); }
+  });
+}
