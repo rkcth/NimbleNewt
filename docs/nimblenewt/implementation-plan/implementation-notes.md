@@ -11842,3 +11842,14 @@ Checked and left as is: every admin view and the secret route go through the doo
 - `compatibility-and-support.md`: the exhaustive run starts by hand or on a `v*` tag; the QA run is by hand only (`qa.yml` has `workflow_dispatch` only).
 
 **Not done / left.** `implementation-plan/g02-acceptance.md` line 11 still says the CI matrix ran Node 24.21.0 "on every push"; it is a dated historical record of an earlier CI layout, so it was left unedited. ASSUMPTION: historical records are not rewritten.
+
+### T1 review (Claude agent, Opus 5.5, clean context, 2026-11-15)
+
+Checked each claim against the code and the workflow files, and ran a probe on the built controller (owner, an agent with no grants, an agent with `project.read` and `task.read` on `*`; real and made-up IDs of the right shape).
+
+**Fixed.**
+- The Scope bullet said only the owner sees `not_found` for projects. An agent whose grant covers the project ID (for example a `*` grant) passes `requireAction`, and `project.get` then answers `not_found: no such project` for a made-up ID (probe). Tasks go through `#hide`, which gives `not_found` only to the owner (the `*` agent got `forbidden` "may not read that" for a made-up task). The bullet now says so, and `architecture.md` step 3, which repeated the same claim, likewise.
+- The bullet named "thread reads" and "conversation writes". Those are routes of the conversation listener (`conversation-and-mcp-protocol.md` already states them), not state API operations; `api-v1.md` documents the state API only, so they were removed. "Meetings" was dropped from the `not_found` examples: `meeting.settle` answers `forbidden` for a missing meeting even to the owner, and `meeting.occurrence`'s text does not say "not found". The examples are now `job.get`, `deliverable.get` and `agent.get`, whose texts do.
+- `ci.yml` runs on a push to `main` and on pull requests, not on every push: the Node evidence in `supported.ts` and `compatibility-and-support.md` now says so.
+
+**Verified as written.** `exhaustive.yml`: `workflow_dispatch` and `v*` tags, Node 22.19.0 and 24.21.0 on ubuntu, macOS and Windows. `qa.yml`: `workflow_dispatch` only; its `qa` job uses both Node versions on the three systems (its `g04` job Node 22.19.0 only). `ci.yml`: ubuntu, Node 22.19.0 only. `own-hardware.yml` and `postgres-versions.yml` are hand-started and not mentioned. `security-guide.md` line 9 is consistent. Dated records (`g01-decision-record.md`, `g02-acceptance.md`, `g04-evidence.md`) left as they are.
