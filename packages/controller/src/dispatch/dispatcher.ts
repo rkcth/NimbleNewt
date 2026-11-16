@@ -174,7 +174,7 @@ export interface DispatcherDeps {
    * The checked resume (card L04c). An attempt that brings earlier work back (it has a checkpoint to continue from: after a restart or a move) starts only once its resume check is done: the dispatcher starts the check,
    * commits it when it is ready and waits while it is open or blocked (a blocked check has opened its own blocker). Without it such an attempt starts as before.
    */
-  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation" | "latestCheckpoint">>;
+  readonly resumes?: Pick<ResumeCheckService, "start" | "commit" | "advance" | "retry" | "cancel" | "forTask" | "checkIdFor" | "retryable" | "exhausted" | "cancelledAsStale" | "get"> & Partial<Pick<ResumeCheckService, "hasContinuation" | "latestCheckpoint" | "capturedCheckpoint">>;
   /** `GenerationService.guardFor` is handed to every effect that is started (it adds the generation hold to the pause and decision guards). */
   readonly generation?: Pick<GenerationService, "guardFor">;
   readonly reviews?: Pick<ReviewService, "request" | "admit" | "get">;
@@ -870,8 +870,8 @@ export class DispatcherService {
   }
 
   /**
-   * The check is made against the task's latest complete continuation. When the checkpoint this attempt resumes from is another one (a later checkpoint that did not read back, so it was captured incomplete), the check
-   * and the resume record still name the earlier complete capture; the task's activity says so, so the record is not read as being about the checkpoint the attempt actually restores (card L04d). Best effort.
+   * The check follows the complete capture of the checkpoint this attempt resumes from (card L04d). When there is none (the checkpoint did not read back, so it was captured incomplete), the check
+   * and the resume record name the task's latest complete capture; the task's activity says so, so the record is not read as being about the checkpoint the attempt actually restores (card L04d). Best effort.
    */
   async #checkpointStep(resumes: NonNullable<DispatcherDeps["resumes"]>, attemptId: string, taskId: string, from: JsonObject): Promise<void> {
     if (resumes.latestCheckpoint === undefined) return;
@@ -880,6 +880,8 @@ export class DispatcherService {
       if (typeof pi !== "object" || pi === null) return;
       const mine = pi as Record<string, unknown>;
       if (typeof mine["digest"] !== "string" || typeof mine["conversationId"] !== "number" || typeof mine["at"] !== "number") return;
+      // A complete capture of this very checkpoint: the check follows it (card L04d), so there is nothing to tell.
+      if (resumes.capturedCheckpoint !== undefined && await resumes.capturedCheckpoint(this.#deps.principal, taskId, mine["digest"]) !== undefined) return;
       const checked = await resumes.latestCheckpoint(this.#deps.principal, taskId);
       if (checked === undefined || checked.digest === mine["digest"]) return;
       await this.#stepOf(attemptId, `resume-checkpoint:${String(mine["digest"]).slice(0, 24)}`, "harness-selected", `Attempt ${attemptId} resumes from the checkpoint taken at ${mine["at"]} in conversation ${mine["conversationId"]}, which has no complete capture (it did not read back as complete). Its resume check is made against the task's latest complete capture, taken at ${checked.at} in conversation ${checked.conversationId}; that is the continuation the check and the resume record name.`, [{ kind: "dispatch", id: attemptId }]);
@@ -1861,7 +1863,9 @@ export class DispatcherService {
     // the check and the resume record say so and name the model before. The key only grows for that case, so a check of an unchanged route keeps the key it had.
     const before = b.modelCall?.route ?? b.route;
     const changed = before !== route ? modelOf(before) : undefined;
-    const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model, ...(changed === undefined ? [] : [changed])])).slice(4, 16)}`;
+    // The check names the checkpoint the attempt restores (card L04d), so it follows that checkpoint's own capture; a check that names one has its own key family.
+    const ckDigest = (() => { const pi = (b.resumeFrom as Record<string, unknown>)["pi"]; const d = typeof pi === "object" && pi !== null ? (pi as Record<string, unknown>)["digest"] : undefined; return typeof d === "string" && /^[A-Za-z0-9:._-]{1,100}$/.test(d) ? d : undefined; })();
+    const base = `dpa-rck:${attemptId}:${derivedId("dpa", JSON.stringify([b.resumeFrom, b.resumeNote ?? null, model, ...(changed === undefined ? [] : [changed]), ...(ckDigest === undefined ? [] : [{ checkpoint: ckDigest }])])).slice(4, 16)}`;
     // A check the dispatcher itself cancelled as stale (the route flapped) does not count toward the restart budget; the key list is long enough for a flapping route.
     const keys = Array.from({ length: RESUME_RESTARTS + 1 + MAX_STALE_RESTARTS }, (_, n) => (n === 0 ? base : `${base}-r${n}`));
     try {
@@ -1891,7 +1895,7 @@ export class DispatcherService {
       const key = keys[n]!;
       // The check's model calls (the second agent) do not run inside the tick (card L04d follow-up): it runs apart, and a check not finished within the short inline wait is waited for by the next ticks, so one slow review cannot hold up other attempts.
       const got = await this.#resumeJob(key, async () => {
-        let c = await resumes.start(by, { commandId: key, taskId, attemptId, model, ...(changed === undefined ? { after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" } : { previousModel: changed, after: "model-change" }) });
+        let c = await resumes.start(by, { commandId: key, taskId, attemptId, model, ...(ckDigest === undefined ? {} : { checkpointDigest: ckDigest }), ...(changed === undefined ? { after: b.resumeNote?.includes("restarted") === true ? "restart" : "continue" } : { previousModel: changed, after: "model-change" }) });
         if (c.phase === "blocked" && await resumes.retryable(c)) c = await resumes.retry(by, { checkId: c.id });
         return c;
       });
@@ -3016,8 +3020,6 @@ export class DispatcherService {
       // The ending this turn holds: only it is let go of at the end (a later turn of the attempt, started elsewhere after a move, holds its own).
       let mine: NonNullable<DispatchBody["turnEnd"]> | undefined;
       try {
-        // A completed turn is a safe boundary (card L04d): the checkpoint it left is captured as the task's continuation before the attempt parks, is readmitted or ends, so the resume that follows is checked against it.
-        if (result.status === "completed" && result.checkpoint !== undefined) await this.#taken({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason: "the turn completed", boundary: "turn-complete", checkpoint: result.checkpoint });
         if (result.usage !== undefined) {
           // A turn's figures that could not be charged are not lost silently: the attempt's record says so (redacted, clipped).
           // A remote turn's result is stored once per placement: keyed by it, a new primary that takes the same result again (the old one charged it and lost the store before ending the attempt) charges nothing more (card H09b).
@@ -3026,6 +3028,9 @@ export class DispatcherService {
             await this.#update(attemptId, (b) => ({ ...b, usageError: why })).catch(() => undefined);
           });
         }
+        // A completed turn is a safe boundary (card L04d): the checkpoint it left is captured as the task's continuation before the attempt parks, is readmitted or ends, so the resume that follows is checked against it.
+        // The turn's usage is charged first, so the capture's budget (spent and remaining) is the one after this turn, not before it.
+        if (result.status === "completed" && result.checkpoint !== undefined) await this.#taken({ attemptId, taskId: d.body.taskId, agentId: d.body.agentId, reason: "the turn completed", boundary: "turn-complete", checkpoint: result.checkpoint });
         // How the turn ended (card W02) goes on the attempt with the write that ends or parks it (no write of its own: two writes from one revision would share a command ID). It decides nothing yet (W03).
         // A result that says no kind (an older or remote worker) is recorded as unknown, never as normal.
         const visibleChars = Number.isSafeInteger(result.visibleChars) && result.visibleChars! >= 0 ? result.visibleChars : undefined;

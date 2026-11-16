@@ -42,6 +42,14 @@ The [current implementation plan](implementation-plan/README.md) is authoritativ
 | [Harness comparison](harness-comparison.md) | Current selection and clearly labeled historical alternatives. |
 | [Harness test results](harness-test-results.md) | Exact scope and limitations of experiments; links to reproducible probes. |
 | [Regular pi research](pi-integration-research.md) | Historical extension/API research; not the Pi Durable integration contract. |
+| [Architecture for contributors](architecture.md) | Packages, one request end to end, storage, where things live, the rules that shape a change (card D02). |
+| [State API guide](api-guide.md) | Worked, test-run examples for calling the state API; the generated [reference](api-v1.md) is the exact list (card D02). |
+| [Conversation listener and MCP door](conversation-and-mcp-protocol.md) | The HTTP routes and MCP door, with test-run examples (card D02). |
+| [Security guide](security-guide.md) | The security model as built, and its known limits; reporting is in [SECURITY.md](../../SECURITY.md) (card D02). |
+| [Durability and flush guarantees](durability-and-flush.md) | What survives a process crash, an orderly shutdown and power loss, store by store (card D02). |
+| [Compatibility and support](compatibility-and-support.md) | Supported environments, interface stability, upgrades and how to ask for help (card D02). |
+| [Troubleshooting](troubleshooting.md) | Symptoms, meanings and fixes for starting, running, the API and the code (card D02). |
+| [Notices and licenses](notices.md) | NimbleNewt's license, the third-party inventory and what redistribution needs (card D02). |
 
 ## Public product and our development deployment
 
