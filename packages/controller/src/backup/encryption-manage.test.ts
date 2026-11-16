@@ -97,7 +97,7 @@ test("the command line adds a passcode and rotates the key, proves the new metho
   const d = tmp();
   try {
     const out: string[] = [];
-    const run = async (...argv: string[]): Promise<number> => { out.length = 0; return runBackupCli(argv, (l) => { out.push(l); }); };
+    const run = async (...argv: string[]): Promise<number> => { out.length = 0; return runBackupCli(argv, (l) => { out.push(l); }, undefined, { scrypt: FAST }); };
     const put = (name: string, text: string): string => { const f = join(d, name); writeFileSync(f, `${text}\n`, { mode: 0o600 }); return f; };
     const pf = put("pass", PASS); const keyringFile = join(d, "keyring.json"); const rec1 = join(d, "rec1.json"); const code1 = join(d, "code1.txt");
     assert.equal(await run("encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", rec1, "--recovery-code-out", code1), 0, out.join("\n"));
@@ -107,6 +107,9 @@ test("the command line adds a passcode and rotates the key, proves the new metho
     assert.equal(await run("encryption-add-passcode", keyringFile, "--recovery-code-file", code1, "--new-passcode-file", put("p2", PASS2)), 0, out.join("\n"));
     const k2 = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
     assert.equal(k2.keyId, k1.keyId); assert.equal(k2.wrappers.length, 3);
+    // The quick settings reach every new wrapper (setup, add-passcode); without them the command line would run the real Argon2id each time.
+    const kdfs = (k: Keyring): string[] => k.wrappers.flatMap((w) => w.kind === "passcode" ? [w.kdf.name] : []);
+    assert.deepEqual(kdfs(k1), ["scrypt"]); assert.deepEqual(kdfs(k2), ["scrypt", "scrypt"]);
     assert.ok(!out.join("\n").includes(PASS2));
     // Without showing a way to open the key nothing changes; a wrong passcode changes nothing either.
     assert.equal(await run("encryption-add-passcode", keyringFile, "--new-passcode-file", put("p3", PASS3)), 1);
@@ -120,6 +123,7 @@ test("the command line adds a passcode and rotates the key, proves the new metho
     for (const secret of [PASS, PASS2, code, readFileSync(code2, "utf8").trim(), JSON.parse(readFileSync(rec2, "utf8")).recoveryKey]) assert.ok(!text.includes(secret));
     const k3 = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
     assert.equal(k3.generation, 2); assert.equal(k3.previousKeyId, k1.keyId);
+    assert.deepEqual(kdfs(k3), ["scrypt"]);
     assert.deepEqual(JSON.parse(readFileSync(`${keyringFile}.generation-1`, "utf8")), k2, "the old generation is kept beside it");
     unlockWithRecoveryCode(k3, readFileSync(code2, "utf8"));
     await assert.rejects(unlockWithPasscode(k3, PASS2), UnlockFailed);
@@ -194,11 +198,11 @@ test("setup leaves a file that was already at the recovery path as it was, and k
     const old = join(d, "old-recovery.json"); writeFileSync(old, "the owner's earlier recovery file\n", { mode: 0o600 });
     const codeOld = join(d, "old-code.txt"); writeFileSync(codeOld, "the owner's earlier code\n", { mode: 0o600 });
     const out: string[] = [];
-    assert.equal(await runBackupCli(["encryption-setup", join(d, "k1.json"), "--passcode-file", pf, "--recovery-out", old], (l) => { out.push(l); }), 1);
+    assert.equal(await runBackupCli(["encryption-setup", join(d, "k1.json"), "--passcode-file", pf, "--recovery-out", old], (l) => { out.push(l); }, undefined, { scrypt: FAST }), 1);
     assert.equal(readFileSync(old, "utf8"), "the owner's earlier recovery file\n");
     assert.ok(!existsSync(join(d, "k1.json")));
     // The code path already taken: the new recovery file and keyring are taken away again, the old code file stays.
-    assert.equal(await runBackupCli(["encryption-setup", join(d, "k2.json"), "--passcode-file", pf, "--recovery-out", join(d, "new-rec.json"), "--recovery-code-out", codeOld], (l) => { out.push(l); }), 1);
+    assert.equal(await runBackupCli(["encryption-setup", join(d, "k2.json"), "--passcode-file", pf, "--recovery-out", join(d, "new-rec.json"), "--recovery-code-out", codeOld], (l) => { out.push(l); }, undefined, { scrypt: FAST }), 1);
     assert.equal(readFileSync(codeOld, "utf8"), "the owner's earlier code\n");
     assert.ok(!existsSync(join(d, "k2.json")) && !existsSync(join(d, "new-rec.json")));
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -207,7 +211,7 @@ test("setup leaves a file that was already at the recovery path as it was, and k
 test("a rotation that stopped after keeping the old generation can be run again; a different file at the archive path is never replaced (review)", { timeout: 120_000 }, async () => {
   const d = tmp();
   try {
-    const run = async (...argv: string[]): Promise<number> => runBackupCli(argv, () => undefined);
+    const run = async (...argv: string[]): Promise<number> => runBackupCli(argv, () => undefined, undefined, { scrypt: FAST });
     const pf = join(d, "pass"); writeFileSync(pf, `${PASS}\n`, { mode: 0o600 });
     const keyringFile = join(d, "keyring.json");
     assert.equal(await run("encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", join(d, "rec1.json")), 0);
@@ -238,4 +242,16 @@ test("a proof record or key creation time that cannot be read makes a proof due 
   assert.equal(e.status().lastSuccessfulProof, undefined);
   await e.attachProofStore({ load: async () => ({ method: "telepathy" as never, at: now.toISOString(), keyId: keyring.keyId }), save: async () => undefined });
   assert.equal(e.status().proofDue, true);
+});
+
+test("without a test seam the command line still makes Argon2id wrappers at the real settings (the quick settings are a test seam only)", async () => {
+  const d = tmp();
+  try {
+    const pf = join(d, "pass"); writeFileSync(pf, `${PASS}\n`, { mode: 0o600 });
+    const keyringFile = join(d, "keyring.json");
+    assert.equal(await runBackupCli(["encryption-setup", keyringFile, "--passcode-file", pf, "--recovery-out", join(d, "rec.json")], () => undefined), 0);
+    const k = JSON.parse(readFileSync(keyringFile, "utf8")) as Keyring;
+    const w = k.wrappers.find((x) => x.kind === "passcode");
+    assert.ok(w !== undefined && w.kind === "passcode" && w.kdf.name === "argon2id" && w.kdf.m >= 65_536 && w.kdf.t >= 3);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

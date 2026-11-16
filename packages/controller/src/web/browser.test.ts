@@ -68,11 +68,16 @@ test("the real page in a real browser: strict policy, phone layout, sign-in, one
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const door = c.webChat!;
-    proc = spawn(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--no-proxy-server", "--remote-debugging-port=0", `--user-data-dir=${join(dir, "profile")}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+    // A CI runner has no desktop session: without a D-Bus session the browser logs "Failed to connect to the bus" and may be slow to start, so say there is none and keep the shared-memory use small. Test-only; the env value is ignored on Windows and macOS.
+    proc = spawn(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-features=MediaRouter,OptimizationHints", "--no-first-run", "--no-default-browser-check", "--no-proxy-server", "--remote-debugging-port=0", `--user-data-dir=${join(dir, "profile")}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: "disabled:", DBUS_SYSTEM_BUS_ADDRESS: "disabled:" } });
     const endpoint = await new Promise<string>((ok, bad) => {
-      let seen = ""; const timer = setTimeout(() => bad(new Error(`the browser did not start: ${seen.slice(-300)}`)), 30_000);
+      let seen = "";
+      /** The last line the browser wrote (what it complained about last), then the tail for context. */
+      const lastLine = (): string => { const lines = seen.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== ""); return `last stderr line: ${lines.length === 0 ? "(none)" : lines[lines.length - 1]!.slice(0, 300)}; tail: ${seen.slice(-300)}`; };
+      const timer = setTimeout(() => bad(new Error(`the browser did not start within 90 s: ${lastLine()}`)), 90_000);
       proc!.stderr!.on("data", (d: Buffer) => { seen += d.toString(); const m = /DevTools listening on (ws:\/\/\S+)/.exec(seen); if (m !== null) { clearTimeout(timer); ok(m[1]!); } });
-      proc!.on("exit", () => bad(new Error(`the browser exited: ${seen.slice(-300)}`)));
+      proc!.on("error", (e) => { clearTimeout(timer); bad(new Error(`the browser could not be launched: ${e.message}`)); });
+      proc!.on("exit", (code, signal) => { clearTimeout(timer); bad(new Error(`the browser exited (${code ?? signal}): ${lastLine()}`)); });
     });
     cdp = await Cdp.connect(endpoint);
     const browser = cdp;
