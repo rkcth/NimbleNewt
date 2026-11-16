@@ -64,6 +64,8 @@ export interface ResumeCheckBody {
   readonly previousModel?: { readonly provider: string; readonly id: string };
   readonly after: "restart" | "model-change" | "continue";
   readonly continuationId?: string;
+  /** The digest of the checkpoint the attempt restores (card L04d): the check follows the complete capture of that checkpoint when there is one, else the task's latest complete capture. Absent: always the latest. */
+  readonly checkpointDigest?: string;
   /** The revisions that were verified: the continuation and the digest of every dependency's status. A commit is allowed only while these still hold. */
   readonly revisionSet?: { readonly continuationId: string; readonly digest: string; readonly dependencies: number; readonly unverified: boolean };
   /** What changed, permission-filtered by the checker's own rights; nothing of the content itself. */
@@ -117,7 +119,7 @@ const checkModel = (v: unknown, field: string): { provider: string; id: string }
 };
 
 export interface ResumeCheckDeps {
-  readonly continuations: Pick<ContinuationService, "latest" | "resume">;
+  readonly continuations: Pick<ContinuationService, "latest" | "resume"> & Partial<Pick<ContinuationService, "forCheckpoint">>;
   readonly dependencies: Pick<DependencyService, "check">;
   readonly blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
   readonly ports: ResumePorts;
@@ -139,7 +141,7 @@ export class ResumeCheckService {
   readonly #runner: CommandRunner;
   /** Checks whose reviewer is being asked in this process now (card L04d follow-up): a second advance of the same check (the dispatcher's sweep while its own job waits for the model, an API call) answers where the check stands instead of asking the model again and counting its tokens twice. */
   readonly #reviewing = new Set<string>();
-  readonly #continuations: Pick<ContinuationService, "latest" | "resume">;
+  readonly #continuations: Pick<ContinuationService, "latest" | "resume"> & Partial<Pick<ContinuationService, "forCheckpoint">>;
   readonly #dependencies: Pick<DependencyService, "check">;
   readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
   readonly #ports: ResumePorts;
@@ -161,8 +163,9 @@ export class ResumeCheckService {
   // ---- requests ------------------------------------------------------------------------------------------------------------
 
   /** Begins a checked resume of a task. One at a time per task; the same command again answers where it stands. Returns after one pass. */
-  async start(by: Principal, command: NoActor & { taskId: string; model: unknown; previousModel?: unknown; after: "restart" | "model-change" | "continue"; attemptId?: string }): Promise<View<ResumeCheckBody>> {
-    onlyKnown(command, ["commandId", "taskId", "model", "previousModel", "after", "attemptId"]);
+  async start(by: Principal, command: NoActor & { taskId: string; model: unknown; previousModel?: unknown; after: "restart" | "model-change" | "continue"; attemptId?: string; checkpointDigest?: string }): Promise<View<ResumeCheckBody>> {
+    onlyKnown(command, ["commandId", "taskId", "model", "previousModel", "after", "attemptId", "checkpointDigest"]);
+    if (command.checkpointDigest !== undefined && !(typeof command.checkpointDigest === "string" && /^[A-Za-z0-9:._-]{1,100}$/.test(command.checkpointDigest))) invalid("checkpointDigest", "is not a checkpoint digest");
     const attemptId = command.attemptId === undefined ? undefined : checkAttemptId(command.attemptId);
     const taskId = checkTaskId(command.taskId);
     const projectId = await this.#authorize(by, taskId);
@@ -173,7 +176,7 @@ export class ResumeCheckService {
     const activeRef: AggregateRef = { kind: ACTIVE, id: derivedId("rck", `active\0${taskId}`) };
     await this.#runner.command("resume.start", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       // The attempt is kept out of the payload: a check started before it was recorded answers the same command again instead of conflicting (the dispatcher's command ID names the attempt anyway).
-      payload: { taskId, model: model as unknown as JsonObject, previousModel: (previousModel ?? null) as unknown as JsonObject, after: command.after },
+      payload: { taskId, model: model as unknown as JsonObject, previousModel: (previousModel ?? null) as unknown as JsonObject, after: command.after, ...(command.checkpointDigest === undefined ? {} : { checkpointDigest: command.checkpointDigest }) },
       build: async () => {
         const at = this.#runner.now();
         const maxRounds = typeof this.#rounds === "number" ? this.#rounds : await this.#rounds();
@@ -186,7 +189,7 @@ export class ResumeCheckService {
         }
         const ref: AggregateRef = { kind: KIND, id };
         const body: ResumeCheckBody = {
-          taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), phase: "collecting", round: 0, blocks: 0, maxRounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, verdicts: {},
+          taskId, projectId, ...(attemptId === undefined ? {} : { attemptId }), phase: "collecting", round: 0, blocks: 0, maxRounds, model, ...(previousModel === undefined ? {} : { previousModel }), after: command.after, ...(command.checkpointDigest === undefined ? {} : { checkpointDigest: command.checkpointDigest }), verdicts: {},
           requestedBy: by.id, requestedAt: at, history: [{ phase: "collecting", at, by: by.id, note: "resume check started" }],
         };
         const pointer = clean({ checkId: id });
@@ -363,7 +366,7 @@ export class ResumeCheckService {
       const b = found.body as unknown as ResumeCheckBody;
       if (TERMINAL.includes(b.phase) || b.phase === "ready" || b.phase === "blocked") return view<ResumeCheckBody>(found);
       if (b.phase === "collecting") {
-        const c = await this.#continuations.latest(by, b.taskId);
+        const c = await this.#target(by, b);
         if (c === undefined) { await this.#block(by, id, b, "missing_context", "no complete continuation exists for the task, so there is nothing to resume"); continue; }
         const missing = await this.#ports.missingContext(b.taskId, c);
         if (missing.length > 0) { await this.#block(by, id, b, "missing_context", `critical context is missing: ${missing.slice(0, 10).join(", ")}`); continue; }
@@ -371,7 +374,7 @@ export class ResumeCheckService {
         continue;
       }
       if (b.phase === "verifying") {
-        const current = await this.#continuations.latest(by, b.taskId);
+        const current = await this.#target(by, b);
         const effects = current === undefined ? [] : await this.#ports.uncertainEffects(b.taskId, current);
         if (effects.length > 0) { await this.#block(by, id, b, "effects_uncertain", `earlier effects of unknown outcome must be settled first: ${effects.slice(0, 10).join(", ")}`); continue; }
         const now = await this.#verify(by, b, true);
@@ -563,9 +566,25 @@ export class ResumeCheckService {
     return found;
   }
 
+  /** The continuation a check is made against: the complete capture of the checkpoint the attempt restores when the check names one and it was captured complete, else the task's latest complete capture. */
+  async #target(by: Principal, b: ResumeCheckBody): Promise<(ContinuationBody & { id: string }) | undefined> {
+    if (b.checkpointDigest !== undefined && this.#continuations.forCheckpoint !== undefined) {
+      const own = await this.#continuations.forCheckpoint(by, b.taskId, b.checkpointDigest);
+      if (own !== undefined) return own;
+    }
+    return await this.#continuations.latest(by, b.taskId);
+  }
+
+  /** The complete capture of this checkpoint of the task, as a check that names it would follow it; nothing when there is none (the check then follows the latest). */
+  async capturedCheckpoint(by: Principal, taskId: string, digest: string): Promise<{ readonly conversationId: number; readonly at: number; readonly digest: string } | undefined> {
+    await this.#authorize(by, checkTaskId(taskId));
+    const c = this.#continuations.forCheckpoint === undefined ? undefined : await this.#continuations.forCheckpoint(by, checkTaskId(taskId), digest);
+    return c === undefined ? undefined : { conversationId: c.checkpoint.conversationId, at: c.checkpoint.at, digest: c.checkpoint.digest };
+  }
+
   /** The continuation and every dependency as they are now: what changed (with the checker's rights), and a digest of the whole set. `stale` says why a revision set that was verified before no longer holds. */
   async #verify(by: Principal, b: ResumeCheckBody, collecting = false): Promise<{ continuationId: string; changed: DeltaItem[]; total: number; digest: string; unverified: boolean; stale?: string }> {
-    const c = await this.#continuations.latest(by, b.taskId);
+    const c = await this.#target(by, b);
     if (c === undefined) throw new DomainError("not_found", "the task's continuation is gone");
     let checks: DependencyCheck[] = [];
     let unverified = false;

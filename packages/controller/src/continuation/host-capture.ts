@@ -61,7 +61,7 @@ export function durabilityOf(taken: JsonObject): { verified: boolean; error?: st
  *
  * What goes in it, and from where:
  * - the adapter's checkpoint reference and the host's durability check of it (`nn.durable`, the worker process reading its store back). Without a passed check the capture is kept `incomplete` and never resumed from;
- * - the conversation identity: the one the task's continuations already have, else `task:<taskId>`;
+ * - the conversation identity: the one the task's captures already have (an earlier incomplete capture fixes it too), else `task:<taskId>`;
  * - the summary lineage from the task's latest compaction (card C07q: the newest IDs listed, the older ones folded and continued), and as many compactions as that lineage counts;
  * - the budget from accounting; the artifacts and decisions the task's previous complete continuation named, carried forward;
  * - the next step in the controller's words (the agent's own is not known here), and no pending effects, scratch records, credentials or non-checkpointable tools (none of which the controller can name from a checkpoint).
@@ -69,7 +69,7 @@ export function durabilityOf(taken: JsonObject): { verified: boolean; error?: st
  * Never throws: a capture that cannot be made is reported to `onError` and answered as `failed`; a checkpoint it cannot name is `skipped`. One command per attempt, checkpoint and boundary, so the same checkpoint
  * taken again at the same boundary is one capture.
  */
-export function continuationRecorder(deps: { readonly continuations: Pick<ContinuationService, "capture">; readonly principal: Principal; readonly sources?: CaptureSources; readonly onError?: (error: unknown) => void }): (taken: CheckpointTaken) => Promise<CaptureOutcome> {
+export function continuationRecorder(deps: { readonly continuations: Pick<ContinuationService, "capture"> & Partial<Pick<ContinuationService, "identityOf">>; readonly principal: Principal; readonly sources?: CaptureSources; readonly onError?: (error: unknown) => void }): (taken: CheckpointTaken) => Promise<CaptureOutcome> {
   const quietly = async <T>(read: (() => Promise<T>) | undefined): Promise<T | undefined> => {
     if (read === undefined) return undefined;
     try { return await read(); } catch (error) { deps.onError?.(error); return undefined; }
@@ -79,16 +79,18 @@ export function continuationRecorder(deps: { readonly continuations: Pick<Contin
     if (typeof checkpoint === "string") return { skipped: checkpoint };
     if (!/^agent:[A-Za-z0-9._-]{1,64}$/.test(taken.agentId)) return { skipped: "the attempt's agent is not one a continuation can name" };
     const durable = durabilityOf(taken.checkpoint);
-    const [compaction, budget, previous] = await Promise.all([
+    const [compaction, budget, previous, kept] = await Promise.all([
       quietly(deps.sources?.compaction === undefined ? undefined : () => deps.sources!.compaction!(taken.taskId)),
       quietly(deps.sources?.budget === undefined ? undefined : () => deps.sources!.budget!(taken.taskId)),
       quietly(deps.sources?.previous === undefined ? undefined : () => deps.sources!.previous!(taken.taskId)),
+      // The identity the task's captures already keep, including a first capture that was incomplete (no complete one carries it yet): a continuation keeps the same one.
+      quietly(deps.continuations.identityOf === undefined ? undefined : () => deps.continuations.identityOf!(deps.principal, taken.taskId)),
     ]);
     const lineage = compaction === undefined ? [] : [...compaction.lineage, compaction.id];
     const compactions = compaction === undefined ? 0 : lineage.length + (compaction.earlier?.count ?? 0);
     const carried = (ids: readonly string[] | undefined): string[] => [...new Set(ids ?? [])].slice(-CONTINUATION_LIMITS.items);
     const input: ContinuationInput = {
-      identity: previous?.identity ?? `task:${taken.taskId}`,
+      identity: kept ?? previous?.identity ?? `task:${taken.taskId}`,
       agent: taken.agentId,
       boundary: { kind: taken.boundary },
       checkpoint,
