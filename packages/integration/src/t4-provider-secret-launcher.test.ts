@@ -43,7 +43,7 @@ async function withContext(config: LauncherConfig, secrets: ReturnType<typeof me
   try { await body(context!, l); } finally { await l.close(); }
 }
 
-test("sqlite: a provider record naming the owner's credential, the backup signing key or a transfer target's address is refused where the launcher reads its key, in any letter case, without asking the secret store (task T4)", async () => {
+test("sqlite: a provider record naming the owner's credential, the backup signing key or a transfer target's address (and a push credential naming one) is refused where the launcher reads its key, in any letter case, without asking the secret store (task T4)", async () => {
   const dir = dirOf();
   try {
     const config: LauncherConfig = { installation: { name: "t4", dataDir: dir }, controller: { storage: { kind: "sqlite", path: join(dir, "controller.sqlite") }, databaseTransfer: { targets: [transferTarget] } }, models: { providers } };
@@ -62,7 +62,12 @@ test("sqlite: a provider record naming the owner's credential, the backup signin
         secrets.asked.length = 0;
         await assert.rejects(Promise.resolve().then(() => e.headers!()), (error: Error) => /cannot be a model provider's credential/.test(error.message) && !error.message.includes("sk-"), name);
         assert.deepEqual(secrets.asked, [], `${name}: the secret store was never asked for it`);
+        // The work-in-progress backup's push credential (the host's `secret`) goes to an https remote: refused the same way (task T4 second review).
+        await assert.rejects(ctx.secret(name), (error: Error) => /cannot be a backup remote's credential/.test(error.message) && !error.message.includes("sk-"), `push ${name}`);
+        assert.deepEqual(secrets.asked, [], `push ${name}: the secret store was never asked for it`);
       }
+      secrets.values.set("wip-push", "sk-push-one");
+      assert.equal(await ctx.secret("wip-push"), "sk-push-one", "an ordinary push credential is read");
     });
   } finally { clean(dir); }
 });
@@ -99,6 +104,8 @@ test("PostgreSQL: a provider record naming the database address's secret is refu
         secrets.asked.length = 0;
         await assert.rejects(Promise.resolve().then(() => e.headers!()), (error: Error) => /cannot be a model provider's credential/.test(error.message) && !error.message.includes(server.url()), name);
         assert.deepEqual(secrets.asked, [], name);
+        await assert.rejects(ctx.secret(name), (error: Error) => /cannot be a backup remote's credential/.test(error.message) && !error.message.includes(server.url()), `push ${name}`);
+        assert.deepEqual(secrets.asked, [], `push ${name}`);
       }
     });
   } finally {

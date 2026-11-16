@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
 import { OWNER_SECRET_PREFIX } from "../admin/index.js";
-import { providerSecretRefusal } from "../setup/reserved-secrets.js";
+import { keptSecretRefusal, providerSecretRefusal } from "../setup/reserved-secrets.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { narratorFrom, stewardFrom } from "../meetings/agents.js";
@@ -76,7 +76,7 @@ export interface LocalHostContext {
   readonly controller: () => Controller;
   readonly fetch?: typeof globalThis.fetch;
   /**
-   * One secret by NAME, read from the secret store at the moment it is needed (the push credential an owner chose for the work-in-progress backup). The owner's own credential is refused here as everywhere. The value is for the one
+   * One secret by NAME, read from the secret store at the moment it is needed (the push credential an owner chose for the work-in-progress backup). The owner's own credential and the names the configuration keeps for something else (task T4: the database address, the transfer targets', the backup signing key) are refused here as everywhere. The value is for the one
    * git process the host starts and goes nowhere else: not a record, a message, a file or a log line.
    */
   readonly secret: (name: string) => Promise<string | undefined>;
@@ -158,6 +158,12 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
   const providerSecret = async (name: string): Promise<string | undefined> => {
     const why = providerSecretRefusal(name, keptSecrets);
     if (why !== undefined) throw new Error(`the secret name "${name.slice(0, 80)}" cannot be a model provider's credential: ${why}; name another secret`);
+    return named(name);
+  };
+  // The work-in-progress backup's push credential (card P02b) goes to the https remote the owner named: the same names are refused there, whatever the setting record says.
+  const pushSecret = async (name: string): Promise<string | undefined> => {
+    const why = keptSecretRefusal(name, keptSecrets, "a backup remote");
+    if (why !== undefined) throw new Error(`the secret name "${name.slice(0, 80)}" cannot be a backup remote's credential: ${why}; name another secret`);
     return named(name);
   };
 
@@ -293,7 +299,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
       else {
         // A builder that throws (a package that cannot be loaded, a folder that cannot be made) is a reason the host was not started, never a reason the owner has no controller.
         let made: LocalHostPlan | { readonly problem: string };
-        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, secret: (name) => named(name), secretValues, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}` }; }
+        try { made = await options.localHost({ dataDir, print, endpoint: endpointOf, controller: () => live!, secret: (name) => pushSecret(name), secretValues, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) }); } catch (error) { made = { problem: `building it failed: ${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}` }; }
         if ("problem" in made) notes.push(`You turned on the worker host for this computer, but it was not started: ${made.problem}`);
         else {
           await controller.close();
