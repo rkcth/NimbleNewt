@@ -431,6 +431,9 @@ export class ResumeCheckService {
         } catch (error) {
           if (error instanceof DomainError && error.message === ORPHANED) { await this.#update(id, (x) => ({ ...x, phase: "cancelled", history: this.#push(x, "cancelled", by.id, ENDED_CANCEL) }), ["executing"]); continue; }
           if (error instanceof DomainError && error.code === "stale_revision") continue;
+          // The capture the check was made against was pruned meanwhile (more than CONTINUATION_KEEP newer ones): nothing was recorded, so the check starts over against what exists now. Left as it was, it would
+          // answer the same not_found at every retry and the attempt would never start.
+          if (error instanceof DomainError && error.code === "not_found" && b.continuationId !== undefined && await this.#runner.get("continuation", b.continuationId) === undefined) { await this.#restart(by, id, "the continuation it was made against was pruned", ["executing"]); continue; }
           throw error;
         }
         await this.#update(id, (x) => ({ ...x, phase: "done", history: this.#push(x, "done", by.id, `resumed from ${r.continuation.id}`) }), ["executing"]);
@@ -599,10 +602,10 @@ export class ResumeCheckService {
   }
 
   /** The inputs moved after the review: start over, or stop as churn when the rounds are used up. */
-  async #restart(by: Principal, id: string, why: string): Promise<void> {
+  async #restart(by: Principal, id: string, why: string, from: readonly ResumePhase[] = ["ready"]): Promise<void> {
     const b = (await this.#runner.get(KIND, id))!.body as unknown as ResumeCheckBody;
-    if (b.round + 1 >= b.maxRounds) { await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, ["ready"]); return; }
-    await this.#update(id, (x) => ({ ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) }), ["ready"]);
+    if (b.round + 1 >= b.maxRounds) { await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, from); return; }
+    await this.#update(id, (x) => ({ ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) }), from);
   }
 
   async #block(by: Principal, id: string, b: ResumeCheckBody, type: NonNullable<ResumeCheckBody["blocked"]>["type"], reason: string, from: readonly ResumePhase[] = LIVE): Promise<void> {
