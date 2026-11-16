@@ -16,6 +16,8 @@ import type { WebBrowser, WebSettings } from "../web/index.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import { relianceOf } from "../security/reliance.js";
+import { relianceHead, relianceLines } from "./reliance-words.js";
 import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
@@ -297,6 +299,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
   chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the reviewing agents (the resume reviewer and the second agent that questions a done) may use (the chat itself is never stopped by it), who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
+  grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -384,6 +387,7 @@ export type StatusRequest =
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
   | { readonly kind: "wakes" }
@@ -893,6 +897,7 @@ export class StatusService {
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
+      case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1611,6 +1616,28 @@ export class StatusService {
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
+  /**
+   * The running work that relies on a standing right (follow-up to card T7), for the owner before a right is taken back: one right (grantId) in full, or every active right that has running work, one line each.
+   * Owner only; read only from the grant, assignment, attempt and task records. At most 12 lines.
+   */
+  async grantRelianceLines(by: Principal, grantId?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if (grantId !== undefined && !(typeof grantId === "string" && /^grt-[a-z2-7]{20}$/.test(grantId))) invalid("grantId", "must be a right's ID (grt-...)");
+    const got = await relianceOf(this.#runner, grantId === undefined ? {} : { grantId });
+    if (got === undefined) return undefined;
+    const lines: Line[] = [];
+    if (grantId !== undefined) {
+      const r = got.items[0]!;
+      const c = cite("grant", r.grantId, r.revision);
+      return { observedAt: this.#runner.now(), lines: relianceLines(r).map((text) => line(text, c)) };
+    }
+    const busy = got.items.filter((r) => r.total > 0);
+    lines.push(line(busy.length === 0 ? `No running work relies on any of the ${got.items.length}${got.more ? " or more" : ""} standing rights${got.items.every((r) => r.complete) ? "" : "; not every record could be read, so some may not be listed"}.` : `${busy.length} of the ${got.items.length}${got.more ? " or more" : ""} standing rights have running work that may rely on them.`, cite("grants", "active")));
+    for (const r of busy.slice(0, 10)) lines.push(line(relianceHead(r, 2), cite("grant", r.grantId, r.revision)));
+    if (busy.length > 10) lines.push(line(`${busy.length - 10} more rights with running work are not listed; ask about one by its ID.`, cite("grants", "active")));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async catalogPolicyLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.catalogPolicy === undefined || by.kind !== "owner") return undefined;
     let p;

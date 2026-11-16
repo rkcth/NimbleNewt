@@ -9,6 +9,7 @@ import { ACTIONS, allows, covers, mayHold } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
 import type { Grant, NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
+import { relianceOf, type Reliance } from "./reliance.js";
 
 /** Where a grant came from. `direct`: the owner's decision for something specific. `standing`: a lasting delegation. `derived`: a step reasonably necessary under another grant, never wider than it. */
 export type GrantSource = "direct" | "standing" | "derived";
@@ -520,6 +521,16 @@ export class GrantService {
     }
     // Something may remain after the last record looked at: the next page starts there, so no grant is skipped however far a filter has to look.
     return { items, ...(more && last !== undefined ? { next: last } : {}), ...(more && items.length < limit ? { scanLimited: true } : {}) };
+  }
+
+  /**
+   * Running work that relies on a right, for the owner who is about to take it back (follow-up to card T7): of the named right, or of every active right. Read only; see `relianceOf`.
+   * A right that does not exist is `undefined`.
+   */
+  async reliance(owner: Principal, query: { grantId?: string } = {}): Promise<{ items: readonly Reliance[]; more: boolean } | undefined> {
+    requireOwner(owner);
+    if (query.grantId !== undefined && !(typeof query.grantId === "string" && GRANT_ID.test(query.grantId))) invalid("grantId", "is not a grant ID");
+    return relianceOf(this.#runner, query);
   }
 
   async getGrant(id: string): Promise<View<GrantRecordBody> | undefined> {

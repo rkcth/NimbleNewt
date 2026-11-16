@@ -589,7 +589,7 @@ test("a standing right is taken back from the page with the owner's reason, afte
   page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
   chip(form, "Take back").click(); await settle();
   assert.equal(asked.length, 1);
-  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Work that relies on it may stop`));
+  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Which running work relies on this right could not be checked just now\\. Work that relies on it may stop`));
   const posts = sent(page);
   assert.equal(posts.length, 1);
   assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/grant-revoke", { grantId: GRT, reason: "the project is finished" }]);
@@ -597,6 +597,51 @@ test("a standing right is taken back from the page with the owner's reason, afte
   assert.match(text(page.doc.byId.get("log")!), /Take back the right task\.update for agent:ann/);
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   assert.deepEqual(page.doc.violations, []);
+});
+
+// Follow-up to card T7: the running work that may rely on a right is shown on its take-back card and in the question asked before it is sent.
+const work = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: "ann", taskId: "task-" + String(i).padStart(20, "a"), title: i === 0 ? HOSTILE : "Chore " + i, projectId: "proj-1", attemptId: "att-" + i, attemptNumber: i + 1 }));
+const relyViews = (reliance: unknown) => { const v = ownerEditViews(); (v["admin-policy"] as Record<string, unknown>)["reliance"] = reliance; return v; };
+const takeBack = async (reliance: unknown) => {
+  const asked: string[] = [];
+  const page = boot(relyViews(reliance), [(c) => (c.path === "/web/admin/grant-revoke" ? { status: 201, body: queuedWith("Take back") } : undefined)], () => true);
+  const policy = await admin(page, "policy", "Policy");
+  const form = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: "))[0]!;
+  inputOf(form, "Why take back task.update for agent:ann in proj-1?").value = "all done";
+  page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
+  chip(form, "Take back").click(); await settle();
+  return { page, form, asked, shown: form.find((e) => e.className === "card-line").map((e) => e.textContent) };
+};
+
+test("the take-back card lists the running work that may rely on the right, ten at most with the rest counted, and the question repeats it (follow-up to card T7)", async () => {
+  const got = await takeBack({ items: [{ grantId: GRT, total: 12, complete: true, items: work(10) }, { grantId: "grt-" + "e".repeat(20), total: 0, complete: true, items: [] }] });
+  assert.equal(got.shown[0], "Running work that relies on it");
+  assert.equal(got.shown[1], "12 running tasks may rely on it:");
+  assert.equal(got.shown.filter((l) => /^".*" \(task task-a+\d, agent ann, attempt \d+\)$/.test(l)).length, 10);
+  assert.equal(got.shown[12], "2 more not listed.");
+  assert.match(got.shown[2]!, /^"/);
+  assert.equal(got.asked.length, 1);
+  assert.match(got.asked[0]!, /\? 12 running tasks may rely on it: "[^]*" \(task task-a+\d, agent ann, attempt 1\)[^]* Work that relies on it may stop/s);
+  assert.doesNotMatch(got.asked[0]!, /Chore 3/, "the question names the first few, the card the ten");
+  assert.equal(sent(got.page).length, 1);
+  assert.deepEqual(got.page.doc.violations, []);
+  assert.ok(![...got.page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)), "a title is only text");
+});
+
+test("the take-back card says so when nothing runs, when not every record could be read, when the right is not in the read and when the read failed (follow-up to card T7)", async () => {
+  const none = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, items: [] }] });
+  assert.deepEqual(none.shown.slice(0, 2), ["Running work that relies on it", "No running work relies on it."]);
+  assert.match(none.asked[0]!, /^Take back [^?]*\? Work that relies on it may stop/, "nothing is added to the question when nothing runs");
+  const part = await takeBack({ items: [{ grantId: GRT, total: 1, complete: false, items: work(1) }] });
+  assert.equal(part.shown[1], "1 or more running tasks may rely on it:");
+  const empty = await takeBack({ items: [{ grantId: GRT, total: 0, complete: false, items: [] }] });
+  assert.match(empty.shown[1]!, /^No running work relies on it, but not every record could be read, so some may not be listed\.$/);
+  const missing = await takeBack({ items: [] });
+  assert.match(missing.shown[1]!, /is not known/);
+  assert.match(missing.asked[0]!, /is not known/);
+  const bad = await takeBack({ error: { code: "unavailable", message: "no" } });
+  assert.match(bad.shown[1]!, /could not be checked just now/);
+  assert.match(bad.asked[0]!, /could not be checked just now/);
 });
 
 test("the edit forms keep nothing but what the owner typed in the outbox, and a hostile name or right is only text (card U08 follow-up)", async () => {
