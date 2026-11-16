@@ -6,6 +6,7 @@ import { SNAPSHOT_TABLES, TABLE_SPECS, canonicalJson, type ControllerStorage, ty
 import type { FileBlobStore } from "../artifacts/index.js";
 import { copyPiState, type PiStateSource } from "./pi-state.js";
 import { beginSeal, hasherFor, openSink, type BackupCipher, type BackupScope, type BackupSeal, type Keyring } from "./crypto.js";
+import { planLeaveOut, scopeIsOn, type BackupScopeValues } from "./scope.js";
 import { SIGNATURE_FILE, type BackupSigner } from "./signing.js";
 import { writeSecrets, type SecretsSource } from "./secrets.js";
 import { ARTIFACT_FOLDER, ARTIFACT_INDEX, BACKUP_FORMAT, ENCRYPTION_MARKER, BACKUP_NOTES, NO_SECRETS_NOTE, SECRETS_SEALED_NOTE, MANIFEST_FILE, PARTIAL_SUFFIX, SEALED_SUFFIX, tableFile, type BackupArtifacts, type BackupFileEntry, type BackupKind, type BackupManifest } from "./format.js";
@@ -31,6 +32,8 @@ export interface BackupOptions {
   readonly piState?: PiStateSource;
   /** Signs the finished manifest (card K01b3): the signature file is written beside it before the folder gets its final name. A signer that fails fails the backup: none is written unsigned on an installation that signs. */
   readonly signer?: BackupSigner;
+  /** The owner's backup scope (card K01d): bulk records of these kinds and ages are left out of the copy, and the manifest says so. Not given, or all off: a whole copy. */
+  readonly leaveOut?: BackupScopeValues;
   /** Tests only: the rename that puts the finished folder in place (default `fs.promises.rename`), so a test can stand in for another system's answer to a name that is taken. */
   readonly renameFolder?: (from: string, to: string) => Promise<void>;
 }
@@ -82,6 +85,8 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
     if (options.encryption !== undefined) await writeFile(join(options.root, ENCRYPTION_MARKER), `${JSON.stringify({ keyId: options.encryption.keyId, at: at.toISOString() })}\n`, { flag: "wx", mode: 0o600 }).catch(() => undefined);
     const files: BackupFileEntry[] = [];
     let epoch = 0;
+    // The owner's backup scope (card K01d): worked out over this very snapshot, before any file is written.
+    const plan = options.leaveOut === undefined || !scopeIsOn(options.leaveOut) ? undefined : await planLeaveOut(snapshot, options.leaveOut, at);
     for (const table of SNAPSHOT_TABLES) {
       const file = tableFile(table, cipher !== undefined);
       const handle = await openSink(join(staging, file), cipher, file);
@@ -92,11 +97,16 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
         for (let after: SnapshotRow | undefined; ;) {
           const page = await snapshot.read(table, { ...(after === undefined ? {} : { after }), limit: pageSize });
           if (page.length === 0) break;
-          const text = page.map((row) => `${JSON.stringify(Object.fromEntries(TABLE_SPECS[table].columns.map((c) => [c, row[c] ?? null])))}\n`).join("");
+          const kept: SnapshotRow[] = [];
+          for (const row of page) {
+            const what = table === "aggregates" && plan !== undefined ? plan.decide(row) : "keep";
+            if (what === "omit") continue;
+            kept.push(what === "stub" ? { ...row, body: plan!.stubText(row) } : row);
+          }
+          const text = kept.map((row) => `${JSON.stringify(Object.fromEntries(TABLE_SPECS[table].columns.map((c) => [c, row[c] ?? null])))}\n`).join("");
           const buffer = Buffer.from(text, "utf8");
-          await handle.write(buffer);
-          hash.update(buffer);
-          rows += page.length;
+          if (buffer.length > 0) { await handle.write(buffer); hash.update(buffer); }
+          rows += kept.length;
           bytes += buffer.length;
           if (table === "state") epoch = Number(page[0]!["epoch"]);
           if (table === "state" || page.length < pageSize) break;
@@ -109,8 +119,10 @@ async function write(storage: Pick<ControllerStorage, "snapshot">, options: Back
     const artifacts = options.blobs === undefined ? undefined : await copyBlobs(options.blobs, staging, cipher);
     const piState = options.piState === undefined ? undefined : await copyPiState(options.piState, staging, cipher);
     const secrets = sealing === undefined || options.secrets === undefined ? undefined : await writeSecrets(staging, sealing.cipher, options.secrets);
-    const notes = secrets === undefined ? BACKUP_NOTES : BACKUP_NOTES.map((n) => n === NO_SECRETS_NOTE ? SECRETS_SEALED_NOTE : n);
-    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(piState === undefined ? {} : { piState }), ...(secrets === undefined ? {} : { secrets }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes, complete: true };
+    const contentScope = plan?.record();
+    const baseNotes = secrets === undefined ? BACKUP_NOTES : BACKUP_NOTES.map((n) => n === NO_SECRETS_NOTE ? SECRETS_SEALED_NOTE : n);
+    const notes = contentScope === undefined ? baseNotes : [...baseNotes, contentScope.text];
+    const unsigned: BackupManifest = { format: BACKUP_FORMAT, product: "nimblenewt", name, createdAt: at.toISOString(), kind: options.kind, version: options.version, schemaVersion: snapshot.schemaVersion, epoch, files, ...(artifacts === undefined ? {} : { artifacts }), ...(piState === undefined ? {} : { piState }), ...(contentScope === undefined ? {} : { contentScope }), ...(secrets === undefined ? {} : { secrets }), ...(sealing === undefined ? {} : { encryption: sealing.seal }), notes, complete: true };
     // An encrypted backup's manifest ends with a keyed MAC over all of it, so the name, time, kind, epoch, notes, skipped list and file list cannot be changed by whoever only has the folder.
     const manifest: BackupManifest = sealing === undefined ? unsigned : { ...unsigned, mac: sealing.cipher.manifestMac(canonicalJson(unsigned as never)) };
     const manifestHandle = await open(join(staging, MANIFEST_FILE), "wx", 0o600);

@@ -60,7 +60,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (rest.length > 0) { print(USAGE); return 2; }
       const all = await listBackups(folder);
       if (all.length === 0) print("no complete backups in that folder");
-      for (const b of all) print(`${b.manifest.name}  ${b.manifest.kind}  schema ${b.manifest.schemaVersion}  ${b.manifest.files.reduce((n, f) => n + f.rows, 0)} rows`);
+      for (const b of all) print(`${b.manifest.name}  ${b.manifest.kind}  schema ${b.manifest.schemaVersion}  ${b.manifest.files.reduce((n, f) => n + f.rows, 0)} rows${b.manifest.contentScope === undefined ? "" : `  NOT A FULL COPY (${b.manifest.contentScope.leftOut.reduce((n, l) => n + l.left, 0)} records left out by the backup scope)`}`);
       return 0;
     }
     if (command === "encryption-setup") {
@@ -146,6 +146,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if ((done.secrets?.refused ?? 0) > 0) print(`${done.secrets!.refused} entries of the backup named the backup-signing key, which a backup never carries: they were refused (check where this backup came from)`);
       if (done.secretsLeftOut !== undefined) print(`the secret values were left out: ${done.secretsLeftOut}`);
       for (const n of done.notes ?? []) print(n);
+      if (done.leftOutByScope !== undefined) print(`NOT A FULL COPY: ${done.leftOutByScope.leftOut.reduce((n, l) => n + l.left, 0)} records were left out of this backup by the backup scope that was set when it was made${done.leftOutByScope.leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind})`).join("")}, so the restored data is not complete`);
       if (done.signature !== undefined) print(done.signature.text);
       print(`restored ${done.rows} rows${done.blobsRestored > 0 ? ` and ${done.blobsRestored} artifact files` : ""} from ${done.manifest.name}`);
       if (done.piFilesRestored > 0) print(`${done.piFilesRestored} conversation files of ${done.piStoresRestored} agent stores were put back`);

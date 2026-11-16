@@ -21,7 +21,7 @@ import { listBackups } from "./retention.js";
 import { RestoreRefused, restoreBackup, type RestoreResult } from "./restore.js";
 import { manifestDigestOf, readManifest, verifyBackup } from "./verify.js";
 import { checkSignature, type SignatureTrust } from "./signing.js";
-import { filesSealed, tableFile, type BackupManifest } from "./format.js";
+import { filesSealed, tableFile, type BackupManifest, type BackupScopeRecord } from "./format.js";
 import { validStoreId } from "./pi-state.js";
 import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
 import { canon, canonSync } from "./canon.js";
@@ -75,6 +75,8 @@ export interface RestorePlan {
   readonly deliveriesToResend?: number;
   /** What happened OUTSIDE NimbleNewt after the backup was made, read from the live database at preview time (card K03): the restore cannot undo it and the restored data will not know it happened. */
   readonly externalSinceBackup?: ExternalSince;
+  /** What the backup's content scope (card K01d) left out; the restore does not bring it back. Absent: the backup is whole. */
+  readonly leftOutByScope?: BackupScopeRecord;
   /** What the owner will see happen, in order. */
   readonly steps: readonly string[];
   readonly warnings: readonly string[];
@@ -658,6 +660,7 @@ export class StagedRestore {
       const what = [since.happened > 0 ? `${since.happened} action${since.happened === 1 ? "" : "s"} outside NimbleNewt finished` : "", since.unknown > 0 ? `${since.unknown} more ${since.unknown === 1 ? "is" : "are"} not known to have finished or not` : "", since.deliveredAfter > 0 ? `${since.deliveredAfter} message${since.deliveredAfter === 1 ? " was" : "s were"} delivered` : ""].filter((x) => x !== "");
       warnings.push(`Since this backup was made, ${what.join(", ")}${since.truncated ? " (at least; the live data is larger than was read)" : ""}. A restore cannot undo any of that, and the restored data will not know it happened${since.targets.length === 0 ? "" : `: check ${since.targets.join(", ")} before anything is repeated`}. Actions the backup holds as only intended come back as uncertain and are never run again by themselves.`);
     }
+    if (m.contentScope !== undefined) warnings.push(`NOT A FULL COPY. ${m.contentScope.text}`);
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
     const changes = last === undefined || backupSeq === undefined ? undefined : Math.max(0, last - backupSeq);
@@ -669,6 +672,7 @@ export class StagedRestore {
       ...(changes === undefined ? {} : { changesSinceBackup: changes }),
       ...(effects === undefined ? {} : { effectsToMarkUncertain: effects }), ...(deliveries === undefined ? {} : { deliveriesToResend: deliveries }),
       ...(since === undefined ? {} : { externalSinceBackup: since }),
+      ...(m.contentScope === undefined ? {} : { leftOutByScope: m.contentScope }),
       steps: [
         "1. The backup is checked against its manifest (and opened, if encrypted).",
         this.#o.postgres === undefined ? "2. It is restored into a new database and new conversation folders beside the live ones; the live ones are not touched." : "2. It is restored into a new schema of the same PostgreSQL database and new conversation folders beside the live ones; the live ones are not touched.",

@@ -149,6 +149,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "backup.encryption.rekey": { verb: "Approve a new backup key", mode: "propose" },
   // Switching backup encryption off, or narrowing what it covers, makes later backups less protected; switching it on is the safe direction, but one command does both, so it is always a proposal shown first (card K01b3).
   "backup.encryption.set": { verb: "Switch backup encryption on or off, or choose what it covers: secrets only (the default when first on) or everything (off writes plain backups)", mode: "propose" },
+  // Leaving bulk records out of later backups means a restore from them is not a full copy: always shown first (card K01d).
+  "backup.scope.set": { verb: "Choose which bulk records backups leave out (private scratch of finished tasks, old chat words, delivered message records) by age, or turn that off", mode: "propose" },
   // A new signing key changes who the owner trusts to have made a backup: shown first.
   "backup.signing.rotate": { verb: "Make a new backup signing key", mode: "propose" },
   // A restore replaces everything with an older copy: always a proposal with the exact preview (backup.restore.preview) shown first, never applied from an interpreter's words, in every profile (card K01h).

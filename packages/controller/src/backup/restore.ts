@@ -9,7 +9,7 @@ import { readSecrets, restoreSecrets, type SecretsRestored, type SecretsSink } f
 import { parsePiIndex, writePiState } from "./pi-state.js";
 import { readPlain, type BackupKey } from "./crypto.js";
 import { ledgerFilter, type LedgerEntry } from "../retention/ledger.js";
-import { ARTIFACT_FOLDER, type BackupManifest, type BlobIndexLine } from "./format.js";
+import { ARTIFACT_FOLDER, type BackupManifest, type BackupScopeRecord, type BlobIndexLine } from "./format.js";
 
 export class RestoreRefused extends Error {
   constructor(message: string) { super(message); this.name = "RestoreRefused"; }
@@ -36,6 +36,8 @@ export interface RestoreResult {
   /** The secret values of an encrypted backup (card K01b): what was done with them; absent when the backup holds none, or when they were left out (`secretsLeftOut` says why). Counts only, never a value. */
   readonly secrets?: SecretsRestored;
   readonly secretsLeftOut?: string;
+  /** What the backup's content scope (card K01d) left out, so the owner is not told the restored data is complete when it is not; absent when the backup is whole. */
+  readonly leftOutByScope?: BackupScopeRecord;
   /** Things the owner should be told that are not problems. */
   readonly notes?: readonly string[];
 }
@@ -124,5 +126,5 @@ export async function restoreBackup(path: string, storage: ControllerStorage, op
     }
     await flush();
   }
-  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles, ...(secrets === undefined ? {} : { secrets }), ...(secretsLeftOut === undefined ? {} : { secretsLeftOut }), ...(check.notes === undefined ? {} : { notes: check.notes }), ...(check.signature === undefined ? {} : { signature: check.signature }) };
+  return { manifest, rows: total, effectsMarkedUncertain: marked, deliveriesToResend: resend, blobsRestored: blobs, deletionsReapplied: ledger.touched(), blobsSkippedDeleted: skippedDeleted, piStoresRestored: piStores, piFilesRestored: piFiles, ...(secrets === undefined ? {} : { secrets }), ...(secretsLeftOut === undefined ? {} : { secretsLeftOut }), ...(manifest.contentScope === undefined ? {} : { leftOutByScope: manifest.contentScope }), ...(check.notes === undefined && manifest.contentScope === undefined ? {} : { notes: [...(check.notes ?? []), ...(manifest.contentScope === undefined ? [] : [manifest.contentScope.text])] }), ...(check.signature === undefined ? {} : { signature: check.signature }) };
 }

@@ -5193,6 +5193,21 @@ Result: `{ revision, enabled, scope, weaker, changed, text }`; `weaker` is true 
 
 Completion: finished when accepted (`completed: true`).
 
+#### `backup.scope.set`
+
+Owner only, recorded and announced to the owner's inbox: chooses which bulk records the backups leave out (card K01d), by kind and age. OFF by default: every backup holds everything. `scratchDays` leaves out the private scratch of tasks that are done or cancelled once it has not changed for that many days; `transcriptDays` leaves out the words, plan and answers of chat turns completed that many days ago (the turn stays as an empty shell); `logDays` leaves out the records of messages to the owner delivered that many days ago. Each is a whole number of days from 7 to 3650, or null to turn that one off; one left out is not changed. The audit log, the owner's decisions and everything a task that can still resume or any replay refers to are ALWAYS kept in full, safety copies before an upgrade or a restore are always whole, and nothing is deleted from the running system (live retention is `retention.settings.set`). A backup made under a scope says in its manifest, in `backup.list` (`notFullCopy`) and in the restore preview and report what it left out, and a restore does not bring that back; backups already made are not changed. Say this to the owner before they agree, because a restore from such a backup is not a complete copy. Current setting: `backup.config.status` `scope`. Give `expectedRevision` from it.
+
+Arguments:
+
+- `scratchDays` (optional): 7 to 3650, or null
+- `transcriptDays` (optional): 7 to 3650, or null
+- `logDays` (optional): 7 to 3650, or null
+- `expectedRevision` (optional): the scope.revision you read
+
+Result: `{ scratchDays, transcriptDays, logDays, revision, changed, wider, text }`; `wider` is true when more is left out than before; `text` says in plain words what backups now leave out.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `backup.signing.rotate`
 
 Owner only, recorded and announced to the owner's inbox: makes a new backup signing key (after the old key may have been exposed, say). The old key stops signing; its public key stays trusted so backups it signed still verify, unless `revokePrevious: true` (the owner says the key was exposed or stolen): then every earlier key is trusted for no backup at all, since whoever holds it could sign a forgery with any date, and backups those keys signed can only be restored with the host command without a trusted key. The owner should then save the new public key (backup.signing.status) off the server.
