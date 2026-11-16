@@ -94,6 +94,7 @@ export const APP_JS = String.raw`(function (root) {
     function sendItem(item) {
       if (item.kind === 'message') return call('POST', '/web/chat', { messageId: item.id, text: item.text });
       if (item.kind === 'thinking') return call('POST', '/web/thinking/collection', { enabled: item.enabled === true }, { 'idempotency-key': item.id });
+      if (item.kind === 'admin') return call('POST', '/web/admin/' + encodeURIComponent(item.what), item.body || {}, { 'idempotency-key': item.id });
       if (item.kind === 'approval') return call('POST', '/web/approvals/' + encodeURIComponent(item.proposalId) + '/' + item.action, item.days === undefined ? {} : { days: item.days }, { 'idempotency-key': item.id });
       return call('POST', '/web/proposals/' + encodeURIComponent(item.proposalId) + '/' + item.decision, {}, { 'idempotency-key': item.id });
     }
@@ -130,6 +131,18 @@ export const APP_JS = String.raw`(function (root) {
         client.flush();
         return item;
       },
+      /**
+       * An edit made on the administration pages (card U08): a setting, a provider or the approval profile. One outbox item with its own id, sent under that id as the Idempotency-Key and run by the controller as the
+       * chat turn for the same words, which shows it first. The body never holds a secret: a provider names its secret.
+       */
+      admin: function (what, body, label) {
+        var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'admin', what: what, body: body, text: label, at: (deps.now || Date.now)(), state: 'pending' });
+        emit();
+        client.flush();
+        return item;
+      },
+      /** The Secrets form (card U08): write only. The value goes in this one request and is never an outbox item, so it is never kept in the browser, and nothing returned carries it. */
+      putSecret: function (name, value) { return call('PUT', '/web/secrets/' + encodeURIComponent(name), { value: value }); },
       /** The switch for collecting the model's thinking (card U09b): one outbox item, sent under its id as the Idempotency-Key, run as the chat turn for the same words, which applies it at once. */
       thinking: function (enabled, label) {
         var item = outbox.add({ id: (deps.newId || function () { return randomId(root.crypto); })(), kind: 'thinking', enabled: enabled === true, text: label, at: (deps.now || Date.now)(), state: 'pending' });
@@ -212,7 +225,7 @@ export const APP_JS = String.raw`(function (root) {
   var $ = function (id) { return doc.getElementById(id); };
   var client = createClient({ fetch: root.fetch.bind(root), outbox: createOutbox(root.localStorage) });
   var tab = 'chat';
-  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery', replay: 'Replay', setup: 'Setup' };
+  var VIEW_TABS = { status: 'Status', 'needs-you': 'Needs you', approvals: 'Approvals', models: 'Models', blockers: 'Blockers', cost: 'Cost', recovery: 'Recovery', replay: 'Replay', setup: 'Setup', admin: 'Administration' };
 
   function el(tag, cls, text) { var e = doc.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
@@ -273,7 +286,7 @@ export const APP_JS = String.raw`(function (root) {
     var all = merged();
     all.forEach(function (item, at) {
       var newest = at === all.length - 1;
-      if (item.kind === 'message' || item.kind === 'approval' || item.kind === 'thinking') {
+      if (item.kind === 'message' || item.kind === 'approval' || item.kind === 'thinking' || item.kind === 'admin') {
         list.appendChild(el('div', 'msg me', item.kind !== 'message' && item.result && typeof item.result.text === 'string' ? item.result.text : item.text));
         var meta = el('div', 'meta', item.state === 'done' ? '' : item.state === 'failed' ? 'Not sent: ' + (item.error || 'refused') : item.state === 'sending' ? 'Sending...' : 'Waiting to send');
         if (meta.textContent) list.appendChild(meta);
@@ -738,7 +751,347 @@ export const APP_JS = String.raw`(function (root) {
       if (att && att.scanLimited) note(a, 'The search stopped early: ask the chat for more.');
     }
   }
+  // ---- the settings and administration pages (card U08) -------------------------------------------------------------------------------
+  // One tab, ten sections. Every section reads what the chat and the API also read and change, owner only, and draws it field by field as text. An edit is never made by the page itself: it is an outbox item that
+  // the controller runs as the chat turn for the same words (a setting, a provider or the approval profile is shown first and applied only on Apply). The one thing typed here that the chat refuses is a secret,
+  // and it has its own write-only form: the value is sent once, never kept in the outbox or the browser, and never shown again.
+  var ADMIN_SECTIONS = [['setup', 'First run'], ['settings', 'Settings'], ['providers', 'Providers'], ['secrets', 'Secrets'], ['team', 'Agents and teams'], ['policy', 'Policy'], ['access', 'API access'], ['operations', 'Operations'], ['sandbox', 'Sandbox'], ['migration', 'Migration']];
+  var adminSection = 'setup';
+  var settingsFilter = '';
+  var secretNotice = '';
+  function adminNav(box, current) {
+    var nav = el('nav', 'chips'); nav.setAttribute('aria-label', 'Administration sections');
+    ADMIN_SECTIONS.forEach(function (s) {
+      var b = el('button', 'chip', s[1]); b.type = 'button'; b.setAttribute('aria-pressed', String(s[0] === current)); if (s[0] === current) b.setAttribute('aria-current', 'page');
+      b.addEventListener('click', function () { adminSection = s[0]; renderView('admin-' + s[0]); });
+      nav.appendChild(b);
+    });
+    box.appendChild(nav);
+  }
+  function adminHead(box, section, title, intro) {
+    adminNav(box, section);
+    box.appendChild(el('h2', null, title));
+    note(box, intro);
+  }
+  function labelled(parent, id, text, input) {
+    var wrap = el('div', 'field');
+    var l = el('label', null, text); l.setAttribute('for', id); input.id = id;
+    wrap.appendChild(l); wrap.appendChild(input); parent.appendChild(wrap);
+    return input;
+  }
+  function field(tag, type) { var i = el(tag); if (type) i.type = type; i.setAttribute('autocomplete', 'off'); return i; }
+  function option(select, value, text) { var o = el('option', null, text); o.value = value; select.appendChild(o); }
+  function adminSent(out, what) { clear(out); note(out, what + ' It is in the chat now: the chat shows what would change and waits for your Apply.'); }
+  /** Sends one edit as an outbox item, then shows the chat, where the controller's preview waits for the owner's Apply. */
+  function sendAdmin(what, body, label, out) { client.admin(what, body, label); adminSent(out, 'Sent: ' + label + '.'); show('chat'); }
+
+  /** The sandbox warning that must show wherever the owner chooses or reviews where work runs (decision G01). */
+  function sandboxWarning(box, sb) {
+    var s = obj(sb) && obj(sb.item) ? sb.item : null;
+    if (!s || s.warn !== true) return;
+    var w = el('p', 'warn'); w.setAttribute('role', 'note');
+    w.textContent = 'Weaker sandbox: ' + [s.local].concat(list(s.hosts, 30)).map(obj).filter(function (h) { return h && h.warn === true; }).map(function (h) { return clip(h.mechanism, 30) + ' on ' + clip(h.os, 30) + (h.hostId ? ' (host ' + clip(h.hostId, 60) + ')' : ' (this computer)'); }).join('; ') + '. It is process-level and weaker than Linux bubblewrap. See the Sandbox section.';
+    box.appendChild(w);
+  }
+
+  function profileButtons(box, current, out) {
+    var row = el('div', 'row');
+    var derived = el('button', 'btn primary', 'Use the derived profile (recommended for testing and development)'); derived.type = 'button';
+    derived.addEventListener('click', function () { sendAdmin('profile', { to: 'derived' }, 'Change the approval profile to derived', out); });
+    var strict = el('button', 'btn', 'Stay strict'); strict.type = 'button';
+    strict.addEventListener('click', function () { sendAdmin('profile', { to: 'strict' }, 'Change the approval profile to strict', out); });
+    if (current !== 'derived') row.appendChild(derived);
+    if (current !== 'strict') row.appendChild(strict);
+    box.appendChild(row);
+  }
+  function currentProfile(ready) {
+    var items = list(ready && ready.items, 20).map(obj).filter(Boolean);
+    var p = items.filter(function (i) { return i.id === 'profile'; })[0];
+    var d = p && typeof p.detail === 'string' ? p.detail : '';
+    return /^derived/.test(d) ? 'derived' : /^autonomous/.test(d) ? 'autonomous' : /^strict/.test(d) ? 'strict' : '';
+  }
+
+  function pageAdminSetup(box, parts) {
+    adminHead(box, 'setup', 'First run', 'A new installation is set up from this page and the chat, with no file edited. Each step says whether it is done, and how to do the next one. Nothing here changes anything by itself.');
+    var out = el('div');
+    var ready = itemOf(parts.readiness);
+    if (!failed(box, 'What is set up', parts.readiness) && ready) {
+      var sec = region(box, ready.ready === true ? 'Ready: every required step is done' : 'What is set up');
+      var items = list(ready.items, 20).map(obj).filter(Boolean);
+      table(sec, 'Setup steps', ['Step', 'State', 'Needed', 'What was found'], items.map(function (i) { return [clip(i.label, 80), clip(i.state, 20), i.required === true ? 'yes' : 'optional', clip(i.detail, 200)]; }));
+      var next = obj(ready.next);
+      if (next) { sec.appendChild(el('div', 'card-line', 'Next: ' + clip(next.label, 80) + '. ' + clip(next.how, 300))); }
+      items.filter(function (i) { return i.id === 'model-route' && i.state !== 'done'; }).forEach(function () {
+        var b = el('button', 'btn', 'Set up a model provider'); b.type = 'button'; b.addEventListener('click', function () { adminSection = 'providers'; renderView('admin-providers'); }); sec.appendChild(b);
+      });
+    }
+    sandboxWarning(box, parts.sandbox);
+    var prof = region(box, 'How much should the team ask you before it acts?');
+    var cur = currentProfile(ready);
+    prof.appendChild(el('div', 'card-line', 'Now: ' + (cur || 'strict (the default for a new installation)') + '.'));
+    prof.appendChild(el('div', 'card-line', 'Strict asks at every consequential step. Derived lets what you say authorize what it reasonably needs - building, fixing what fails, merging into the integration branch, deploying to development and test - and still asks about anything wider, such as a customer-live environment, new outside access or spending beyond the estimate.'));
+    prof.appendChild(el('div', 'card-line', 'For testing and development work the derived profile is recommended. You can choose again at any time, here or in the chat.'));
+    if (cur === 'strict' || cur === 'derived' || cur === '') profileButtons(prof, cur, out); else note(prof, 'The autonomous profile is in force; change it by telling the chat.');
+    if (!failed(box, 'Derived-profile question', parts.suggestion)) {
+      var sug = itemOf(parts.suggestion);
+      if (sug && sug.due === true) { var q = region(box, 'The system suggests the derived profile'); list(sug.preview, 12).forEach(function (l) { q.appendChild(el('div', 'card-line', clip(l, 400))); }); note(q, 'Use the buttons above, or the Approvals page, to answer.'); }
+    }
+    box.appendChild(out);
+    note(box, 'Without a browser, the chat asks the same question during its setup, and either profile can be chosen later.');
+  }
+
+  function settingControl(card, s, out) {
+    if (s.editable !== true) { note(card, 'Read here as an agent or project sees it; change it for the whole installation in the Settings section.'); return; }
+    var row = el('div', 'row');
+    var input = field('input', 'text'); input.setAttribute('aria-label', 'New value of ' + clip(s.key, 80)); input.value = s.value === undefined ? '' : JSON.stringify(s.value);
+    input.setAttribute('placeholder', 'true, 30, "text" or ["a","b"]');
+    row.appendChild(input);
+    approvalButton(row, 'Change', 'Change ' + clip(s.key, 80), true, function () {
+      var raw = String(input.value).trim(); var v;
+      if (!raw) { clear(out); out.appendChild(el('p', 'error', 'Type the new value first.')); return; }
+      try { v = JSON.parse(raw); } catch (e) { v = raw; }
+      sendAdmin('setting', { key: s.key, value: v }, 'Set ' + clip(s.key, 80) + ' to ' + clip(JSON.stringify(v), 80), out);
+    });
+    if (s.state === 'set') approvalButton(row, 'Back to default', 'Put ' + clip(s.key, 80) + ' back to its default', false, function () { if (root.confirm('Remove your value of ' + clip(s.key, 80) + ' so the default counts again?')) sendAdmin('setting', { key: s.key, remove: true }, 'Remove the setting ' + clip(s.key, 80), out); });
+    card.appendChild(row);
+  }
+  var STATE_WORDS = { 'default': 'the default', set: 'set by you', inherited: 'inherited', locked: 'locked' };
+  function settingCard(parent, s, out) {
+    var card = el('div', 'card');
+    card.appendChild(el('h4', 'card-title', clip(s.key, 100)));
+    card.appendChild(el('div', 'card-line', clip(s.description, 400)));
+    var val = s.value === undefined ? 'not set' : clip(JSON.stringify(s.value), 300) + (s.valueClipped ? ' (shortened)' : '');
+    card.appendChild(el('div', 'card-line', 'Value: ' + val + ' - ' + (STATE_WORDS[s.state] || clip(s.state, 20)) + ' (from ' + clip(obj(s.source) && s.source.layer, 30) + '); counts ' + clip(String(s.effect || '').replace(/-/g, ' '), 40) + '.'));
+    if (s.lockedBy) card.appendChild(el('div', 'meta', 'Locked by the ' + clip(s.lockedBy.layer, 30) + ' layer.'));
+    if (s.note) card.appendChild(el('div', 'meta', clip(s.note, 300)));
+    settingControl(card, s, out);
+    parent.appendChild(card);
+  }
+  function pageAdminSettings(box, parts) {
+    adminHead(box, 'settings', 'Settings', 'Every setting, with the value in force and where it comes from: the default, set by you, inherited from a layer above, or locked. A change here is the same change the chat makes, in the same revision: it is shown first and applied when you say so.');
+    var out = el('div');
+    if (failed(box, 'Settings', parts.settings)) return;
+    var got = itemOf(parts.settings) || {};
+    var all = list(got.items, 300).map(obj).filter(Boolean);
+    var sec = region(box, 'Settings (' + all.length + ')');
+    var filter = field('input', 'text'); filter.setAttribute('placeholder', 'Filter by name, for example provider or budget'); filter.value = settingsFilter;
+    labelled(sec, 'nn-filter', 'Filter', filter);
+    var holder = el('div'); sec.appendChild(holder);
+    function draw() {
+      settingsFilter = String(filter.value || '').toLowerCase().slice(0, 60);
+      clear(holder);
+      var shownItems = all.filter(function (s) { return !settingsFilter || String(s.key).toLowerCase().indexOf(settingsFilter) >= 0; });
+      shownItems.slice(0, 40).forEach(function (s) { settingCard(holder, s, out); });
+      if (shownItems.length > 40) note(holder, 'Showing the first 40 of ' + shownItems.length + '; narrow the filter.');
+      if (!shownItems.length) note(holder, 'No setting matches.');
+    }
+    filter.addEventListener('input', draw);
+    draw();
+    if (got.truncated) note(sec, 'More settings exist than are listed; ask the chat for a prefix.');
+    list(got.problems, 10).forEach(function (p) { box.appendChild(el('p', 'error', 'These values do not fit together: ' + clip(p, 300))); });
+    box.appendChild(out);
+  }
+
+  function pageAdminProviders(box, parts) {
+    adminHead(box, 'providers', 'Providers', 'The model servers the team can use: where each runs, whether it costs money, its address, and the NAME of its secret with whether that secret is set. A key is never shown here and is never typed in chat; enter it in the Secrets section.');
+    var out = el('div');
+    if (failed(box, 'Providers', parts.providers)) return;
+    var got = itemOf(parts.providers) || {};
+    var items = list(got.items, 50).map(obj).filter(Boolean);
+    var sec = region(box, 'Model providers (' + items.length + ')');
+    if (!items.length) note(sec, 'No provider is set up yet. Add one below, or tell the chat.');
+    items.forEach(function (p) {
+      var card = el('div', 'card');
+      card.appendChild(el('h4', 'card-title', clip(p.name, 64) + ' - ' + (p.enabled ? 'on' : 'off')));
+      card.appendChild(el('div', 'card-line', 'Runs ' + clip(p.location, 20) + '; ' + (p.paid ? 'costs money' : 'free') + (p.endpoint ? '; address ' + clip(p.endpoint, 200) : '; no address recorded') + (p.kind ? ' (' + clip(p.kind, 30) + ')' : '')));
+      card.appendChild(el('div', 'card-line', p.credentialName ? 'Secret ' + clip(p.credentialName, 64) + ': ' + clip(p.secret, 30) : 'No secret needed.'));
+      list(p.models, 60).forEach(function (m) { m = obj(m) || {}; card.appendChild(el('div', 'meta', clip(m.route, 160) + ' - ' + (isNum(m.contextTokens) ? m.contextTokens + ' tokens of context' : 'context not known'))); });
+      var row = el('div', 'row');
+      var flip = p.enabled ? 'Switch off' : 'Switch on';
+      approvalButton(row, flip, flip + ' the provider ' + clip(p.name, 64), false, function () { sendAdmin('setting', { key: 'provider.' + p.name + '.enabled', value: !p.enabled }, flip + ' the provider ' + clip(p.name, 64), out); });
+      card.appendChild(row);
+      sec.appendChild(card);
+    });
+    if (got.truncated) note(sec, 'More providers exist than are listed.');
+    var form = region(box, 'Add or replace a provider');
+    note(form, 'Give the secret\'s NAME, not the key. The change is shown in the chat first and applied only when you agree; a team needs at least two routes on two different servers.');
+    var f = {};
+    f.name = labelled(form, 'nn-p-name', 'Name', field('input', 'text'));
+    f.location = labelled(form, 'nn-p-loc', 'Where it runs', field('select')); option(f.location, 'local', 'On this network (local)'); option(f.location, 'cloud', 'In the cloud'); f.location.value = 'local';
+    f.endpoint = labelled(form, 'nn-p-end', 'Server address (starts with http or https, for example a loopback address and port)', field('input', 'text'));
+    f.models = labelled(form, 'nn-p-models', 'Model names, separated by commas', field('input', 'text'));
+    f.ctx = labelled(form, 'nn-p-ctx', 'The model\'s real context window, in tokens', field('input', 'number'));
+    f.kind = labelled(form, 'nn-p-kind', 'What the server is', field('select')); option(f.kind, '', 'Not sure'); ['llama-cpp', 'vllm', 'radiance', 'strata', 'openai', 'openai-compatible', 'claude', 'generic'].forEach(function (k) { option(f.kind, k, k); }); f.kind.value = '';
+    f.paid = labelled(form, 'nn-p-paid', 'Cost', field('select')); option(f.paid, 'free', 'Free'); option(f.paid, 'paid', 'Costs money'); f.paid.value = 'free';
+    f.cred = labelled(form, 'nn-p-cred', 'Name of its secret (leave empty if none is needed)', field('input', 'text'));
+    var row = el('div', 'row');
+    approvalButton(row, 'Add the provider', 'Add the provider', true, function () {
+      var models = String(f.models.value).split(',').map(function (m) { return m.trim(); }).filter(Boolean);
+      var body = { name: String(f.name.value).trim(), location: f.location.value, endpoint: String(f.endpoint.value).trim(), models: models, contextTokens: Number(f.ctx.value) };
+      if (f.kind.value) body.kind = f.kind.value;
+      if (f.paid.value === 'paid') body.paid = true;
+      if (String(f.cred.value).trim()) body.credentialName = String(f.cred.value).trim();
+      var missing = !body.name || !body.endpoint || !models.length || !(body.contextTokens > 0);
+      if (missing) { clear(out); out.appendChild(el('p', 'error', 'Fill in the name, the address, at least one model and the context window.')); return; }
+      sendAdmin('provider', body, 'Add the model provider ' + clip(body.name, 64), out);
+    });
+    form.appendChild(row);
+    box.appendChild(out);
+  }
+
+  function pageAdminSecrets(box, parts) {
+    adminHead(box, 'secrets', 'Secrets', 'A key or password is entered here once and kept in this computer\'s secret store. It is write-only: nothing ever shows it again, it is not kept in this browser, and it is never typed in chat.');
+    var out = el('div');
+    if (secretNotice) { note(out, secretNotice); secretNotice = ''; }
+    if (failed(box, 'Secrets', parts.secrets)) return;
+    var got = itemOf(parts.secrets) || {};
+    var items = list(got.items, 100).map(obj).filter(Boolean);
+    var sec = region(box, 'Secret names in use (' + items.length + ')');
+    if (!items.length) note(sec, 'No secret is named yet. A provider names its secret when you add it.');
+    else table(sec, 'Secrets and whether each is set', ['Name', 'State', 'Used by'], items.map(function (i) { return [clip(i.name, 64), clip(i.state, 30), list(i.usedBy, 10).map(function (u) { return clip(u, 60); }).join(', ') || '-']; }));
+    if (got.writable !== true) { note(box, 'No secret store is connected to this page, so put the secret in the secret store on the computer. Never type it in chat.'); return; }
+    var form = region(box, 'Enter a secret');
+    var name = labelled(form, 'nn-s-name', 'Name of the secret', field('input', 'text'));
+    var pick = el('div', 'chips'); form.appendChild(pick);
+    items.filter(function (i) { return i.state !== 'set'; }).slice(0, 10).forEach(function (i) { var b = el('button', 'chip', clip(i.name, 40)); b.type = 'button'; b.setAttribute('aria-label', 'Fill in the name ' + clip(i.name, 64)); b.addEventListener('click', function () { name.value = i.name; }); pick.appendChild(b); });
+    var value = field('input', 'password'); value.setAttribute('autocapitalize', 'off'); value.setAttribute('autocorrect', 'off'); value.setAttribute('spellcheck', 'false');
+    labelled(form, 'nn-s-value', 'The secret (it is not shown again)', value);
+    var row = el('div', 'row');
+    approvalButton(row, 'Save the secret', 'Save the secret', true, function () {
+      var n = String(name.value).trim(); var v = String(value.value);
+      if (!n || !v) { clear(out); out.appendChild(el('p', 'error', 'Give the name and the secret.')); return; }
+      // The field is emptied before the request leaves, so the value is held by this one call only, and an answer (success or not) never carries it back.
+      value.value = '';
+      client.putSecret(n, v).then(function (r) {
+        v = '';
+        clear(out);
+        if (r.status === 200 && r.body && r.body.set === true) { secretNotice = 'Saved ' + clip(r.body.name, 64) + (r.body.replaced ? ' (replaced the earlier value)' : '') + '. The value is not shown again.'; renderView('admin-secrets'); }
+        else out.appendChild(el('p', 'error', 'Not saved: ' + clip((r.body && r.body.error && r.body.error.message) || r.status, 200)));
+      }, function () { v = ''; clear(out); out.appendChild(el('p', 'error', 'Not saved: offline. Enter it again when the connection is back.')); });
+    });
+    form.appendChild(row);
+    box.appendChild(out);
+  }
+
+  function pageAdminTeam(box, parts) {
+    adminHead(box, 'team', 'Agents and teams', 'Who is on the team, their roles and the team each belongs to. To add, change or retire one, tell the chat.');
+    if (!failed(box, 'Agents', parts.agents)) {
+      var agents = list(obj(parts.agents) && parts.agents.items, 100).map(obj).filter(Boolean);
+      var sec = region(box, 'Agents (' + agents.length + ')');
+      if (!agents.length) note(sec, 'There are no agents yet. Tell the chat what the first one should be called and its role.');
+      else table(sec, 'Agents', ['Name', 'Roles', 'Team', 'State', 'Profile', 'Coordinator'], agents.map(function (a) { var c = obj(a.coordinator); return [clip(a.friendlyName, 80), list(a.roles, 10).map(function (r) { return clip(r, 30); }).join(', ') || '-', clip(a.teamId, 80) || '-', clip(a.state, 20), clip(a.defaultProfile, 60) || '-', c ? clip(c.state, 20) : '-']; }));
+    }
+    if (!failed(box, 'Teams', parts.teams)) {
+      var teams = list(obj(parts.teams) && parts.teams.items, 100).map(obj).filter(Boolean);
+      var ts = region(box, 'Teams (' + teams.length + ')');
+      if (!teams.length) note(ts, 'There are no teams.');
+      else table(ts, 'Teams', ['Team', 'ID', 'Reports into'], teams.map(function (t) { return [clip(t.name, 80), clip(t.id, 80), clip(t.parentTeamId, 80) || '-']; }));
+    }
+  }
+
+  function pageAdminPolicy(box, parts) {
+    adminHead(box, 'policy', 'Policy', 'How much the team asks you before it acts, and the standing rights you have given. The profile is the same one the chat changes; the Approvals tab shows what is waiting and the standing-rule proposals.');
+    var out = el('div');
+    var ready = itemOf(parts.readiness);
+    var sec = region(box, 'Approval profile');
+    var cur = currentProfile(ready);
+    sec.appendChild(el('div', 'card-line', 'In force: ' + (cur || 'strict (the default)') + '.'));
+    if (cur === 'strict' || cur === 'derived' || cur === '') profileButtons(sec, cur, out); else note(sec, 'The autonomous profile is in force; change it by telling the chat.');
+    if (!failed(box, 'Standing rights', parts.grants)) {
+      var gs = list(obj(parts.grants) && parts.grants.items, 50).map(obj).filter(Boolean);
+      var gsec = region(box, 'Rights you have given (' + gs.length + ' shown)');
+      if (!gs.length) note(gsec, 'No right has been granted beyond the profile.');
+      else table(gsec, 'Granted rights', ['Who', 'What', 'Project', 'State', 'Why'], gs.map(function (g) { return [clip(g.grantee, 80), clip(g.action, 80), clip(g.project, 80) || 'all', clip(g.state, 20), clip(g.basis, 160)]; }));
+      note(gsec, 'To take one back, tell the chat which right and why.');
+    }
+    if (!failed(box, 'How long standing rules last', parts.settings)) {
+      var items = list(itemOf(parts.settings) && itemOf(parts.settings).items, 20).map(obj).filter(Boolean);
+      var ssec = region(box, 'How long standing rules last');
+      items.forEach(function (s) { settingCard(ssec, s, out); });
+    }
+    box.appendChild(out);
+  }
+
+  function pageAdminAccess(box, parts) {
+    adminHead(box, 'access', 'API access', 'How you reach NimbleNewt and who is signed in. A credential or a session token is never shown. The address and the network are set when the controller starts.');
+    if (!failed(box, 'Web chat', parts.web)) {
+      var w = itemOf(parts.web); var st = w && obj(w.settings);
+      var sec = region(box, 'The web chat');
+      if (!st) note(sec, 'No web chat is running on this controller.');
+      else {
+        [
+          'Listens on ' + clip(st.host, 60) + ':' + (isNum(st.port) ? st.port : '?') + ', reachable from ' + (st.network === 'loopback' ? 'this machine only' : 'your private network'),
+          st.tls ? 'With its own TLS' : st.behindTlsProxy ? 'Behind a TLS proxy on this machine' : 'Plain HTTP',
+          'Host names: ' + (list(st.publicHosts, 10).map(function (h) { return clip(h, 80); }).join(', ') || 'none'),
+          obj(st.trustedProxy) && st.trustedProxy.enabled ? 'A trusted proxy gives the client address' : 'No trusted proxy: every client is the connection\'s own address'
+        ].forEach(function (l) { sec.appendChild(el('div', 'card-line', l)); });
+        var bs = list(w.browsers, 50).map(obj).filter(Boolean);
+        var b = region(box, 'Signed-in browsers (' + bs.length + ')');
+        if (!bs.length) note(b, 'No browser is signed in.'); else table(b, 'Signed-in browsers', ['Browser', 'Signed in', 'Last used'], bs.map(function (x) { return [clip(x.label, 80), clip(x.createdAt, 40), clip(x.lastSeen, 40)]; }));
+        note(b, 'Sign browsers out, or make a pairing code, under the Settings tab.');
+      }
+    }
+    sandboxWarning(box, parts.sandbox);
+    if (!failed(box, 'Worker host', parts.local)) {
+      var l = itemOf(parts.local);
+      var ls = region(box, 'The worker host on this computer');
+      ls.appendChild(el('div', 'card-line', l && l.enabled === true ? 'It is turned on: agents run on this computer.' : 'It is turned off: nothing runs on this computer until it is turned on (tell the chat).'));
+    }
+  }
+
+  function pageAdminOperations(box, parts) {
+    adminHead(box, 'operations', 'Operations', 'Whether the team is running or paused, and the limits and watches that keep it in bounds. To change one, say so in the chat; it is shown to you first.');
+    sandboxWarning(box, parts.sandbox);
+    [['lifecycle', 'Running or paused'], ['workers', 'What one local agent may use'], ['capacity', 'Capacity limits'], ['dispatch', 'Dispatcher limits'], ['quiet', 'When a host goes quiet']].forEach(function (p) {
+      if (failed(box, p[1], parts[p[0]])) return;
+      var lines = linesOf(itemOf(parts[p[0]])).slice(0, 40);
+      var sec = region(box, p[1]);
+      if (!lines.length) note(sec, 'Nothing to show.'); else lines.forEach(function (l) { sec.appendChild(el('div', 'card-line', clip(l, 300))); });
+    });
+  }
+
+  function pageAdminSandbox(box, parts) {
+    adminHead(box, 'sandbox', 'Sandbox', 'The mechanism each host uses to confine agents. Read it where you choose or review where work runs: the boundary is not the same on every system.');
+    if (failed(box, 'Sandbox', parts.sandbox)) return;
+    var s = itemOf(parts.sandbox) || {};
+    sandboxWarning(box, parts.sandbox);
+    var rows = [];
+    if (obj(s.local)) rows.push(['This computer', clip(s.local.mechanism, 30), clip(s.local.os, 30), clip(s.local.boundary, 20), list(s.local.limits, 4).map(function (l) { return clip(l, 300); }).join(' ')]);
+    list(s.hosts, 100).map(obj).filter(Boolean).forEach(function (h) { rows.push(['Host ' + clip(h.hostId, 60), clip(h.mechanism, 30), clip(h.os, 30), clip(h.boundary, 20), list(h.limits, 4).map(function (l) { return clip(l, 300); }).join(' ')]); });
+    var sec = region(box, 'Where agents run');
+    if (!rows.length) note(sec, 'No host has announced itself and no worker host runs on this computer, so no sandbox is in use yet.');
+    else table(sec, 'The sandbox of each host', ['Where', 'Mechanism', 'System', 'Boundary', 'Limits'], rows);
+    if (s.truncated) note(sec, 'More hosts exist than are listed.');
+  }
+
+  function pageAdminMigration(box, parts) {
+    adminHead(box, 'migration', 'Migration', 'How the database schema stands, what waits for your approval, and how long you can go back to the earlier release. To allow a destructive migration or change the rollback period, tell the chat.');
+    if (!failed(box, 'Migration', parts.migration)) {
+      var m = itemOf(parts.migration) || {};
+      var sec = region(box, 'Schema');
+      sec.appendChild(el('div', 'card-line', 'The database is at schema ' + (isNum(m.schemaVersion) ? m.schemaVersion : '?') + '; this version knows ' + (isNum(m.latestKnown) ? m.latestKnown : '?') + '.'));
+      var rb = obj(m.rollbackPeriod);
+      if (rb) sec.appendChild(el('div', 'card-line', 'Rollback period: ' + (isNum(rb.days) ? rb.days : '?') + ' days, ' + (rb.open ? 'open until ' + clip(rb.until, 40) : 'not open') + '.'));
+      var ct = obj(m.contract);
+      if (ct) { sec.appendChild(el('div', 'card-line', ct.waiting ? 'Destructive migrations are waiting for your approval.' : 'No destructive migration is waiting.')); list(ct.refusals, 5).forEach(function (r) { sec.appendChild(el('div', 'meta', clip(r, 300))); }); }
+      var migs = list(m.migrations, 200).map(obj).filter(Boolean);
+      var ms = region(box, 'Migrations this version knows (' + migs.length + ')');
+      if (!migs.length) note(ms, 'None.'); else table(ms, 'Migrations', ['Version', 'Name', 'Kind', 'State'], migs.map(function (x) { return [String(x.version), clip(x.name, 80), clip(x.kind, 20), clip(x.state, 20)]; }));
+      var ups = list(m.upgrades, 20).map(obj).filter(Boolean);
+      if (ups.length) table(region(box, 'Upgrades on record'), 'Upgrades', ['When', 'From schema', 'To schema', 'Only additive'], ups.map(function (u) { return [clip(u.at, 40), String(u.from), String(u.to), u.additiveOnly ? 'yes' : 'no']; }));
+      var pairs = list(m.testedPairs, 20).map(obj).filter(Boolean);
+      if (pairs.length) table(region(box, 'Tested pairs: a release and the schema it really started on'), 'Tested pairs', ['Release', 'Schema', 'When'], pairs.map(function (x) { return [clip(x.release, 80), String(x.schema), clip(x.at, 40)]; }));
+    }
+    if (!failed(box, 'Policy', parts.policy)) {
+      var p = itemOf(parts.policy) || {}; var eff = obj(p.effective) || obj(p.policy) || p;
+      var ps = region(box, 'Rollout policy');
+      [['rollbackPeriodDays', 'Rollback period (days)'], ['probationMinutes', 'A new release is watched for (minutes)'], ['maxReleaseFailures', 'Failures before going back'], ['hostRetries', 'Retries per host']].forEach(function (k) { if (isNum(eff[k[0]])) ps.appendChild(el('div', 'card-line', k[1] + ': ' + eff[k[0]])); });
+    }
+  }
+
+  var ADMIN_PAGES = { 'admin-setup': pageAdminSetup, 'admin-settings': pageAdminSettings, 'admin-providers': pageAdminProviders, 'admin-secrets': pageAdminSecrets, 'admin-team': pageAdminTeam, 'admin-policy': pageAdminPolicy, 'admin-access': pageAdminAccess, 'admin-operations': pageAdminOperations, 'admin-sandbox': pageAdminSandbox, 'admin-migration': pageAdminMigration };
   var PAGES = { approvals: pageApprovals, models: pageModels, replay: pageReplay, cost: pageCost, blockers: pageBlockers };
+  Object.keys(ADMIN_PAGES).forEach(function (k) { PAGES[k] = ADMIN_PAGES[k]; });
 
   function renderView(name) {
     var box = $('view');
@@ -746,6 +1099,7 @@ export const APP_JS = String.raw`(function (root) {
     box.appendChild(el('p', 'meta', 'Loading...'));
     client.view(name).then(function (r) {
       clear(box);
+      if (r.status !== 200 && name.indexOf('admin-') === 0) adminNav(box, name.slice(6));
       if (r.status !== 200) { box.appendChild(el('p', 'meta', r.status === 401 ? 'Signed out.' : 'Could not load: ' + ((r.body && r.body.error && r.body.error.message) || r.status))); return; }
       box.appendChild(el('p', 'meta', 'As of ' + r.body.observedAt));
       if (PAGES[name]) { PAGES[name](box, r.body.parts || {}); return; }
@@ -761,7 +1115,7 @@ export const APP_JS = String.raw`(function (root) {
       });
       if (!any) box.appendChild(el('p', 'meta', 'Nothing to show.'));
       if (name === 'recovery') renderRecoveryActions(box);
-    }, function () { clear(box); box.appendChild(el('p', 'meta', 'Offline. Try again when the connection is back.')); });
+    }, function () { clear(box); if (name.indexOf('admin-') === 0) adminNav(box, name.slice(6)); box.appendChild(el('p', 'meta', 'Offline. Try again when the connection is back.')); });
   }
 
   function renderRecoveryActions(box) {
@@ -830,7 +1184,7 @@ export const APP_JS = String.raw`(function (root) {
   // carries no data: the page reads what it shows again with its ordinary requests. Without EventSource the page asks for the history every half minute while it is in front. A repeated or missed nudge
   // changes nothing.
   var live = null, livePoll = null, readies = 0;
-  var QUIET = { replay: true, sessions: true };
+  var QUIET = { replay: true, sessions: true, admin: true };
   function tabButton(name) { return Array.prototype.filter.call(doc.querySelectorAll('[data-tab]'), function (b) { return b.getAttribute('data-tab') === name; })[0]; }
   function markTab(name, on) {
     var b = tabButton(name);
@@ -872,7 +1226,7 @@ export const APP_JS = String.raw`(function (root) {
     $('chat').hidden = name !== 'chat';
     $('view').hidden = name === 'chat';
     Array.prototype.forEach.call(doc.querySelectorAll('[data-tab]'), function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-tab') === name)); });
-    if (name === 'chat') renderChat(); else if (name === 'sessions') renderSessions(); else renderView(name);
+    if (name === 'chat') renderChat(); else if (name === 'sessions') renderSessions(); else if (name === 'admin') renderView('admin-' + adminSection); else renderView(name);
   }
 
   function build() {

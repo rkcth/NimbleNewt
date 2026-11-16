@@ -205,10 +205,12 @@ test("the tabs name the new pages and the page offers no control the chat lacks:
   const page = boot({});
   await settle();
   const names = page.doc.body.find((e) => e.getAttribute("role") === "tab").map((e) => e.textContent);
-  assert.deepEqual(names, ["Chat", "Status", "Needs you", "Approvals", "Models", "Blockers", "Cost", "Recovery", "Replay", "Setup", "Settings"]);
+  assert.deepEqual(names, ["Chat", "Status", "Needs you", "Approvals", "Models", "Blockers", "Cost", "Recovery", "Replay", "Setup", "Administration", "Settings"]);
   // Each POST route the script uses; the new one is the approvals route, and its two actions are chat commands of the same names.
   const posts = [...APP_JS.matchAll(/call\('POST', '([^']+)'/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(posts)].sort(), ["/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/replay/", "/web/sessions/revoke", "/web/thinking/collection"]);
+  assert.deepEqual([...new Set(posts)].sort(), ["/web/admin/", "/web/approvals/", "/web/chat", "/web/login", "/web/logout", "/web/pairings", "/web/proposals/", "/web/replay/", "/web/sessions/revoke", "/web/thinking/collection"]);
+  // The one other change the page sends is the write-only secret (card U08), by PUT to one named secret.
+  assert.deepEqual([...APP_JS.matchAll(/call\('(PUT|DELETE|PATCH)', '([^']+)'/g)].map((m) => `${m[1]} ${m[2]}`), ["PUT /web/secrets/"]);
 });
 
 test("only the lengths the controller accepts become buttons, whatever a record says", async () => {
@@ -259,4 +261,245 @@ test("the thinking switch shows the setting, asks first, and sends one fixed dec
   const unwired = boot({ models: { ...base, thinking: { error: { code: "unavailable", message: "collected thinking is unavailable" } } } });
   const uv = await open(unwired, "models");
   assert.match(text(uv), /runs without the store/); assert.deepEqual(uv.buttons(), []); assert.doesNotMatch(text(uv), /Could not load/);
+});
+
+// ---- the settings and administration pages (card U08) -------------------------------------------------------------------------------
+
+const LEAKED = "sk-LEAK-0123456789abcdef";
+const sandboxFixture = (warn: boolean) => ({ item: { local: warn ? { os: "darwin", mechanism: "Seatbelt", boundary: "weaker", warn: true, limits: ["Seatbelt confines by what a process may touch; it is process-level and has weaker limits than Linux's bubblewrap."] } : { os: "linux", mechanism: "bubblewrap", boundary: "strong", warn: false, limits: ["Each agent gets its own view."] }, hosts: [{ hostId: "host:odd", os: "plan9", mechanism: "unknown", boundary: "unproven", warn: true, limits: ["unproven"], freshness: "fresh", identity: "active" }], warn: true, truncated: false } });
+const settingsFixture = (fill: (s: string) => string = (s) => s) => ({ settings: { item: { scope: { layer: "installation", id: "installation" }, truncated: false, problems: [fill("the checkpoint is longer than the attempt")], items: [
+  { key: "grants.maxDays", description: fill("The longest a standing grant may go unused."), kind: "default", effect: "next-request", installationOnly: false, value: 9, state: "set", source: { layer: "installation", id: "installation" }, editable: true },
+  { key: "budget.paidAllowed", description: "Whether paid routes may be chosen.", kind: "restriction", effect: "next-request", installationOnly: false, value: true, state: "default", source: { layer: "default", id: "default" }, editable: true, note: "A restriction: a narrower layer can only tighten it, never widen it." },
+  { key: "time.checkpointMinutes", description: "How often a checkpoint is written.", kind: "default", effect: "after-current-operation", installationOnly: false, value: 30, state: "locked", source: { layer: "installation", id: "installation" }, lockedBy: { layer: "installation", id: "installation" }, editable: true, note: "Locked by the installation layer: layers below it cannot change it." },
+  { key: "workClass.pcFloor", description: "The least PC share.", kind: "default", effect: "next-request", installationOnly: false, state: "inherited", source: { layer: "team", id: "team.x" }, value: 20, editable: false },
+] } } });
+const sent = (page: ReturnType<typeof boot>) => page.calls.filter((c) => c.method !== "GET" && c.path !== "/web/session");
+const inputOf = (view: FakeElement, label: string): FakeElement => { const l = view.find((e) => e.tag === "label" && e.textContent === label)[0]; assert.ok(l, `a label ${label}`); const id = l.getAttribute("for")!; const i = view.find((e) => e.id === id && e.tag !== "label")[0]; assert.ok(i, `an input for ${label}`); return i; };
+const chip = (view: FakeElement, text: string): FakeElement => { const b = view.buttons().find((x) => x.textContent === text); assert.ok(b, `a button ${text}`); return b; };
+async function admin(page: ReturnType<typeof boot>, section: string, label: string): Promise<FakeElement> {
+  await settle(); tab(page.doc, "admin").click(); await settle();
+  const view = page.doc.byId.get("view")!;
+  if (section !== "setup") { chip(view, label).click(); await settle(); }
+  return page.doc.byId.get("view")!;
+}
+const NAV = ["First run", "Settings", "Providers", "Secrets", "Agents and teams", "Policy", "API access", "Operations", "Sandbox", "Migration"];
+
+test("the Administration tab has the ten sections, one at a time, each a named page reached from the same row of buttons (card U08)", async () => {
+  const views: Record<string, unknown> = {
+    "admin-setup": { readiness: { item: { ready: false, items: [] } }, suggestion: { item: { due: false } }, sandbox: sandboxFixture(false) },
+    "admin-settings": settingsFixture(), "admin-providers": { providers: { item: { items: [], truncated: false } } }, "admin-secrets": { secrets: { item: { writable: false, items: [], truncated: false } } },
+    "admin-team": { agents: { items: [] }, teams: { items: [] } }, "admin-policy": { readiness: { item: { items: [] } }, grants: { items: [] }, settings: { item: { items: [] } } },
+    "admin-access": { web: { item: null }, local: { item: { enabled: false } }, sandbox: sandboxFixture(false) }, "admin-operations": { lifecycle: { item: { intent: "active" } }, sandbox: sandboxFixture(false) }, "admin-sandbox": { sandbox: sandboxFixture(true) }, "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 3, migrations: [], upgrades: [], testedPairs: [] } }, policy: { item: {} } },
+  };
+  const page = boot(views);
+  await settle(); tab(page.doc, "admin").click(); await settle();
+  const view = page.doc.byId.get("view")!;
+  assert.deepEqual(view.find((e) => e.tag === "nav")[0]!.buttons().map((b) => b.textContent), NAV);
+  assert.match(text(view), /First run/);
+  for (const [i, name] of ["admin-settings", "admin-providers", "admin-secrets", "admin-team", "admin-policy", "admin-access", "admin-operations", "admin-sandbox", "admin-migration"].entries()) {
+    chip(page.doc.byId.get("view")!, NAV[i + 1]!).click(); await settle();
+    const v = page.doc.byId.get("view")!;
+    assert.equal(page.calls.at(-1)!.path, `/web/views/${name}`);
+    assert.equal(v.find((e) => e.tag === "h2")[0]!.textContent.length > 0, true, name);
+    assert.equal(v.find((e) => e.tag === "nav")[0]!.buttons().filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent).join(), NAV[i + 1], "the section in view is marked");
+    for (const b of v.buttons()) assert.ok(b.type === "button" && b.getAttribute("aria-label") !== null || b.textContent.length > 0);
+  }
+  assert.deepEqual(page.doc.violations, []);
+});
+
+test("settings show the value, whether it is the default, set by you, inherited or locked, the layer it comes from, and when it counts, with hostile text drawn as text (card U08)", async () => {
+  const page = boot({ "admin-settings": settingsFixture((s) => HOSTILE + s) });
+  const view = await admin(page, "settings", "Settings");
+  const t = text(view);
+  assert.match(t, /Value: 9 - set by you \(from installation\); counts next request\./);
+  assert.match(t, /Value: not set|Value: true - the default \(from default\)/);
+  assert.match(t, /Value: 30 - locked \(from installation\)/); assert.match(t, /Locked by the installation layer/);
+  assert.match(t, /Value: 20 - inherited \(from team\)/); assert.match(t, /Read here as an agent or project sees it/);
+  assert.match(t, /after current operation/);
+  assert.match(t, /These values do not fit together: .*the checkpoint is longer/);
+  assert.match(t, /<script>alert\(2\)<\/script>/, "markup is shown as text");
+  assert.deepEqual(page.doc.violations, []); assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)), [...page.doc.tags()].join());
+  // The filter narrows the list without a request.
+  const before = page.calls.length;
+  const f = inputOf(view, "Filter"); f.value = "budget"; f.listeners.get("input")![0]!({});
+  assert.match(text(view), /budget\.paidAllowed/); assert.doesNotMatch(text(view), /grants\.maxDays/);
+  assert.equal(page.calls.length, before, "filtering is local");
+  f.value = "nothing-like-this"; f.listeners.get("input")![0]!({});
+  assert.match(text(view), /No setting matches/);
+});
+
+test("a setting is changed from the page as one outbox item under one key, the chat shows it first, and 'back to default' asks first (card U08)", async () => {
+  const done = { turnId: "t", replayed: false, text: "Set the setting grants.maxDays to 12 for the whole installation", reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "pedit-aaaa", preview: ["Set grants.maxDays to 12 for the whole installation."] }] };
+  const page = boot({ "admin-settings": settingsFixture() }, [(c) => (c.path === "/web/admin/setting" ? { status: 201, body: done } : undefined)], () => false);
+  const view = await admin(page, "settings", "Settings");
+  const card = view.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  const input = card.find((e) => e.tag === "input")[0]!;
+  assert.equal(input.value, "9"); assert.match(input.getAttribute("aria-label")!, /New value of grants\.maxDays/);
+  input.value = "12";
+  chip(card, "Change").click(); await settle();
+  const posts = sent(page);
+  assert.equal(posts.length, 1);
+  assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/setting", { key: "grants.maxDays", value: 12 }]);
+  assert.match(posts[0]!.headers["idempotency-key"]!, /^m[0-9a-f]{24}$/); assert.equal(posts[0]!.headers["x-nn-csrf"], "csrf-1");
+  assert.match(text(page.doc.byId.get("log")!), /Set the setting grants\.maxDays to 12 for the whole installation/, "the chat shows what was said and its preview");
+  // Text that is not JSON is a string; nothing is sent for an empty field; a locked or default card has no reset.
+  await open(page, "admin");
+  const again = page.doc.byId.get("view")!;
+  const c2 = again.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  c2.find((e) => e.tag === "input")[0]!.value = "";
+  chip(c2, "Change").click(); await settle();
+  assert.match(text(again), /Type the new value first/); assert.equal(sent(page).length, 1);
+  chip(c2, "Back to default").click(); await settle();
+  assert.equal(sent(page).length, 1, "declined: nothing sent");
+  page.confirmWith(() => true);
+  chip(c2, "Back to default").click(); await settle();
+  assert.deepEqual(sent(page)[1]!.body, { key: "grants.maxDays", remove: true });
+  const budget = again.find((e) => e.className === "card" && e.textContent.startsWith("budget.paidAllowed"))[0]!;
+  assert.deepEqual(budget.buttons().map((b) => b.textContent), ["Change"], "a default value has nothing to put back");
+});
+
+test("providers show where each runs, its address, the NAME of its secret and whether it is set, never a key; one can be switched off, and one added with the secret's name only (card U08)", async () => {
+  const fill = (s: string) => s;
+  const providers = { providers: { item: { secretsWritable: true, truncated: false, items: [
+    { name: fill("cloud-b"), location: "cloud", enabled: true, paid: true, endpoint: "https://api.example.test/v1", kind: "openai", credentialName: "cloud-b-key", secret: "not set", models: [{ route: "cloud-b/big", contextTokens: 65536 }] },
+    { name: "local-a", location: "local", enabled: false, paid: false, endpoint: "http://127.0.0.1:8002/v1", secret: "none needed", models: [{ route: "local-a/m", contextTokens: 32768 }] },
+  ] } }, secrets: { item: { writable: true, items: [{ name: "cloud-b-key", state: "not set", usedBy: ["provider cloud-b"] }] } } };
+  const page = boot({ "admin-providers": providers });
+  const view = await admin(page, "providers", "Providers");
+  const t = text(view);
+  assert.match(t, /cloud-b - on/); assert.match(t, /Runs cloud; costs money; address https:\/\/api\.example\.test\/v1 \(openai\)/); assert.match(t, /Secret cloud-b-key: not set/);
+  assert.match(t, /local-a - off/); assert.match(t, /No secret needed\./); assert.match(t, /cloud-b\/big - 65536 tokens of context/);
+  assert.doesNotMatch(t, new RegExp(LEAKED));
+  chip(view, "Switch off").click(); await settle();
+  assert.deepEqual([sent(page)[0]!.path, sent(page)[0]!.body], ["/web/admin/setting", { key: "provider.cloud-b.enabled", value: false }]);
+  await open(page, "admin");
+  const v2 = page.doc.byId.get("view")!;
+  assert.ok(v2.buttons().some((b) => b.textContent === "Switch on"), "an off provider offers switching on");
+  // The form: nothing is sent until the fields are filled; the body carries the NAME of the secret, never a value.
+  chip(v2, "Add the provider").click(); await settle();
+  assert.match(text(v2), /Fill in the name, the address/); assert.equal(sent(page).length, 1);
+  inputOf(v2, "Name").value = "new-p"; inputOf(v2, "Where it runs").value = "cloud";
+  inputOf(v2, "Server address (starts with http or https, for example a loopback address and port)").value = "https://x.example.test/v1";
+  inputOf(v2, "Model names, separated by commas").value = "a, b";
+  inputOf(v2, "The model's real context window, in tokens").value = "32768";
+  inputOf(v2, "What the server is").value = "vllm"; inputOf(v2, "Cost").value = "paid";
+  inputOf(v2, "Name of its secret (leave empty if none is needed)").value = "new-p-key";
+  chip(v2, "Add the provider").click(); await settle();
+  assert.deepEqual(sent(page)[1]!.body, { name: "new-p", location: "cloud", endpoint: "https://x.example.test/v1", models: ["a", "b"], contextTokens: 32768, kind: "vllm", paid: true, credentialName: "new-p-key" });
+  assert.equal(sent(page)[1]!.path, "/web/admin/provider");
+});
+
+test("the Secrets form is write only: the value is sent once, the field is emptied before the request leaves, it is never kept in the browser, and an answer never shows it (card U08)", async () => {
+  const secrets = { secrets: { item: { writable: true, truncated: false, items: [{ name: "cloud-b-key", state: "not set", usedBy: ["provider cloud-b"] }, { name: "other", state: "set", usedBy: ["provider x"] }] } } };
+  let answer: { status: number; body: unknown } = { status: 200, body: { name: "cloud-b-key", set: true, replaced: false } };
+  const page = boot({ "admin-secrets": secrets }, [(c) => (c.path === "/web/secrets/cloud-b-key" ? answer : undefined)]);
+  const view = await admin(page, "secrets", "Secrets");
+  assert.match(text(view), /cloud-b-key.*not set.*provider cloud-b/s); assert.match(text(view), /write-only/);
+  const value = inputOf(view, "The secret (it is not shown again)");
+  assert.equal(value.type, "password"); assert.equal(value.getAttribute("autocomplete"), "off");
+  chip(view, "cloud-b-key").click();
+  assert.equal(inputOf(view, "Name of the secret").value, "cloud-b-key", "an unset name fills in the name field");
+  assert.ok(!view.buttons().some((b) => b.textContent === "other"), "only names that are not set are offered");
+  chip(view, "Save the secret").click(); await settle();
+  assert.match(text(view), /Give the name and the secret/); assert.equal(sent(page).length, 0);
+  value.value = LEAKED;
+  chip(view, "Save the secret").click();
+  assert.equal(value.value, "", "the field is empty before the request is even answered");
+  await settle();
+  const put = sent(page);
+  assert.equal(put.length, 1);
+  assert.deepEqual([put[0]!.method, put[0]!.path, put[0]!.body], ["PUT", "/web/secrets/cloud-b-key", { value: LEAKED }]);
+  assert.equal(put[0]!.headers["x-nn-csrf"], "csrf-1");
+  assert.match(text(page.doc.byId.get("view")!), /Saved cloud-b-key\. The value is not shown again\./);
+  // Never kept: not in the outbox, not in storage, not on the page, not in the chat log.
+  assert.ok(![...page.storage.map.values()].some((v) => v.includes(LEAKED)), "the browser keeps no copy");
+  assert.doesNotMatch(text(page.doc.body), new RegExp(LEAKED));
+  assert.equal(page.storage.map.get("nn.outbox.v1") === undefined || !page.storage.map.get("nn.outbox.v1")!.includes("PUT"), true);
+  // A refusal is shown in the controller's words and the value is gone.
+  answer = { status: 503, body: { error: { code: "unavailable", message: "the secret store did not take it" } } };
+  const v2 = page.doc.byId.get("view")!;
+  inputOf(v2, "Name of the secret").value = "cloud-b-key"; const field2 = inputOf(v2, "The secret (it is not shown again)"); field2.value = LEAKED;
+  chip(v2, "Save the secret").click(); await settle();
+  assert.match(text(v2), /Not saved: the secret store did not take it/); assert.equal(field2.value, "");
+  assert.doesNotMatch(text(page.doc.body), new RegExp(LEAKED));
+  // No store connected: no form, and the words say where a secret goes instead.
+  const bare = boot({ "admin-secrets": { secrets: { item: { writable: false, items: [], truncated: false } } } });
+  const bv = await admin(bare, "secrets", "Secrets");
+  assert.match(text(bv), /secret store on the computer\. Never type it in chat/); assert.ok(!bv.buttons().some((b) => b.textContent === "Save the secret"));
+});
+
+test("the first-run page lists what is set up, explains the profiles in plain words, recommends derived for testing and development, and asks once (card U08)", async () => {
+  const readiness = (profile: string) => ({ item: { ready: false, next: { id: "model-route", label: "A model route", how: "Add a provider on the Providers section." }, items: [
+    { id: "owner", label: "Owner identity and credential", state: "done", required: true, detail: "rob" },
+    { id: "profile", label: "Approval profile", state: profile === "strict" ? "default" : "done", required: false, detail: profile },
+    { id: "model-route", label: "A model route", state: "missing", required: true, detail: "none" } ] } });
+  const page = boot({ "admin-setup": { readiness: readiness("strict (the default for a new installation)"), suggestion: { item: { due: true, preview: ["Approvals would be decided by rule first."] } }, sandbox: sandboxFixture(true) } });
+  const view = await admin(page, "setup", "First run");
+  const t = text(view);
+  assert.match(t, /Owner identity and credential.*done/s); assert.match(t, /Next: A model route\. Add a provider/);
+  assert.match(t, /Strict asks at every consequential step\. Derived lets what you say authorize what it reasonably needs/);
+  assert.match(t, /For testing and development work the derived profile is recommended/);
+  assert.match(t, /Weaker sandbox: Seatbelt on darwin \(this computer\); unknown on plan9 \(host host:odd\)/);
+  assert.match(t, /The system suggests the derived profile.*Approvals would be decided by rule first/s);
+  assert.match(t, /Without a browser, the chat asks the same question/);
+  assert.deepEqual(view.buttons().filter((b) => /profile|strict/i.test(b.textContent)).map((b) => b.textContent), ["Use the derived profile (recommended for testing and development)"], "strict is in force, so only the change is offered");
+  chip(view, "Use the derived profile (recommended for testing and development)").click(); await settle();
+  assert.deepEqual([sent(page)[0]!.path, sent(page)[0]!.body], ["/web/admin/profile", { to: "derived" }]);
+  const derived = boot({ "admin-setup": { readiness: readiness("derived"), suggestion: { item: { due: false } }, sandbox: sandboxFixture(false) } });
+  const dv = await admin(derived, "setup", "First run");
+  assert.deepEqual(dv.buttons().filter((b) => /profile|strict/i.test(b.textContent)).map((b) => b.textContent), ["Stay strict"], "the profile in force is not offered again");
+  assert.match(text(dv), /Weaker sandbox: unknown on plan9 \(host host:odd\)/, "the unproven host is warned about even when this computer is strong");
+});
+
+test("the sandbox section names each mechanism and warns about a weaker or unproven boundary; the warning is also on every page where the owner chooses where work runs (card U08, G01)", async () => {
+  const page = boot({ "admin-sandbox": { sandbox: sandboxFixture(true) } });
+  const view = await admin(page, "sandbox", "Sandbox");
+  const rows = view.find((e) => e.tag === "tr").slice(1).map((r) => r.children.map((c) => c.textContent));
+  assert.deepEqual(rows.map((r) => r.slice(0, 4)), [["This computer", "Seatbelt", "darwin", "weaker"], ["Host host:odd", "unknown", "plan9", "unproven"]]);
+  assert.match(rows[0]![4]!, /process-level and has weaker limits than Linux/);
+  assert.match(text(view), /Weaker sandbox: Seatbelt on darwin \(this computer\); unknown on plan9/);
+  const strong = { item: { local: { os: "linux", mechanism: "bubblewrap", boundary: "strong", warn: false, limits: ["x"] }, hosts: [], warn: false, truncated: false } };
+  const quiet = await admin(boot({ "admin-sandbox": { sandbox: strong } }), "sandbox", "Sandbox");
+  assert.doesNotMatch(text(quiet), /Weaker sandbox/); assert.match(text(quiet), /bubblewrap/);
+  const none = await admin(boot({ "admin-sandbox": { sandbox: { item: { hosts: [], warn: false, truncated: false } } } }), "sandbox", "Sandbox");
+  assert.match(text(none), /no sandbox is in use yet/);
+  for (const [name, label, fixture] of [["admin-access", "API access", { web: { item: null }, local: { item: { enabled: true } } }], ["admin-operations", "Operations", { lifecycle: { item: { intent: "active" } } }]] as const) {
+    const p = boot({ [name]: { ...fixture, sandbox: sandboxFixture(true) } });
+    assert.match(text(await admin(p, name, label)), /Weaker sandbox: Seatbelt on darwin/, `${name} warns`);
+  }
+});
+
+test("agents and teams, policy, API access, operations and migration are drawn from their records as tables and plain lines, and a hostile value is only text (card U08)", async () => {
+  const H = HOSTILE;
+  const page = boot({
+    "admin-team": { agents: { items: [{ id: "agt-a", friendlyName: H, roles: ["author", "reviewer"], teamId: "team-t", state: "active", defaultProfile: "default", coordinator: { state: "running" } }] }, teams: { items: [{ id: "team-t", name: "builders", parentTeamId: undefined }] } },
+    "admin-policy": { readiness: { item: { items: [{ id: "profile", detail: "derived" }] } }, grants: { items: [{ grantee: "agent:ann", action: "approve.class.commit", project: "proj-1", state: "active", basis: H }] }, settings: { item: { items: settingsFixture().settings.item.items.slice(0, 1) } } },
+    "admin-access": { web: { item: { settings: { host: "127.0.0.1", port: 8443, network: "loopback", tls: false, behindTlsProxy: true, publicHosts: ["newt.example.ts.net"], trustedProxy: { enabled: false } }, browsers: [{ label: H, createdAt: "2026-11-10", lastSeen: "2026-11-11" }] } }, local: { item: { enabled: true } } },
+    "admin-operations": { lifecycle: { item: { intent: "paused", reason: H } }, workers: { item: { effective: { cpus: 2 } } }, capacity: { item: { x: 1 } } },
+    "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 4, rollbackPeriod: { days: 7, open: true, until: "2026-11-20" }, contract: { waiting: true, refusals: ["rollback period still open"] }, migrations: [{ version: 4, name: H, kind: "destructive", state: "deferred" }], upgrades: [{ at: "2026-11-01", from: 2, to: 3, additiveOnly: true }], testedPairs: [{ release: "1.4.0", schema: 3, at: "2026-11-02" }] } }, policy: { item: { rollbackPeriodDays: 7, probationMinutes: 60, maxReleaseFailures: 2, hostRetries: 3 } } },
+  });
+  const team = await admin(page, "team", "Agents and teams");
+  assert.match(text(team), /<script>alert\(2\)<\/script>.*author, reviewer.*team-t.*active.*running/s); assert.match(text(team), /builders/);
+  const policy = await admin(page, "policy", "Policy");
+  assert.match(text(policy), /In force: derived\./); assert.deepEqual(policy.buttons().filter((b) => /profile|strict/i.test(b.textContent)).map((b) => b.textContent), ["Stay strict"]);
+  assert.match(text(policy), /agent:ann.*approve\.class\.commit.*proj-1.*active/s); assert.match(text(policy), /grants\.maxDays/);
+  const access = await admin(page, "access", "API access");
+  assert.match(text(access), /Listens on 127\.0\.0\.1:8443, reachable from this machine only/); assert.match(text(access), /Behind a TLS proxy/); assert.match(text(access), /newt\.example\.ts\.net/);
+  assert.match(text(access), /It is turned on: agents run on this computer/);
+  const ops = await admin(page, "operations", "Operations");
+  assert.match(text(ops), /Running or paused/); assert.match(text(ops), /intent: paused/); assert.match(text(ops), /cpus: 2/);
+  const mig = await admin(page, "migration", "Migration");
+  assert.match(text(mig), /schema 3; this version knows 4/); assert.match(text(mig), /Rollback period: 7 days, open until 2026-11-20/); assert.match(text(mig), /Destructive migrations are waiting for your approval/);
+  assert.match(text(mig), /rollback period still open/); assert.match(text(mig), /Tested pairs/); assert.match(text(mig), /Rollout policy/); assert.match(text(mig), /Failures before going back: 2/);
+  assert.deepEqual(page.doc.violations, []);
+  assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
+  for (const tb of mig.find((e) => e.tag === "table")) assert.equal(tb.find((e) => e.tag === "caption").length, 1, "every table has a caption");
+});
+
+test("an error on a part of an administration page is the controller's plain words and does not hide the rest (card U08)", async () => {
+  const page = boot({ "admin-providers": { providers: { error: { code: "forbidden", message: "only the owner does" } }, secrets: { item: { writable: false, items: [] } } }, "admin-settings": { settings: { error: { code: "unavailable", message: "the administration views are not available" } } } });
+  const prov = await admin(page, "providers", "Providers");
+  assert.match(text(prov), /Could not load: only the owner does/);
+  chip(prov, "Settings").click(); await settle();
+  assert.match(text(page.doc.byId.get("view")!), /Could not load: the administration views are not available/);
 });

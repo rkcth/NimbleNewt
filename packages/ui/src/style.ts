@@ -27,6 +27,8 @@ input,select,textarea{font:inherit;font-size:16px;color:var(--fg);background:var
 .msg.bot{align-self:flex-start;background:var(--bot)}
 .meta{font-size:.8rem;color:var(--muted);overflow-wrap:anywhere}
 .error{color:var(--bad);min-height:1.4em}
+.warn{color:var(--warn);border-left:4px solid var(--warn);padding:.4em .7em;margin:.6em 0}
+.field{display:flex;flex-direction:column;gap:.2em;margin:.5em 0}.field input,.field select{font:inherit;padding:.5em;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);max-width:100%}
 .chips{display:flex;gap:.4rem;overflow-x:auto;padding:.25rem .75rem}
 .chip{flex:0 0 auto;min-height:44px;padding:0 .9rem;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--fg);font:inherit}
 .composer{display:flex;gap:.5rem;align-items:flex-end;padding:.5rem .75rem;border-top:1px solid var(--line);background:var(--bg)}

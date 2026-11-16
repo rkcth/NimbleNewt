@@ -13,3 +13,4 @@ export {
   BUBBLEWRAP_FLAGS, checkPrerequisites, detectDistribution, hostLine, prerequisiteProblems, realProbes,
   type PrerequisiteOptions, type PrerequisiteReport, type Probe, type ProbeResult, type Probes,
 } from "./prerequisites.js";
+export { sandboxFor, type SandboxFacts } from "./sandbox.js";

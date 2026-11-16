@@ -257,6 +257,8 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     ...(configuredWorkspaces.length === 0 ? {} : { workspaceRoots: configuredWorkspaces.map((w) => w.path) }),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
+    // The Secrets form of the web chat (card U08) writes into the same store; the names this installation itself depends on (its own credential, the database address, the transfer targets') are never offered for writing.
+    ...(options.start?.adminSecrets !== undefined ? {} : { adminSecrets: { store: secrets, reserved: [ownerSecretName(dataDir), ...(config.controller.storage.kind === "postgres" ? [config.controller.storage.url.secret] : []), ...((config.controller.databaseTransfer?.targets ?? []) as readonly unknown[]).flatMap((t) => { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; return typeof n === "string" ? [n] : []; })] } }),
     chat: { interpreter },
     meetingRecords,
     ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),

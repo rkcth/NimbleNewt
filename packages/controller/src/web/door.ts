@@ -24,6 +24,8 @@ export interface WebChatBackend {
   discardProposal(token: string, request: { commandId: string; proposalId: string }, options?: CallOptions): Promise<{ proposalId: string; replayed: boolean }>;
   /** A button on the page (card U08b): the words it stands for and the intents they mean, run through the same chat turn as a typed message (shown first, applied only when the owner says so). */
   decide(token: string, message: { messageId: string; text: string; intents: readonly unknown[] }, options?: CallOptions): Promise<TurnResult>;
+  /** Writes one secret into the host's secret store (card U08), the Secrets form of the page: the value is stored and never returned, logged or recorded anywhere else. Absent when no store is connected. A name the installation reserves is refused. */
+  putSecret?(token: string, name: string, value: string): Promise<{ readonly name: string; readonly replaced: boolean }>;
   /** The owner's recorded conversation, newest turns first (`ChatService.history`): what a browser that did not send the messages shows, and what a live-update check compares. Read only. */
   history(token: string, request: { limit?: number; before?: string }): Promise<{ turns: readonly HistoryTurn[]; next?: string; complete: boolean }>;
   /** The state API's operations the door's fixed routes name, nothing wider: the view queries below, the replay reads, and (card U09b) the owner's recorded look at thinking and the simulation, which carry a `commandId` (the page's Idempotency-Key). */
@@ -106,6 +108,17 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   approvals: [{ key: "load", op: "approval.load", args: { days: 7 } }, { key: "proposals", op: "approval.proposals", args: { state: "open" } }, { key: "suggestion", op: "approval.suggestion", args: {} }],
   // Which model routes there are, with their reply limits and where each value comes from, what is switched off, and how difficulty maps to a way of running (cards R01, R06, U08b).
   models: [{ key: "routes", op: "routing.budgets", args: {} }, { key: "controls", op: "routing.controls", args: {} }, { key: "state", op: "status.ask", args: { request: { kind: "model_routes" } } }, { key: "difficulty", op: "difficulty.profiles", args: {} }, { key: "thinking", op: "thinking.collection.get", args: {} }],
+  // The settings and administration pages (card U08), all owner only and all reads of what the chat and the API also change. The page shows them under one tab.
+  "admin-setup": [{ key: "readiness", op: "setup.readiness", args: {} }, { key: "suggestion", op: "approval.suggestion", args: {} }, { key: "sandbox", op: "sandbox.status", args: {} }],
+  "admin-settings": [{ key: "settings", op: "settings.effective", args: {} }],
+  "admin-providers": [{ key: "providers", op: "provider.list", args: {} }, { key: "secrets", op: "secret.status", args: {} }],
+  "admin-secrets": [{ key: "secrets", op: "secret.status", args: {} }],
+  "admin-team": [{ key: "agents", op: "agent.list", args: { limit: 100 } }, { key: "teams", op: "team.list", args: { limit: 100 } }],
+  "admin-policy": [{ key: "readiness", op: "setup.readiness", args: {} }, { key: "suggestion", op: "approval.suggestion", args: {} }, { key: "grants", op: "grant.list", args: { limit: 50 } }, { key: "settings", op: "settings.effective", args: { prefix: "grants" } }],
+  "admin-access": [{ key: "web", op: "web.access.get", args: {} }, { key: "local", op: "host.local.get", args: {} }, { key: "sandbox", op: "sandbox.status", args: {} }],
+  "admin-operations": [{ key: "lifecycle", op: "lifecycle.status", args: { scope: { kind: "installation", id: "installation" } } }, { key: "workers", op: "workers.limits.get", args: {} }, { key: "capacity", op: "capacity.limits.get", args: {} }, { key: "dispatch", op: "dispatch.limits.get", args: {} }, { key: "quiet", op: "host.quiet.get", args: {} }, { key: "sandbox", op: "sandbox.status", args: {} }],
+  "admin-sandbox": [{ key: "sandbox", op: "sandbox.status", args: {} }],
+  "admin-migration": [{ key: "migration", op: "migration.status", args: {} }, { key: "policy", op: "migration.policy.get", args: {} }],
   // The first-run walk-through (card U14d): what is set up, what is open and the next question, from the readiness view (owner only, records only, no secret). Answers are given in the chat, which shows each one first.
   setup: [{ key: "setup", op: "status.ask", args: { request: { kind: "setup" } } }],
   // Replay (card U09b): the tasks to choose from; one task's replay is read through /web/replay/{taskId}.
@@ -150,6 +163,73 @@ export function thinkingIntent(body: Record<string, unknown>): { text: string; i
   if (enabled !== true && enabled !== false) throw new HttpError(400, "invalid_command", "enabled must be true or false");
   const text = enabled ? "Turn collecting the model's thinking on" : "Turn collecting the model's thinking off";
   return { text, intent: { kind: "command", op: "thinking.collection.set", args: { enabled }, evidence: text, basis: "owner" } };
+}
+const SETTING_NAME = /^[a-z][A-Za-z0-9_-]{0,39}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}){1,3}$/;
+const SECRET_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const ADMIN_TEXT = /^[^\u0000-\u001f\u007f]*$/;
+/** The most a secret written on the page may be (the secret store's own limit is 16 KiB; the request body is bounded below it). */
+const SECRET_VALUE_MAX = 8 * 1024;
+const adminText = (v: unknown, field: string, max: number): string => { if (typeof v !== "string" || v.trim().length === 0 || v.length > max || !ADMIN_TEXT.test(v)) throw new HttpError(400, "invalid_command", `${field} must be text of 1 to ${max} characters on one line`); return v; };
+
+/**
+ * What an edit made on the administration pages stands for (card U08): the sentence it says in the owner's name and the one intent that sentence means, as for the approval buttons. The chat then does what it
+ * does for the same words typed: a setting, a provider and a profile change are shown first (what would change and when it counts) and applied only on Apply. A setting is the installation layer's, through the same
+ * configuration service and revision as the chat; a value is a switch, a number, a short text or a short list of names, and its sentence carries the value, so the chat checks it is the owner's words.
+ * No secret is ever part of any of these: a provider names its secret, and the value goes through the separate write-only form.
+ */
+export function adminIntent(what: string, body: Record<string, unknown>): { text: string; intent: Record<string, unknown> } {
+  const built = adminIntentOf(what, body);
+  // The sentence is recorded as the owner's message: a text the redactor recognises as a key or credential is never made one (a secret goes through its own write-only form).
+  if (redactText(built.text) !== built.text) throw new HttpError(400, "invalid_command", "that looks like a key or a password; a secret is entered on the Secrets form, and only its name goes anywhere else");
+  return built;
+}
+function adminIntentOf(what: string, body: Record<string, unknown>): { text: string; intent: Record<string, unknown> } {
+  const only = (known: readonly string[]): void => { for (const k of Object.keys(body)) if (!known.includes(k)) throw new HttpError(400, "invalid_command", `${k} is not accepted here`); };
+  if (what === "setting") {
+    only(["key", "value", "remove"]);
+    const key = body["key"];
+    if (typeof key !== "string" || !SETTING_NAME.test(key)) throw new HttpError(400, "invalid_command", "key must be the name of a setting");
+    if ((body["value"] === undefined) === (body["remove"] === undefined)) throw new HttpError(400, "invalid_command", "give either value or remove");
+    if (body["remove"] !== undefined) {
+      if (body["remove"] !== true) throw new HttpError(400, "invalid_command", "remove must be true");
+      const text = `Remove the setting ${key} from the whole installation`;
+      return { text, intent: { kind: "policy_edit", change: { type: "setting", layer: "installation", key, remove: true }, evidence: text, basis: "owner" } };
+    }
+    const value = body["value"];
+    const okScalar = typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length >= 1 && value.length <= 200 && ADMIN_TEXT.test(value));
+    const okList = Array.isArray(value) && value.length <= 40 && value.every((x) => typeof x === "string" && x.length >= 1 && x.length <= 100 && ADMIN_TEXT.test(x));
+    if (!okScalar && !okList) throw new HttpError(400, "invalid_command", "value must be true or false, a number, a short text or a short list of names");
+    const text = `Set the setting ${key} to ${JSON.stringify(value)} for the whole installation`;
+    if (text.length > 450) throw new HttpError(400, "invalid_command", "value is too long for one change from this page; say it in the chat");
+    return { text, intent: { kind: "policy_edit", change: { type: "setting", layer: "installation", key, value }, evidence: text, basis: "owner" } };
+  }
+  if (what === "profile") {
+    only(["to"]);
+    const to = body["to"];
+    if (to !== "strict" && to !== "derived") throw new HttpError(400, "invalid_command", "to must be strict or derived; the autonomous profile is chosen in the chat");
+    const text = `Change the approval profile to ${to}`;
+    return { text, intent: { kind: "policy_edit", change: { type: "profile", to }, evidence: text, basis: "owner" } };
+  }
+  if (what === "provider") {
+    only(["name", "location", "endpoint", "models", "contextTokens", "credentialName", "kind", "paid"]);
+    const name = adminText(body["name"], "name", 64);
+    const location = body["location"];
+    if (location !== "local" && location !== "cloud") throw new HttpError(400, "invalid_command", "location must be local or cloud");
+    const endpoint = adminText(body["endpoint"], "endpoint", 300);
+    const models = body["models"];
+    if (!Array.isArray(models) || models.length < 1 || models.length > 20) throw new HttpError(400, "invalid_command", "models must list 1 to 20 model names");
+    const names = models.map((m) => adminText(m, "models", 128));
+    const ct = body["contextTokens"];
+    if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1) throw new HttpError(400, "invalid_command", "contextTokens must be the model's context window as a whole number of tokens");
+    const spec: Record<string, unknown> = { name, location, endpoint, models: names, contextTokens: ct };
+    if (body["paid"] !== undefined) { if (typeof body["paid"] !== "boolean") throw new HttpError(400, "invalid_command", "paid must be true or false"); spec["paid"] = body["paid"]; }
+    if (body["credentialName"] !== undefined) { const c = body["credentialName"]; if (typeof c !== "string" || !SECRET_NAME.test(c)) throw new HttpError(400, "invalid_command", "credentialName must be the NAME of a secret (letters, digits, dots, dashes, underscores), never the key"); spec["credentialName"] = c; }
+    if (body["kind"] !== undefined) spec["kind"] = adminText(body["kind"], "kind", 30);
+    const text = `Add the model provider ${name}, which runs ${location === "local" ? "locally" : "in the cloud"} at ${endpoint}, with the models ${names.join(", ")} and a context window of ${ct} tokens${spec["paid"] === true ? ", and it costs money" : ""}${spec["credentialName"] === undefined ? "" : `; its secret is named ${spec["credentialName"] as string}`}${spec["kind"] === undefined ? "" : `; it is a ${spec["kind"] as string} server`}`;
+    if (text.length > 480) throw new HttpError(400, "invalid_command", "that provider is too long to say in one change from this page; say it in the chat");
+    return { text, intent: { kind: "command", op: "routing.provider.add", args: { providers: [spec] }, evidence: text, basis: "owner" } };
+  }
+  throw new HttpError(404, "not_found", "no such change");
 }
 const SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin", "cross-origin-resource-policy": "same-origin",
@@ -409,15 +489,34 @@ export class WebChatDoor {
       const result = c === "apply" ? await this.#o.backend.applyProposal(session.token, { commandId, proposalId: b }, options) : await this.#o.backend.discardProposal(session.token, { commandId, proposalId: b }, options);
       return this.#reply(res, 200, result);
     }
+    // The Secrets form (card U08): the one place a secret is typed. Write only: the value goes to the secret store and nothing is returned, recorded or logged but the name; it is never an outbox item (so it is never kept in the browser) and never a chat turn.
+    if (a === "secrets" && b !== undefined && c === undefined) {
+      allowed("PUT");
+      if (!SECRET_NAME.test(b)) throw new HttpError(400, "invalid_command", "that is not a secret name");
+      if (this.#o.backend.putSecret === undefined) throw new HttpError(503, "unavailable", "no secret store is connected to the web page; put the secret in the secret store on the machine", { "retry-after": "60" });
+      const body = await this.#body(req);
+      for (const k of Object.keys(body)) if (k !== "value") throw new HttpError(400, "invalid_command", `${k} is not accepted here`);
+      const value = body["value"];
+      if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > SECRET_VALUE_MAX) throw new HttpError(400, "invalid_command", `a secret is text of 1 byte to ${SECRET_VALUE_MAX} bytes`);
+      try {
+        const done = await this.#o.backend.putSecret(session.token, b, value);
+        return this.#reply(res, 200, { name: done.name, set: true, replaced: done.replaced });
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        if (error instanceof DomainError && (error.code === "forbidden" || error.code === "invalid_command" || error.code === "unauthenticated")) throw new HttpError(error.code === "forbidden" ? 403 : error.code === "unauthenticated" ? 401 : 400, error.code, redactText(error.message).replaceAll(value, "[removed]").slice(0, 200));
+        throw new HttpError(503, "unavailable", "the secret store did not take it; nothing was changed that you can rely on, check it and try again", { "retry-after": "10" });
+      }
+    }
+    const admin = a === "admin" && b !== undefined && parts.length === 2;
     const approval = a === "approvals" && b !== undefined && (c === "accept" || c === "dismiss") && parts.length === 3;
     const thinking = a === "thinking" && b === "collection" && parts.length === 2;
-    if (approval || thinking) {
+    if (approval || thinking || admin) {
       allowed("POST");
       const commandId = req.headers["idempotency-key"];
       if (typeof commandId !== "string" || !MESSAGE_ID.test(commandId)) throw new HttpError(400, "idempotency_key_required", "a decision needs an Idempotency-Key header (1 to 100 letters, digits, dots, dashes or underscores), so a retry runs once");
       if (approval && !PROPOSAL_ID.test(b)) throw new HttpError(400, "invalid_command", "that is not a proposal ID");
       const body = await this.#body(req);
-      const { text, intent } = approval ? approvalIntent(b, c as "accept" | "dismiss", body) : thinkingIntent(body);
+      const { text, intent } = admin ? adminIntent(b!, body) : approval ? approvalIntent(b, c as "accept" | "dismiss", body) : thinkingIntent(body);
       const key = `${who.id}\u0000${commandId}`;
       let run = this.#inflight.get(key);
       if (run === undefined) { run = this.#o.backend.decide(session.token, { messageId: commandId, text, intents: [intent] }, { stillAllowed: this.#stillLive(session) }).finally(() => { this.#inflight.delete(key); }); this.#inflight.set(key, run); }

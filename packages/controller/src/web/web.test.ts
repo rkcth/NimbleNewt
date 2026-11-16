@@ -11,7 +11,8 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { checkBinding, isLoopbackAddress, isPrivateAddress, remoteAllowed } from "./binding.js";
 import { checkTrustedProxy, type TrustedProxy } from "./proxy.js";
 import { WebSessionStore } from "./sessions.js";
-import { deviceLabel, type WebAssets } from "./door.js";
+import { adminIntent, deviceLabel, type WebAssets } from "./door.js";
+import { readdirSync, readFileSync } from "node:fs";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -107,12 +108,12 @@ interface World {
   signIn(credential?: Record<string, string>): Promise<{ cookie: string; csrf: string; reply: Reply }>;
 }
 
-async function world(extra: { behindTlsProxy?: boolean; publicHosts?: string[]; session?: object; limits?: object; trustedProxy?: TrustedProxy } = {}, interpreter: ScriptedInterpreter = new ScriptedInterpreter(() => [])): Promise<World> {
+async function world(extra: { behindTlsProxy?: boolean; publicHosts?: string[]; session?: object; limits?: object; trustedProxy?: TrustedProxy } = {}, interpreter: ScriptedInterpreter = new ScriptedInterpreter(() => []), startExtra: Record<string, unknown> = {}): Promise<World> {
   const d = mkdtempSync(join(tmpdir(), "nn-web-")); dirs.push(d);
   const now = { t: Date.parse("2026-11-10T10:00:00Z") };
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "n.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4,
-    chat: { interpreter }, webChat: { host: "127.0.0.1", network: "loopback", assets: ASSETS, clock: () => now.t, ...extra },
+    chat: { interpreter }, webChat: { host: "127.0.0.1", network: "loopback", assets: ASSETS, clock: () => now.t, ...extra }, ...startExtra,
   });
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
   const door = c.webChat!;
@@ -372,7 +373,7 @@ test("the views read status, blockers, cost and recovery; an unknown view is ref
   const w = await world();
   try {
     const s = await w.signIn();
-    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "setup", "replay", "recovery"]);
+    assert.deepEqual(s.reply.body.views, ["status", "needs-you", "blockers", "cost", "approvals", "models", "admin-setup", "admin-settings", "admin-providers", "admin-secrets", "admin-team", "admin-policy", "admin-access", "admin-operations", "admin-sandbox", "admin-migration", "setup", "replay", "recovery"]);
     for (const name of s.reply.body.views as string[]) {
       const r = await w.call("GET", `/web/views/${name}`, { cookie: s.cookie });
       assert.equal(r.status, 200, `${name}: ${r.text}`);
@@ -477,6 +478,158 @@ test("the switch for collecting the model's thinking is the chat's own command w
     assert.equal(read, 0, "the assistant was never asked");
     assert.ok(CHAT_OPS["thinking.collection.set"] !== undefined, "the switch is also a chat command");
   } finally { await w.c.close(); }
+});
+
+// ---- the settings and administration pages (card U08) ---------------------------------------------------------------------------
+
+test("the administration views read the owner's records only: every part is a record or the controller's plain error, and no secret is in any of them (card U08)", async () => {
+  const w = await world();
+  try {
+    const s = await w.signIn();
+    for (const name of (s.reply.body.views as string[]).filter((v) => v.startsWith("admin-"))) {
+      const r = await w.call("GET", `/web/views/${name}`, { cookie: s.cookie });
+      assert.equal(r.status, 200, `${name}: ${r.text}`);
+      assert.ok(Object.keys(r.body.parts).length >= 1, name);
+      assert.doesNotMatch(r.text, /sk-|password|api[_-]?key|Bearer /i, name);
+      for (const [key, part] of Object.entries(r.body.parts) as [string, { error?: { code?: string; message?: string } }][]) assert.equal(part.error, undefined, `${name}.${key}: ${JSON.stringify(part.error)}`);
+      assert.equal((await w.call("GET", `/web/views/${name}`, {})).status, 401, `${name} needs a session`);
+    }
+    const settings = (await w.call("GET", "/web/views/admin-settings", { cookie: s.cookie })).body.parts.settings.item;
+    assert.equal(settings.scope.layer, "installation");
+    assert.ok(settings.items.some((i: { key: string; state: string }) => i.key === "grants.maxDays" && i.state === "default"));
+    const sandbox = (await w.call("GET", "/web/views/admin-sandbox", { cookie: s.cookie })).body.parts.sandbox.item;
+    assert.deepEqual([sandbox.hosts, sandbox.warn], [[], false], "no host announced, no local worker: nothing to warn about");
+    const setup = (await w.call("GET", "/web/views/admin-setup", { cookie: s.cookie })).body.parts;
+    assert.equal(setup.readiness.item.ready, false);
+    assert.ok(setup.readiness.item.items.some((i: { id: string }) => i.id === "profile"));
+  } finally { await w.c.close(); }
+});
+
+test("an edit made on the administration pages is the chat's own turn for its words: signed in, CSRF, one key, a fixed meaning, shown first and applied on Apply, nothing read by the assistant (card U08)", async () => {
+  let read = 0;
+  const w = await world({}, new ScriptedInterpreter(() => { read += 1; return []; }));
+  try {
+    const s = await w.signIn();
+    const go = (what: string, o: { body?: unknown; key?: string | null; csrf?: boolean; cookie?: boolean; method?: string } = {}) =>
+      w.call(o.method ?? "POST", `/web/admin/${what}`, { ...(o.cookie === false ? {} : { cookie: s.cookie }), ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? {}, headers: o.key === null ? {} : { "idempotency-key": o.key ?? "a-1" } });
+    const good = { key: "grants.maxDays", value: 12 };
+    assert.equal((await go("setting", { cookie: false, body: good })).status, 401);
+    assert.equal((await go("setting", { csrf: false, body: good })).status, 403);
+    assert.equal((await go("setting", { key: null, body: good })).status, 400);
+    assert.equal((await go("setting", { method: "GET", body: good })).status, 405);
+    assert.equal((await go("unknown", { body: good })).status, 404);
+    for (const bad of [{}, { key: "grants.maxDays" }, { value: 1 }, { key: "grants.maxDays", value: 1, remove: true }, { key: "Bad Key", value: 1 }, { key: "grants.maxDays", value: null }, { key: "grants.maxDays", value: { a: 1 } }, { key: "grants.maxDays", value: [1] }, { key: "grants.maxDays", value: "x\ny" }, { key: "grants.maxDays", remove: false }, { key: "grants.maxDays", value: 1, layer: "task" }, { key: "grants.maxDays", value: 1, expectedRevision: 1 }, { key: "a.b", value: "x".repeat(201) }])
+      assert.equal((await go("setting", { body: bad })).status, 400, JSON.stringify(bad));
+    assert.equal((await go("profile", { body: { to: "autonomous" } })).status, 400, "the autonomous profile is chosen in the chat");
+    assert.equal((await go("profile", { body: { to: "derived", extra: 1 } })).status, 400);
+    // A setting: shown first (nothing changes), applied from the page's Apply, the same revision the chat makes, and the same key is the same turn.
+    const first = await go("setting", { key: "k-1", body: good });
+    assert.equal(first.status, 201, first.text);
+    assert.equal(first.body.text, "Set the setting grants.maxDays to 12 for the whole installation");
+    assert.equal(first.body.outcomes[0].status, "proposed", first.text);
+    const seen = async () => (await w.call("GET", "/web/views/admin-settings", { cookie: s.cookie })).body.parts.settings.item.items.find((i: { key: string }) => i.key === "grants.maxDays");
+    assert.equal((await seen()).state, "default", "nothing changed yet");
+    const replay = await go("setting", { key: "k-1", body: good });
+    assert.equal(replay.status, 200); assert.equal(replay.body.replayed, true); assert.equal(replay.body.turnId, first.body.turnId);
+    const applied = await w.call("POST", `/web/proposals/${first.body.outcomes[0].proposalId}/apply`, { cookie: s.cookie, csrf: s.csrf, body: {}, headers: { "idempotency-key": "ap-1" } });
+    assert.equal(applied.status, 200, applied.text);
+    assert.equal(applied.body.applied, true);
+    assert.deepEqual([(await seen()).value, (await seen()).state, (await seen()).source.layer], [12, "set", "installation"]);
+    // Back to the default: a removal.
+    const gone = await go("setting", { key: "k-2", body: { key: "grants.maxDays", remove: true } });
+    assert.equal(gone.body.text, "Remove the setting grants.maxDays from the whole installation");
+    assert.equal((await w.call("POST", `/web/proposals/${gone.body.outcomes[0].proposalId}/apply`, { cookie: s.cookie, csrf: s.csrf, body: {}, headers: { "idempotency-key": "ap-2" } })).body.applied, true);
+    assert.equal((await seen()).state, "default");
+    // The approval profile: a proposal first; the page's setup section then reads it.
+    const prof = await go("profile", { key: "k-3", body: { to: "derived" } });
+    assert.equal(prof.body.text, "Change the approval profile to derived");
+    assert.equal(prof.body.outcomes[0].status, "proposed", prof.text);
+    assert.equal((await w.call("POST", `/web/proposals/${prof.body.outcomes[0].proposalId}/apply`, { cookie: s.cookie, csrf: s.csrf, body: {}, headers: { "idempotency-key": "ap-3" } })).body.applied, true);
+    const ready = (await w.call("GET", "/web/views/admin-setup", { cookie: s.cookie })).body.parts.readiness.item.items.find((i: { id: string }) => i.id === "profile");
+    assert.match(ready.detail, /^derived/);
+    // A provider: the sentence carries every field, the secret by NAME only, and the plan is the chat's own routing.provider.add (shown first).
+    const provider = { name: "cloud-b", location: "cloud", endpoint: "https://api.example.test/v1", models: ["big"], contextTokens: 65536, credentialName: "cloud-b-key", paid: true, kind: "openai" };
+    for (const bad of [{ ...provider, credentialName: "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }, { ...provider, credentialName: "has space" }, { ...provider, location: "moon" }, { ...provider, models: [] }, { ...provider, contextTokens: "big" }, { ...provider, extra: 1 }, { ...provider, endpoint: "https://u:p@api.example.test/v1?key=sk-LEAK-0123456789abcdef0123" }])
+      assert.equal((await go("provider", { body: bad })).status, 400, JSON.stringify(bad).slice(0, 80));
+    const prov = await go("provider", { key: "k-4", body: provider });
+    assert.equal(prov.status, 201, prov.text);
+    assert.match(prov.body.text, /^Add the model provider cloud-b, which runs in the cloud at https:\/\/api\.example\.test\/v1, with the models big and a context window of 65536 tokens, and it costs money; its secret is named cloud-b-key; it is a openai server$/);
+    assert.equal(read, 0, "the assistant was never asked: the meaning is fixed by the page's code");
+    // Every control of the page is a chat operation: settings and the profile are the chat's policy edits, the provider is routing.provider.add.
+    assert.ok(CHAT_OPS["routing.provider.add"] !== undefined);
+  } finally { await w.c.close(); }
+});
+
+test("the sentence and the intent of every administration edit are built from fixed words, and a key-looking text never becomes one (card U08)", () => {
+  const s = adminIntent("setting", { key: "time.maxMinutes", value: 90 });
+  assert.deepEqual(s.intent, { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "time.maxMinutes", value: 90 }, evidence: s.text, basis: "owner" });
+  assert.equal(s.text, "Set the setting time.maxMinutes to 90 for the whole installation");
+  assert.deepEqual((adminIntent("profile", { to: "strict" }).intent as { change: unknown }).change, { type: "profile", to: "strict" });
+  const list = adminIntent("setting", { key: "permissions.deniedTools", value: ["git-push", "deploy"] });
+  assert.equal(list.text, 'Set the setting permissions.deniedTools to ["git-push","deploy"] for the whole installation');
+  assert.throws(() => adminIntent("setting", { key: "a.b", value: "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }), (e: { status?: number }) => e.status === 400, "a key in a value is refused");
+  assert.throws(() => adminIntent("provider", { name: "x", location: "local", endpoint: "http://127.0.0.1:1/v1", models: ["m"], contextTokens: 9000, kind: "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }), (e: { status?: number }) => e.status === 400);
+});
+
+test("the Secrets form is write only: it needs the owner's session, CSRF and a name, stores the value and returns, records and shows nothing but the name (card U08)", async () => {
+  const store = new Map<string, string>();
+  let failNext = false;
+  const adminSecrets = { store: { kind: "test-store", resolve: async (n: string) => store.get(n), set: async (n: string, v: string) => { if (failNext) { failNext = false; throw new Error(`the store refused ${n} ${v}`); } store.set(n, v); } }, reserved: ["owner-credential-x"] };
+  const w = await world({}, new ScriptedInterpreter(() => []), { adminSecrets });
+  const LEAK = "sk-LEAK-0123456789abcdefLEAK";
+  try {
+    const s = await w.signIn();
+    // A provider names its secret; the Secrets view lists the name as not set.
+    const provider = adminIntent("provider", { name: "cloud-b", location: "cloud", endpoint: "https://api.example.test/v1", models: ["big"], contextTokens: 65536, credentialName: "cloud-b-key" });
+    const owner = await w.c.services.principals.authenticate(w.token);
+    await w.c.services.setupProviders.add(owner, { commandId: "p-1", providers: [{ name: "local-a", location: "local", endpoint: "http://127.0.0.1:8002/v1", models: ["m"], contextTokens: 32768 }, ((provider.intent as { args: { providers: unknown[] } }).args.providers[0]) as never] });
+    const list = async () => (await w.call("GET", "/web/views/admin-secrets", { cookie: s.cookie })).body.parts.secrets.item;
+    assert.deepEqual((await list()).items, [{ name: "cloud-b-key", state: "not set", usedBy: ["provider cloud-b"] }]);
+    assert.equal((await list()).writable, true);
+    const put = (name: string, o: { body?: unknown; csrf?: boolean; cookie?: boolean; method?: string } = {}) => w.call(o.method ?? "PUT", `/web/secrets/${name}`, { ...(o.cookie === false ? {} : { cookie: s.cookie }), ...(o.csrf === false ? {} : { csrf: s.csrf }), body: o.body ?? { value: LEAK } });
+    assert.equal((await put("cloud-b-key", { cookie: false })).status, 401);
+    assert.equal((await put("cloud-b-key", { csrf: false })).status, 403);
+    assert.equal((await put("cloud-b-key", { method: "POST" })).status, 405);
+    assert.equal((await put("cloud-b-key", { method: "GET" })).status, 405, "a secret cannot be read back through this route");
+    assert.equal((await put("bad%20name")).status, 400);
+    assert.equal((await put("1abc")).status, 400);
+    assert.equal((await put("cloud-b-key", { body: {} })).status, 400);
+    assert.equal((await put("cloud-b-key", { body: { value: "" } })).status, 400);
+    assert.equal((await put("cloud-b-key", { body: { value: 5 } })).status, 400);
+    assert.equal((await put("cloud-b-key", { body: { value: LEAK, name: "x" } })).status, 400);
+    assert.equal((await put("cloud-b-key", { body: { value: "x".repeat(9000) } })).status, 400, "the page's own bound is 8 KiB");
+    assert.equal(store.size, 0, "nothing was stored by a refused request");
+    assert.equal((await put("owner-credential-x")).status, 403, "a name the installation depends on is not written from the page");
+    assert.equal(store.size, 0);
+    const done = await put("cloud-b-key");
+    assert.equal(done.status, 200, done.text);
+    assert.deepEqual(done.body, { name: "cloud-b-key", set: true, replaced: false });
+    assert.doesNotMatch(done.text, /LEAK/);
+    assert.equal(store.get("cloud-b-key"), LEAK);
+    assert.equal((await put("cloud-b-key", { body: { value: `${LEAK}2` } })).body.replaced, true);
+    // The store failing: a plain 503 that carries neither the value nor the store's own words.
+    failNext = true;
+    const failed = await put("cloud-b-key");
+    assert.equal(failed.status, 503, failed.text);
+    assert.doesNotMatch(failed.text, /LEAK|refused/);
+    // It now reads as set, and nothing the page can read carries the value: views, history, settings, the session.
+    assert.equal((await list()).items[0].state, "set");
+    const seen = [await w.call("GET", "/web/views/admin-providers", { cookie: s.cookie }), await w.call("GET", "/web/views/admin-secrets", { cookie: s.cookie }), await w.call("GET", "/web/views/admin-settings", { cookie: s.cookie }), await w.call("GET", "/web/history", { cookie: s.cookie }), await w.call("GET", "/web/session", { cookie: s.cookie }), await w.call("GET", "/web/settings", { cookie: s.cookie })];
+    for (const r of seen) assert.doesNotMatch(r.text, /LEAK/);
+    const providers = (await w.call("GET", "/web/views/admin-providers", { cookie: s.cookie })).body.parts.providers.item.items;
+    assert.deepEqual(providers.map((p: { name: string; secret: string }) => [p.name, p.secret]), [["cloud-b", "set"], ["local-a", "none needed"]]);
+    // The database the controller keeps, and the chat's turns, never held it.
+    const dir = dirs[dirs.length - 1]!;
+    for (const f of readdirSync(dir)) assert.ok(!readFileSync(join(dir, f)).includes("LEAK-0123456789abcdef"), `${f} holds no secret value`);
+  } finally { await w.c.close(); }
+  const bare = await world();
+  try {
+    const s = await bare.signIn();
+    const r = await bare.call("PUT", "/web/secrets/cloud-b-key", { cookie: s.cookie, csrf: s.csrf, body: { value: "abc" } });
+    assert.equal(r.status, 503, "no store is connected: the page says so and stores nothing");
+    assert.match(String(r.body.error.message), /secret store on the machine/);
+    assert.equal((await bare.call("GET", "/web/views/admin-secrets", { cookie: s.cookie })).body.parts.secrets.item.writable, false);
+  } finally { await bare.c.close(); }
 });
 
 test("a proposal is applied or discarded from the page once, however often the decision is sent", async () => {
