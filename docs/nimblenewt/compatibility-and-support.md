@@ -8,7 +8,7 @@ NimbleNewt is under development and has **no stable release yet**. "Supported" m
 
 | Part | Supported | Evidence |
 | --- | --- | --- |
-| Node.js | 22.19.0 or newer | 22.19.0 passes the CI run on every push (Linux); 22.19.0 and 24.21.0 pass the exhaustive and QA runs on Linux, macOS and Windows, which are started by hand or by a release tag |
+| Node.js | 22.19.0 or newer | 22.19.0 passes the CI run on every push (Linux); 22.19.0 and 24.21.0 pass the exhaustive and QA runs on Linux, macOS and Windows (the exhaustive run is started by hand or by a `v*` release tag, the QA run by hand only) |
 | Linux | x64 (kernel with unprivileged user namespaces for the sandbox) | GitHub-hosted Ubuntu runner and the development server |
 | macOS | Apple silicon, macOS 26 (Darwin 25) or newer | GitHub-hosted macOS runner |
 | Windows | x64, Windows 11 24H2 / Server 2025 (build 26100) or newer | GitHub-hosted Windows runner |

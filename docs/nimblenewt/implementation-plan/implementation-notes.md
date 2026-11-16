@@ -11833,3 +11833,12 @@ Checked and left as is: every admin view and the secret route go through the doo
 **Breakages** (built files, each restored): same-record dedupe of register's checks removed (environments test fails: one aggregate twice in one operation); the three above (new tests fail); catalog read of `instructional` only (fails). All on four backends.
 
 **Judged.** Register's new refusals are compatible: an archived or purged record had an empty body, so registering it gave a tool with empty text; the revision check pins the revision whose digest is recorded (sources are read before the command), and a stale one asks to register again. The remaining window (register committing after retention's last catalog read and before its write) is documented and is the same accepted window as `#blankExecutable`. The four backends behave the same (`check` is a standard change covered by the storage conformance suite).
+
+## T1: three wrong statements corrected (docs only)
+
+**Done.** Each claim was checked against the code or the workflow files first.
+- `api/docs.ts` Scope bullet (and the generated `api-v1.md`): it no longer says an unreadable thing "reads exactly like" a missing one. It now says existence is never revealed and gives the real answers: projects and tasks answer `forbidden` for a real and a made-up ID alike (only the owner sees `not_found`); operations whose text says "not found" answer `not_found` for both; conversation writes answer `forbidden` for both (`security/access.ts` `requireAction`, `security/secured.ts` `#hide`, D02 review notes).
+- `environment/supported.ts` Node evidence: only 22.19.0 on Linux runs on every push (`ci.yml`); 22.19.0 and 24.21.0 run in `exhaustive.yml` and `qa.yml`. No test asserted the old text.
+- `compatibility-and-support.md`: the exhaustive run starts by hand or on a `v*` tag; the QA run is by hand only (`qa.yml` has `workflow_dispatch` only).
+
+**Not done / left.** `implementation-plan/g02-acceptance.md` line 11 still says the CI matrix ran Node 24.21.0 "on every push"; it is a dated historical record of an earlier CI layout, so it was left unedited. ASSUMPTION: historical records are not rewritten.
