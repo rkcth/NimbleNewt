@@ -50,6 +50,12 @@ export interface BackupPort {
 export interface QuotaClassUsage { readonly quota: number; readonly scopes: number; readonly totalBytes: number; readonly top: readonly { readonly id: string; readonly used: number }[] }
 export type QuotaUsage = { readonly project?: QuotaClassUsage; readonly agent?: QuotaClassUsage };
 const RUNS_LISTED = 5;
+/** The bulk logs the chat tells the room of and the retention that applies to each (card K06e): what each holds, the setting that removes it. */
+const BULK_LOGS = [
+  { kind: "notification-delivery", label: "messages sent to you", setting: "deliveryLogDays" },
+  { kind: "agent-message", label: "messages between agents", setting: "agentMessageDays" },
+  { kind: "generation-run", label: "recorded model replies", setting: "generationRunDays" },
+] as const;
 /** How many of the kept backups the status names, newest first (card K06d); the count covers the rest. */
 const BACKUPS_LISTED = 10;
 export interface IncidentPort {
@@ -136,6 +142,14 @@ const isDispatcher = (by: Principal): boolean => by.kind === "owner" || by.kind 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const digestOf = (v: unknown): string => sha256(canonicalJson(v as never));
 const cmdId = (prefix: string, ...parts: (string | number)[]): string => `${prefix}-${createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 40)}`;
+
+/** How many of the removed `kind/id` entries each kind has (card K06e): the run record keeps only the first 200 IDs, so the chat's per-kind figures come from these counts. Kinds and counts only. */
+function byKind(removed: readonly string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of removed) { const k = r.slice(0, Math.max(0, r.indexOf("/"))); if (k !== "") out[k] = (out[k] ?? 0) + 1; }
+  return out;
+}
+
 
 async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) => void, limit = SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
@@ -267,7 +281,7 @@ export class RetentionService {
     if (space !== undefined && space.totalBytes > 0 && space.freeBytes * 10 < space.totalBytes) warnings.push(`the data disk has ${Math.floor((space.freeBytes * 100) / space.totalBytes)}% free`);
     const deletions = (await this.#recent("retention-deletion", 20)).map((a) => ({ id: a.id, ...(a.body as object) }));
     // The last runs of the rules (card K06d): when, by whom, how many records and backups each removed. Counts and IDs only.
-    const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown }; return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0 }; });
+    const runs = (await this.#recent("retention-run", RUNS_LISTED)).map((a) => { const b = a.body as { at?: unknown; by?: unknown; auto?: unknown; removedCount?: unknown; backupsDeleted?: unknown; incidentsArchived?: unknown; incidentsPurged?: unknown; removedByKind?: unknown }; return { id: a.id, at: typeof b.at === "string" ? b.at : a.createdAt, by: typeof b.by === "string" ? b.by : "", auto: b.auto === true, removed: typeof b.removedCount === "number" ? b.removedCount : 0, backupsDeleted: Array.isArray(b.backupsDeleted) ? b.backupsDeleted.length : 0, incidentsArchived: typeof b.incidentsArchived === "number" ? b.incidentsArchived : 0, incidentsPurged: typeof b.incidentsPurged === "number" ? b.incidentsPurged : 0, byKind: typeof b.removedByKind === "object" && b.removedByKind !== null && !Array.isArray(b.removedByKind) ? b.removedByKind : {} }; });
     const backupList = this.#deps.backups === undefined ? undefined : await this.#deps.backups.list();
     // The newest backup by its time (ties by name), whether it can be trusted, and how many cannot.
     const byNewest = backupList === undefined ? undefined : [...backupList].sort((a, b) => (a.at === b.at ? (a.manifest.name < b.manifest.name ? 1 : -1) : a.at < b.at ? 1 : -1));
@@ -288,17 +302,22 @@ export class RetentionService {
       },
     };
     let thinkingComplete = true;
-    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "notification-delivery", "thinking-record", "thinking-purge"]) {
-      let n = 0; const extra = tally[kind];
-      const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); });
+    // The bulk logs (card K06e): how many records each holds and how much room they take (the size of each record's stored text), counted in the same pass.
+    const bulk: Record<string, { records: number; bytes: number; partial: boolean }> = {};
+    for (const kind of ["responsibility-check", "stall-concern", "responsibility-incident", "stall-evidence", "stall-speed", "responsibility-event", "responsibility-incident-slot", "ctx-note-archive", "notification-delivery", "agent-message", "generation-run", "thinking-record", "thinking-purge"]) {
+      let n = 0; let bytes = 0; const extra = tally[kind]; const isBulk = BULK_LOGS.some((l) => l.kind === kind);
+      const complete = await scan(this.#runner, kind, (a) => { n += 1; extra?.(a); if (isBulk) bytes += Buffer.byteLength(JSON.stringify(a.body), "utf8"); });
       growth[kind] = complete ? n : `${n}+`;
+      if (isBulk) bulk[kind] = { records: n, bytes, partial: !complete };
       if (extra !== undefined && !complete) thinkingComplete = false;
     }
+    const bulkLogs = BULK_LOGS.map((l) => ({ kind: l.kind, label: l.label, setting: l.setting, days: values[l.setting as keyof RetentionValues] as number | null, ...bulk[l.kind]! }));
     const thinking = { days: values.thinkingDays, auto: values.thinkingAuto, storesReached: this.#deps.thinkingStores !== undefined, copiesKept: kept, copiesRemoved: removed, tasksCleaned, storesCleaned, storesWithout, blocksRemoved, ...(thinkingComplete ? {} : { partial: true }) };
     return {
       values: values as unknown as JsonObject,
       thinking: thinking as unknown as JsonObject,
       growth: growth as unknown as JsonObject,
+      bulkLogs: bulkLogs as unknown as JsonObject[],
       disk: { ...(space === undefined ? {} : { freeBytes: space.freeBytes, totalBytes: space.totalBytes }), reserve: { wantedBytes: reserve?.wanted ?? 0, inUse: reserve?.released ?? false, short: reserve?.short ?? false, ...(reserve?.releasedAt === undefined ? {} : { usedAt: reserve.releasedAt }) } },
       quotas: quotas as unknown as JsonObject[], quotaUsagePartial: partial, warnings,
       quotaLimits: { projectBytes: values.quotaProjectBytes, agentBytes: values.quotaAgentBytes, warnPercent: values.quotaWarnPercent },
@@ -699,6 +718,27 @@ export class RetentionService {
       if (!complete) partial = true;
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
+    if (values.agentMessageDays !== null) {
+      // Card K06e, tier "bulk logs": the text of a message one agent sent another (`agent-message`). Only a message the recipient has dealt with is a log: answered, or handled with no deadline. A message still waiting (accepted, delivered), one with a
+      // deadline that no reply has met (the escalation reads it), one the deadline list still names, and one a task's replay cites are kept. The age is the record's last change (its answer, or its handling).
+      const cutoff = now - values.agentMessageDays * DAY;
+      const old: Aggregate[] = [];
+      if (!(await scan(this.#runner, "agent-message", (a) => {
+        const b = a.body as { state?: unknown; deadline?: unknown };
+        if (Date.parse(a.updatedAt) >= cutoff) return;
+        if (b.state === "answered" || (b.state === "handled" && b.deadline === undefined)) old.push(a);
+      }))) partial = true;
+      if (old.length > 0) {
+        const listed = new Set(((await this.#runner.get("agent-deadlines", "all"))?.body as { open?: { id?: unknown }[] } | undefined)?.open?.map((o) => o.id) ?? []);
+        const material = await RetainedMaterial.build(this.#runner.storage);
+        for (const a of old) {
+          if (candidates.length >= limit) { partial = true; break; }
+          const why = [...(material.why("agent-message", a.id) ?? []), ...(listed.has(a.id) ? ["the list of requests waiting for a reply still names it"] : [])];
+          if (why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: "agent-message", id: a.id, reasons: why }); continue; }
+          candidates.push({ kind: "agent-message", id: a.id, revision: a.revision, projectId: typeof (a.body as { projectId?: unknown }).projectId === "string" ? (a.body as { projectId: string }).projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
+        }
+      }
+    }
     let incidentsDue: { archive: string[]; purge: string[]; more: boolean } | undefined;
     if (this.#deps.incidents?.due !== undefined && this.#deps.projects !== undefined && (values.incidentArchiveDays !== null || values.incidentPurgeDays !== null)) {
       incidentsDue = { archive: [], purge: [], more: false };
@@ -710,7 +750,7 @@ export class RetentionService {
     }
     const digest = digestOf({ c: candidates.map((c) => `${c.kind}/${c.id}@${c.revision}`), b: wouldDelete ?? [], i: [values.incidentArchiveDays, values.incidentPurgeDays, incidentsDue === undefined ? null : [incidentsDue.archive, incidentsDue.purge]], v: versions === undefined ? null : [keepVersions, ...versions.items.map((v) => `${v.versionId}@${v.revision}`)], x: revoked === undefined ? null : [values.revokedBytesDays, ...revoked.items.map((r) => r.recordId)] });
     const base: RunReport = {
-      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null || values.scratchArchiveDays !== null || values.scratchPurgeDays !== null || values.transcriptDays !== null || values.deliveryLogDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
+      dryRun, enabled: values.derivedDays !== null || values.generationRunDays !== null || values.contextRouteDays !== null || values.checkRecordDays !== null || values.concernDays !== null || values.stallEvidenceDays !== null || values.stallSpeedDays !== null || values.responsibilityHistoryDays !== null || values.noteArchiveDays !== null || values.scratchArchiveDays !== null || values.scratchPurgeDays !== null || values.transcriptDays !== null || values.deliveryLogDays !== null || values.agentMessageDays !== null, derivedDays: values.derivedDays, candidates, removed: 0, retained, partial,
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length - (wouldDelete?.length ?? 0), ...(dryRun ? { wouldDelete: wouldDelete ?? [] } : {}), counts } }),
       ...(this.#deps.incidents === undefined ? {} : { incidents: { archiveDays: values.incidentArchiveDays, purgeDays: values.incidentPurgeDays, ...(incidentsDue === undefined || !dryRun ? {} : { wouldArchive: incidentsDue.archive.length, wouldPurge: incidentsDue.purge.length, ...(incidentsDue.more ? { more: true } : {}) }) } }),
       ...(revoked === undefined ? {} : { revokedBytes: { days: values.revokedBytesDays!, candidates: revoked.items.map((r) => ({ name: r.name, version: r.version, ageDays: r.ageDays })), blanked: 0, partial: revoked.partial } }),
@@ -742,7 +782,7 @@ export class RetentionService {
           if (tier) removedIds.push(`${c.kind}/${c.id}`);
           continue;
         }
-        const done = await this.#removeOne(by, c, c.kind === "chat-turn" ? values.transcriptDays! : c.kind === "notification-delivery" ? values.deliveryLogDays! : c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
+        const done = await this.#removeOne(by, c, c.kind === "chat-turn" ? values.transcriptDays! : c.kind === "notification-delivery" ? values.deliveryLogDays! : c.kind === "agent-message" ? values.agentMessageDays! : c.kind === "generation-run" ? values.generationRunDays! : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? values.contextRouteDays! : c.kind === "responsibility-check" ? values.checkRecordDays! : c.kind === "stall-concern" ? values.concernDays! : c.kind === "stall-evidence" ? values.stallEvidenceDays! : c.kind === "stall-speed" ? values.stallSpeedDays! : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? values.responsibilityHistoryDays! : c.kind === "ctx-note-archive" ? values.noteArchiveDays! : c.kind === "thinking-record" ? values.thinkingDays : values.derivedDays!);
         if (done) removedIds.push(`${c.kind}/${c.id}`);
       }
     }
@@ -790,7 +830,7 @@ export class RetentionService {
       payload: { digest },
       build: async (): Promise<Built> => {
         const ref = { kind: "retention-run", id: runId };
-        const body = { at: stamp, by: by.id, auto, derivedDays: values.derivedDays, removed: removedIds.slice(0, 200), removedCount: removedIds.length, retained: retained.length, backupsDeleted: deleted ?? [], incidentsArchived: archived ?? 0, incidentsPurged: purged ?? 0 } as unknown as JsonObject;
+        const body = { at: stamp, by: by.id, auto, derivedDays: values.derivedDays, removed: removedIds.slice(0, 200), removedCount: removedIds.length, removedByKind: byKind(removedIds), retained: retained.length, backupsDeleted: deleted ?? [], incidentsArchived: archived ?? 0, incidentsPurged: purged ?? 0 } as unknown as JsonObject;
         return { ref, creates: true, changes: [{ type: "create", ref, body }], detail: { removed: removedIds.length, backupsDeleted: deleted?.length ?? 0 } };
       },
     }));
@@ -862,7 +902,7 @@ export class RetentionService {
           if (arc !== undefined) changes.push({ type: "delete", ref: { kind: "retention-archive", id: arc.id }, expectedRevision: arc.revision });
           // The chat's conversation context keeps a line of each recent turn (the start of the owner's words and the answer) per project: that copy goes with the turn's words, in the same command (review fix).
           if (c.kind === "chat-turn") { const ctx = await this.#contextWithout(fresh.body as { ownerId?: unknown }, c.id); if (ctx !== undefined) changes.push(ctx); }
-          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "notification-delivery" ? "delivery-log-days" : c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
+          return { ref, creates: false, changes, ...(arc === undefined ? {} : { audit: [{ type: "retention.expire.archive", subject: { kind: "retention-archive", id: arc.id }, detail: { with: c.id } }] }), detail: { rule: c.kind === "notification-delivery" ? "delivery-log-days" : c.kind === "agent-message" ? "agent-message-days" : c.kind === "generation-run" ? "generation-run-days" : c.kind === "ctx-route-archive" || c.kind === "ctx-admission" ? "context-route-days" : c.kind === "responsibility-check" ? "check-record-days" : c.kind === "stall-concern" ? "concern-days" : c.kind === "stall-evidence" ? "stall-evidence-days" : c.kind === "stall-speed" ? "stall-speed-days" : c.kind === "responsibility-event" || c.kind === "responsibility-incident-slot" ? "responsibility-history-days" : c.kind === "ctx-note-archive" ? "note-archive-days" : c.kind === "thinking-record" ? "thinking-days" : c.kind === "chat-turn" ? "transcript-days" : "derived-days", days, ageDays: c.ageDays, ...(c.projectId === undefined ? {} : { projectId: c.projectId }) } };
         },
       }));
       return !r.replayed;
