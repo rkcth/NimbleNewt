@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
 import { OWNER_SECRET_PREFIX } from "../admin/index.js";
+import { providerSecretRefusal } from "../setup/reserved-secrets.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { narratorFrom, stewardFrom } from "../meetings/agents.js";
@@ -147,6 +148,18 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     if (name.toLowerCase().startsWith(OWNER_SECRET)) throw new Error(`the secret name "${name.slice(0, 80)}" is reserved for the owner's credential, which is never sent to a model server or a database; name another secret`);
     return secrets.resolve(name);
   };
+  // The names the configuration keeps for something else: the database address and the transfer targets' (and a backup signing key given another name). A provider's key is sent to its model server, so none of these,
+  // nor the owner's credential, nor the fixed installation names, may be read as a provider's credential, whatever a record or the configuration says (the same check the provider is added under).
+  const keptSecrets: readonly string[] = [
+    ...(config.controller.storage.kind === "postgres" ? [config.controller.storage.url.secret] : []),
+    ...((config.controller.databaseTransfer?.targets ?? []) as readonly unknown[]).flatMap((t) => { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; return typeof n === "string" ? [n] : []; }),
+    ...(options.start?.backup?.signing?.secretName === undefined ? [] : [options.start.backup.signing.secretName]),
+  ];
+  const providerSecret = async (name: string): Promise<string | undefined> => {
+    const why = providerSecretRefusal(name, keptSecrets);
+    if (why !== undefined) throw new Error(`the secret name "${name.slice(0, 80)}" cannot be a model provider's credential: ${why}; name another secret`);
+    return named(name);
+  };
 
   let storage: StorageChoice;
   if (config.controller.storage.kind === "sqlite") storage = { kind: "sqlite", path: resolve(dataDir, config.controller.storage.path) };
@@ -173,7 +186,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     endpoint: (route): ModelEndpoint | undefined => {
       const e = endpoints.get(route.slice(0, route.indexOf("/")));
       if (e === undefined) return undefined;
-      return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await named(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+      return { url: e.endpoint, ...(e.credentialName === undefined ? {} : { headers: async () => { const key = await providerSecret(e.credentialName!); if (key === undefined) throw new Error(`the secret "${e.credentialName}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
     },
   });
   /** A route's endpoint for the worker host's relay: read from the records at each call, the key from the secret store by name at each call. */
@@ -187,7 +200,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     const name = record.credentialName;
     // No `kind` here: the relay takes an endpoint's own kind before the controller's, so the provider's recorded kind named here would go ahead of the operator's cache endpoint configuration, which the status view and
     // the controller's composition put first. The controller reads the provider's kind itself at each call when the cache configuration names none.
-    return { url: record.endpoint, ...(name === undefined ? {} : { headers: async () => { const key = await named(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
+    return { url: record.endpoint, ...(name === undefined ? {} : { headers: async () => { const key = await providerSecret(name); if (key === undefined) throw new Error(`the secret "${name}" is not in the secret store`); return { authorization: `Bearer ${key}` }; } }) };
   };
   const routes = async (): Promise<readonly string[]> => {
     if (live === undefined) return [];
@@ -259,7 +272,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
     // The Secrets form of the web chat (card U08) writes into the same store; the names this installation itself depends on (its own credential, the database address, the transfer targets') are never offered for writing.
-    ...(options.start?.adminSecrets !== undefined ? {} : { adminSecrets: { store: secrets, reserved: [ownerSecretName(dataDir), ...(config.controller.storage.kind === "postgres" ? [config.controller.storage.url.secret] : []), ...((config.controller.databaseTransfer?.targets ?? []) as readonly unknown[]).flatMap((t) => { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; return typeof n === "string" ? [n] : []; })] } }),
+    ...(options.start?.adminSecrets !== undefined ? {} : { adminSecrets: { store: secrets, reserved: [ownerSecretName(dataDir), ...keptSecrets] } }),
     chat: { interpreter },
     meetingRecords,
     ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),

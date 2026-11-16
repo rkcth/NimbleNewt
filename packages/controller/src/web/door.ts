@@ -7,6 +7,7 @@ import { REPLAY_LABELS } from "../activity/replay.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import type { Principal } from "../security/index.js";
 import { redactText } from "../security/redact.js";
+import { providerSecretRefusal } from "../setup/reserved-secrets.js";
 import { checkBinding, remoteAllowed, type WebNetwork } from "./binding.js";
 import { bucketOfAddress, checkTrustedProxy, clientAddress, type ResolvedProxy, type TrustedProxy } from "./proxy.js";
 import { DEFAULT_SESSION_LIMITS, WebSessionStore, type WebSession, type WebSessionLimits } from "./sessions.js";
@@ -223,7 +224,7 @@ function adminIntentOf(what: string, body: Record<string, unknown>): { text: str
     if (typeof ct !== "number" || !Number.isSafeInteger(ct) || ct < 1) throw new HttpError(400, "invalid_command", "contextTokens must be the model's context window as a whole number of tokens");
     const spec: Record<string, unknown> = { name, location, endpoint, models: names, contextTokens: ct };
     if (body["paid"] !== undefined) { if (typeof body["paid"] !== "boolean") throw new HttpError(400, "invalid_command", "paid must be true or false"); spec["paid"] = body["paid"]; }
-    if (body["credentialName"] !== undefined) { const c = body["credentialName"]; if (typeof c !== "string" || !SECRET_NAME.test(c)) throw new HttpError(400, "invalid_command", "credentialName must be the NAME of a secret (letters, digits, dots, dashes, underscores), never the key"); spec["credentialName"] = c; }
+    if (body["credentialName"] !== undefined) { const c = body["credentialName"]; if (typeof c !== "string" || !SECRET_NAME.test(c)) throw new HttpError(400, "invalid_command", "credentialName must be the NAME of a secret (letters, digits, dots, dashes, underscores), never the key"); const why = providerSecretRefusal(c); if (why !== undefined) throw new HttpError(400, "invalid_command", `credentialName: ${why}; name another secret`); spec["credentialName"] = c; }
     if (body["kind"] !== undefined) spec["kind"] = adminText(body["kind"], "kind", 30);
     const text = `Add the model provider ${name}, which runs ${location === "local" ? "locally" : "in the cloud"} at ${endpoint}, with the models ${names.join(", ")} and a context window of ${ct} tokens${spec["paid"] === true ? ", and it costs money" : ""}${spec["credentialName"] === undefined ? "" : `; its secret is named ${spec["credentialName"] as string}`}${spec["kind"] === undefined ? "" : `; it is a ${spec["kind"] as string} server`}`;
     if (text.length > 480) throw new HttpError(400, "invalid_command", "that provider is too long to say in one change from this page; say it in the chat");
