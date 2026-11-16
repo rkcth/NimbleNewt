@@ -44,6 +44,28 @@ export interface SettingItem {
   readonly note?: string;
 }
 
+/** The secret store's own name rule (no `__`, as the stores and configuration check it), so a name the store would refuse is refused before it, in words about the name. */
+const STORE_NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * The write behind the Secrets form of the web page (card U08), kept here so its checks are one tested function: only the owner's own credential (never an agent, a task credential, a client or a service), never
+ * a name the installation itself depends on (`reserved`: its own credential, the database address, the transfer targets', the backup signing key), never a name that itself looks like a key (it would be shown and
+ * recorded). The value goes to the store and nowhere else; what comes back is the name and whether an earlier value was replaced.
+ */
+export function secretWriter(authenticate: (token: string) => Promise<Principal>, store: { resolve(name: string): Promise<string | undefined>; set(name: string, value: string): Promise<void> }, reserved: readonly string[]): (token: string, name: string, value: string) => Promise<{ readonly name: string; readonly replaced: boolean }> {
+  const held = new Set(reserved);
+  return async (token, name, value) => {
+    const who = await authenticate(token);
+    if (who.kind !== "owner" || who.taskScope !== undefined) throw new DomainError("forbidden", "only the owner may write a secret");
+    if (typeof name !== "string" || !STORE_NAME.test(name)) throw new DomainError("invalid_command", "that is not a secret name (a letter, then letters, digits, '.', '_' or '-', at most 64, no '__')", { field: "name" });
+    if (redactText(name) !== name) throw new DomainError("invalid_command", "that name looks like a key; give the secret a name and put the key in the value field", { field: "name" });
+    if (held.has(name)) throw new DomainError("forbidden", `${name} is a name the installation itself depends on and is not written from the web page`);
+    const replaced = (await store.resolve(name).catch(() => undefined)) !== undefined;
+    await store.set(name, value);
+    return { name, replaced };
+  };
+}
+
 const isWild = (key: string): boolean => key.split(".").includes("*");
 const matches = (def: string, key: string): boolean => { const d = def.split("."), k = key.split("."); return d.length === k.length && d.every((x, i) => x === "*" || x === k[i]); };
 
@@ -80,7 +102,8 @@ export class AdminViewService {
       const state: SettingState = r === undefined ? "default" : r.lockedBy !== undefined ? "locked" : r.source.layer === "default" ? "default" : r.source.layer === own ? "set" : "inherited";
       const text = r === undefined ? undefined : JSON.stringify(r.value);
       const clipped = text !== undefined && text.length > ADMIN_LIMITS.value;
-      const shown = r === undefined ? undefined : clipped ? text!.slice(0, ADMIN_LIMITS.value) : typeof r.value === "string" ? redactText(r.value) : r.value;
+      // A value is configuration, never a secret (configuration refers to secrets by name), but whatever text the redactor recognises as a key is shown redacted, whole or clipped, string or not.
+      const shown = r === undefined ? undefined : clipped ? redactText(text!.slice(0, ADMIN_LIMITS.value)) : typeof r.value === "string" ? redactText(r.value) : redactText(text!) !== text ? redactText(text!) : r.value;
       const note = r?.lockedBy !== undefined ? `Locked by the ${r.lockedBy.layer} layer: layers below it cannot change it.` : r !== undefined && r.ignored.length > 0 ? `Not counted: ${r.ignored.slice(0, 2).map((i) => `${i.layer} (${i.reason})`).join("; ")}.` : def.installationOnly === true ? "Only the whole installation can set this; no narrower layer can override it." : def.kind === "restriction" ? "A restriction: a narrower layer can only tighten it, never widen it." : undefined;
       items.push({ key, description: def.description, kind: def.kind, effect: def.effect, installationOnly: def.installationOnly === true, ...(shown === undefined ? {} : { value: shown }), ...(clipped ? { valueClipped: true } : {}), state, source: r === undefined ? { layer: "default", id: "default" } : r.source, ...(r?.lockedBy === undefined ? {} : { lockedBy: r.lockedBy }), editable: own === "installation", ...(note === undefined ? {} : { note }) });
       if (items.length > ADMIN_LIMITS.settings) break;

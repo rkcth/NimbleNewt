@@ -165,7 +165,7 @@ export function thinkingIntent(body: Record<string, unknown>): { text: string; i
   return { text, intent: { kind: "command", op: "thinking.collection.set", args: { enabled }, evidence: text, basis: "owner" } };
 }
 const SETTING_NAME = /^[a-z][A-Za-z0-9_-]{0,39}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}){1,3}$/;
-const SECRET_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const SECRET_NAME = /^(?!.*__)[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const ADMIN_TEXT = /^[^\u0000-\u001f\u007f]*$/;
 /** The most a secret written on the page may be (the secret store's own limit is 16 KiB; the request body is bounded below it). */
 const SECRET_VALUE_MAX = 8 * 1024;

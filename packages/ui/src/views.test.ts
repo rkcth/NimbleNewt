@@ -411,6 +411,8 @@ test("the Secrets form is write only: the value is sent once, the field is empti
   assert.deepEqual([put[0]!.method, put[0]!.path, put[0]!.body], ["PUT", "/web/secrets/cloud-b-key", { value: LEAKED }]);
   assert.equal(put[0]!.headers["x-nn-csrf"], "csrf-1");
   assert.match(text(page.doc.byId.get("view")!), /Saved cloud-b-key\. The value is not shown again\./);
+  const live = page.doc.byId.get("view")!.find((e) => e.getAttribute("role") === "status" && e.getAttribute("aria-live") === "polite");
+  assert.ok(live.some((e) => /Saved cloud-b-key/.test(text(e))), "the outcome is in a live region, so a screen reader announces it");
   // Never kept: not in the outbox, not in storage, not on the page, not in the chat log.
   assert.ok(![...page.storage.map.values()].some((v) => v.includes(LEAKED)), "the browser keeps no copy");
   assert.doesNotMatch(text(page.doc.body), new RegExp(LEAKED));

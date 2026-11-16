@@ -773,6 +773,8 @@ export const APP_JS = String.raw`(function (root) {
     box.appendChild(el('h2', null, title));
     note(box, intro);
   }
+  /** Where an administration form says what became of a change (saved, sent, refused): a polite live region, so a screen reader announces it. */
+  function liveOut() { var o = el('div'); o.setAttribute('role', 'status'); o.setAttribute('aria-live', 'polite'); return o; }
   function labelled(parent, id, text, input) {
     var wrap = el('div', 'field');
     var l = el('label', null, text); l.setAttribute('for', id); input.id = id;
@@ -813,7 +815,7 @@ export const APP_JS = String.raw`(function (root) {
 
   function pageAdminSetup(box, parts) {
     adminHead(box, 'setup', 'First run', 'A new installation is set up from this page and the chat, with no file edited. Each step says whether it is done, and how to do the next one. Nothing here changes anything by itself.');
-    var out = el('div');
+    var out = liveOut();
     var ready = itemOf(parts.readiness);
     if (!failed(box, 'What is set up', parts.readiness) && ready) {
       var sec = region(box, ready.ready === true ? 'Ready: every required step is done' : 'What is set up');
@@ -869,7 +871,7 @@ export const APP_JS = String.raw`(function (root) {
   }
   function pageAdminSettings(box, parts) {
     adminHead(box, 'settings', 'Settings', 'Every setting, with the value in force and where it comes from: the default, set by you, inherited from a layer above, or locked. A change here is the same change the chat makes, in the same revision: it is shown first and applied when you say so.');
-    var out = el('div');
+    var out = liveOut();
     if (failed(box, 'Settings', parts.settings)) return;
     var got = itemOf(parts.settings) || {};
     var all = list(got.items, 300).map(obj).filter(Boolean);
@@ -894,7 +896,7 @@ export const APP_JS = String.raw`(function (root) {
 
   function pageAdminProviders(box, parts) {
     adminHead(box, 'providers', 'Providers', 'The model servers the team can use: where each runs, whether it costs money, its address, and the NAME of its secret with whether that secret is set. A key is never shown here and is never typed in chat; enter it in the Secrets section.');
-    var out = el('div');
+    var out = liveOut();
     if (failed(box, 'Providers', parts.providers)) return;
     var got = itemOf(parts.providers) || {};
     var items = list(got.items, 50).map(obj).filter(Boolean);
@@ -941,7 +943,7 @@ export const APP_JS = String.raw`(function (root) {
 
   function pageAdminSecrets(box, parts) {
     adminHead(box, 'secrets', 'Secrets', 'A key or password is entered here once and kept in this computer\'s secret store. It is write-only: nothing ever shows it again, it is not kept in this browser, and it is never typed in chat.');
-    var out = el('div');
+    var out = liveOut();
     if (secretNotice) { note(out, secretNotice); secretNotice = ''; }
     if (failed(box, 'Secrets', parts.secrets)) return;
     var got = itemOf(parts.secrets) || {};
@@ -991,7 +993,7 @@ export const APP_JS = String.raw`(function (root) {
 
   function pageAdminPolicy(box, parts) {
     adminHead(box, 'policy', 'Policy', 'How much the team asks you before it acts, and the standing rights you have given. The profile is the same one the chat changes; the Approvals tab shows what is waiting and the standing-rule proposals.');
-    var out = el('div');
+    var out = liveOut();
     var ready = itemOf(parts.readiness);
     var sec = region(box, 'Approval profile');
     var cur = currentProfile(ready);

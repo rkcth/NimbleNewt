@@ -1,1 +1,1 @@
-export { ADMIN_LIMITS, AdminViewService, type AdminDeps, type SettingItem, type SettingState } from "./admin.js";
+export { ADMIN_LIMITS, AdminViewService, secretWriter, type AdminDeps, type SettingItem, type SettingState } from "./admin.js";

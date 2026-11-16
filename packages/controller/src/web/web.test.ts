@@ -600,6 +600,11 @@ test("the Secrets form is write only: it needs the owner's session, CSRF and a n
     assert.equal((await put("cloud-b-key", { body: { value: "x".repeat(9000) } })).status, 400, "the page's own bound is 8 KiB");
     assert.equal(store.size, 0, "nothing was stored by a refused request");
     assert.equal((await put("owner-credential-x")).status, 403, "a name the installation depends on is not written from the page");
+    assert.equal((await put("backup-signing-key")).status, 403, "the backup signing key is always reserved");
+    assert.equal((await put("two__parts")).status, 400, "a name the store itself would refuse is refused as a name");
+    const keyName = await put("sk-proj-0123456789abcdefABCDEF0123456789");
+    assert.equal(keyName.status, 400, "a name that looks like a key is refused");
+    assert.doesNotMatch(keyName.text, /0123456789abcdefABCDEF/, "and is not echoed back");
     assert.equal(store.size, 0);
     const done = await put("cloud-b-key");
     assert.equal(done.status, 200, done.text);

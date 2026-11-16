@@ -68,7 +68,7 @@ import { WebChatDoor, type WebChatOptions } from "../web/index.js";
 import { CatalogPolicyService, CatalogService } from "../catalog/index.js";
 import { AdmissionService } from "../admission/index.js";
 import { HostService } from "../hosts/index.js";
-import { AdminViewService } from "../admin/index.js";
+import { AdminViewService, secretWriter } from "../admin/index.js";
 import { AgentSiteAllowances, NetworkGrantService } from "../network/index.js";
 import { RunningCallStore, ToolExecutionService, type BoundGateway, type ScriptLaunch, type BridgeRequest, type BridgeResponse, type ToolExecutionDeps } from "../toolbridge/index.js";
 import { CommandService, catalogSource } from "../commands/index.js";
@@ -1537,15 +1537,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         discardProposal: (token, request, options) => owned.discardProposal(token, request, options),
         history: (token, request) => owned.history(token, request),
         // The Secrets form of the page (card U08): the value goes to the host's secret store and nowhere else, and only the owner's own session may write. A name the installation depends on (its own credential) is never overwritten from here.
-        ...(options.adminSecrets === undefined ? {} : { putSecret: async (token: string, name: string, value: string) => {
-          const who = await principals.authenticate(token);
-          if (who.kind !== "owner" || who.taskScope !== undefined) throw new DomainError("forbidden", "only the owner may write a secret");
-          const admin = options.adminSecrets!;
-          if (admin.reserved?.includes(name) === true) throw new DomainError("forbidden", `${name} is a name the installation itself depends on and is not written from the web page`);
-          const replaced = (await admin.store.resolve(name).catch(() => undefined)) !== undefined;
-          await admin.store.set(name, value);
-          return { name, replaced };
-        } }),
+        // The backup signing key is always reserved (the backup's own restore of secrets refuses it too), whether or not backups are on now.
+        ...(options.adminSecrets === undefined ? {} : { putSecret: secretWriter((token) => principals.authenticate(token), options.adminSecrets.store, [...(options.adminSecrets.reserved ?? []), SIGNING_SECRET_NAME, ...(options.backup?.signing?.secretName === undefined ? [] : [options.backup.signing.secretName])]) }),
         query: async (token, op, args, commandId) => {
           const r = await api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args });
           return r.ok ? { ok: true, result: r.result } : { ok: false, error: { code: r.error.code, message: r.error.message } };

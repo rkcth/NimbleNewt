@@ -8,7 +8,8 @@ import { backends, stopServer, type Backend } from "../domain/testing/backends.j
 import { RoutingService } from "../routing/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { SetupProviderService } from "../setup/index.js";
-import { AdminViewService } from "./index.js";
+import { AdminViewService, secretWriter } from "./index.js";
+import { SIGNING_SECRET_NAME } from "../backup/index.js";
 
 // Card U08: the owner's reads for the settings and administration pages, on every storage backend: the value of a setting with its source and lock, the providers with the state of their secret (never the secret), the secret
 // names, and the sandbox of each host. Read only and owner only.
@@ -133,3 +134,45 @@ for (const backend of backends) {
     }, "darwin");
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: the Secrets form's write takes only the owner's own credential, never a reserved name, a name the store refuses or a name that looks like a key, and returns only the name (card U08)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const ownerToken = (await principals.bootstrapOwner({ name: "rob" })).token;
+      const owner = await principals.authenticate(ownerToken);
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "ann", grants: [{ action: "*", project: "*" }] } as never);
+      await principals.enroll(owner, { commandId: cid("e"), kind: "client", name: "viewer", grants: [] });
+      const tokens = { agent: (await principals.issueCredential(owner, "agent:ann")).token, client: (await principals.issueCredential(owner, "client:viewer")).token };
+      const stored = new Map<string, string>();
+      const write = secretWriter((t) => principals.authenticate(t), { resolve: async (n) => stored.get(n), set: async (n, v) => { stored.set(n, v); } }, ["owner-credential-x", SIGNING_SECRET_NAME]);
+      for (const t of Object.values(tokens)) await refuses("forbidden", () => write(t, "cloud-key", LEAK));
+      await assert.rejects(() => write("not-a-real-token", "cloud-key", LEAK));
+      await refuses("forbidden", () => write(ownerToken, "owner-credential-x", LEAK));
+      await refuses("forbidden", () => write(ownerToken, "backup-signing-key", LEAK));
+      await refuses("invalid_command", () => write(ownerToken, "two__parts", LEAK));
+      await refuses("invalid_command", () => write(ownerToken, "1abc", LEAK));
+      await refuses("invalid_command", () => write(ownerToken, "sk-proj-0123456789abcdefABCDEF0123456789", LEAK));
+      assert.equal(stored.size, 0, "nothing refused reached the store");
+      assert.deepEqual(await write(ownerToken, "cloud-key", LEAK), { name: "cloud-key", replaced: false });
+      assert.deepEqual(await write(ownerToken, "cloud-key", `${LEAK}2`), { name: "cloud-key", replaced: true });
+      assert.equal(stored.get("cloud-key"), `${LEAK}2`);
+    } finally { await world.close(); }
+  });
+}
+
+test("a setting value the redactor recognises as a key is shown redacted, as a list or clipped, never as it is (card U08)", async () => {
+  const KEY = "sk-proj-0123456789abcdefABCDEF0123456789";
+  const value = (v: unknown) => ({ value: v, source: { layer: "installation", id: "installation" }, ignored: [] });
+  const admin = new AdminViewService({
+    configuration: { settings: () => [{ key: "x.list", description: "d", kind: "default", effect: "now" }, { key: "x.long", description: "d", kind: "default", effect: "now" }, { key: "x.text", description: "d", kind: "default", effect: "now" }], effective: async () => ({ values: { "x.list": value(["a", KEY]), "x.long": value([KEY, "y".repeat(2000)]), "x.text": value(`key ${KEY}`) }, problems: [] }) } as never,
+    routing: async () => undefined, endpoints: async () => [], hosts: async () => [],
+  });
+  const owner = { id: "owner:rob", kind: "owner", name: "rob", grants: [] } as unknown as Principal;
+  const got = await admin.settings(owner);
+  assert.equal(got.items.length, 3);
+  assert.doesNotMatch(JSON.stringify(got), /0123456789abcdefABCDEF/);
+  assert.equal(got.items.find((i) => i.key === "x.long")!.valueClipped, true);
+});
