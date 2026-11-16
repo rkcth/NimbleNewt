@@ -38,6 +38,7 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
+import type { AdminViewService } from "../admin/index.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
@@ -288,6 +289,10 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
+  settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
+  providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
+  secrets: { keys: [], about: "owner only (card U08): the names of the secrets the installation uses and whether each is set; never a value. A secret is entered write-only on the web page's Secrets form or put in the host's secret store, never typed in chat" },
+  sandbox: { keys: [], about: "owner only (card U08): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox on Windows) and a warning where the boundary is weaker, as macOS Seatbelt's is" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
@@ -373,6 +378,10 @@ export type StatusRequest =
   | { readonly kind: "thinking"; readonly taskId: string; readonly after?: number; readonly limit?: number }
   | { readonly kind: "revocations"; readonly name?: string; readonly limit?: number }
   | { readonly kind: "approval_load"; readonly days?: number }
+  | { readonly kind: "settings"; readonly prefix?: string }
+  | { readonly kind: "providers" }
+  | { readonly kind: "secrets" }
+  | { readonly kind: "sandbox" }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "landing" }
   | { readonly kind: "wakes" }
@@ -506,6 +515,8 @@ export interface StatusDeps {
   /** The web chat listener's settings and signed-in browsers (card U07b). Absent, or no listener running: the view is not offered. */
   /** The optional work-in-progress backup (card P02b). Absent: the view is not offered. */
   readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly credential?: string; readonly approvalHeld?: boolean; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string; readonly grantId?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
+  /** The reads of the settings and administration pages (card U08); owner only. */
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
   readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
@@ -847,6 +858,10 @@ export class StatusService {
       case "meeting_desk_reads": { onlyKnown(request, ["kind", "occurrenceId", "deskRecordId", "limit"]); return this.deskReadLines(by, request); }
       case "standup_briefs": { onlyKnown(request, ["kind", "occurrenceId", "agent"]); return this.standupBriefLines(by, request); }
       case "approval_load": { onlyKnown(request, ["kind", "days"]); return this.approvalLoadLines(by, request.days); }
+      case "settings": { onlyKnown(request, ["kind", "prefix"]); return this.settingsLines(by, request.prefix); }
+      case "providers": { onlyKnown(request, ["kind"]); return this.providerLines(by); }
+      case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
+      case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1047,6 +1062,57 @@ export class StatusService {
       if (t.blocked.length > 0) out.push(line(`Task ${shown(t.taskId, 64)}: ${t.blocked.length} file(s) were left out because they looked like secrets or could not be carried: ${t.blocked.slice(0, 5).map((b) => `${shown(b.path, 80)} (${shown(b.reason, 80)})`).join("; ")}.`, tc));
     }
     return { observedAt: this.#runner.now(), lines: out };
+  }
+
+  /** The settings, for the owner (card U08): each with its value, whether it is the default, set by the owner, inherited or locked, and the layer it comes from. */
+  async settingsLines(by: Principal, prefix?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.admin.settings(by, prefix === undefined ? {} : { prefix });
+    const c = cite("configuration", "installation");
+    const shownItems = got.items.slice(0, 40);
+    const words = (i: (typeof got.items)[number]): string => (i.state === "default" ? (i.value === undefined ? "not set" : `${shown(JSON.stringify(i.value), 80)} (the default)`) : `${shown(JSON.stringify(i.value), 80)} (${i.state === "set" ? "set by you" : i.state === "locked" ? `locked by the ${i.lockedBy?.layer ?? "a higher"} layer` : `inherited from the ${i.source.layer} layer`})`);
+    return { observedAt: this.#runner.now(), lines: [
+      line(got.items.length === 0 ? (prefix === undefined ? "No settings are known." : `No setting starts with ${shown(prefix, 40)}.`) : `${got.items.length} setting(s)${prefix === undefined ? "" : ` starting with ${shown(prefix, 40)}`}; change one by saying so, and the chat shows the change first.`, c),
+      ...shownItems.map((i) => line(`${shown(i.key, 70)}: ${words(i)}; ${shown(i.description, 160)}`, c)),
+      ...(got.items.length > shownItems.length ? [line(`${got.items.length - shownItems.length} more are not shown; ask for a prefix such as provider or budget.`, c)] : []),
+      ...got.problems.slice(0, 5).map((p) => line(`These values do not fit together: ${shown(p, 200)}`, c)),
+    ] };
+  }
+
+  /** The model providers, for the owner (card U08). A key is never shown, only whether the secret of its name is set. */
+  async providerLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.admin.providers(by);
+    const c = cite("routing-table", "routing", got.revision);
+    if (got.items.length === 0) return { observedAt: this.#runner.now(), lines: [line("No model provider is set up yet. Say which model server to use and where it is; no key goes in chat.", c)] };
+    return { observedAt: this.#runner.now(), lines: [
+      line(`${got.items.length} model provider(s):`, c),
+      ...got.items.slice(0, 30).map((p) => line(`${shown(p.name, 40)}: ${p.location}, ${p.enabled ? "on" : "off"}, ${p.paid ? "costs money" : "free"}${p.endpoint === undefined ? "" : `, at ${shown(p.endpoint, 120)}`}${p.kind === undefined ? "" : ` (${shown(p.kind, 30)})`}; secret ${p.credentialName === undefined ? "not needed" : `${shown(p.credentialName, 64)} is ${p.secret}`}; models ${p.models.slice(0, 6).map((m) => `${shown(m.route.slice(p.name.length + 1), 60)} (${m.contextTokens} tokens)`).join(", ") || "none"}${(p.modelsMore ?? 0) + Math.max(0, p.models.length - 6) > 0 ? " and more" : ""}`, c)),
+    ] };
+  }
+
+  /** The names of the secrets in use and whether each is set (card U08); never a value. */
+  async secretLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.admin.secrets(by);
+    const c = cite("secret-names", "installation");
+    return { observedAt: this.#runner.now(), lines: [
+      line(got.writable ? `Secrets are kept in this computer's secret store${got.store === undefined ? "" : ` (${shown(got.store, 40)})`}. Enter one on the Secrets page of the web chat, or put it in the store on the machine; never type it in chat.` : "No secret store is connected to the web page, so a secret is put in the secret store on the machine, never typed in chat.", c),
+      ...(got.items.length === 0 ? [line("No secret is named yet.", c)] : got.items.slice(0, 50).map((i) => line(`${shown(i.name, 64)}: ${i.state}; used by ${i.usedBy.map((u) => shown(u, 60)).join(", ") || "nothing"}`, c))),
+    ] };
+  }
+
+  /** The sandbox each host uses, and a warning where its boundary is weaker (card U08, decision G01). */
+  async sandboxLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.admin.sandbox(by);
+    const c = cite("hosts", "sandbox");
+    const row = (who: string, f: { mechanism: string; os: string; boundary: string; warn: boolean; limits: readonly string[] }): Line => line(`${who}: ${f.mechanism} on ${shown(f.os, 30)}, ${f.boundary === "strong" ? "a strong boundary" : f.boundary === "weaker" ? "a WEAKER boundary" : "an unproven boundary"}${f.warn ? ` - ${shown(f.limits[0] ?? "", 200)}` : ""}`, c);
+    return { observedAt: this.#runner.now(), lines: [
+      ...(got.local === undefined ? [line("This controller runs no worker host on its own computer.", c)] : [row("This computer", got.local)]),
+      ...got.hosts.slice(0, 30).map((h) => row(`Host ${shown(h.hostId, 60)} (${h.freshness})`, h)),
+      line(got.warn ? "Take the weaker boundary into account where you choose or review where work runs; Linux's bubblewrap is the strongest." : "Every host listed uses a strong boundary.", c),
+    ] };
   }
 
   /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */

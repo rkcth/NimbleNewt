@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
 import { startController, type Controller, type StartOptions, type StorageChoice } from "../api/start.js";
+import { OWNER_SECRET_PREFIX } from "../admin/index.js";
 import { HttpModelCall } from "../chat/http-model.js";
 import { ModelInterpreter } from "../chat/model-interpreter.js";
 import { narratorFrom, stewardFrom } from "../meetings/agents.js";
@@ -47,7 +48,7 @@ export interface LauncherConfig {
 }
 
 /** The start of the name the owner's credential is kept under in the secret store; see ownerSecretName. */
-export const OWNER_SECRET = "nimblenewt-owner-token";
+export const OWNER_SECRET = OWNER_SECRET_PREFIX;
 /**
  * The name of the owner's credential in the secret store for the installation in `dataDir` (an absolute path). The Linux Secret Service and the macOS Keychain are one store per user account, shared by
  * every installation of that account, so a fixed name would let a second installation's first start overwrite the first one's credential (which cannot be derived again). The name carries a digest of
@@ -257,6 +258,8 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     ...(configuredWorkspaces.length === 0 ? {} : { workspaceRoots: configuredWorkspaces.map((w) => w.path) }),
     storage, argv: options.argv, env: options.env, print, dataDirectory: dataDir,
     ...(config.controller.databaseTransfer === undefined || config.controller.databaseTransfer.targets.length === 0 ? {} : { transfer: { ...(options.start?.transfer ?? {}), stateDirectory: join(dataDir, "transfer"), targets: options.start?.transfer?.targets ?? [], targetEntries: config.controller.databaseTransfer.targets, secrets: (name: string) => named(name) } }),
+    // The Secrets form of the web chat (card U08) writes into the same store; the names this installation itself depends on (its own credential, the database address, the transfer targets') are never offered for writing.
+    ...(options.start?.adminSecrets !== undefined ? {} : { adminSecrets: { store: secrets, reserved: [ownerSecretName(dataDir), ...(config.controller.storage.kind === "postgres" ? [config.controller.storage.url.secret] : []), ...((config.controller.databaseTransfer?.targets ?? []) as readonly unknown[]).flatMap((t) => { const n = (t as { url?: { secret?: unknown } } | null)?.url?.secret; return typeof n === "string" ? [n] : []; })] } }),
     chat: { interpreter },
     meetingRecords,
     ...(options.start?.reviewerModel === undefined && options.start?.reportInterrogation === undefined ? { reviewerModel } : {}),

@@ -54,6 +54,7 @@ import type { PlacementSettingsService } from "../remote/placement-settings.js";
 import type { MigrationGuardService } from "../migration/index.js";
 import type { ReconnectSettingsService } from "../remote/reconnect-settings.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
+import type { AdminViewService } from "../admin/index.js";
 import type { RemoteWorkerService } from "../remote/service.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { WipBackupApi } from "../wip-backup/index.js";
@@ -166,6 +167,8 @@ export interface StateApiDeps {
   readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept" | "pending">;
   /** When present, the owner can read the approval load, answer standing-rule proposals and the profile suggestion (cards A07b, A07c; U08). */
   readonly approvals?: ApprovalsFacade;
+  /** The reads of the settings and administration pages (card U08). */
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change" | "setBestEffort" | "enforced">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;
@@ -400,6 +403,7 @@ export class StateApi {
         ...(this.#deps.placement === undefined ? {} : { placement: this.#deps.placement }),
         ...(this.#deps.reconnect === undefined ? {} : { reconnect: this.#deps.reconnect }),
         ...(this.#deps.approvals === undefined ? {} : { approvals: this.#deps.approvals }),
+        ...(this.#deps.admin === undefined ? {} : { admin: this.#deps.admin }),
         ...(this.#deps.agreedLimits === undefined ? {} : { agreedLimits: this.#deps.agreedLimits }),
         ...(this.#deps.resumeSettings === undefined ? {} : { resumeSettings: this.#deps.resumeSettings }),
         ...(this.#deps.quietHostSettings === undefined ? {} : { quietHostSettings: this.#deps.quietHostSettings }),

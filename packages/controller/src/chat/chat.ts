@@ -431,6 +431,8 @@ export class ChatService {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
     const guard = guardOf(options);
+    // A policy edit (a setting, the approval profile, a grant) is shown first with its own ID and applied by the policy service, exactly as the typed "apply it" does: the Apply button of a page reaches the same code (card U08).
+    if (request.proposalId.startsWith("pedit-")) return endedOf(async () => { await guard?.(); return this.#applyEdit(owner, request.proposalId, request.commandId); });
     return endedOf(() => this.#apply(owner, token as string, request.proposalId, request.commandId, undefined, options.secrets !== false, guard));
   }
 
@@ -438,6 +440,7 @@ export class ChatService {
     const owner = await this.#owner(token);
     onlyKnown(request, ["commandId", "proposalId"]);
     const guard = guardOf(options);
+    if (request.proposalId.startsWith("pedit-")) return endedOf(async () => { await guard?.(); const edits = this.#deps.policyEdits; if (edits === undefined) throw new DomainError("unavailable", "policy editing by chat is not set up here"); const done = await edits.discard(owner, { commandId: request.commandId, editId: request.proposalId }); return { proposalId: done.editId, replayed: done.replayed }; });
     return endedOf(async () => { await guard?.(); return this.#discard(owner, request.proposalId, request.commandId, undefined); });
   }
 
@@ -2425,6 +2428,13 @@ export class ChatService {
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: asJson({ ...(current.body as unknown as TurnBody), resumedBy: byId }) }], detail: { by: byId } };
       },
     }));
+  }
+
+  async #applyEdit(owner: Principal, editId: string, commandId: string): Promise<ApplyResult> {
+    const edits = this.#deps.policyEdits;
+    if (edits === undefined) throw new DomainError("unavailable", "policy editing by chat is not set up here");
+    const done = await edits.apply(owner, { commandId, editId });
+    return { proposalId: editId, applied: done.status === "applied", replayed: done.replayed, results: [], ...(done.status === "applied" || done.failure === undefined ? {} : { failure: { step: 0, code: done.failure.code, message: done.failure.message } }) };
   }
 
   async #apply(owner: Principal, token: string, proposalId: string, commandId: string, fromTurn: string | undefined, allowSecrets = true, guard?: Guard): Promise<ApplyResult> {
