@@ -5,6 +5,7 @@ import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PauseService } from "../lifecycle/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { FakeApplier, MaintenanceService, type MaintenanceBody, type MaintenanceNotice, type MaintenanceOptions } from "./index.js";
@@ -19,7 +20,7 @@ let n = 0;
 const cid = (l: string): string => `${l}-${n++}`;
 
 interface World {
-  readonly owner: Principal; readonly storage: ControllerStorage; readonly applier: FakeApplier; readonly pauses: PauseService; readonly m: MaintenanceService;
+  readonly owner: Principal; readonly agents: AgentService; readonly storage: ControllerStorage; readonly applier: FakeApplier; readonly pauses: PauseService; readonly m: MaintenanceService;
   /** A service on another view of the same storage, with the pause fence on that same view (so a read through a spying view is seen by it). */
   on(storage: ControllerStorage, extra?: Partial<MaintenanceOptions>): MaintenanceService;
   make(name: string, supervisorId?: string): Promise<{ id: string; principal: Principal }>;
@@ -44,7 +45,7 @@ async function world(index: number, run: (w: World) => Promise<void>): Promise<v
     const on: World["on"] = (storage, extra = {}) => MaintenanceService.withEpoch(storage, epoch, { applier, heartbeatMs: 0, fence: (id) => pausesOn(storage).agentFence(id), ...extra }, options);
     const m = on(open.storage);
     await run({
-      owner, storage: open.storage, applier, pauses, m, on,
+      owner, agents, storage: open.storage, applier, pauses, m, on,
       make: async (friendlyName, supervisorId) => {
         const created = await agents.create(owner, { commandId: cid("a"), friendlyName, ...(supervisorId === undefined ? {} : { supervisorId }) });
         return { id: created.id, principal: await principals.authenticate((await principals.issueCredential(owner, `agent:${created.id}`)).token) };
@@ -84,13 +85,13 @@ for (const [index, backend] of backends.entries()) {
         assert.equal((await w.gate(adm.id)) !== undefined, existing);
         const id = (await ask(w, ann.principal, "base", { change: "newer interpreter" })).maintenanceId;
         const race = afterRead(w.storage, "pause-gate", gateId(adm.id), async () => { await w.pause(adm.id); });
-        await refuses("forbidden", () => decide(w, w.on(race.view), adm.principal, id), /paused at the same moment.*not recorded.*still waiting.*one order/s);
+        await refuses("forbidden", () => decide(w, w.on(race.view), adm.principal, id), /paused at the same moment.*decision was not recorded.*request is unchanged.*one order/s);
         assert.equal(race.fired(), true, "the pause was placed in the window");
         assert.equal((await w.body(id)).status, "pending");
         assert.equal((await w.gate(adm.id))?.intent, "pause", "the pause stands");
         assert.equal(w.applier.calls.length, 0, "nothing was applied");
         // While it is paused it does not decide, and is told that this is why (not a general refusal).
-        await refuses("forbidden", () => decide(w, w.m, adm.principal, id), /is paused, and a paused agent does not decide.*keeps waiting/s);
+        await refuses("forbidden", () => decide(w, w.m, adm.principal, id), /is paused, and a paused agent does not decide.*left as it is/s);
         // The owner is not held by it; resumed, the administrator decides.
         await w.resume(adm.id);
         assert.equal((await decide(w, w.m, adm.principal, id)).status, "applied");
@@ -156,25 +157,67 @@ for (const [index, backend] of backends.entries()) {
       await w.m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
       const two = (await ask(w, ann.principal, "host-policy", { setting: "worker-limits", change: "more memory" })).maintenanceId;
       const race2 = afterRead(w.storage, "pause-gate", gateId(adm.id), async () => { await w.pause(adm.id); });
-      await refuses("forbidden", () => w.on(race2.view).revoke(adm.principal, { commandId: cid("v"), maintenanceId: two, reason: "not now" }), /paused at the same moment/);
+      await refuses("forbidden", () => w.on(race2.view).revoke(adm.principal, { commandId: cid("v"), maintenanceId: two, reason: "not now" }), /paused at the same moment, so its revocation was not recorded/);
       assert.equal((await w.body(two)).status, "pending");
       await w.resume(adm.id);
       assert.equal((await w.m.revoke(adm.principal, { commandId: cid("v"), maintenanceId: two, reason: "not now" })).status, "withdrawn");
     });
   });
 
-  test(`two requests decided at once by different administrators are not refused by the gate they share: the one that loses is told to ask again, and none is lost (${backend.name})`, async () => {
+  test(`two requests decided at once by different administrators both stand: the one that meets the other's first write of a shared gate is built again, not refused (${backend.name})`, async () => {
     await world(index, async (w) => {
       const a1 = await w.make("AdminOne"); const a2 = await w.make("AdminTwo");
       const ann = await w.make("Ann");
       await w.m.change(w.owner, { commandId: cid("adm"), administrators: [a1.id, a2.id] });
       const x = (await ask(w, ann.principal, "base", { change: "one" })).maintenanceId;
       const y = (await ask(w, ann.principal, "host-policy", { setting: "worker-limits", change: "two" })).maintenanceId;
-      const results = await Promise.allSettled([decide(w, w.m, a1.principal, x, "reject"), decide(w, w.m, a2.principal, y, "reject")]);
-      for (const [i, r] of results.entries()) if (r.status === "rejected") assert.ok(r.reason instanceof DomainError && ["stale_revision", "command_conflict"].includes(r.reason.code), String(r.reason));
-      // Asked again, each is decided.
-      for (const [id, p] of [[x, a1.principal], [y, a2.principal]] as const) if ((await w.body(id)).status === "pending") await decide(w, w.m, p, id, "reject");
+      const installation = PauseService.gateIdOf({ kind: "installation", id: "installation" });
+      assert.equal(await w.storage.getAggregate({ kind: "pause-gate", id: installation }), undefined, "no gate exists yet: both decisions create the installation's");
+      // The second decision is written entirely inside the first one's window: after the first read the installation's gate as absent (so it meant to create it).
+      const race = afterRead(w.storage, "pause-gate", installation, async () => { assert.equal((await decide(w, w.m, a2.principal, y, "reject")).status, "rejected"); });
+      assert.equal((await decide(w, w.on(race.view), a1.principal, x, "reject")).status, "rejected");
+      assert.equal(race.fired(), true);
       assert.deepEqual([(await w.body(x)).status, (await w.body(y)).status], ["rejected", "rejected"]);
+      assert.deepEqual([(await w.body(x)).decision?.by, (await w.body(y)).decision?.by], [a1.principal.id, a2.principal.id]);
+    });
+  });
+
+  test(`a change to the deciding administrator's own record at the same moment does not refuse the decision with a false answer: it is built again and stands; a move into a paused team is refused as paused (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const adm = await w.make("Admin"); const ann = await w.make("Ann");
+      await w.m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
+      const x = (await ask(w, ann.principal, "base", { change: "one" })).maintenanceId;
+      const rename = afterRead(w.storage, "pause-gate", gateId(adm.id), async () => {
+        const rec = (await w.storage.getAggregate({ kind: "agent", id: adm.id }))!;
+        await w.agents.update(w.owner, { commandId: cid("u"), agentId: adm.id, expectedRevision: rec.revision, friendlyName: "Admin Renamed" });
+      });
+      assert.equal((await decide(w, w.on(rename.view), adm.principal, x, "reject")).status, "rejected");
+      assert.equal(rename.fired(), true);
+      // Moved into a team that is paused, in the window: the decision is refused, and the answer says it is paused.
+      const y = (await ask(w, ann.principal, "host-policy", { setting: "worker-limits", change: "two" })).maintenanceId;
+      const team = (await w.agents.createTeam(w.owner, { commandId: cid("tm"), name: "Night" })).id;
+      await w.pauses.pause(w.owner, { commandId: cid("pz"), scope: { kind: "team", id: team }, reason: "hold" });
+      const move = afterRead(w.storage, "pause-gate", gateId(adm.id), async () => {
+        const rec = (await w.storage.getAggregate({ kind: "agent", id: adm.id }))!;
+        await w.agents.update(w.owner, { commandId: cid("u"), agentId: adm.id, expectedRevision: rec.revision, teamId: team });
+      });
+      await refuses("forbidden", () => decide(w, w.on(move.view), adm.principal, y, "reject"), /paused/);
+      assert.equal(move.fired(), true);
+      assert.equal((await w.body(y)).status, "pending");
+    });
+  });
+
+  test(`a paused agent that may not decide a request for another reason is given the ordinary refusal, not told to be resumed (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const boss = await w.make("Boss");
+      const bob = await w.make("Bob", boss.id);
+      await w.m.toggle(w.owner, { commandId: cid("t"), what: "bosses", enabled: true });
+      await w.m.change(w.owner, { commandId: cid("s"), bossKinds: ["package"] });
+      const id = (await ask(w, bob.principal, "network", { site: "example.org", port: 443 })).maintenanceId;
+      await w.pause(boss.id);
+      await refuses("forbidden", () => decide(w, w.m, boss.principal, id, "reject"), /may not decide this maintenance request/);
+      const pk = (await ask(w, bob.principal, "package", pkg("paused-boss"))).maintenanceId;
+      await refuses("forbidden", () => decide(w, w.m, boss.principal, pk, "reject"), /is paused/);
     });
   });
 
@@ -213,6 +256,21 @@ for (const [index, backend] of backends.entries()) {
       assert.deepEqual(closed, [one, two]);
       await m.decide(w.owner, { commandId: cid("d"), maintenanceId: other, verdict: "reject", specDigest: (await w.body(other)).specDigest });
       assert.deepEqual(closed, [one, two], "an ordinary request has no administrator notice to close");
+    });
+  });
+
+  test(`the controller closes the administrators' notices of one request in every project they were raised in, and nothing else (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const svc = NotificationService.withEpoch(w.storage, (await ProjectService.open(w.storage, { holder: "c1", clock: () => "2026-11-16T10:00:00.000Z", pause: async () => undefined })).epoch, { clock: () => "2026-11-16T10:00:00.000Z" });
+      const one = "mnt-aaaaaaaaaaaaaaaaaaaa"; const other = "mnt-bbbbbbbbbbbbbbbbbbbb";
+      const emit = (id: string, projectId: string, refKind = "maintenance-admin") => svc.emitFromController({ commandId: cid("e"), kind: "maintenance", level: "notice", ref: { kind: refKind, id }, projectId, detail: "an administrator may decide it" });
+      await emit(`${one}-11111111`, "proj-garden"); await emit(`${one}-22222222`, "proj-orchard");
+      await emit(`${other}-11111111`, "proj-garden"); await emit(one, "proj-garden", "maintenance");
+      assert.deepEqual(await svc.settleRefsFromController({ kind: "maintenance", refKind: "maintenance-admin", idPrefix: one }), { closed: 2 });
+      const open = (await svc.inbox(w.owner)).items.filter((i) => i.state !== "answered" && i.state !== "settled").map((i) => `${i.ref.kind}:${i.ref.id}`).sort();
+      assert.deepEqual(open, [`maintenance-admin:${other}-11111111`, `maintenance:${one}`]);
+      assert.deepEqual(await svc.settleRefsFromController({ kind: "maintenance", refKind: "maintenance-admin", idPrefix: one }), { closed: 0 }, "a second close finds nothing");
+      await refuses("invalid_command", () => svc.settleRefsFromController({ kind: "maintenance", refKind: "maintenance-admin", idPrefix: "mnt-" }));
     });
   });
 }

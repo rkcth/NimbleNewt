@@ -308,6 +308,17 @@ export interface MaintenanceOptions {
   readonly inspectQueue?: number;
 }
 
+/** A refusal of a decision or revocation that lost only to an unrelated write at the same moment (the request unchanged, the decider not paused): nothing was recorded, so it is sent again. */
+const AGAIN = new WeakSet<DomainError>();
+/** How many times a decision or revocation is built and written when it loses only to such a write. */
+const DECIDE_ATTEMPTS = 3;
+/** Runs `run` again while it loses only to an unrelated write (see `AGAIN`), at most `DECIDE_ATTEMPTS` times in all. */
+const again = async <T>(run: () => Promise<T>): Promise<T> => {
+  for (let attempt = 1; ; attempt++) {
+    try { return await run(); } catch (error) { if (!(error instanceof DomainError && AGAIN.has(error)) || attempt >= DECIDE_ATTEMPTS) throw error; }
+  }
+};
+
 /** The changes without repeats of the same record (the first one for a record stands: it is the revision first read). */
 const fenced = (changes: readonly Change[]): Change[] => { const seen = new Set<string>(); return changes.filter((c) => { const k = `${c.ref.kind}\u0000${c.ref.id}`; if (seen.has(k)) return false; seen.add(k); return true; }); };
 
@@ -404,11 +415,11 @@ export class MaintenanceService {
    * itself), the owner has handed this kind to supervisors (`bossKinds`, off by default: every kind that widens the sandbox is the owner's otherwise), and a mount is for the requester's own resource (`<agent key>.name`) or a
    * shared one (`shared.name`) read-only: another agent's, the owner's and write access to a shared one are the owner's.
    */
-  async #bossFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, fences?: Change[]): Promise<boolean> {
+  async #bossFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, fences?: Change[], ignoreHold = false): Promise<boolean> {
     if (b.class === "protected" || by.taskScope !== undefined || !eff.bosses || !eff.bossKinds.includes(b.kind)) return false;
     if (!(await this.#isSupervisorOf(by, b.agentId))) return false;
     // A supervisor that a pause, suspend or stop gate holds does not decide (fail closed, also when the gate cannot be read): its approval may not be made, and one that waited is judged again at the claim.
-    if (await this.#holds(by.id.slice("agent:".length), fences)) return false;
+    if (!ignoreHold && await this.#holds(by.id.slice("agent:".length), fences)) return false;
     const target = await this.#agent(b.agentId);
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // A legacy agent has no record of who chose its supervisor: that is unknown, so a boss may not decide a kind that widens the sandbox for it (the owner does).
@@ -448,11 +459,11 @@ export class MaintenanceService {
    * Whether `by` may decide this protected request as an administrator: the owner named it (`administrators`), it is an active agent no pause, suspend or stop gate holds (fail closed), it is not a task credential, it is not the requester,
    * it is not the requester's own hand (it did not create the requester or choose its supervisor, and nobody the requester controls made it), and it is not in the requester's line of management either way (its team). The supervisor role plays no part.
    */
-  async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, reads?: Map<string, number>, fences?: Change[]): Promise<boolean> {
+  async #adminFor(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, reads?: Map<string, number>, fences?: Change[], ignoreHold = false): Promise<boolean> {
     if (b.class !== "protected" || by.kind !== "agent" || by.taskScope !== undefined || !by.id.startsWith("agent:") || !eff.administrators.includes(by.id)) return false;
     if (by.id === b.agentId || by.id === b.requestedBy) return false;
     if ((await this.#agent(by.id, reads))?.state !== "active") return false;
-    if (await this.#holds(by.id.slice("agent:".length), fences)) return false;
+    if (!ignoreHold && await this.#holds(by.id.slice("agent:".length), fences)) return false;
     const target = await this.#agent(b.agentId, reads);
     if (target?.createdBy === by.id || target?.supervisorSetBy === by.id) return false;
     // Not its own team either: an administrator above the requester (its supervisor, or further up by supervisor or creator) would approve what it can direct the requester to ask for, and one below the requester is directed by it.
@@ -734,12 +745,12 @@ export class MaintenanceService {
 
   // ---- deciding ------------------------------------------------------------------------------------------------------------------
 
-  async #decider(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, fences?: Change[]): Promise<"owner" | "administrator" | "supervisor"> {
+  async #decider(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, fences?: Change[], ignoreHold = false): Promise<"owner" | "administrator" | "supervisor"> {
     if (by.kind === "owner") return "owner";
     // An administrator the owner named decides the protected kinds, and only those; being a supervisor, however placed, is no part of it.
-    if (b.class === "protected" && await this.#adminFor(by, b, eff, undefined, fences)) return "administrator";
+    if (b.class === "protected" && await this.#adminFor(by, b, eff, undefined, fences, ignoreHold)) return "administrator";
     // A supervisor role alone never reaches the protected base or host policy, nor any kind the owner has not handed over; a task credential never decides; nobody decides their own request.
-    if (by.id === b.agentId || by.id === b.requestedBy || !(await this.#bossFor(by, b, eff, fences))) throw new DomainError("forbidden", `${by.id} may not decide this maintenance request`);
+    if (by.id === b.agentId || by.id === b.requestedBy || !(await this.#bossFor(by, b, eff, fences, ignoreHold))) throw new DomainError("forbidden", `${by.id} may not decide this maintenance request`);
     return "supervisor";
   }
 
@@ -755,7 +766,7 @@ export class MaintenanceService {
     this.#expected(command.expectedRevision);
     const ref: AggregateRef = { kind: REQ, id };
     let protectedDecided = false;
-    const result = await this.#runner.command("maintenance.decide", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const result = await again(() => this.#runner.command("maintenance.decide", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { maintenanceId: id, verdict, specDigest: digest, note: note ?? null, expectedRevision: command.expectedRevision ?? null },
       build: async (): Promise<Built> => {
         const fences: Change[] = [];
@@ -773,21 +784,24 @@ export class MaintenanceService {
         const next: MaintenanceBody = { ...b, status: verdict === "approve" ? "approved" : "rejected", decision: { by: by.id, verdict, via, specDigest: digest, at: now, ...(note === undefined ? {} : { note }) } };
         const idx = await this.#indexChanges(id, next);
         // What the pause check read is locked in the same commit: a pause placed on the decider meanwhile and this decision go in one order, and the one that comes second fails and is told so.
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...(await this.#closePending(b.agentId)), ...idx, ...fenced(fences)], audit: this.#removed(idx), detail: { verdict, via, agentId: b.agentId, kind: b.kind, specDigest: digest }, contention: async () => this.#lostRace(id, by, b) };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...(await this.#closePending(b.agentId)), ...idx, ...fenced(fences)], audit: this.#removed(idx), detail: { verdict, via, agentId: b.agentId, kind: b.kind, specDigest: digest }, contention: async () => this.#lostRace(id, by, found.revision, "decision", fences.length > 0) };
       },
-    }));
+    })));
     if (!result.replayed && protectedDecided) await this.#options.closed?.(id).catch(() => undefined);
     const status = ((await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody).status;
     if (!result.replayed && verdict === "approve") await this.drive(id).catch(() => undefined);
     return { revision: result.revision, status: ((await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody | undefined)?.status ?? status };
   }
 
-  /** Decides who is deciding, as `#decider`; an agent that is held is told plainly that this is why (and that the request keeps waiting) instead of the general refusal. */
+  /**
+   * Decides who is deciding, as `#decider`; an agent that is held, and would otherwise decide this request, is told plainly that this is why (and that the request keeps waiting) instead of the general refusal. One that
+   * may not decide it for another reason gets the general refusal, paused or not (resuming it would not help).
+   */
   async #decideBy(by: Principal, b: MaintenanceBody, eff: MaintenanceEffective, fences: Change[]): Promise<"owner" | "administrator" | "supervisor"> {
     try { return await this.#decider(by, b, eff, fences); } catch (error) {
       if (error instanceof DomainError && error.code === "forbidden" && by.kind === "agent" && by.taskScope === undefined && by.id.startsWith("agent:")
-        && (b.class === "protected" ? eff.administrators.includes(by.id) : await this.#isSupervisorOf(by, b.agentId)) && await this.#holds(by.id.slice("agent:".length))) {
-        throw new DomainError("forbidden", `${by.id} is paused, and a paused agent does not decide; the request keeps waiting (the owner can decide it, or resume ${by.id} first)`);
+        && await this.#holds(by.id.slice("agent:".length)) && await this.#decider(by, b, eff, undefined, true).then(() => true, () => false)) {
+        throw new DomainError("forbidden", `${by.id} is paused, and a paused agent does not decide or revoke; the request is left as it is (the owner can decide it, or resume ${by.id} first)`);
       }
       throw error;
     }
@@ -796,14 +810,18 @@ export class MaintenanceService {
    * What a decision or revocation answers when its commit failed on a record it had read. If the request itself changed, that is said (as before); otherwise, if the decider is paused now, the pause went first and the answer says so:
    * a pause and a decision that arrive together are put in one order, the first to be written stands, and the other is refused or applied after it (never both silently).
    */
-  async #lostRace(id: string, by: Principal, was: MaintenanceBody): Promise<DomainError> {
+  async #lostRace(id: string, by: Principal, wasRevision: number, act: "decision" | "revocation", pauseFenced: boolean): Promise<DomainError> {
     const now = await this.#runner.get(REQ, id);
-    const b = now?.body as unknown as MaintenanceBody | undefined;
-    if (now === undefined || b === undefined) return new DomainError("not_found", "no such maintenance request");
-    if (b.status === was.status && by.kind === "agent" && by.id.startsWith("agent:") && await this.#holds(by.id.slice("agent:".length))) {
-      return new DomainError("forbidden", `${by.id} was paused at the same moment, so its decision was not recorded and the request is still waiting. A pause and a decision that arrive together are put in one order, and here the pause came first (the owner can decide the request, or resume ${by.id} first).`);
+    if (now === undefined) return new DomainError("not_found", "no such maintenance request");
+    if (now.revision !== wasRevision) return new DomainError("stale_revision", `maintenance ${id} changed meanwhile and is now at revision ${now.revision}`, { currentRevision: now.revision });
+    if (pauseFenced && by.kind === "agent" && by.id.startsWith("agent:") && await this.#holds(by.id.slice("agent:".length))) {
+      return new DomainError("forbidden", `${by.id} was paused at the same moment, so its ${act} was not recorded and the request is unchanged. A pause and a ${act} that arrive together are put in one order, and here the pause came first (the owner can decide the request, or resume ${by.id} first).`);
     }
-    return new DomainError("stale_revision", `maintenance ${id} changed meanwhile and is now at revision ${now.revision}`, { currentRevision: now.revision });
+    // The request is as it was and the decider is not paused: what changed is another record this write rested on (the decider's own record or its team, a pause gate created at the same moment by another decision, the
+    // requester's count of open requests). Nothing was recorded, so it is built again from what is there now (`again`); this text is the answer only after several such losses in a row.
+    const e = new DomainError("stale_revision", `other changes were written at the same moment as this ${act}, several times in a row, so it was not recorded and maintenance ${id} is unchanged; send it again`, { currentRevision: now.revision });
+    AGAIN.add(e);
+    return e;
   }
   async #closePending(agentId: string): Promise<Change[]> {
     const idx = await this.#runner.get(OPEN, openKey(agentId));
@@ -844,7 +862,7 @@ export class MaintenanceService {
     const reason = redactText(text(command.reason, "reason", { min: 1, max: MAINTENANCE_LIMITS.note }));
     this.#expected(command.expectedRevision);
     const ref: AggregateRef = { kind: REQ, id };
-    const result = await this.#runner.command("maintenance.revoke", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const result = await again(() => this.#runner.command("maintenance.revoke", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { maintenanceId: id, reason, expectedRevision: command.expectedRevision ?? null },
       build: async (): Promise<Built> => {
         const found = await this.#runner.get(REQ, id);
@@ -868,9 +886,9 @@ export class MaintenanceService {
         }
         const idx = await this.#indexChanges(id, next);
         extra.push(...idx);
-        return { ref, creates: false, audit: this.#removed(idx), changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra, ...fenced(fences)], detail: { agentId: b.agentId, kind: b.kind, from: b.status, by: by.id }, contention: async () => this.#lostRace(id, by, b) };
+        return { ref, creates: false, audit: this.#removed(idx), changes: [{ type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }, ...extra, ...fenced(fences)], detail: { agentId: b.agentId, kind: b.kind, from: b.status, by: by.id }, contention: async () => this.#lostRace(id, by, found.revision, "revocation", fences.length > 0) };
       },
-    }));
+    })));
     await this.drive(id).catch(() => undefined);
     const b = (await this.#runner.get(REQ, id))?.body as unknown as MaintenanceBody;
     if (!result.replayed && b.class === "protected") await this.#options.closed?.(id).catch(() => undefined);
