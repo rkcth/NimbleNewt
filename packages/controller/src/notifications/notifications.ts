@@ -965,6 +965,23 @@ export class NotificationService {
   }
 
   /**
+   * Closes every open item of one kind whose record ID begins with `idPrefix`, in whatever project it was raised (the controller's own call, for a service whose notices are anchored in several projects and that no longer knows
+   * which; card A09 follow-up T6b). Returns how many were closed. Bounded by the open items: the prefix must be at least 8 characters, so a loose call cannot close unrelated ones.
+   */
+  async settleRefsFromController(command: { readonly kind: NotificationKind; readonly refKind: string; readonly idPrefix: string }): Promise<{ closed: number }> {
+    if (!NOTIFICATION_KINDS.includes(command.kind)) invalid("kind", `must be one of ${NOTIFICATION_KINDS.join(", ")}`);
+    if (typeof command.idPrefix !== "string" || command.idPrefix.length < 8) invalid("idPrefix", "must be at least 8 characters");
+    let closed = 0; let problem: unknown;
+    const open = this.#openIds((await this.#index()).body);
+    for (const item of await this.#load<ItemBody>("notification-item", open)) {
+      if (item.kind !== command.kind || item.ref.kind !== command.refKind || !item.ref.id.startsWith(command.idPrefix) || item.state === "answered" || item.state === "settled") continue;
+      try { if (await this.#settle(item, this.#runner.now())) closed++; } catch (error) { problem ??= error; }
+    }
+    if (problem !== undefined) throw problem;
+    return { closed };
+  }
+
+  /**
    * One page of the open items that wait on the owner and belong to a project (card U11d), for the stopped-work and critical-path watches: a blocker, a review request or an owner question that is still Needs you (not yet
    * Urgent for another reason), or that one of the watches itself raised (`stopped`, `critical`), so it can be put back. Controller only (an internal call, never exposed through the state API). Bounded: at most `limit`
    * items of the open list after the cursor `after`; `next` is where to go on. Holds IDs and the controller-built label, nothing the record says. `taskId` is the task the item's record is about, read from that record (never
