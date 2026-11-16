@@ -11834,6 +11834,26 @@ Checked and left as is: every admin view and the secret route go through the doo
 
 **Judged.** Register's new refusals are compatible: an archived or purged record had an empty body, so registering it gave a tool with empty text; the revision check pins the revision whose digest is recorded (sources are read before the command), and a stale one asks to register again. The remaining window (register committing after retention's last catalog read and before its write) is documented and is the same accepted window as `#blankExecutable`. The four backends behave the same (`check` is a standard change covered by the storage conformance suite).
 
+## T1: three wrong statements corrected (docs only)
+
+**Done.** Each claim was checked against the code or the workflow files first.
+- `api/docs.ts` Scope bullet (and the generated `api-v1.md`): it no longer says an unreadable thing "reads exactly like" a missing one. It now says existence is never revealed and gives the real answers: projects and tasks answer `forbidden` for a real and a made-up ID alike (only the owner sees `not_found`); operations whose text says "not found" answer `not_found` for both; conversation writes answer `forbidden` for both (`security/access.ts` `requireAction`, `security/secured.ts` `#hide`, D02 review notes).
+- `environment/supported.ts` Node evidence: only 22.19.0 on Linux runs on every push (`ci.yml`); 22.19.0 and 24.21.0 run in `exhaustive.yml` and `qa.yml`. No test asserted the old text.
+- `compatibility-and-support.md`: the exhaustive run starts by hand or on a `v*` tag; the QA run is by hand only (`qa.yml` has `workflow_dispatch` only).
+
+**Not done / left.** `implementation-plan/g02-acceptance.md` line 11 still says the CI matrix ran Node 24.21.0 "on every push"; it is a dated historical record of an earlier CI layout, so it was left unedited. ASSUMPTION: historical records are not rewritten.
+
+### T1 review (Claude agent, Opus 5.5, clean context, 2026-11-15)
+
+Checked each claim against the code and the workflow files, and ran a probe on the built controller (owner, an agent with no grants, an agent with `project.read` and `task.read` on `*`; real and made-up IDs of the right shape).
+
+**Fixed.**
+- The Scope bullet said only the owner sees `not_found` for projects. An agent whose grant covers the project ID (for example a `*` grant) passes `requireAction`, and `project.get` then answers `not_found: no such project` for a made-up ID (probe). Tasks go through `#hide`, which gives `not_found` only to the owner (the `*` agent got `forbidden` "may not read that" for a made-up task). The bullet now says so, and `architecture.md` step 3, which repeated the same claim, likewise.
+- The bullet named "thread reads" and "conversation writes". Those are routes of the conversation listener (`conversation-and-mcp-protocol.md` already states them), not state API operations; `api-v1.md` documents the state API only, so they were removed. "Meetings" was dropped from the `not_found` examples: `meeting.settle` answers `forbidden` for a missing meeting even to the owner, and `meeting.occurrence`'s text does not say "not found". The examples are now `job.get`, `deliverable.get` and `agent.get`, whose texts do.
+- `ci.yml` runs on a push to `main` and on pull requests, not on every push: the Node evidence in `supported.ts` and `compatibility-and-support.md` now says so.
+
+**Verified as written.** `exhaustive.yml`: `workflow_dispatch` and `v*` tags, Node 22.19.0 and 24.21.0 on ubuntu, macOS and Windows. `qa.yml`: `workflow_dispatch` only; its `qa` job uses both Node versions on the three systems (its `g04` job Node 22.19.0 only). `ci.yml`: ubuntu, Node 22.19.0 only. `own-hardware.yml` and `postgres-versions.yml` are hand-started and not mentioned. `security-guide.md` line 9 is consistent. Dated records (`g01-decision-record.md`, `g02-acceptance.md`, `g04-evidence.md`) left as they are.
+
 ## T4: a provider's credential name may not be a secret kept for something else
 
 **Done.** A model provider's `credentialName` is read from the secret store and sent to that provider's server as a bearer token, so it must never name a secret the installation keeps for another purpose. These are now refused: the database address secret, a database transfer target's address secret, the backup signing key (`backup-signing-key`, or the name given in the backup options), and any name starting with `OWNER_SECRET_PREFIX` (`nimblenewt-owner-token`, exported from `admin/admin.ts`). Letter case is ignored.
