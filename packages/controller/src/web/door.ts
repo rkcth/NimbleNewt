@@ -170,6 +170,8 @@ const ADMIN_TEXT = /^[^\u0000-\u001f\u007f]*$/;
 const AGENT_ID = /^agt-[a-z2-7]{20}$/;
 const GRANT_ID = /^grt-[a-z2-7]{20}$/;
 const ROLE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** Invisible and text-direction characters (the set the page shows escaped): refused in a name or reason typed on the page, so what is stored and said reads as it displays. */
+const UNSEEN_TEXT = /[\u0080-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
 /** The most a secret written on the page may be (the secret store's own limit is 16 KiB; the request body is bounded below it). */
 const SECRET_VALUE_MAX = 8 * 1024;
 const adminText = (v: unknown, field: string, max: number): string => { if (typeof v !== "string" || v.trim().length === 0 || v.length > max || !ADMIN_TEXT.test(v)) throw new HttpError(400, "invalid_command", `${field} must be text of 1 to ${max} characters on one line`); return v; };
@@ -242,7 +244,7 @@ function adminIntentOf(what: string, body: Record<string, unknown>): { text: str
     const args: Record<string, unknown> = { agentId };
     if (body["friendlyName"] !== undefined) {
       const name = adminText(body["friendlyName"], "friendlyName", 80);
-      if (name.trim() !== name || /["\\]/.test(name)) throw new HttpError(400, "invalid_command", "friendlyName may not start or end with a space or contain a quote or a backslash");
+      if (name.trim() !== name || /["\\]/.test(name) || UNSEEN_TEXT.test(name)) throw new HttpError(400, "invalid_command", "friendlyName may not start or end with a space or contain a quote, a backslash, or an invisible or text-direction character");
       args["friendlyName"] = name; parts.push(`its name is ${JSON.stringify(name)}`);
     }
     if (body["roles"] !== undefined) {
@@ -259,7 +261,7 @@ function adminIntentOf(what: string, body: Record<string, unknown>): { text: str
     const grantId = body["grantId"];
     if (typeof grantId !== "string" || !GRANT_ID.test(grantId)) throw new HttpError(400, "invalid_command", "grantId must be a grant's ID");
     const reason = adminText(body["reason"], "reason", 300);
-    if (reason.trim() !== reason) throw new HttpError(400, "invalid_command", "reason may not start or end with a space");
+    if (reason.trim() !== reason || UNSEEN_TEXT.test(reason)) throw new HttpError(400, "invalid_command", "reason may not start or end with a space or contain an invisible or text-direction character");
     const text = `Revoke the grant ${grantId}, because ${reason}`;
     return { text, intent: { kind: "command", op: "grant.revoke", args: { grantId, reason }, evidence: text, basis: "owner" } };
   }

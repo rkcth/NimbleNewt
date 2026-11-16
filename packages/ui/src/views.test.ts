@@ -571,17 +571,25 @@ test("a standing right is taken back from the page with the owner's reason, afte
   const page = boot(ownerEditViews(), [(c) => (c.path === "/web/admin/grant-revoke" ? { status: 201, body: queuedWith("Take back the right task.update for agent:ann") } : undefined)], () => false);
   const policy = await admin(page, "policy", "Policy");
   const cards = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: "));
-  assert.deepEqual(cards.map((c) => c.find((e) => e.tag === "h4")[0]!.textContent), ["Take back: task.update for agent:ann"], "the revoked right has no button");
+  assert.deepEqual(cards.map((c) => c.find((e) => e.tag === "h4")[0]!.textContent), ["Take back: task.update for agent:ann in proj-1"], "the revoked right has no button");
   const form = cards[0]!;
-  const why = inputOf(form, "Why take back task.update for agent:ann?");
+  const why = inputOf(form, "Why take back task.update for agent:ann in proj-1?");
   assert.equal(why.getAttribute("maxlength"), "300");
   chip(form, "Take back").click(); await settle();
   assert.match(text(live(policy)), /Say why first/); assert.equal(sent(page).length, 0);
   why.value = "the project is finished";
   chip(form, "Take back").click(); await settle();
   assert.equal(sent(page).length, 0, "declined: nothing sent");
-  page.confirmWith(() => true);
+  // Second review: the reason may not hold invisible or text-direction characters, and the question names the project and the right's ID.
+  why.value = "finished\u202e";
   chip(form, "Take back").click(); await settle();
+  assert.match(text(live(policy)), /invisible or text-direction/); assert.equal(sent(page).length, 0);
+  why.value = "the project is finished";
+  const asked: string[] = [];
+  page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
+  chip(form, "Take back").click(); await settle();
+  assert.equal(asked.length, 1);
+  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Work that relies on it may stop`));
   const posts = sent(page);
   assert.equal(posts.length, 1);
   assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/grant-revoke", { grantId: GRT, reason: "the project is finished" }]);
@@ -599,5 +607,29 @@ test("the edit forms keep nothing but what the owner typed in the outbox, and a 
   assert.ok(team.find((e) => e.tag === "h4" && e.textContent.startsWith("Edit <img")).length === 1, "shown as text");
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   assert.doesNotMatch(JSON.stringify([...page.storage.map.values()]), /sk-|password/i);
+  assert.deepEqual(page.doc.violations, []);
+});
+
+test("two agents with one name and one right held in two projects are told apart on every form, button and question; a name with a direction mark is refused (second review, card U08 follow-up)", async () => {
+  const AGT3 = "agt-" + "e".repeat(20), GRT3 = "grt-" + "f".repeat(20);
+  const views = ownerEditViews();
+  views["admin-team"].agents.items.push({ id: AGT3, friendlyName: "Ann", roles: ["qa"], state: "active" });
+  (views["admin-policy"].grants.items as Record<string, unknown>[]).push({ id: GRT3, grantee: "agent:ann", action: "task.update", project: "*", state: "active", basis: "x" });
+  const page = boot(views, [(c) => (c.path.startsWith("/web/admin/") ? { status: 201, body: queuedWith("x") } : undefined)]);
+  const team = await admin(page, "team", "Agents and teams");
+  const cards = team.find((e) => e.className === "card" && e.textContent.startsWith("Edit "));
+  assert.deepEqual(cards.map((c) => c.find((e) => e.tag === "h4")[0]!.textContent), [`Edit Ann (${AGT})`, `Edit Ann (${AGT3})`]);
+  const labels = cards.map((c) => chip(c, "Change agent").getAttribute("aria-label"));
+  assert.equal(new Set(labels).size, 2, "two buttons, two names");
+  const second = cards[1]!;
+  inputOf(second, `Name of Ann (${AGT3})`).value = "Ann\u202eeinnA";
+  chip(second, "Change agent").click(); await settle();
+  assert.match(text(live(team)), /invisible or text-direction/); assert.equal(sent(page).length, 0);
+  inputOf(second, `Name of Ann (${AGT3})`).value = "Ann Two";
+  chip(second, "Change agent").click(); await settle();
+  assert.deepEqual(sent(page)[0]!.body, { agentId: AGT3, friendlyName: "Ann Two" }, "the form edits its own agent");
+  const policy = await admin(page, "policy", "Policy");
+  const takes = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: ")).map((c) => c.find((e) => e.tag === "h4")[0]!.textContent);
+  assert.deepEqual(takes, ["Take back: task.update for agent:ann in proj-1", "Take back: task.update for agent:ann in every project"]);
   assert.deepEqual(page.doc.violations, []);
 });
