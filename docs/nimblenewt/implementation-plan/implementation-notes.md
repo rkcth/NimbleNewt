@@ -11241,6 +11241,8 @@ Reviewed `card-a09-fu` at 73234787 (base 93896fe0, which was still origin/main: 
 
 **Breakages (each alone on the built file; restored).** End without a count makes none (4 failures); the requester's line ignored (4); the administrator's line ignored (4); administrators matched as a substring (1); an administrator's approval always stands at the claim (8); `end` not retried (4); the relay closes only by request ID (the test times out, reported cancelled).
 
+**Runs (Linux, on dc2ba5e4 + notes; `npx tsc --build --force` clean, no stale dist tests, `api:docs:write` unchanged, `check:deps` ok; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, `/tmp/nn-slot.sh`, `--test-timeout=600000`):** controller shard 1/3 4,696 of 4,696, 2/3 5,040 of 5,040, 3/3 5,108 of 5,108; worker 510 of 512 (1 skipped; 1 failure: the sandbox launcher, a listed flake, whose file passed alone 34 of 34); pi-adapter 252, contracts 19, config 52 (24 skipped), ui 44, registry 15, integration 181 (10 skipped), `scripts/*.test.mjs` 74.
+
 ASSUMPTION: "its team" means the administrator's line of management with the requester (above or below by supervisor or creator links), not peers under the same supervisor; excluding peers would leave an administrator unable to decide for most agents in a flat team, and the owner always decides.
 
 ## K01c: the configurable backup system (Claude agent, Sonnet 5.5, 2026-11-14)
