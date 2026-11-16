@@ -93,7 +93,7 @@ test("a failure that may pass is asked once more after a short wait; a blocked r
   await assert.rejects(new ReportInterrogator({ complete: async () => { m++; throw new Error("socket hang up"); } }, { routes: ["m/a"], retryDelayMs: 0 }).ask(input()), /no route answered/);
   assert.equal(m, 2);
   // Every route skipped by the routed client, at the cap, or out of credit: one pass only, no wait.
-  for (const why of ["blocked: route m/a is cooling down", "budget: the chat's token budget for today (100) is used", "credit: out of credit", "auth: bad key", "rate-limit: slow down", "outage: 503"]) {
+  for (const why of ["blocked: route m/a is cooling down", "budget: the daily cap on the controller's own model calls (100 tokens) is reached", "credit: out of credit", "auth: bad key", "rate-limit: slow down", "outage: 503"]) {
     let k = 0;
     const started = Date.now();
     await assert.rejects(new ReportInterrogator({ complete: async () => { k++; throw new Error(why); } }, { routes: ["m/a", "m/b"], retryDelayMs: 5000 }).ask(input()), /no route answered/);

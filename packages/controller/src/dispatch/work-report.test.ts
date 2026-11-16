@@ -233,12 +233,12 @@ for (const backend of backends) {
       assert.match(reportLines(d).join("\n"), /no second agent questioned it: no second agent is set up on this controller/);
       // A second agent that cannot be asked (every route failed, the daily cap is reached): the same, with the reason, redacted.
       const { taskId: t2 } = await w.task("cap", ann);
-      w.dispatcher = w.restart({ interrogator: new ScriptedInterrogator([new DomainError("unavailable", `budget: the chat's token budget for today (240) is used ${SECRET}`)]) });
+      w.dispatcher = w.restart({ interrogator: new ScriptedInterrogator([new DomainError("unavailable", `budget: the daily cap on the controller's own model calls (240 tokens) is reached ${SECRET}`)]) });
       let capped: ReportVerdict | undefined;
       const second = await turn(w, async (id) => { capped = await w.dispatcher.interrogateDone(P, id, { key: "k1", report: "Done.", verified: "passed" }); });
       assert.deepEqual(capped, { state: "not-run" });
       d = await body(w, second);
-      assert.match(d.report?.why ?? "", /^the second agent could not be asked: budget: the chat's token budget for today \(240\) is used \[redacted\]/);
+      assert.match(d.report?.why ?? "", /^the second agent could not be asked: budget: the daily cap on the controller's own model calls \(240 tokens\) is reached \[redacted\]/);
       assert.equal(await countOf(w, taskId), 0);
       assert.equal(await countOf(w, t2), 0);
     } finally { await store.close(); }

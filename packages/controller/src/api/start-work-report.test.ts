@@ -151,7 +151,7 @@ for (const store of stores) {
       assert.equal(capped.outcome?.status, "succeeded");
       const report = (capped as unknown as { report?: { questioning: string; why?: string } }).report;
       assert.equal(report?.questioning, "not-run");
-      assert.match(report?.why ?? "", /could not be asked: .*budget: the chat's token budget for today \(100\) is used/);
+      assert.match(report?.why ?? "", /could not be asked: .*budget: the daily cap on the controller's own model calls \(100 tokens\) is reached/);
     } finally { await c.close(); await db.close(); }
   });
 }
