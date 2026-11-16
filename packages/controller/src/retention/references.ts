@@ -7,7 +7,8 @@ export const REFERENCE_SCAN_LIMIT = 100_000;
 
 /**
  * The IDs of the desk records a decision-link record names as the subject of kind `plan` (links in any state). Reads the stored shape defensively: a missing, non-list or malformed `links` (a null entry, a link with no subject,
- * a subject whose ID is not text or is empty) names nothing and never throws, so one odd record cannot stop a retention or backup read. A link to a plan that is empty, archived or missing still names its ID (it is held, never blanked).
+ * a subject whose ID is not text or is empty) names nothing and never throws for any shape a stored record can have (stored bodies are parsed JSON), so one odd record cannot stop a retention or backup read.
+ * A body that throws when read (an accessor, which stored JSON never has) is not swallowed: the caller's read then fails closed. A link to a plan that is empty, archived or missing still names its ID (it is held, never blanked).
  */
 export function planSubjectIds(body: unknown): string[] {
   const links = (body as { links?: unknown } | null | undefined)?.links;

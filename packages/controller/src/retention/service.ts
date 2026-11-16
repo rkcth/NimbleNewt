@@ -142,6 +142,8 @@ const cmdId = (prefix: string, ...parts: (string | number)[]): string => `${pref
 
 async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) => void, limit = SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
+  // A read with no cap must still end: a store that does not move past the cursor (a page whose last ID was a cursor already) counts as a read that did not finish.
+  const cursors = new Set<string>();
   for (;;) {
     const page = await runner.list(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
     for (const a of page) each(a);
@@ -149,6 +151,8 @@ async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) =>
     if (page.length < 500) return true;
     if (seen >= limit) return false;
     after = page[page.length - 1]!.id;
+    if (cursors.has(after)) return false;
+    cursors.add(after);
   }
 }
 
@@ -725,6 +729,8 @@ export class RetentionService {
     const removedIds: string[] = [];
     // A batch whose read of the catalog's source records did not finish removes none of its scratch work, and the run then says it is partial.
     let sourcesUnread = false;
+    // The holds are read once more inside each guarded archive, removal and blanking; a read there that did not finish keeps that record, and the run says it is partial too (not only the batch's read).
+    const unread = { seen: false };
     // A hold can appear while the run is going (a task resumes, a checkpoint cites a summary): the holds are read again before every batch, and a candidate held now is kept and shown as retained.
     for (let i = 0; i < candidates.length; i += REMOVE_BATCH) {
       await this.#deps.beforeBatch?.(i / REMOVE_BATCH);
@@ -741,7 +747,7 @@ export class RetentionService {
         const why = c.kind === "pi-thinking" ? undefined : material.why(heldAs, c.id)?.filter((w) => !(c.kind === "scratch-archive" && isReplayReason(w)) && !((c.kind === "scratch-archive" || c.kind === "scratch-purge") && w.includes("written for task")));
         if (why !== undefined && why.length > 0) { if (retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: why }); continue; }
         if (c.kind === "pi-thinking" || c.kind === "scratch-archive" || c.kind === "scratch-purge") {
-          const tier = c.kind === "pi-thinking" ? await this.#purgeStores(by, c, piAttempts.get(c.id) ?? [], values.thinkingDays) : c.kind === "scratch-archive" ? await this.#tierArchive(by, c, retained) : await this.#tierPurge(by, c, values.scratchPurgeDays!, retained);
+          const tier = c.kind === "pi-thinking" ? await this.#purgeStores(by, c, piAttempts.get(c.id) ?? [], values.thinkingDays) : c.kind === "scratch-archive" ? await this.#tierArchive(by, c, retained, unread) : await this.#tierPurge(by, c, values.scratchPurgeDays!, retained, unread);
           if (tier) removedIds.push(`${c.kind}/${c.id}`);
           continue;
         }
@@ -766,7 +772,7 @@ export class RetentionService {
       }
     }
     let blanked = 0;
-    if (revoked !== undefined) for (const r of revoked.items) if (await this.#blankExecutable(by, r)) { blanked += 1; removedIds.push(`desk-record/${r.recordId}`); }
+    if (revoked !== undefined) for (const r of revoked.items) if (await this.#blankExecutable(by, r, unread)) { blanked += 1; removedIds.push(`desk-record/${r.recordId}`); }
     let deleted: string[] | undefined;
     if (backupsPort !== undefined) deleted = await backupsPort.prune(counts);
     let archived: number | undefined; let purged: number | undefined;
@@ -798,7 +804,7 @@ export class RetentionService {
       },
     }));
     return {
-      ...base, dryRun: false, removed: removedIds.length, runId, ...(sourcesUnread ? { partial: true } : {}),
+      ...base, dryRun: false, removed: removedIds.length, runId, ...(sourcesUnread || unread.seen ? { partial: true } : {}),
       ...(versions === undefined ? {} : { catalogVersions: { ...base.catalogVersions!, retained: versionsRetained, removed: versionsRemoved } }),
       ...(revoked === undefined ? {} : { revokedBytes: { ...base.revokedBytes!, blanked } }),
       ...(backupsPort === undefined ? {} : { backups: { kept: (await backupsPort.list()).length, deleted: deleted ?? [], counts } }),
@@ -807,7 +813,7 @@ export class RetentionService {
   }
 
   /** Blanks the executable text of one revoked version's record (title and body gone, a marker left), guarded by the revision read now; the deletion ledger is written after the guarded command has gone through (so a record that was left alone never has an entry), so a restore of an older backup blanks it again. */
-  async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string; digest: string; revision: number }): Promise<boolean> {
+  async #blankExecutable(by: Principal, r: { name: string; version: string; versionId: string; recordId: string; digest: string; revision: number }, unread: { seen: boolean }): Promise<boolean> {
     const found = await this.#runner.get("desk-record", r.recordId);
     if (found === undefined) return false;
     const body = found.body as Record<string, unknown>;
@@ -829,6 +835,7 @@ export class RetentionService {
           if ((await RetainedMaterial.build(this.#runner.storage)).why("desk-record", r.recordId) !== undefined) throw new DomainError("stale_revision", "something cites it since the preview");
           // A decision link does not change the record's revision either: the links are read here too, and an unfinished read keeps the record.
           const links = await planLinkIds(this.#runner, this.#deps.catalogScanLimit);
+          if (links === undefined) unread.seen = true;
           if (links === undefined || links.has(r.recordId)) throw new DomainError("stale_revision", links === undefined ? CATALOG_SOURCES_UNREAD : PLAN_LINK_REASON);
           const ref = { kind: "desk-record", id: r.recordId };
           const stub = stubDeskBody(body, { at, by: by.id, reason: `executable of revoked ${r.name} ${r.version}`.slice(0, 200), contentDigest: digestOf({ title: body["title"] ?? "", body: body["body"] ?? "" }) });
@@ -922,7 +929,7 @@ export class RetentionService {
   }
 
   /** Card K06b, scratch tier: archives one private record of a finished task (restorable by `retention.restore`), if it is still as previewed. */
-  async #tierArchive(by: Principal, c: Candidate, retained: { kind: string; id: string; reasons: string[] }[]): Promise<boolean> {
+  async #tierArchive(by: Principal, c: Candidate, retained: { kind: string; id: string; reasons: string[] }[], unread: { seen: boolean }): Promise<boolean> {
     const rec = await this.#runner.get("desk-record", c.id);
     if (rec === undefined || rec.revision !== c.revision) return false;
     const b = rec.body as { taskId?: unknown; archived?: unknown; deleted?: unknown };
@@ -930,15 +937,17 @@ export class RetentionService {
     const r = await this.#archive(by, { commandId: cmdId("rts", "archive", c.id, c.revision), taskId: b.taskId, reason: "retention rule: scratchArchiveDays" }, new Set([c.id]));
     // A hold found inside the archive (a tool registered after this batch's read) is shown like the others.
     for (const h of r.retained) if (h.id === c.id && retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: h.reasons });
+    if (r.retained.some((h) => h.reasons.includes(CATALOG_SOURCES_UNREAD))) unread.seen = true;
     return r.archived.includes(c.id);
   }
 
   /** Card K06b, scratch tier: removes one private record of a finished task for good with what was made from it (a replay's or a resumable task's hold stops it), if it is still as previewed. */
-  async #tierPurge(by: Principal, c: Candidate, days: number, retained: { kind: string; id: string; reasons: string[] }[]): Promise<boolean> {
+  async #tierPurge(by: Principal, c: Candidate, days: number, retained: { kind: string; id: string; reasons: string[] }[], unread: { seen: boolean }): Promise<boolean> {
     const rec = await this.#runner.get("desk-record", c.id);
     if (rec === undefined || rec.revision !== c.revision || (rec.body as { deleted?: unknown }).deleted !== undefined) return false;
     const r = await this.#delete(by, { commandId: cmdId("rts", "purge", c.id, c.revision), recordId: c.id, reason: `retention rule: scratchPurgeDays (${days})` }, { holdCatalogSources: true });
     if (r.status === "retained") for (const h of r.retained ?? []) if (h.id === c.id && retained.length < RETAINED_LISTED) retained.push({ kind: c.kind, id: c.id, reasons: h.reasons });
+    if ((r.retained ?? []).some((h) => h.reasons.includes(CATALOG_SOURCES_UNREAD))) unread.seen = true;
     return r.status === "deleted";
   }
 

@@ -9,6 +9,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
 import { createBackup } from "./index.js";
+import { planLeaveOut } from "./scope.js";
+import type { StorageSnapshot } from "../storage/index.js";
 
 after(stopServer);
 
@@ -66,6 +68,23 @@ for (const backend of backends) {
       const line = made.manifest.contentScope!.leftOut.find((l) => l.kind === "desk-record")!;
       assert.deepEqual([line.left, line.heldBack], [1, 2]);
       assert.ok(free.length > 0);
+
+      // A snapshot whose rows of link records do not move past the cursor (always the first page): the read ends, the check is unfinished, and nothing is left out.
+      const real = await world.storage.snapshot();
+      try {
+        const stuck: StorageSnapshot = {
+          schemaVersion: real.schemaVersion,
+          read: async (table, page) => real.read(table, table === "aggregates" && page.after?.["kind"] === "decision-reliance" && page.after["id"] !== "" ? { after: { kind: "decision-reliance", id: "" }, limit: page.limit } : page),
+          close: async () => undefined,
+        };
+        const blind = await planLeaveOut(stuck, { scratchDays: 30, transcriptDays: null, logDays: null }, LATER);
+        const record = blind.record();
+        assert.equal(record.referenceCheckComplete, false);
+        assert.match(record.text, /decision link.*nothing was left out/);
+        assert.equal(blind.decide({ kind: "desk-record", id: free } as never), "keep", "the unlinked plan is kept when the check did not finish");
+        const seen = await planLeaveOut(real, { scratchDays: 30, transcriptDays: null, logDays: null }, LATER);
+        assert.equal(seen.decide({ kind: "desk-record", id: free } as never), "omit", "and left out when it finished");
+      } finally { await real.close(); }
     } finally { await world.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
   });
 }

@@ -67,6 +67,8 @@ function snapshotLister(snapshot: StorageSnapshot): Pick<ControllerStorage, "lis
 /** Reads every record of one kind, a page at a time. Returns false when the bound was reached (what was not read must not be assumed to be anything). */
 async function eachOf(lister: Pick<ControllerStorage, "listAggregates">, kind: string, each: (a: Aggregate) => void, limit = REFERENCE_SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
+  // A read with no cap must still end: a lister that does not move past the cursor (a page whose last ID was a cursor already) counts as a read that did not finish.
+  const cursors = new Set<string>();
   for (;;) {
     const page = await lister.listAggregates(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
     for (const a of page) each(a);
@@ -74,6 +76,8 @@ async function eachOf(lister: Pick<ControllerStorage, "listAggregates">, kind: s
     if (page.length < 500) return true;
     if (seen >= limit) return false;
     after = page[page.length - 1]!.id;
+    if (cursors.has(after)) return false;
+    cursors.add(after);
   }
 }
 

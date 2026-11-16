@@ -97,3 +97,76 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 }
+
+test("planSubjectIds with hostile JSON shapes: __proto__ keys, numbers, nested arrays and a large list read only real plan subjects", () => {
+  assert.deepEqual(planSubjectIds(JSON.parse('{"__proto__":{"links":[{"subject":{"kind":"plan","id":"p"}}]}}')), []);
+  assert.deepEqual(planSubjectIds(JSON.parse('{"links":[{"__proto__":{"subject":{"kind":"plan","id":"p"}}},{"subject":{"__proto__":{"kind":"plan"},"id":"q"}},[{"subject":{"kind":"plan","id":"r"}}],{"subject":{"kind":"plan","id":"s"}}]}')), ["s"]);
+  assert.deepEqual(planSubjectIds({ links: [Number.NaN, Infinity, -0, true, Symbol("x"), () => 1] }), []);
+  const many = Array.from({ length: 100_000 }, (_, i) => (i % 2 === 0 ? { subject: { kind: "plan", id: `p${i}` } } : null));
+  assert.equal(planSubjectIds({ links: many }).length, 50_000);
+});
+
+for (const backend of backends) {
+  test(`${backend.name}: a link read whose store does not move past its cursor ends and holds everything, and a hold read that fails inside a real run makes the run partial (card K06b follow-up T5b review)`, async () => {
+    const world = await backend.open();
+    try {
+      const inner: ControllerStorage = world.storage;
+      let stuck = false; let broken = false;
+      // The same store, except that its list of decision-link records can ignore the cursor (always the first page) or fail.
+      const storage = new Proxy(inner, {
+        get(target, key) {
+          if (key === "listAggregates") return async (kind: string, page: { afterId?: string; limit: number }) => {
+            if (kind === "decision-reliance" && broken) throw new Error("the storage could not be read");
+            return target.listAggregates(kind, kind === "decision-reliance" && stuck ? { limit: page.limit } : page);
+          };
+          const v = Reflect.get(target, key, target) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      }) as ControllerStorage;
+      const real = Date.now();
+      const options = { clock: () => new Date(real - 60 * DAY).toISOString(), pause: async () => undefined };
+      const projects = await ProjectService.open(storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(storage, epoch, options);
+      const owner: Principal = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "A" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "ann", grants: [{ action: "desk.write", project }, { action: "desk.read", project }, { action: "attempt.work", project }] });
+      const ann = await principals.authenticate((await principals.issueCredential(owner, "agent:ann")).token);
+      const desks = DeskService.withEpoch(storage, epoch, options);
+      const free = (await desks.write(ann, { commandId: cid("w"), projectId: project, taskId: task, kind: "plan", title: "work", body: "plan without a link 9904", visibility: "private", status: "accepted" } as never)).id;
+      for (const id of ["ready", "in_progress", "done"]) await projects.transitionTask({ commandId: cid("mv"), actor: owner.id, taskId: task, expectedRevision: (await projects.getTask(task))!.revision, to: id as never });
+      // 600 link records: more than one page, so a store that ignores the cursor would give a full first page forever.
+      const filler = Array.from({ length: 600 }, (_, i) => ({ type: "create" as const, ref: { kind: "decision-reliance", id: `drl-s-${String(i).padStart(5, "0")}` }, body: { links: [] } as never }));
+      for (let i = 0; i < filler.length; i += 100) await storage.applyOperation({ operationId: cid("fill"), epoch, actor: "test", correlationId: "fill", at: options.clock(), changes: filler.slice(i, i + 100), audit: [{ type: "test.fill", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+      const at = (deps: object = {}) => RetentionService.withEpoch(storage, epoch, { settings: { effective: async () => ({ ...off, scratchArchiveDays: 30 }) }, now: () => real, ...deps } as never, { clock: () => new Date(real).toISOString(), pause: async () => undefined });
+      const title = async (): Promise<string> => ((await inner.getAggregate({ kind: "desk-record", id: free }))!.body as { title: string }).title;
+
+      stuck = true;
+      const blind = await at().run(owner, {});
+      assert.equal(blind.partial, true, "a read that does not advance did not finish");
+      assert.deepEqual(blind.candidates, [], "and nothing is a candidate");
+      assert.match(describeRun(blind), /Not everything could be checked/);
+      const held = await at().archive(owner, { commandId: cid("a"), taskId: task });
+      assert.deepEqual([held.archived, held.retained.map((r) => r.reasons.join())], [[], [CATALOG_SOURCES_UNREAD]]);
+      stuck = false;
+
+      // The preview reads everything; inside the real run's guarded archive the read fails: the plan stays and the run says it is partial.
+      const preview = await at().run(owner, {});
+      assert.equal(preview.partial, false);
+      assert.deepEqual(preview.candidates.map((c) => c.id), [free]);
+      const ran = await at({ beforeArchiveWrite: async () => { broken = true; } }).run(owner, { dryRun: false, confirm: preview.digest! });
+      broken = false;
+      assert.equal(ran.removed, 0);
+      assert.equal(ran.partial, true, "a hold that could not be read inside the run is reported");
+      assert.match(describeRun(ran), /^Retention ran: 0 expired.*Not everything could be checked.*nothing unchecked was removed\.$/);
+      assert.equal(await title(), "work");
+      // With the store read normally, the same run archives it and is not partial.
+      const again = await at().run(owner, {});
+      const done = await at().run(owner, { dryRun: false, confirm: again.digest! });
+      assert.deepEqual([done.removed, done.partial], [1, false]);
+      assert.doesNotMatch(describeRun(done), /could be checked/);
+      assert.equal(await title(), "(archived)");
+    } finally { await world.close(); }
+  });
+}
