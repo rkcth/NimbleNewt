@@ -47,10 +47,13 @@ import type { AdmissionService } from "../admission/service.js";
 import type { EnvironmentService } from "../environments/index.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
+import { keptSecretUseText, type KeptSecretUse } from "../setup/kept-secret-uses.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
 } from "./explain.js";
+/** How many lines the chat shows of a status answer (`CHAT_LIMITS.statusLines`; a test keeps the two equal). */
+const KEPT_SECRET_LINES = 30;
 
 // ---- views ---------------------------------------------------------------------------------------------------------------------
 
@@ -292,6 +295,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
   providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
   secrets: { keys: [], about: "owner only (card U08): the names of the secrets the installation uses and whether each is set; never a value. A secret is entered write-only on the web page's Secrets form or put in the host's secret store, never typed in chat" },
+  kept_secret_uses: { keys: [], about: "owner only (task T4b): records made before the rule that a secret the installation keeps for something else (the owner's credential, the database address, a transfer target's address, the backup signing key) is never sent to another party: each network grant, backup target or work-in-progress backup that still names one, by the secret's NAME, never a value; none of them sends anything, and the answer says what to change" },
   sandbox: { keys: [], about: "owner only (card U08): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox on Windows) and a warning where the boundary is weaker, as macOS Seatbelt's is" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
@@ -383,6 +387,7 @@ export type StatusRequest =
   | { readonly kind: "providers" }
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
+  | { readonly kind: "kept_secret_uses" }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
@@ -547,6 +552,8 @@ export interface StatusDeps {
   readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly credential?: string; readonly approvalHeld?: boolean; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string; readonly grantId?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
   /** The reads of the settings and administration pages (card U08); owner only. */
   readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
+  /** Records that still name a secret the installation keeps for something else (task T4b). Absent: the view is not offered. */
+  readonly keptSecretUses?: { find(): Promise<readonly KeptSecretUse[]> };
   readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
@@ -892,6 +899,7 @@ export class StatusService {
       case "providers": { onlyKnown(request, ["kind"]); return this.providerLines(by); }
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
+      case "kept_secret_uses": { onlyKnown(request, ["kind"]); return this.keptSecretUseLines(by); }
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
@@ -1130,6 +1138,20 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines: [
       line(got.writable ? `Secrets are kept in this computer's secret store${got.store === undefined ? "" : ` (${shown(got.store, 40)})`}. Enter one on the Secrets page of the web chat, or put it in the store on the machine; never type it in chat.` : "No secret store is connected to the web page, so a secret is put in the secret store on the machine, never typed in chat.", c),
       ...(got.items.length === 0 ? [line("No secret is named yet.", c)] : got.items.slice(0, 50).map((i) => line(`${shown(i.name, 64)}: ${i.state}; used by ${i.usedBy.map((u) => shown(u, 60)).join(", ") || "nothing"}`, c))),
+    ] };
+  }
+
+  /** Records that name a secret the installation keeps for something else (task T4b), for the owner: the secret's name, never a value, and what to change. One header line, at most 28 records and one line for the rest: never more than the chat shows. */
+  async keptSecretUseLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.keptSecretUses === undefined || by.kind !== "owner") return undefined;
+    const uses = await this.#deps.keptSecretUses.find();
+    const c = cite("kept-secret-uses", "installation");
+    if (uses.length === 0) return { observedAt: this.#runner.now(), lines: [line("No network grant, backup target or work-in-progress backup names a secret the installation keeps for something else.", c)] };
+    const room = KEPT_SECRET_LINES - 2;
+    return { observedAt: this.#runner.now(), lines: [
+      line(`${uses.length} record(s) name a secret the installation keeps for something else; none of them sends anything, and the owner changes each:`, c),
+      ...uses.slice(0, room).map((u) => line(keptSecretUseText(u, 400), c)),
+      ...(uses.length > room ? [line(`${uses.length - room} more are not shown; fix the ones above and ask again.`, c)] : []),
     ] };
   }
 
