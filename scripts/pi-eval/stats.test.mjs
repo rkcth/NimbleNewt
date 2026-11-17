@@ -27,6 +27,19 @@ test("results are grouped per variant and size with every outcome counted", () =
   assert.equal(a.counts.unclassified, 1, "an outcome the bench does not know counts as unclassified");
 });
 
+test("a run the server refused on its history is counted as itself: a non-finish, not unclassified and not a false done", () => {
+  const recs = [...runs("B", "M", { "verified-finish": 1, "server-rejected-history": 1 })];
+  const g = aggregate(recs);
+  assert.equal(g[0].n, 2);
+  assert.equal(g[0].counts["server-rejected-history"], 1);
+  assert.equal(g[0].counts.unclassified, 0);
+  const gates = gatesFor("B", g);
+  assert.match(gates.lines.join("\n"), /M verified finish 1\/2 /);
+  assert.match(gates.lines.join("\n"), /false done 0\/2 /);
+  assert.match(gates.lines.join("\n"), /unclassified non-finishes 0 /);
+  assert.match(renderReport(recs).text, /\| server-rejected-history \|/);
+});
+
 test("the gates pass only at >=90% S, >=85% M, >=70% L, false done <=5% and no unclassified run", () => {
   const good = [...runs("A", "S", { "verified-finish": 19, "stopped-early": 1 }), ...runs("A", "M", { "verified-finish": 17, length: 3 }), ...runs("A", "L", { "verified-finish": 14, timeout: 6 })];
   const ok = gatesFor("A", aggregate(good));

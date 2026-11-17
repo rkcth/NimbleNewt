@@ -5,7 +5,17 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
-export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "error", "unclassified"]);
+export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "server-rejected-history", "error", "unclassified"]);
+
+/**
+ * The server refused the conversation Pi sent back: an HTTP 400 that names one of the request's messages
+ * ("400: {"message":"messages: messages[74].tool_calls[0].function.arguments is not JSON", ...}"). The model's reply was
+ * not the problem; the history Pi rebuilt from it was (W01 night batch, 2026-11-17: Pi's `edit` tool parses an `edits`
+ * argument the model sent as a JSON string in place, so the stored call later went back with lone surrogate escapes
+ * the server will not read as JSON). A non-finish with its own name, so a batch can tell it from a server or bench
+ * fault. Only a 400 whose text names `messages[N]` within its first 200 characters is read this way.
+ */
+export const REJECTED_HISTORY = /^400\b[^\n]{0,200}?\bmessages\[(\d+)\]((?:\.\w+(?:\[\d+\])?)*)/;
 
 /** Words a final report uses when it says the work is done. Read only to tell a false done (`wrong`) from a stop mid-work; it never makes a run a finish. */
 const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )?(?:tests?|checks?|steps?) (?:now )?pass(?:ed|es)?|implemented|summary of (?:the )?(?:work|changes)|work is complete)\b/i;
@@ -235,6 +245,8 @@ export function classify({ summary, hidden, plan = null, changed, dirty = null, 
   const out = (outcome, reason) => ({ outcome, reason, endKind, claimsDone: done, doneClaim: claim });
   if (timedOut) return out("timeout", "the agent was stopped at its wall-clock limit");
   if (!summary.sawSession && summary.assistantMessages === 0) return out("error", `the agent wrote no Pi session (exit ${exitCode})`);
+  const rejected = summary.last?.stopReason === "error" && typeof summary.last.errorMessage === "string" ? REJECTED_HISTORY.exec(summary.last.errorMessage) : null;
+  if (rejected !== null) return out("server-rejected-history", `the server refused the conversation Pi sent back (HTTP 400 on messages[${rejected[1]}]${rejected[2]}): ${summary.last.errorMessage}`);
   if (summary.last !== null && (summary.last.stopReason === "error" || summary.last.stopReason === "aborted")) return out("error", `the last reply ended with ${summary.last.stopReason}${summary.last.errorMessage ? `: ${summary.last.errorMessage}` : ""}`);
   if (!summary.agentEnd && exitCode !== 0) return out("error", `the agent process exited ${exitCode} before its run ended`);
   if (hidden?.passed === true) {

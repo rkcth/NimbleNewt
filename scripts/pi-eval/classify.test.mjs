@@ -77,6 +77,35 @@ test("errors: no session at all, a reply that ended in error, and a process that
   assert.equal(classify({ summary: died, hidden: failed, changed: true, exitCode: 137 }).outcome, "error");
 });
 
+// The W01 night batch's first run (2026-11-17): Pi's 35th request was refused because a tool call in its history went
+// back with lone surrogate escapes in its arguments. The error text is the one that run's log recorded.
+const errorEnd = (errorMessage) => ({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage, usage: { input: 0, output: 0 } } });
+const NIGHT_400 = '400: {"message":"messages: messages[74].tool_calls[0].function.arguments is not JSON","type":"invalid_request_error","param":"messages","code":null}';
+
+test("a 400 that names a message of the request is the server refusing the history Pi sent, not a generic error", () => {
+  const s = summarizeLogText(ev(...head, tool, msg([{ type: "text", text: "Editing." }], "toolUse"), errorEnd(NIGHT_400), ...tail));
+  const r = classify({ summary: s, hidden: failed, changed: true, plan: { checked: 0, unchecked: 7 }, dirty: true });
+  assert.equal(r.outcome, "server-rejected-history", r.reason);
+  assert.match(r.reason, /messages\[74\]\.tool_calls\[0\]\.function\.arguments\)/);
+  assert.match(r.reason, /is not JSON/, "the server's own words are kept");
+  assert.equal(r.endKind, "error");
+  assert.equal(r.claimsDone, false);
+  // A timeout still wins, as for every other ending.
+  assert.equal(classify({ summary: s, hidden: failed, changed: true, timedOut: true }).outcome, "timeout");
+  // Another message field, and no field after the index, read the same way.
+  assert.equal(classify({ summary: summarizeLogText(ev(...head, errorEnd('400: {"message":"messages[3].content must be a string"}'), ...tail)), hidden: failed, changed: false }).outcome, "server-rejected-history");
+});
+
+test("other error replies stay generic errors: a 400 naming no message, a 500 or 401 that does, an aborted reply", () => {
+  const as = (text, stop = "error") => classify({ summary: summarizeLogText(ev(...head, { ...errorEnd(text), message: { ...errorEnd(text).message, stopReason: stop } }, ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(as('400: {"message":"max_tokens is too large"}'), "error");
+  assert.equal(as('500: {"message":"messages[74] could not be processed"}'), "error");
+  assert.equal(as('401: messages[2] unauthorized'), "error");
+  assert.equal(as("the engine stopped on an error, see messages[1] in the log"), "error");
+  assert.equal(as(NIGHT_400, "aborted"), "error", "only an error reply, not an aborted one");
+  assert.equal(as(`400: ${"x".repeat(250)} messages[74].content is not valid`), "error", "the message index must come early in the text");
+});
+
 test("a log that just stops (exit 0, no agent_end) is stopped early, not finished", () => {
   const s = summarizeLogText(ev(...head, tool, msg([{ type: "text", text: "Now I'll edit it." }], "toolUse")));
   assert.equal(classify({ summary: s, hidden: failed, changed: true, exitCode: 0 }).outcome, "stopped-early");

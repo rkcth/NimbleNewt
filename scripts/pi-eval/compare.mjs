@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readResults } from "./report.mjs";
 
-const ABBR = { "verified-finish": "F", wrong: "W", "interface-mismatch": "I", "stopped-early": "S", length: "L", empty: "E", timeout: "T", error: "X", unclassified: "?" };
+const ABBR = { "verified-finish": "F", wrong: "W", "interface-mismatch": "I", "stopped-early": "S", length: "L", empty: "E", timeout: "T", "server-rejected-history": "R", error: "X", unclassified: "?" };
 
 export function compare(records) {
   const agents = [...new Set(records.map((r) => String(r.agent ?? "?")))];

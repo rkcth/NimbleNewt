@@ -287,6 +287,10 @@ descend from one that is seen, is missed; on other systems only the agent's own 
    for the informational score. (A task without an acceptance suite is scored on its shipped files, as before.)
 5. The ending is classified (`lib/classify.mjs`), in this order:
    - **timeout**: stopped at the wall-clock limit.
+   - **server-rejected-history**: the last reply ended in `error` with an HTTP 400 that names one of the request's
+     messages (`messages[74].tool_calls[0].function.arguments is not JSON`): the server refused the conversation Pi sent
+     back, not the model's reply. A non-finish like any other (it counts in the verified-finish denominator, not in the
+     false-done gate); named apart so a batch does not read it as a server or bench fault.
    - **error**: no Pi session, a reply that ended in `error`/`aborted`, a non-zero exit before the run ended, or a bench
      error (a failed checkout, a leak).
    - **verified-finish**: the repository builds (`tsc --build` exits 0 with the acceptance files in) and the acceptance
