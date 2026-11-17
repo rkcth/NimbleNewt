@@ -96,6 +96,8 @@ test("a 400 that names a message of the request is the server refusing the histo
   const one = (text) => classify({ summary: summarizeLogText(ev(...head, errorEnd(text), ...tail)), hidden: failed, changed: false }).outcome;
   assert.equal(one('400: {"message":"messages[3].tool_calls[1].function.arguments: unexpected end"}'), "server-rejected-history");
   assert.equal(one("400 Invalid request: messages[9] is not valid JSON (lone surrogate)"), "server-rejected-history");
+  // A JSON parser's own words name a token without any size limit (second review).
+  assert.equal(one('400: {"message":"messages[74].tool_calls[0].function.arguments is not JSON: Unexpected token \\\\ in JSON at position 812"}'), "server-rejected-history");
   // The same refusal after the hidden tests passed is still not a finish (as a generic error was not).
   assert.equal(classify({ summary: s, hidden: { ran: true, passed: true }, changed: true }).outcome, "server-rejected-history");
 });
@@ -105,6 +107,8 @@ test("a 400 that names a message for another reason stays a generic error: a con
   assert.equal(one('400: {"message":"messages[3].content must be a string"}'), "error");
   assert.equal(one("400: {\"message\":\"Invalid value for 'messages[5].role': 'developer' is not supported\"}"), "error");
   assert.equal(one('400: {"message":"messages[40] exceeds the context length of 32768 tokens"}'), "error");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments: invalid JSON, 40000 tokens"}'), "error", "a token count is a size");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments not JSON; check max_tokens"}'), "error");
   assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments is too long (maximum 65536)"}'), "error", "a size limit, even on arguments");
   assert.equal(one('400: {"message":"messages[80].content: not valid JSON after truncation to the context window"}'), "error", "a context limit wins over the JSON words");
 });

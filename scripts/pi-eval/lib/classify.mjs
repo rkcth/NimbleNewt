@@ -20,7 +20,9 @@ export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "leng
  */
 export const REJECTED_HISTORY = /^400\b[^\n]{0,200}?\bmessages\[(\d+)\]((?:\.\w+(?:\[\d+\])?)*)/;
 const MALFORMED_ENTRY = /\bnot (?:valid )?JSON\b|\binvalid JSON\b|\bsurrogate|\binvalid unicode\b|\bnot valid UTF-?8\b/i;
-const SIZE_OR_CONTEXT = /\bcontext\b|\btokens?\b|\btoo (?:long|large|many)\b|\bmaximum\b|\bexceed/i;
+// A token count ("32768 tokens", "max_tokens") is a size limit; the bare word is not: a JSON parser's "Unexpected token" is
+// the same refusal (second review).
+const SIZE_OR_CONTEXT = /\bcontext\b|\d[\d,]*\s*tokens?\b|\bmax_tokens\b|\btoo (?:long|large|many)\b|\bmaximum\b|\bexceed/i;
 
 /** The `messages[N]` index and field path of a 400 that refused a malformed history entry, or null (see REJECTED_HISTORY). */
 export function rejectedHistory(errorMessage) {

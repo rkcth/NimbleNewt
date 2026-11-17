@@ -292,8 +292,9 @@ descend from one that is seen, is missed; on other systems only the agent's own 
      back, not the model's reply. Read narrowly: the text must also say the entry is not valid JSON or Unicode (or name a
      tool call's `arguments` field) and say nothing of a size or context limit; a context-length 400, an unknown role or
      a content-type refusal that names a message stays `error`. A non-finish like any other (it counts in the
-     verified-finish denominator, not in the false-done gate); named apart so a batch does not read it as a server or
-     bench fault. `compare.mjs` shows it as `R`.
+     verified-finish denominator, not in the false-done gate); named apart so whoever drives a batch can tell it from a
+     server or bench fault (the batch loop itself stops on no outcome; a driver that stops on `error` may still choose to
+     stop on this one). `compare.mjs` shows it as `R`.
    - **error**: no Pi session, a reply that ended in `error`/`aborted`, a non-zero exit before the run ended, or a bench
      error (a failed checkout, a leak).
    - **verified-finish**: the repository builds (`tsc --build` exits 0 with the acceptance files in) and the acceptance
