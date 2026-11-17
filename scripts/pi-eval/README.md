@@ -61,6 +61,31 @@ runs every task in `taskset.json`, variants A and B, the task set's repeats (3),
 report. Narrow it with `--tasks quote-lines,c07n`, `--variants A`, `--repeats 1`, `--concurrency 2` (at most 3).
 `--dry-run` prints what would run. `node scripts/pi-eval/run.mjs --help` lists every option.
 
+**On the shared Radiance server (added 2026-11-17).** With the task set on the `radiance` provider the bench guards the
+server for every agent: the Pi agent, named with `--agent` or not, and any wrapper (only the bench's own Claude control
+agent under `agents/` and `stub-agent.mjs`, which never reach Radiance, are left out). The guard is
+`lib/radiance-gate.mjs`, the approach of the G10 bench and the M00 prototype: it reads `GET /stats` and `GET /v1/models`
+with the key from Pi's own `~/.pi/agent/models.json` (only ever in the Authorization header; never printed, logged or
+written) and lets a run go only when nothing is in flight, running or waiting and the pinned model is already served (a
+model list it could not read is no confirmation). It asks before preparing the checkout and again right before the agent
+starts, since preparing, the setup build and a test-slot wait can take minutes; a run refused at that second check
+started nothing and is not recorded. A busy or unreadable server is polled each minute for at most
+`--idle-wait-minutes` (default 30); past that, or when the model is not served, the batch stops starting runs (the
+bench never loads, unloads, switches or restarts a model). With the gate on, runs go one at a time, so the bench adds at
+most one request to the server at any moment (`--concurrency` above 1 is refused); `--no-radiance-gate` turns it off for
+a server nobody else uses. The gate cannot reserve the server: another client can start in the seconds between the
+second check and the agent's first request, so it keeps the bench from adding to a busy server, not others from joining.
+Each record carries `server` (the counters the agent started on and those after the run).
+`--token-budget N` stops starting runs once the batch's finished runs used N input+output tokens (cache reads not
+counted); a run already started is never cut short, and a run whose agent started but whose token use is unknown stops
+the batch too (a log with no model reply, or a reply without token counts, is unknown use, not 0 tokens). `--test-slot CMD` (or `PI_EVAL_TEST_SLOT`) holds a slot of a machine-wide test-slot command (on this
+machine `/tmp/nn-slot.sh`) for the bench's own setup build and grading suites only; the agent's own test runs are part
+of what is measured and never wait for it. Do not start `run.mjs` itself through that slot command while giving it
+`--test-slot`: it would hold one slot and wait for another (with a single slot, forever). A stopped batch is noted in
+`batches.jsonl` and at the end of its report. The report also counts timeouts whose acceptance tests pass at the limit
+(the work was done, the agent did not end) and warns when variant B mixes runs from before card W06 (PLAN.md and a
+commit per step) with the W06 rules.
+
 The report alone, over everything recorded so far or one batch:
 
 ```sh
