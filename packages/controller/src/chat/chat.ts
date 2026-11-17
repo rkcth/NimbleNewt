@@ -15,6 +15,8 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import type { CoordinatorService } from "./coordinator.js";
+import { relianceLines } from "../status/reliance-words.js";
+import type { Reliance } from "../security/reliance.js";
 import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
@@ -1663,6 +1665,14 @@ export class ChatService {
         const effective = typeof standing?.["effective"] === "string" ? String(standing["effective"]) : "cancel";
         notes.push(`No call is running now; one that starts before you accept follows the standing policy: ${effective}${standing?.["source"] === "operator" ? " (set by the operator at startup)" : ""}.`);
       }
+    }
+    // Taking a right back (follow-up to card T7): the owner is shown the running work that may rely on it, from the same read as the page and the status answer, so a typed request and the page's button say the same.
+    // A read that fails is said so rather than shown as "nothing relies on it".
+    if (intent.op === "grant.revoke" && typeof args["grantId"] === "string") {
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "grant.reliance", args: { grantId: args["grantId"] } });
+      const first = found.ok ? (found.result["items"] as Reliance[] | undefined)?.[0] : undefined;
+      if (first !== undefined) notes.push(...relianceLines(first));
+      else if (!found.ok && found.error.code !== "not_found" && found.error.code !== "invalid_command") notes.push("Which running work relies on this right could not be checked just now; work that does may stop at its next check.");
     }
     if (intent.op === "catalog.policy.change") {
       const standing = await this.#get(token, "catalog.policy.get", {});

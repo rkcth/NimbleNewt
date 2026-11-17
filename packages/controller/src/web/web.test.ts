@@ -381,6 +381,11 @@ test("the views read status, blockers, cost and recovery; an unknown view is ref
       assert.ok(Object.keys(r.body.parts).length >= 1, name);
       for (const [key, part] of Object.entries(r.body.parts) as [string, { error?: { code?: string } }][]) assert.ok(part.error === undefined || (name === "models" && key === "difficulty" && part.error.code === "not_found"), `${name}: ${JSON.stringify(part)}`);
     }
+    // The Policy tab reads the running work that may rely on each standing right with the rights themselves (follow-up to card T7), one read, owner only, answering for every active right.
+    const policy = await w.call("GET", "/web/views/admin-policy", { cookie: s.cookie });
+    const given = (policy.body.parts.grants.items as { id: string }[]).map((g) => g.id).sort();
+    assert.deepEqual((policy.body.parts.reliance.items as { grantId: string; total: number; complete: boolean }[]).map((r) => r.grantId).sort(), given.filter((id) => (policy.body.parts.grants.items as { id: string; state: string }[]).find((g) => g.id === id)!.state === "active"));
+    assert.ok((policy.body.parts.reliance.items as { total: number; complete: boolean }[]).every((r) => r.total === 0 && r.complete === true), "no work runs in this world");
     // The Setup tab (card U14d) carries the first-run list in plain lines: what is open, the next question, and no secret.
     const setup = await w.call("GET", "/web/views/setup", { cookie: s.cookie });
     const setupText = JSON.stringify(setup.body.parts.setup);
