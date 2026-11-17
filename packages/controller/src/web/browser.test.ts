@@ -99,6 +99,21 @@ async function removeFolder(dir: string, budgetMs = 30_000, rm: (dir: string) =>
 /** True when the folder is inside the OS temp folder, where the operating system clears leftovers. */
 const inTempFolder = (dir: string): boolean => { const r = relative(tmpdir(), dir); return r !== "" && !r.startsWith("..") && !isAbsolute(r); };
 
+/** What the cleanup's problems mean for the test. A problem fails the test (`error`, the first one) only when the body passed; when
+ * the body failed every problem is only reported (`notes`), so the body's own failure stays the one the test shows. A folder left
+ * inside the OS temp folder is always only reported. */
+function cleanupOutcome(passed: boolean, dir: string, closing: unknown, stuck: string | undefined, left: string | undefined): { error: unknown; notes: string[] } {
+  const notes: string[] = []; let error: unknown;
+  const problem = (e: unknown, note: string): void => { if (passed && error === undefined) error = e; else notes.push(note); };
+  if (closing !== undefined) problem(closing, `browser.test cleanup: the controller did not close: ${String(closing)}`);
+  if (stuck !== undefined) problem(new Error(`browser.test cleanup: ${stuck}`), `browser.test cleanup: ${stuck}`);
+  if (left !== undefined) {
+    const m = `browser.test cleanup: the temporary folder ${dir} was left behind (${left})`;
+    if (inTempFolder(dir)) notes.push(`${m}; it is in the OS temp folder, so the test is not failed for it`); else problem(new Error(m), m);
+  }
+  return { error, notes };
+}
+
 const chrome = findBrowser();
 test("the real page in a real browser: strict policy, phone layout, sign-in, one delivery after offline, a second browser, a live update and revocation", { skip: chrome === undefined ? "no Chromium-family browser found (set NIMBLENEWT_CHROME)" : false, timeout: 240_000 }, async (t) => {
   const assets = await loadAssets();
@@ -221,14 +236,9 @@ test("the real page in a real browser: strict policy, phone layout, sign-in, one
     // A failing controller close is kept, not thrown here: the folder is still removed, and the body's own failure stays the one reported.
     const closing = await c.close().then(() => undefined, (e: unknown) => e);
     const left = stuck === undefined ? await removeFolder(dir) : `not removed because the browser is still running`;
-    const report = (m: string): void => { t.diagnostic(m); console.error(m); };
-    if (closing !== undefined) { if (passed) throw closing; report(`browser.test cleanup: the controller did not close: ${String(closing)}`); }
-    if (stuck !== undefined) { if (passed) throw new Error(`browser.test cleanup: ${stuck}`); report(`browser.test cleanup: ${stuck}`); }
-    if (left !== undefined) {
-      const m = `browser.test cleanup: the temporary folder ${dir} was left behind (${left})`;
-      if (passed && !inTempFolder(dir)) throw new Error(m);
-      report(inTempFolder(dir) ? `${m}; it is in the OS temp folder, so the test is not failed for it` : m);
-    }
+    const { error, notes } = cleanupOutcome(passed, dir, closing, stuck, left);
+    for (const m of notes) { t.diagnostic(m); console.error(m); }
+    if (error !== undefined) throw error;
   }
 });
 
@@ -238,6 +248,7 @@ test("the browser test's cleanup helpers: the exit wait is bounded and true only
     assert.equal(await ended(child, 200), false, "a running process has not ended (the wait gave up after 200 ms)");
     assert.equal(await closeBrowser(child, undefined), undefined, "kill() ends it and the exit is seen");
     assert.equal(await ended(child, 0), true);
+    if (process.platform !== "win32") assert.equal(child.signalCode, "SIGTERM", "the polite kill() comes before the forced kill");
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
   const quick = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(3), 100)"], { stdio: "ignore" });
   assert.equal(await ended(quick, 30_000), true, "the exit event ends the wait");
@@ -268,4 +279,19 @@ test("the browser test's cleanup helpers: the exit wait is bounded and true only
   assert.equal(inTempFolder(join(tmpdir(), "x")), true);
   assert.equal(inTempFolder(tmpdir()), false, "the temp folder itself is not inside it");
   assert.equal(inTempFolder(join(tmpdir(), "..", "elsewhere")), false);
+  // The cleanup never hides the body's failure: with a failed body nothing is thrown, every problem is reported.
+  const inTemp = join(tmpdir(), "nn-browser-x"); const outside = join(tmpdir(), "..", "nn-browser-x"); const closeError = new Error("close failed");
+  assert.deepEqual(cleanupOutcome(true, inTemp, undefined, undefined, undefined), { error: undefined, notes: [] });
+  const failedBody = cleanupOutcome(false, outside, closeError, "still running", "ENOTEMPTY: x");
+  assert.equal(failedBody.error, undefined, "a failed body is never replaced by a cleanup problem");
+  assert.equal(failedBody.notes.length, 3, "each cleanup problem is still reported");
+  // With a passed body each real problem fails the test; the first one is thrown and the rest are reported.
+  const both = cleanupOutcome(true, inTemp, closeError, "still running", undefined);
+  assert.equal(both.error, closeError, "a controller that did not close fails a passed test");
+  assert.match(both.notes.join("\n"), /still running/);
+  assert.match(String(cleanupOutcome(true, inTemp, undefined, "still running", undefined).error), /still running/, "a browser that did not exit fails a passed test");
+  assert.match(String(cleanupOutcome(true, outside, undefined, undefined, "ENOTEMPTY: x").error), /left behind/, "a folder left outside the temp folder fails a passed test");
+  const leftInTemp = cleanupOutcome(true, inTemp, undefined, undefined, "ENOTEMPTY: x");
+  assert.equal(leftInTemp.error, undefined, "a folder left in the temp folder does not fail the test");
+  assert.match(leftInTemp.notes.join("\n"), /left behind .*OS temp folder/, "but it is reported by name");
 });
