@@ -32,7 +32,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
 | N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W02, W03, W04, W05, W06, W07, W08, W10, W12, W13, W09 |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
-| N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L06, L06b, H08, H08b |
+| N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L04g, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07h, A07f, A07g |
 | N07 / AII-257 | C01, C01b, C02, C04, C05, C07, C07b, C07d, C07e, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, C08, C09, C09b, C09c, C09d, C09e, C09f, C09g, C09h, C08b, C08c, C08d |
 | N08 / AII-258 | R01, R02, R03, R04, R04b, R04c, R05, R05b, R05c, R05d, R05f, R05g, R05e |
@@ -1344,6 +1344,14 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 - **Blockers:** L04c.
 - **Deliverable:** Split from L04c (2026-11-08): L04c built the dispatcher's checked resume, the owner's hold, the host ports and the state-API operations; three pieces are still only ports or operations. A worker-side observer that reads each recorded file, directory, search and external dependency again before the resumed attempt's first turn (in the new sandbox or by a pre-start probe on the host) instead of `unknown`; a reviewer agent behind `ResumePorts.review` that gives reasoned verdicts instead of the controller's stand-in (every change relevant, so every changed resume waits for the owner); and the local and remote worker hosts calling `continuation.capture` at their safe boundaries. Also `after: model-change` when the route differs from the checkpoint's, and a per-tick cache of the prerequisite scan.
 - **Acceptance and verification:** A resumed attempt on a new host has its file dependencies observed (changed or unchanged, not unknown); a change the reviewer agent judges not to matter is committed without the owner; a host captures a complete continuation at a turn boundary and a resume uses it; mutation check recorded.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### L04g — Re-read external and mcp-resource dependencies when an attempt resumes on a new host
+
+- **Parent:** N05 / AII-255.
+- **Blockers:** L04d.
+- **Deliverable:** Split from L04d (2026-11-18): its audit left three limits. External and mcp-resource dependencies of a resumed attempt are observed (changed or unchanged, not unknown) through a read the owner has allowed: one allowed, bounded request per resource kind that keeps credentials out of logs, with a fake-resource test server for offline proof; a Pi agent can record its own dependencies; the reviewer agent sees the change itself, not only the change notes.
+- **Acceptance and verification:** Such a dependency on a resumed attempt reads changed or unchanged when the resource answers, and unknown with a stated reason when it cannot be read or the owner has not allowed the read; nothing is fetched without the owner's allowance; a Pi agent records its own dependencies; the reviewer is given the change itself; offline test with a stand-in resource.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### L06 — Implement team and system shutdown, reboot and resume policy
@@ -3483,7 +3491,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### D05 — Close the plan: every optional item built or deferred by the owner
 
 - **Parent:** N19 / AII-269.
-- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09.
+- **Blockers:** T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, L04g, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09.
 - **Deliverable:** Final bookkeeping after real-world QA: each optional, after-the-first-release card (D04b, U03c, K06b, K01d, P02b, A08c) is either built or recorded as deferred by the owner, and the plan is marked complete.
 - **Acceptance and verification:** D05 is the one card for which an owner-recorded deferral counts as satisfying a dependency, so D04b, U03c, K06b, K01d, P02b and A08c may be built or deferred; each shows built, or deferred with the owner's decision recorded; D03 and D04 are for the first release and do not wait for optional cards.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.

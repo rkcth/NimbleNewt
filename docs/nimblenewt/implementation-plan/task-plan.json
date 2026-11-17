@@ -3867,6 +3867,23 @@
       }
     },
     {
+      "id": "L04g",
+      "parent": "N05",
+      "existing_issue": "AII-255",
+      "title": "Re-read external and mcp-resource dependencies when an attempt resumes on a new host",
+      "depends_on": [
+        "L04d"
+      ],
+      "deliverable": "Split from L04d (2026-11-18): its audit left three limits. External and mcp-resource dependencies of a resumed attempt are observed (changed or unchanged, not unknown) through a read the owner has allowed: one allowed, bounded request per resource kind that keeps credentials out of logs, with a fake-resource test server for offline proof; a Pi agent can record its own dependencies; the reviewer agent sees the change itself, not only the change notes",
+      "acceptance_and_verification": "Such a dependency on a resumed attempt reads changed or unchanged when the resource answers, and unknown with a stated reason when it cannot be read or the owner has not allowed the read; nothing is fetched without the owner's allowance; a Pi agent records its own dependencies; the reviewer is given the change itself; offline test with a stand-in resource",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "L06",
       "parent": "N05",
       "existing_issue": "AII-255",
@@ -10548,6 +10565,7 @@
         "L04b",
         "L04c",
         "L04d",
+        "L04g",
         "C09b",
         "C09c",
         "U04b",
