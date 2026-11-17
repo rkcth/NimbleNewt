@@ -45,6 +45,8 @@ test("submissions by role go through the state API: the author submits code tied
     assert.equal((await call(stranger.token, "submission.record", code, "sx")).error.code, "forbidden", "an agent that does not own the attempt cannot submit code");
     assert.equal((await call(ann.token, "submission.record", { ...code, role: "qa" }, "sr")).error.code, "forbidden", "a role the agent does not hold (or that may not submit code)");
     assert.equal((await call(ann.token, "submission.record", code)).error.code, "invalid_command", "a command ID is required");
+    const named = await call(ann.token, "submission.record", { ...code, attemptId: (await s.assignments.getAssignment(task))!.activeAttemptId }, "sa");
+    assert.deepEqual([named.error?.code, named.error?.field], ["invalid_command", "args.attemptId"], `an agent cannot name the attempt itself: ${JSON.stringify(named.error)}`);
 
     const first = await call(ann.token, "submission.record", { ...code, evidence: [{ check: "unit", result: "pass", boundTo: tree }] }, "s1");
     assert.equal(first.ok, true, JSON.stringify(first));

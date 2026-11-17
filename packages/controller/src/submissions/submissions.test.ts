@@ -199,9 +199,12 @@ for (const backend of backends) {
   suite("a code submission records the attempt it came from; a replay keeps the first attempt; non-code kinds name none (card Q01b, a record per attempt)", async (c) => {
     const ann = await c.agent("ann", ["author", "docs"]);
     const bob = await c.agent("bob", ["reviewer"]);
-    let attempt: { ownerId: string; state: string; attemptId?: string } = { ownerId: ann.id, state: "active", attemptId: "att-first" };
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-first" };
     const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
     const cmd = { commandId: cid("s"), taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    // the attempt is the controller's observation: an agent naming one (its own or another task's) is refused, in every kind
+    await refuses("invalid_command", () => gated.record(ann, { ...cmd, commandId: cid("s"), attemptId: "att-other" } as never), /attemptId: is not a field/);
+    await refuses("invalid_command", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, attemptId: "att-first" } as never), /attemptId: is not a field/);
     const first = await gated.record(ann, cmd);
     assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
     // the next attempt of the same task (a retry) submits again: its own record names its own attempt
@@ -221,6 +224,23 @@ for (const backend of backends) {
     // without the attempt port nothing is named (as before)
     const plain = await c.svc.record(ann, { ...cmd, commandId: cid("s") });
     assert.equal((await c.rawBody(plain.id) as SubmissionBody).attemptId, undefined);
+    // a record from before this field (made without the attempt port, so the same compared payload as before) replays cleanly under the attempt port and gains no attempt
+    const old = { ...cmd, commandId: cid("s"), tree: T2 };
+    const oldMade = await c.svc.record(ann, old);
+    const oldAgain = await gated.record(ann, old);
+    assert.deepEqual([oldAgain.id, oldAgain.revision, oldAgain.replayed], [oldMade.id, oldMade.revision, true]);
+    assert.equal((await c.rawBody(oldMade.id) as SubmissionBody).attemptId, undefined, "no backfill");
+    // after the attempt has ended (or another agent's attempt took over), a repeat still answers with the first record; a new code submission is refused
+    for (const later of [undefined, { ownerId: ann.id, state: "failed", attemptId: "att-second" }, { ownerId: bob.id, state: "active", attemptId: "att-third" }]) {
+      attempt = later;
+      const repeat = await gated.record(ann, cmd);
+      assert.deepEqual([repeat.id, repeat.replayed], [first.id, true]);
+      assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+      await refuses("forbidden", () => gated.record(ann, { ...cmd, commandId: cid("s") }), /owns the task's current attempt/);
+    }
+    // the same command ID with a different request is still a conflict, not a replay
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-fourth" };
+    await refuses("command_conflict", () => gated.record(ann, { ...cmd, tree: T2 }));
   });
 
   suite("formats are size-capped and checked: digests, evidence names, role, artifact ID", async (c) => {

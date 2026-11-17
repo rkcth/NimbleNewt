@@ -226,13 +226,6 @@ export class SubmissionService {
     if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
 
     if (!(await this.#roles(by.id, { projectId: task.projectId, taskId }, by)).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role} in this project`);
-    let attemptId: string | undefined;
-    if (kind === "code" && this.#attemptOf !== undefined) {
-      const attempt = await this.#attemptOf(taskId);
-      if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
-      attemptId = attempt.attemptId;
-    }
-
     const evidence = this.#evidence(command.evidence);
     const subject = command.subject === undefined ? undefined : await this.#subject(command.subject, taskId);
     let fields = this.#fields(by, kind, command, subject);
@@ -249,12 +242,20 @@ export class SubmissionService {
     const id = derivedId("sbm", scopedCommandId(by.id, commandId));
     const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined
       : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
-    const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, ...(attemptId === undefined ? {} : { attemptId }), evidence, ...(review === undefined ? {} : { review }) };
-    // Like the time, the attempt is what the controller observed, not what the agent asked: it is left out of the compared payload (as before this field existed), so a replay keeps the first record and its attempt.
-    const { attemptId: _observed, ...asked } = body;
+    const asked: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
+    let body: SubmissionBody = asked;
     const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+      // Like the time, the attempt is what the controller observed, not what the agent asked: it is not in the compared payload (as before this field existed), so a replay keeps the first record
+      // and its attempt, and records from before the field still replay.
       payload: { ...(asked as unknown as JsonObject), submittedAt: null },
       build: async () => {
+        // The attempt is checked here, after the runner has looked for a repeat: a repeat of a recorded submission returns that record even when the attempt has ended since (the agent
+        // retrying a lost answer after its attempt finished); a new code submission still needs the agent that owns the task's current attempt.
+        if (kind === "code" && this.#attemptOf !== undefined) {
+          const attempt = await this.#attemptOf(taskId);
+          if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
+          if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
+        }
         const ref = { kind: "submission", id };
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { taskId, kind, role } };
       },
