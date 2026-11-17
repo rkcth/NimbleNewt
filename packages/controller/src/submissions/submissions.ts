@@ -202,7 +202,11 @@ export class SubmissionService {
     return new SubmissionService(new CommandRunner(storage, epoch, options), roles, options);
   }
 
-  async record(by: Principal, command: NoActor & RecordSubmission): Promise<{ id: string; revision: number; replayed: boolean }> {
+  /**
+   * `from` is for the controller's own callers only (the work.end ending, card H12n), never an agent argument: the attempt whose work is being submitted. The task's current attempt must then be
+   * exactly that attempt, so an ending of an attempt that is no longer current (it ended and a newer attempt of the same agent took over) is refused instead of being recorded under the newer attempt.
+   */
+  async record(by: Principal, command: NoActor & RecordSubmission, from?: { readonly attemptId: string }): Promise<{ id: string; revision: number; replayed: boolean }> {
     if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} is not an agent, so it has no role to submit in`);
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     const unknown = Object.keys(command).filter((k) => !(FIELDS as readonly string[]).includes(k));
@@ -229,9 +233,15 @@ export class SubmissionService {
     const evidence = this.#evidence(command.evidence);
     const subject = command.subject === undefined ? undefined : await this.#subject(command.subject, taskId);
     let fields = this.#fields(by, kind, command, subject);
+    const id = derivedId("sbm", scopedCommandId(by.id, commandId));
+    // A repeat of this agent's own recorded code submission is compared with what the controller observed when it was first made (its refresh round and whether review was required),
+    // not with today's count: a repeat after the attempt ended may come after a later refresh or a change of reviewers, and must still answer with the first record (card Q01b second review).
+    // The ID is derived from this agent's own command ID, so only its own record is found here.
+    const earlier = kind === "code" ? (await this.#runner.get("submission", id))?.body as unknown as SubmissionBody | undefined : undefined;
+    const then = earlier !== undefined && earlier.submittedBy === by.id && earlier.taskId === taskId && earlier.kind === "code" ? earlier : undefined;
     // The refresh round is the controller's count, never the agent's word (card H12p review).
     if (kind === "code" && this.#rounds !== undefined) {
-      const counted = await this.#rounds(taskId);
+      const counted = then?.refreshRound ?? await this.#rounds(taskId);
       if (command.refreshRound !== undefined && command.refreshRound !== counted) bad("refreshRound", `is counted by the controller (${counted} for this task so far); leave it out`);
       fields = { ...fields, refreshRound: counted };
     }
@@ -239,8 +249,7 @@ export class SubmissionService {
     const bound = fields.tree ?? fields.artifactDigest;
     for (const e of evidence) if (e.boundTo !== bound) throw new DomainError("invalid_command", `evidence: ${e.check} is bound to ${e.boundTo}, not to the submitted ${fields.artifactDigest === undefined ? "tree" : "artifact"} ${String(bound)}`, { field: "evidence" });
 
-    const id = derivedId("sbm", scopedCommandId(by.id, commandId));
-    const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined
+    const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined : then?.review !== undefined ? then.review
       : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
     const asked: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
     let body: SubmissionBody = asked;
@@ -254,6 +263,7 @@ export class SubmissionService {
         if (kind === "code" && this.#attemptOf !== undefined) {
           const attempt = await this.#attemptOf(taskId);
           if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
+          if (from !== undefined && attempt.attemptId !== from.attemptId) throw new DomainError("forbidden", "the attempt this work came from is no longer the task's current attempt");
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
         }
         const ref = { kind: "submission", id };

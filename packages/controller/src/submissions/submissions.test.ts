@@ -9,6 +9,7 @@ import { PrincipalService, type Principal } from "../security/index.js";
 import { CommandRunner } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
+import { stagedSubmit } from "../work-end/index.js";
 
 after(stopServer);
 
@@ -248,6 +249,61 @@ for (const backend of backends) {
     // the same command ID with a different request is still a conflict, not a replay
     attempt = { ownerId: ann.id, state: "active", attemptId: "att-fourth" };
     await refuses("command_conflict", () => gated.record(ann, { ...cmd, tree: T2 }));
+  });
+
+  suite("the ending's submission (work.end) is recorded only while its own attempt is the task's current one, and names that attempt (card Q01b second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    // the agent's earlier attempt ended (its lease ran out) and a newer attempt of the same agent took over; the earlier attempt's ending then resumes (after a restart) and reaches its submit step
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-new" };
+    const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
+    const staged: string[] = [];
+    const submit = stagedSubmit({ stage: async (a) => { staged.push(a.attemptId); return { base: BASE, tree: T1, patchId: PATCH, files: [] }; }, submissions: gated, principalOf: async () => ann });
+    const ending = (attemptId: string) => ({ attemptId, taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true, hostId: "h", generation: 1 }) as never;
+    await refuses("forbidden", () => submit(ending("att-old"), BASE, cid("end")), /no longer the task's current attempt/);
+    assert.deepEqual(staged, ["att-old"]);
+    // the current attempt's own ending is recorded under it
+    const key = cid("end");
+    const made = await submit(ending("att-new"), BASE, key);
+    assert.equal((await gated.get(ann, made.submissionId))?.attemptId, "att-new");
+    // its repeat after the attempt ended (or another took over) is the same record
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-later" };
+    assert.equal((await submit(ending("att-new"), BASE, key)).submissionId, made.submissionId);
+    assert.equal((await gated.get(ann, made.submissionId))?.attemptId, "att-new");
+    // the same check straight on the service: `from` must be the current attempt
+    await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-new" }), /no longer the task's current attempt/);
+    const direct = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-later" });
+    assert.equal((await gated.get(ann, direct.id))?.attemptId, "att-later");
+  });
+
+  suite("a repeat of a code submission is compared with what the controller observed when it was first made: a later refresh round or a change of reviewers does not turn it into a conflict (card Q01b second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    let rounds = 1;
+    let reviewers: string[] = [];
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-1" };
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { refreshRounds: async () => rounds, reviewersAvailableIn: async () => reviewers, attemptOf: async () => attempt });
+    const cmd = { commandId: cid("s"), taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    const first = await svc.record(ann, cmd);
+    const stored = await c.rawBody(first.id) as SubmissionBody;
+    assert.deepEqual([stored.refreshRound, stored.review, stored.attemptId], [1, { required: false, reason: "review_disabled_single_agent" }, "att-1"]);
+    // the attempt ended, a later attempt refreshed twice, and a reviewer joined
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-2" };
+    rounds = 3; reviewers = ["agent:rev"];
+    for (const again of [cmd, { ...cmd, refreshRound: 1 }]) {
+      const r = await svc.record(ann, again);
+      assert.deepEqual([r.id, r.revision, r.replayed], [first.id, first.revision, true], "the first record, unchanged");
+    }
+    assert.deepEqual(await c.rawBody(first.id), stored);
+    // a repeat that asks for something else is still a conflict; a new command counts today's round and reviewers
+    await refuses("command_conflict", () => svc.record(ann, { ...cmd, tree: T2 }));
+    const next = await svc.record(ann, { ...cmd, commandId: cid("s"), tree: T2 });
+    const nextBody = await c.rawBody(next.id) as SubmissionBody;
+    assert.deepEqual([nextBody.refreshRound, nextBody.review, nextBody.attemptId], [3, { required: true }, "att-2"]);
+    // another agent's same command ID is its own command: nothing of ann's record is used or shown
+    attempt = { ownerId: bob.id, state: "active", attemptId: "att-3" };
+    const bobs = await svc.record(bob, cmd);
+    assert.notEqual(bobs.id, first.id);
+    assert.deepEqual([(await c.rawBody(bobs.id) as SubmissionBody).refreshRound, (await c.rawBody(bobs.id) as SubmissionBody).submittedBy], [3, bob.id]);
   });
 
   suite("formats are size-capped and checked: digests, evidence names, role, artifact ID", async (c) => {
