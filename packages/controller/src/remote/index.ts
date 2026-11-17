@@ -18,4 +18,4 @@ export { readReleaseHostConfig, runReleaseHost, type ReleaseHostConfig, type Run
 export { RemoteScriptRuns, orderProblem, type HostScriptLaunch, type HostScriptRunner, type RemoteScriptRunsOptions } from "./script-runs.js";
 export { ScriptOrders, orderDigest, runIdOf, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
 export { OBSERVE_ON_HOST, observationOf, observeOnHost, type ObserveAsker } from "./observe.js";
-export { observeEntries } from "../dependencies/observe.js";
+export { entriesObserver, observeEntries } from "../dependencies/observe.js";

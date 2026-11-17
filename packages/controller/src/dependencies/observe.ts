@@ -152,6 +152,11 @@ class ProbeTimeout extends Error {}
  * dependencies unobserved, which the check reads as what it is — unknown, and the owner decides.
  */
 export function checkoutDependencyObserver(options: DependencyObserverOptions): (taskId: string) => Promise<Readonly<Record<string, Observation>>> {
+  return probeWith(options, { hung: 0 });
+}
+
+/** The probe itself, with the count of abandoned file-system calls kept in `state`, so callers that build a probe per request (a remote host's `observe`) still share one count. */
+function probeWith(options: DependencyObserverOptions, state: { hung: number }): (taskId: string) => Promise<Readonly<Record<string, Observation>>> {
   const limit = bound(options.maxEntries, OBSERVE_LIMITS.entries);
   const maxBytes = bound(options.maxBytes, OBSERVE_LIMITS.fileBytes);
   const maxTotal = bound(options.maxTotalBytes, OBSERVE_LIMITS.totalBytes);
@@ -159,14 +164,13 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
   const fileSystem = options.fs ?? nodeProbeFileSystem;
   // File-system calls an earlier probe gave up on that have still not come back. Node runs them on a small shared thread pool, so a
   // mount that hangs would take one more thread at every probe until the whole process's file work stalls: while one is still out,
-  // no probe starts another call, and everything is left unobserved.
-  let hung = 0;
+  // no probe starts another call, and everything is left unobserved (`state.hung`).
   return async (taskId: string): Promise<Readonly<Record<string, Observation>>> => {
     const out: Record<string, Observation> = {};
     const deadline = Date.now() + timeoutMs;
     // One file-system call, cut off at the probe's deadline. A call that hangs past it is abandoned: what it would have said is not used.
     const timed = async <T>(start: () => Promise<T>): Promise<T> => {
-      if (hung > 0 || deadline - Date.now() <= 0) throw new ProbeTimeout();
+      if (state.hung > 0 || deadline - Date.now() <= 0) throw new ProbeTimeout();
       const step = start();
       const left = deadline - Date.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -175,7 +179,7 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
         return await Promise.race([step, new Promise<never>((_, reject) => { timer = setTimeout(() => { late = true; reject(new ProbeTimeout()); }, Math.max(0, left)); })]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
-        if (late) { hung++; step.then(() => { hung--; }, () => { hung--; }); } else step.catch(() => undefined);
+        if (late) { state.hung++; step.then(() => { state.hung--; }, () => { state.hung--; }); } else step.catch(() => undefined);
       }
     };
     let manifest: ManifestBody | undefined;
@@ -188,7 +192,7 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
     const scope = { mode: "read" as const, paths: typeof located === "object" ? [...(located.paths ?? [])] : [] };
     if (root === undefined || !isAbsolute(root)) return out; // nowhere to look: everything stays unknown
     let base: string;
-    try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
+    try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (state.hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
     let read = 0;
     for (const entry of wanted) {
       const key = relativePath(entry.key);
@@ -260,6 +264,15 @@ export function locallyPlaced(remoteHostIds: ReadonlySet<string>, placedHostOf: 
  * guess, never a throw. `locate` is asked for the task's checkout on this machine. Returns what it could read, by entry ID; the rest is left out (unknown).
  */
 export async function observeEntries(options: Omit<DependencyObserverOptions, "manifest">, scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[]): Promise<Readonly<Record<string, Observation>>> {
-  const observe = checkoutDependencyObserver({ ...options, manifest: async () => ({ taskId: scope.taskId, projectId: scope.projectId, entries: entries.map((e) => ({ id: e.id, kind: e.kind, key: e.key })) as unknown as readonly DependencyEntry[] }) });
-  return await observe(scope.taskId);
+  const { locate, ...rest } = options;
+  return await entriesObserver(rest)(scope, entries, locate);
+}
+
+/**
+ * `observeEntries` for a long-lived caller (a remote host answering every `observe` request it gets): one count of file-system calls a look gave up on is kept across all its looks, so a mount that hangs takes one of Node's few file-system
+ * threads once, not once more at every request, and later looks leave everything unobserved until that call comes back. `locate` is given per look (it carries the project's paths of that request).
+ */
+export function entriesObserver(options: Omit<DependencyObserverOptions, "manifest" | "locate">): (scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[], locate: DependencyObserverOptions["locate"]) => Promise<Readonly<Record<string, Observation>>> {
+  const state = { hung: 0 };
+  return async (scope, entries, locate) => await probeWith({ ...options, locate, manifest: async () => ({ taskId: scope.taskId, projectId: scope.projectId, entries: entries.map((e) => ({ id: e.id, kind: e.kind, key: e.key })) as unknown as readonly DependencyEntry[] }) }, state)(scope.taskId);
 }

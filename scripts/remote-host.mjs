@@ -181,10 +181,10 @@ export async function startRemoteWorker(setup, config) {
   const piState = new controller.PiStateHost({ client, source: stores.source, final: stores.final, busy: () => local.busyAttempts(), scratch: join(base, "pi-state-copies"), purgeThinking: piAdapter.removeStoredThinking });
   // A look at the files a task relied on (card L04e): read again in the task's checkout on THIS host (never outside it, never beyond the project's paths the controller names), before a resumed attempt's first turn. The answer carries hashes and
   // member names, never content. A task with no checkout here has nothing to look at: everything is left out and the controller reads it as unknown.
-  const observeTask = (scope, entries, paths) => controller.observeEntries({
-    locate: (taskId, projectId) => { const where = workspaces.locate({ taskId, projectId }); return where === undefined ? undefined : { root: where.checkout, paths }; },
-    onFault: (detail) => log(`the look at the files of task ${scope.taskId}: ${detail}`),
-  }, scope, entries);
+  // One observer for every look, so a read that hangs on this host's disk is counted once across requests (later looks leave everything unobserved until it comes back) rather than taking another file-system thread at each request.
+  // Its time bound stays under the controller's 8 s wait for an answer, so a slow disk still sends what was read.
+  const lookAt = controller.entriesObserver({ timeoutMs: 6_000, onFault: (detail) => log(`a look at a task's files: ${detail}`) });
+  const observeTask = (scope, entries, paths) => lookAt(scope, entries, (taskId, projectId) => { const where = workspaces.locate({ taskId, projectId }); return where === undefined ? undefined : { root: where.checkout, paths }; });
   const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), verify: verifyDone, piState, observe: observeTask, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
 
   const abort = new AbortController();

@@ -10,7 +10,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { NewDependency } from "./dependencies.js";
 import { DependencyService } from "./index.js";
-import { checkoutDependencyObserver, locallyPlaced, nodeProbeFileSystem, resumeProbeEnabled, type ProbeFileSystem } from "./observe.js";
+import { checkoutDependencyObserver, entriesObserver, locallyPlaced, nodeProbeFileSystem, resumeProbeEnabled, type ProbeFileSystem } from "./observe.js";
 
 after(stopServer);
 
@@ -280,4 +280,25 @@ test("second review: a file whose size moved while it was read is not hashed fro
   // A procfs file says it is empty and still has bytes: the same as a file that grew between the look and the read.
   const path = await real.realpath("/proc/self/status");
   await assert.rejects(() => real.readFile(path, 1024 * 1024), /moved while it was read/);
+});
+
+test("L04e review: a remote host's looks share one count of abandoned reads, so a hanging disk is not called again at every request until its call comes back", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const hanging: ProbeFileSystem = {
+    realpath: (path) => { calls++; return new Promise<string>((ok) => { release = () => ok(path); }); },
+    readFile: async () => ({ kind: "not-file" }), readdir: async () => ({ kind: "not-directory" }),
+  };
+  const look = entriesObserver({ fs: hanging, timeoutMs: 20 });
+  const root = process.platform === "win32" ? "C:\\checkout" : "/checkout";
+  const scope = { taskId: "tsk-1", projectId: "prj-1" };
+  const entries = [{ id: "dpm-1", kind: "file" as const, key: "a.ts" }];
+  assert.deepEqual(await look(scope, entries, () => root), {}, "the hanging read is abandoned: unobserved");
+  assert.deepEqual(await look(scope, entries, () => root), {}, "a second request while it is still out: unobserved");
+  assert.equal(calls, 1, "the second request did not start another file-system call");
+  release!();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(await look(scope, entries, () => root), {});
+  assert.equal(calls, 2, "once the abandoned call came back, the next request reads again");
+  release!();
 });

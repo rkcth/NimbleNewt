@@ -114,7 +114,9 @@ export class WorkspaceResponder {
     if (o === undefined || !Array.isArray(o.entries)) return { ok: false, reason: "the request named nothing to look at" };
     let seen: Readonly<Record<string, Observation>>;
     try { seen = await this.#observe({ taskId: ask.taskId, projectId: ask.projectId }, o.entries, o.paths ?? []); } catch (error) {
-      return { ok: false, reason: `this host could not look at the files: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+      // The error's text stays on this host (it may name a path of its disk): it goes to the host's own log, and the controller is told only that the look failed.
+      try { this.#onError?.(error); } catch { /* a failing log changes nothing */ }
+      return { ok: false, reason: "this host could not look at the files (see the host's log), so they were not looked at" };
     }
     const observed: Record<string, JsonObject> = {};
     const later: string[] = [];

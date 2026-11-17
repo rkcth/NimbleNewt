@@ -153,6 +153,25 @@ for (const backend of backends) {
     } finally { await first.stop().catch(() => undefined); await second.stop(); where.remove(); }
   });
 
+  suite("the project's paths go with the request and the host looks only under them: a recorded file outside them stays unknown though it is in the checkout (card L04e review)", async (c) => {
+    const r1 = await c.host("r1");
+    const { taskId } = await c.started(r1);
+    const where = disk();
+    const answerer = answering(r1, where);
+    const deps = DependencyService.withEpoch(c.storage, c.epoch, c.options);
+    try {
+      where.write(taskId, "src/a.ts", "A");
+      where.write(taskId, "private/b.ts", "B");
+      await deps.record(c.owner, { commandId: cid("dep"), taskId, dependencies: [{ kind: "file", key: "src/a.ts", hash: sha("A") }, { kind: "file", key: "private/b.ts", hash: sha("B") }] });
+      const observe = resumeObserver({ manifest: (t) => deps.get(c.owner, t), placedHostOf: async () => r1.id, remoteHostIds: new Set([r1.id]), binding: async () => ({ root: "/not-read-here", paths: ["src"] }), remote: () => ({ remote: c.remote, by: c.dispatcherPrincipal }) });
+      const seen = await observe(taskId);
+      assert.deepEqual(Object.values(seen).map((o) => o.hash), [sha("A")], "only the file under the project's paths was looked at");
+      assert.ok(answerer.asked.length >= 1 && answerer.asked.every((a) => JSON.stringify(a.paths) === JSON.stringify(["src"])), JSON.stringify(answerer.asked));
+      const checks = await deps.check(c.owner, taskId, seen);
+      assert.deepEqual(checks.map((k) => [k.key, k.status]).sort(), [["private/b.ts", "unknown"], ["src/a.ts", "unchanged"]]);
+    } finally { await answerer.stop(); where.remove(); }
+  });
+
   suite("a host started without a look refuses it, saying so, and the files stay unknown; a request that is malformed or too big is refused before anything is sent (card L04e)", async (c) => {
     const r1 = await c.host("r1");
     const where = disk();

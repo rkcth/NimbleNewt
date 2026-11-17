@@ -25,8 +25,8 @@ function packages(scriptsOptions = {}) {
   class HostPoller { constructor(options) { seen.poller = options; } run() { return new Promise((resolve) => { seen.stopPoller = resolve; }); } }
   class PiStateHost { constructor(options) { seen.piStateOptions = options; } async answer() { return { ok: true, summary: "x" }; } }
   // Card L04e: the look at a task's recorded files, here a stand-in that records what it was asked and where it was told to look.
-  const observeEntries = async (options, scope, entries) => { (seen.observed ??= []).push({ where: await options.locate(scope.taskId, scope.projectId), scope, entries }); return {}; };
-  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost, observeEntries };
+  const entriesObserver = (options) => { (seen.observerOptions ??= []).push(options); return async (scope, entries, locate) => { (seen.observed ??= []).push({ where: await locate(scope.taskId, scope.projectId), scope, entries }); return {}; }; };
+  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost, entriesObserver };
   class LocalConversationStores { constructor(options) { seen.storesOptions = options; this.source = { list: async () => [] }; this.final = () => undefined; } }
   class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } locate(call) { return call.taskId === "task-none" ? undefined : { checkout: `/host/work/${call.projectId}/${call.taskId}/checkout` }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
   const worker = {
@@ -235,6 +235,8 @@ test("the remote host looks at a task's recorded files in the checkout it made f
     assert.deepEqual(seen.observed[0].entries, entries);
     await seen.responderOptions.observe({ taskId: "task-none", projectId: scope.projectId }, entries, []);
     assert.equal(seen.observed[1].where, undefined, "no checkout of the task on this host: nowhere to look");
+    assert.equal(seen.observerOptions.length, 1, "one observer serves every look, so a read that hangs is counted across requests");
+    assert.ok(seen.observerOptions[0].timeoutMs < 8_000, "the host's look ends before the controller stops waiting for its answer");
   } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
 });
 
