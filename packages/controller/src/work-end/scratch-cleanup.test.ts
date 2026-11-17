@@ -285,6 +285,7 @@ for (const backend of backends) {
     // run's rejection ("the storage is closed") failed the whole file once the file ran longer than two minutes.
     const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
     const hung = hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
+    let storeClosed = false;
     try {
       // Waits for the run to reach the order (a fixed 100 ms was too short for a SQLite worker thread on a slow Windows runner).
       for (let i = 0; i < 200 && (await r.cleanup.get("att-1"))?.state !== "ordering"; i++) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -301,15 +302,18 @@ for (const backend of backends) {
       assert.equal((await r.cleanup.get("att-1"))?.state, "removed");
       assert.equal(await r.cleanup.recover(), 0, "finished and reported: nothing more");
       assert.equal(r.s.orders.length, 1);
-      // Shutdown ends the hung run at once (its order is cancelled), while the storage is still open; it leaves the sweep's removal as it is.
+      // Shutdown ends the hung run at once (its order is cancelled) and close() returns only once the run is done; the storage is then closed straight away, as the
+      // controller's shutdown does, so a run still writing after close() returned would fail with "the storage is closed". The sweep's removal is left as it is.
       const began = Date.now();
       await hanging.close();
-      assert.ok(Date.now() - began < SCRATCH_LIMITS.orderMs / 4, "close() did not wait for the order's time limit");
-      assert.equal((await hung).state, "removed", "the hung run ended without an error and did not change the sweep's outcome");
+      assert.ok(Date.now() - began < SCRATCH_LIMITS.orderMs / 4, "close() cancels the hung order at once instead of waiting for its time limit");
+      storeClosed = true;
+      await r.store.close();
+      assert.equal((await hung).state, "removed", "the hung run ended before close() returned, without an error, and did not change the sweep's outcome");
     } finally {
       await hanging.close();
       await hung.catch(() => undefined);
-      await r.store.close();
+      if (!storeClosed) await r.store.close();
     }
   });
 
