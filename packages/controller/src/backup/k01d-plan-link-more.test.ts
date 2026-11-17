@@ -67,6 +67,7 @@ for (const backend of backends) {
       assert.equal(made.manifest.contentScope!.referenceCheckComplete, true);
       const line = made.manifest.contentScope!.leftOut.find((l) => l.kind === "desk-record")!;
       assert.deepEqual([line.left, line.heldBack], [1, 2]);
+      assert.match(made.manifest.contentScope!.text, /2 that matched were kept because .*a decision link refers to them/, "the owner is told a decision link is one of the reasons a record was kept");
       assert.ok(free.length > 0);
 
       // A snapshot whose rows of link records do not move past the cursor (always the first page): the read ends, the check is unfinished, and nothing is left out.
