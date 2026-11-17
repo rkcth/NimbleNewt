@@ -92,8 +92,21 @@ test("a 400 that names a message of the request is the server refusing the histo
   assert.equal(r.claimsDone, false);
   // A timeout still wins, as for every other ending.
   assert.equal(classify({ summary: s, hidden: failed, changed: true, timedOut: true }).outcome, "timeout");
-  // Another message field, and no field after the index, read the same way.
-  assert.equal(classify({ summary: summarizeLogText(ev(...head, errorEnd('400: {"message":"messages[3].content must be a string"}'), ...tail)), hidden: failed, changed: false }).outcome, "server-rejected-history");
+  // Other wordings of the same refusal read the same way: a field path that ends in arguments, or an entry said not to be JSON.
+  const one = (text) => classify({ summary: summarizeLogText(ev(...head, errorEnd(text), ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(one('400: {"message":"messages[3].tool_calls[1].function.arguments: unexpected end"}'), "server-rejected-history");
+  assert.equal(one("400 Invalid request: messages[9] is not valid JSON (lone surrogate)"), "server-rejected-history");
+  // The same refusal after the hidden tests passed is still not a finish (as a generic error was not).
+  assert.equal(classify({ summary: s, hidden: { ran: true, passed: true }, changed: true }).outcome, "server-rejected-history");
+});
+
+test("a 400 that names a message for another reason stays a generic error: a context limit, a role, a content type", () => {
+  const one = (text) => classify({ summary: summarizeLogText(ev(...head, errorEnd(text), ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(one('400: {"message":"messages[3].content must be a string"}'), "error");
+  assert.equal(one("400: {\"message\":\"Invalid value for 'messages[5].role': 'developer' is not supported\"}"), "error");
+  assert.equal(one('400: {"message":"messages[40] exceeds the context length of 32768 tokens"}'), "error");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments is too long (maximum 65536)"}'), "error", "a size limit, even on arguments");
+  assert.equal(one('400: {"message":"messages[80].content: not valid JSON after truncation to the context window"}'), "error", "a context limit wins over the JSON words");
 });
 
 test("other error replies stay generic errors: a 400 naming no message, a 500 or 401 that does, an aborted reply", () => {
@@ -103,7 +116,7 @@ test("other error replies stay generic errors: a 400 naming no message, a 500 or
   assert.equal(as('401: messages[2] unauthorized'), "error");
   assert.equal(as("the engine stopped on an error, see messages[1] in the log"), "error");
   assert.equal(as(NIGHT_400, "aborted"), "error", "only an error reply, not an aborted one");
-  assert.equal(as(`400: ${"x".repeat(250)} messages[74].content is not valid`), "error", "the message index must come early in the text");
+  assert.equal(as(`400: ${"x".repeat(250)} messages[74].tool_calls[0].function.arguments is not JSON`), "error", "the message index must come early in the text");
 });
 
 test("a log that just stops (exit 0, no agent_end) is stopped early, not finished", () => {

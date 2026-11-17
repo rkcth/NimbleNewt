@@ -45,7 +45,7 @@ export function renderCompare(records) {
   const widths = head.map((h, i) => Math.max(h.length, ...table.map((r) => String(r[i]).length)));
   const fmt = (r) => `| ${r.map((x, i) => String(x).padEnd(widths[i])).join(" | ")} |`;
   const lines = [fmt(head), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...table.map(fmt), "",
-    "Cells: verified finishes / runs, then each run's outcome: F finish, W false done, I interface mismatch, S stopped early, L length, E empty, T timeout, X error, ? unclassified, C contaminated (never a finish).", ""];
+    "Cells: verified finishes / runs, then each run's outcome: F finish, W false done, I interface mismatch, S stopped early, L length, E empty, T timeout, R server refused the history, X error, ? unclassified, C contaminated (never a finish).", ""];
   for (const t of totals) lines.push(`${t.agent}: ${t.finish}/${t.runs} verified finish, ${t.wrong} false done, ${t.mismatch} interface mismatch, ${t.contaminated} contaminated, ${t.other} other; shipped wording (informational) ${t.shippedRuns ? `${t.shippedPassed}/${t.shippedRuns}` : "-"}`);
   return lines.join("\n");
 }
