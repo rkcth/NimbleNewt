@@ -120,6 +120,29 @@ export class LocalWorkspaces {
   }
 
   /**
+   * What a submit of the task's work is checked against (card H12n, `GitBridge.submitView`): the checkout's base, the shared repository's head (the landing branch), the files the agent changed and the files the landing branch
+   * changed since the base. `undefined`: this host holds no checkout for the task.
+   */
+  async submitView(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> {
+    const where = this.locate(call);
+    if (where === undefined) return undefined;
+    return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout });
+  }
+
+  /**
+   * Stages the task's checkout for a submission (card H12n): `GitBridge.stage` (everything git does not ignore, into the checkout's own index; a link or Git-named entry refuses the whole), then the patch ID of the staged change.
+   * Returns the base the staging is on, the tree, the patch ID and the staged files. Refuses when this host holds no checkout for the task, or when nothing differs from the base (there is nothing to submit).
+   */
+  async stageWork(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; tree: string; patchId: string; files: string[] }> {
+    const where = this.locate(call);
+    if (where === undefined) throw new WorkspaceError("unavailable", "this host holds no checkout for the task, so its work cannot be staged");
+    const staged = await this.#options.git.stage({ gitDir: where.gitDir, checkout: where.checkout });
+    const patchId = await this.#options.git.patchId({ gitDir: where.gitDir, base: staged.base });
+    if (patchId === undefined || staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
+    return { base: staged.base, tree: staged.tree, patchId, files: staged.files.map((f) => f.path) };
+  }
+
+  /**
    * The host of the optional work-in-progress backup (card P02b) over THIS layout: the same `locate` as every other request, so a backup reads exactly the checkout the agent works in, and `restoreTarget` below for a restore.
    * `scan` (required: no scan, no push) and `pushEnv` (the credential seam) are the operator's own; see `WipBackupHost`.
    */

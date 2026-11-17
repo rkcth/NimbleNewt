@@ -89,7 +89,7 @@ import { DependencyService, resumeProbeEnabled } from "../dependencies/index.js"
 import { resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
-import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
+import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
@@ -320,10 +320,10 @@ export interface StartOptions {
   /** What the runtime knows about an attempt's local processes and delegated child work, and what the stop cleanup cost it (card L02d). Absent: the stop inventory does not list them. */
   readonly localWork?: LocalWork;
   /**
-   * Stages an attempt's work and reports it (card H12n): the commit its checkout is based on, the tree and patch id of what is staged and the files changed. Provided by the workspace host (not composed yet, H12k). Absent: `work.end { submit: true }` is refused as unavailable, as before.
+   * Stages an attempt's work and reports it (card H12n): the commit its checkout is based on, the tree and patch id of what is staged and the files changed. A test's or composer's own function. Absent (and `landing` absent too): the host that runs the attempt stages it (`WorkerHost.stage`, the worker package's `LocalWorkspaces.stageWork`); a host that cannot ends the submit plainly with `release_failed`.
    */
   readonly stage?: (attempt: EndingAttempt) => Promise<StagedWork>;
-  /** What the task's checkout changed against its base and what the landing branch changed since (card H12n). Absent: the checkout is unknown, so a submit cannot be checked. */
+  /** What the task's checkout changed against its base and what the landing branch changed since (card H12n). Absent (and `stage` absent too): the host that runs the attempt says (`WorkerHost.submitView`); a host that cannot leaves the checkout unknown, so a submit is refused as unavailable. Given alone (no `stage`): a submit ends `submit_unavailable`. */
   readonly landing?: (taskId: string) => Promise<Landed | undefined>;
   /**
    * The HOST PORT of the scratch cleanup (owner decision 2026-10-30): executes a cleanup order on the attempt's controller-created scratch workspace and reports what an agent installed or left running (never removed). Idempotent by `order.key`.
@@ -1041,7 +1041,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         for (const [i, detail] of ownerNotices(a, leftovers).entries()) await notifications.emitFromController({ commandId: `scl-left:${a.attemptId}:${i + 1}`, kind: "maintenance", level: "needs-you", ref: { kind: "scratch-cleanup", id: `${scratchRecordId(a.attemptId)}-${i + 1}` }, projectId: a.projectId, detail });
       },
     });
-    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(() => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal })), landing: options.landing === undefined ? async () => undefined : (taskId) => options.landing!(taskId), ...(options.stage === undefined ? {} : { submit: stagedSubmit({ stage: options.stage, submissions, refreshRounds: async (attempt) => workspaceOps.refreshRounds(attempt.taskId), principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
+    const dispatchHandle = () => (dispatch === undefined ? undefined : { dispatcher: dispatch.dispatcher, principal: dispatch.principal });
+    // Card H12n: a submit is checked and staged on the host that holds the attempt's checkout (through the dispatcher), unless the composer gives its own `landing`/`stage`; a composer that gives either keeps the old binding.
+    const viaHost = options.landing === undefined && options.stage === undefined;
+    const stage = options.stage ?? (viaHost ? dispatcherStage(dispatchHandle) : undefined);
+    const workEnd = WorkEndService.withEpoch(storage, epoch, { attempts: dispatcherEndingPorts(dispatchHandle), landing: options.landing !== undefined ? (taskId) => options.landing!(taskId) : viaHost ? dispatcherLanding(dispatchHandle) : async () => undefined, ...(stage === undefined ? {} : { submit: stagedSubmit({ stage, submissions, refreshRounds: async (attempt) => workspaceOps.refreshRounds(attempt.taskId), principalOf: async (agentId) => { const p = await principals.get(agentId.startsWith("agent:") ? agentId : `agent:${agentId}`); return p === undefined || p.state !== "active" ? undefined : ((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal); } }) }), blockers: BlockerService.withEpoch(storage, epoch), paused: (taskId) => pauses.isPaused(taskId), scratch: { cleanup: scratchCleanup, checkpointRecorded: async (a) => {
       if (dispatch === undefined) return false;
       const attempt = await dispatch.dispatcher.get(dispatch.principal, a.attemptId).catch(() => undefined);
       return attempt === undefined ? false : checkpointVerdict(await continuations.latest(dispatch.principal, a.taskId).catch(() => undefined), attempt);
