@@ -83,3 +83,50 @@ test("through the running controller: the owner sets an HTTP probe, a due check 
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test("closing the running controller ends a probe request that is out at once (the shared shutdown aborts the requests; card P04i with the one shutdown of fixshut)", async () => {
+  // A health address that takes the request and never answers: only the controller's close can end it before the probe's own 30-second wait.
+  let requestEnded: (() => void) | undefined;
+  const ended = new Promise<void>((resolve) => { requestEnded = resolve; });
+  let asked = 0;
+  const server = createServer((req) => { asked++; req.socket.once("close", () => requestEnded?.()); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const d = mkdtempSync(join(tmpdir(), "nn-p04i-close-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  let closed = false;
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const owner = await c.services.principals.authenticate(boot.token);
+    await c.services.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "responsibility.read", project: "*" }] });
+    const call = (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    const project = (await call("project.create", { name: "Ops" }, "p1")).result.id as string;
+    const duty = (await call("responsibility.create", { projectId: project, title: "Keep web up", objective: "Up", desiredCondition: "health answers 200", everyMinutes: 60, ownerId: "agent:ann" }, "r1")).result.id as string;
+    const long = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const realGet = c.storage.getAggregate.bind(c.storage);
+    const realList = c.storage.listAggregates.bind(c.storage);
+    const back = (a: any) => (a?.kind === "responsibility" ? { ...a, createdAt: long, updatedAt: long } : a);
+    c.storage.getAggregate = async (ref) => back(await realGet(ref));
+    c.storage.listAggregates = (async (kind: string, o: any) => (await realList(kind, o)).map(back)) as never;
+    assert.ok((await call("responsibility.probe.set", { responsibilityId: duty, url: `http://127.0.0.1:${port}/silent`, timeoutSeconds: 30 }, "s1")).ok);
+    // Tick until the request is out (bounded).
+    const deadline = Date.now() + 30_000;
+    while (asked === 0) {
+      await c.dispatch!.dispatcher.tick();
+      if (Date.now() >= deadline) assert.fail("the probe request never reached the health address");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const t0 = Date.now();
+    await c.close(); closed = true;
+    // The request's connection is closed by the controller well before the probe's own 30-second wait.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<"late">((resolve) => { timer = setTimeout(() => resolve("late"), 10_000); });
+    try { assert.notEqual(await Promise.race([ended.then(() => "ended" as const), late]), "late", "the request out was still open 10 s after close()"); } finally { clearTimeout(timer); }
+    assert.ok(Date.now() - t0 < 10_000);
+  } finally {
+    if (!closed) await c.close();
+    server.closeAllConnections(); await new Promise((r) => server.close(r));
+    rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

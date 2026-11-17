@@ -173,19 +173,22 @@ test("close() whose dispatcher stop fails still closes the maintenance service, 
     const realMaintenanceClose = maintenanceProto.close;
     let maintenanceClosed = 0;
     maintenanceProto.close = async function (this: unknown): Promise<unknown> { maintenanceClosed += 1; return realMaintenanceClose.call(this); };
-    let c: Awaited<ReturnType<typeof startController>>;
+    let c: Awaited<ReturnType<typeof startController>> | undefined;
+    // Both wraps are put back in `finally`, also when the start itself fails.
     try {
-      c = await startController({
-        storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-        conversationTransport: { port: 0 }, dispatch: localDispatch(timer, () => { workersClosed++; }),
-      } as never);
-    } finally { (ScratchCleanupService as unknown as { withEpoch: typeof ScratchCleanupService.withEpoch }).withEpoch = realWithEpoch; }
+      try {
+        c = await startController({
+          storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+          conversationTransport: { port: 0 }, dispatch: localDispatch(timer, () => { workersClosed++; }),
+        } as never);
+      } finally { (ScratchCleanupService as unknown as { withEpoch: typeof ScratchCleanupService.withEpoch }).withEpoch = realWithEpoch; }
+      // The dispatcher's own stop does its work and then fails (set on this controller's driver only).
+      const driver = c.dispatch!.driver as unknown as { stop: () => Promise<void> };
+      const realStop = driver.stop.bind(driver);
+      driver.stop = async () => { await realStop(); throw new Error("the dispatcher's stop failed"); };
+      await assert.rejects(c.close(), /dispatcher's stop failed/, "close() reports the dispatcher's failure");
+    } finally { maintenanceProto.close = realMaintenanceClose; }
     const conversationPort = Number(new URL(c.conversationUrl!).port);
-    // The dispatcher's own stop does its work and then fails (set on this controller's driver only).
-    const driver = c.dispatch!.driver as unknown as { stop: () => Promise<void> };
-    const realStop = driver.stop.bind(driver);
-    driver.stop = async () => { await realStop(); throw new Error("the dispatcher's stop failed"); };
-    try { await assert.rejects(c.close(), /dispatcher's stop failed/, "close() reports the dispatcher's failure"); } finally { maintenanceProto.close = realMaintenanceClose; }
     assert.equal(maintenanceClosed, 1, "the maintenance service was closed once (its background work stopped)");
     assert.equal(workersClosed, 1, "the workers were closed after the failed stop");
     await portFree(conversationPort);
