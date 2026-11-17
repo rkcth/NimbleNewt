@@ -102,6 +102,20 @@ for (const backend of backends) {
       assert.equal((await rel.silent(60)).length, 1);
       await assert.rejects(() => rel.silent(0), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
 
+      // Two controllers on the same storage read the same silence (the notice key is built from stored times only, never from either one's clock) (first review).
+      const rel2 = ReleaseService.withEpoch(world.storage, projects.epoch, options);
+      assert.deepEqual(await rel2.silent(), await rel.silent());
+      // A heartbeat stamped ahead of this clock (another controller's clock runs ahead, or this one was set back): the silence counts from that stamp, so it is named later, never early, under one name.
+      const real = now;
+      now += 3 * MIN; await beat(lx); const ahead = at(); now = real;
+      assert.deepEqual((await rel.silent()).filter((x) => x.attemptId === a.attemptId), [], "a heartbeat in the future is not a silence");
+      now = Date.parse(ahead) + RELEASE_LIMITS.silentSeconds * 1000 - 1;
+      assert.deepEqual((await rel.silent()).filter((x) => x.attemptId === a.attemptId), [], "one millisecond short of five minutes after it");
+      now += 1;
+      const late = (await rel.silent()).filter((x) => x.attemptId === a.attemptId);
+      assert.deepEqual(late.map((x) => [x.silentSince, x.lastHeardAt]), [[ahead, ahead]]);
+      now = real;
+
       // Ended attempts are never named: a result, a cancel or the deadline ends the watch over them.
       await rel.cancel(owner, { commandId: cid("c"), attemptId: a.attemptId, reason: "not needed" });
       assert.deepEqual(await rel.silent(), []);

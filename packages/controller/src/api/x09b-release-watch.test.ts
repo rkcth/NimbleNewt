@@ -28,15 +28,17 @@ const MIN = 60_000;
 /** The longest host name the controller accepts (40 characters after `host:`). */
 const LONG = "a-very-long-release-test-machine-name-01";
 
-async function rig(clock: () => string) {
-  const d = mkdtempSync(join(tmpdir(), "nn-x09b-watch-"));
+async function rig(clock: () => string, dir?: string) {
+  const d = dir ?? mkdtempSync(join(tmpdir(), "nn-x09b-watch-"));
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter(() => []) },
     dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { blobDirectory: join(d, "blobs"), hosts: [] } },
   } as never);
   assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
-  const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+  // A second start on the same data folder (a restart) signs in with the owner credential the first one made.
+  const boot = dir === undefined ? await c.services.principals.bootstrapOwner({ name: "rob" }) : { token: ownerTokens.get(d)! };
+  ownerTokens.set(d, boot.token);
   const rob = await c.services.principals.authenticate(boot.token);
   const host = async (name: string) => {
     await c.services.principals.enroll(rob, { commandId: `e-${name}`, kind: "host", name, grants: [] });
@@ -50,8 +52,9 @@ async function rig(clock: () => string) {
     assert.ok(v.ok, JSON.stringify(v));
     return (v.result.item.lines as { text: string }[]).map((l) => l.text);
   };
-  return { c, call, host, inbox, view, close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
+  return { c, d, call, host, inbox, view, stop: () => c.close(), close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
 }
+const ownerTokens = new Map<string, string>();
 
 test("a host that took a release test and went quiet is told to the owner once per silence; the release view says when it was last heard and when the test ends; nothing is ended early (card X09b watch)", async () => {
   let now = Date.parse("2026-11-17T10:00:00.000Z");
@@ -168,4 +171,62 @@ test("a release notice is cut to the notice limit by whole characters, never ref
   assert.doesNotMatch(cut, /[\ud800-\udbff](?![\udc00-\udfff])/, "no half of a character is left");
   assert.equal(releaseNoticeText("y".repeat(200)), "y".repeat(200));
   assert.equal(releaseNoticeText("y".repeat(201)).length, 200);
+});
+
+test("a silence already told is not told again after the controller restarts, and a new one after the restart is (card X09b watch, first review)", async () => {
+  let now = Date.parse("2026-11-17T10:00:00.000Z");
+  const clock = () => new Date(now).toISOString();
+  const w = await rig(clock);
+  let again: Awaited<ReturnType<typeof rig>> | undefined;
+  try {
+    const manifest = { sourceCommit: COMMIT, suiteRevision: "suite-7", artifacts: { "nimblenewt.tgz": h("1") }, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] };
+    const candidateId = (await w.call("release.submit", { manifest }, "sub1")).result.candidateId as string;
+    assert.ok((await w.call("release.host", { hostId: "host:rig", os: "linux", arch: "x64" }, "hst1")).ok);
+    const client = await w.host("rig");
+    await client.connect({ ...CAPS } as never);
+    const attemptId = (await w.call("release.start", { candidateId, cell: linux, hostId: "host:rig", timeoutSeconds: 3600 }, "go1")).result.attemptId as string;
+    await client.releasePickUp(attemptId);
+    now += RELEASE_LIMITS.silentSeconds * 1000 + MIN;
+    await w.c.dispatch!.dispatcher.tick();
+    assert.equal(((await w.inbox(attemptId))[0] as unknown as { count: number } | undefined)?.count, 1);
+    await w.stop();
+    // The new controller remembers nothing in memory: the notice's command ID is what keeps the same silence to one notice.
+    again = await rig(clock, w.d);
+    await again.c.dispatch!.dispatcher.tick();
+    await again.c.dispatch!.dispatcher.tick();
+    let told = await again.inbox(attemptId);
+    assert.equal(told.length, 1);
+    assert.equal((told[0] as unknown as { count: number }).count, 1, "the same silence is not told again after a restart");
+    // The host comes back to the restarted controller (a new credential: the old address is gone), then goes quiet again.
+    const owner = await again.c.services.principals.authenticate(ownerTokens.get(w.d)!);
+    const client2 = new RemoteWorkerClient({ url: again.c.dispatch!.workerUrl!, token: (await again.c.services.principals.issueCredential(owner, "host:rig")).token, workerVersion: "release-host-test" });
+    await client2.connect({ ...CAPS } as never);
+    await client2.heartbeat(1);
+    now += RELEASE_LIMITS.silentSeconds * 1000 + MIN;
+    await again.c.dispatch!.dispatcher.tick();
+    told = await again.inbox(attemptId);
+    assert.equal((told[0] as unknown as { count: number }).count, 2, "a new silence after the restart is told");
+  } finally { if (again !== undefined) await again.close(); else await w.close(); }
+});
+
+test("the timed-out notice shows a host name with control or bidirectional characters escaped (card X09b watch, first review)", async () => {
+  let now = Date.parse("2026-11-17T10:00:00.000Z");
+  const w = await rig(() => new Date(now).toISOString());
+  try {
+    const manifest = { sourceCommit: COMMIT, suiteRevision: "suite-7", artifacts: { "nimblenewt.tgz": h("1") }, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] };
+    const candidateId = (await w.call("release.submit", { manifest }, "sub1")).result.candidateId as string;
+    // The owner may authorize a release host under any name; a test issued to it and never picked up still ends as timed out and is told.
+    const name = "lab\u202egpj.exe\u0085box";
+    assert.ok((await w.call("release.host", { hostId: name, os: "linux", arch: "x64" }, "hst1")).ok);
+    const started = await w.call("release.start", { candidateId, cell: linux, hostId: name, timeoutSeconds: 60 }, "go1");
+    assert.ok(started.ok, JSON.stringify(started));
+    const attemptId = started.result.attemptId as string;
+    now += (60 + RELEASE_LIMITS.graceSeconds) * 1000 + MIN;
+    await w.c.dispatch!.dispatcher.tick();
+    const told = await w.inbox(attemptId);
+    assert.equal(told.length, 1, JSON.stringify(told));
+    const detail = (told[0] as unknown as { detail: string }).detail;
+    assert.ok(detail.includes("Host: lab\\u202egpj.exe\\u0085box"), detail);
+    assert.doesNotMatch(detail, /[\u202e\u0085]/);
+  } finally { await w.close(); }
 });

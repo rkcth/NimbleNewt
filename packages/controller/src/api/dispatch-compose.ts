@@ -6,6 +6,7 @@ import type { ContinuationService } from "../continuation/continuation.js";
 import { continuationRecorder } from "../continuation/host-capture.js";
 import type { ReleaseService } from "../release/release.js";
 import { createHash } from "node:crypto";
+import { shown } from "../status/explain.js";
 import { framedMcp } from "../dispatch/tools.js";
 import { ProjectResourceService } from "../projects/index.js";
 import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.js";
@@ -493,6 +494,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   const liveProjects = (): Promise<string[]> => liveProjectIds(i.projects);
   let stallNotices = 0;
   const quiet: { service?: QuietHostService } = {};
+  /** The silences of release-test hosts this controller has already told the owner about (card X09b watch); only those still going on are kept. */
+  const silencesTold = new Set<string>();
   const loops: DispatcherLoop[] = [
     { name: "hosts.quiet", run: async (by) => { await quiet.service?.sweep(by); } },
     { name: "charge-retry", run: (by) => chargeRetry.sweep(by) },
@@ -501,14 +504,21 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       for (const e of (await i.release!.expire()).ended) {
         // The detail is cut to the notice limit: a long host name used to push it past 200 characters, the notice was refused and the owner was told nothing (card X09b watch). The notice points at the attempt:
         // notices are gathered by what they point at, and under the dispatcher's own name a release notice was folded into an unrelated one (another text, another level).
-        try { await notifications.emitFromController({ commandId: `release-timed-out:${e.attemptId}`, kind: "maintenance", level: "notice", label: "A release test ran out of time", ref: { kind: "release-attempt", id: e.attemptId }, detail: releaseNoticeText(`Release test ${e.attemptId} (${e.cell.os} ${e.cell.arch}) sent no result in time and ended as timed out, not passed; start it again to retry. Host: ${e.hostId}`) }); } catch { /* the attempt is ended either way and the release view shows it as timed out; the notice is not sent again (a failed notice, or a stop between the end and the notice, leaves only the view) */ }
+        try { await notifications.emitFromController({ commandId: `release-timed-out:${e.attemptId}`, kind: "maintenance", level: "notice", label: "A release test ran out of time", ref: { kind: "release-attempt", id: e.attemptId }, detail: releaseNoticeText(`Release test ${e.attemptId} (${e.cell.os} ${e.cell.arch}) sent no result in time and ended as timed out, not passed; start it again to retry. Host: ${shown(e.hostId, 80)}`) }); } catch { /* the attempt is ended either way and the release view shows it as timed out; the notice is not sent again (a failed notice, or a stop between the end and the notice, leaves only the view) */ }
       }
       // The outer watch (card X09b): a host that took a release test and then stopped sending heartbeats is told to the owner once per silence (the command ID carries the attempt and the moment the silence
       // began, so a host that comes back and goes quiet again is told again, a repeated sweep is not; the silences of one test gather on one notice item, counted, with the latest text). Nothing is ended here: a reboot test silences its host on purpose, and the deadline still ends it.
+      // A silence this controller already told is not sent again on every pass (each would be a replayed command and its reads): only the silences still going on are remembered, so the set stays as small as
+      // the open tests. After a restart, or on another controller, the command ID still makes it one notice.
+      const going = new Set<string>();
       for (const s of (await i.release!.silent?.()) ?? []) {
         const key = createHash("sha256").update(`${s.attemptId}|${s.silentSince}`).digest("hex").slice(0, 24);
-        try { await notifications.emitFromController({ commandId: `release-host-silent:${s.attemptId}:${key}`, kind: "maintenance", level: "notice", label: "A release test host went quiet", ref: { kind: "release-silence", id: s.attemptId }, detail: releaseNoticeText(`Test ${s.attemptId} (${s.cell.os} ${s.cell.arch}) on ${s.hostId}: silent since ${s.silentSince.slice(0, 16).replace("T", " ")} UTC, times out at ${s.endsAt.slice(0, 16).replace("T", " ")} UTC with no result; you may cancel.`) }); } catch { /* told on the next sweep: the command ID is the same, so it is still told once */ }
+        going.add(key);
+        if (silencesTold.has(key)) continue;
+        // The host's name is shown escaped: an owner may authorize a release host under any name, and a control or bidirectional character must not reach the owner's screen as such.
+        try { await notifications.emitFromController({ commandId: `release-host-silent:${s.attemptId}:${key}`, kind: "maintenance", level: "notice", label: "A release test host went quiet", ref: { kind: "release-silence", id: s.attemptId }, detail: releaseNoticeText(`Test ${s.attemptId} (${s.cell.os} ${s.cell.arch}) on ${shown(s.hostId, 80)}: silent since ${s.silentSince.slice(0, 16).replace("T", " ")} UTC, times out at ${s.endsAt.slice(0, 16).replace("T", " ")} UTC with no result; you may cancel.`) }); silencesTold.add(key); } catch { /* told on the next sweep: the command ID is the same, so it is still told once */ }
       }
+      for (const k of silencesTold) if (!going.has(k)) silencesTold.delete(k);
     } }]),
     ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, ...(s.apart === true ? { apart: true as const } : {}), run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...(i.wakeHost === undefined ? [] : wakeAttendLoops(i.wakeHost, wakeAttender(attendance, i.assignments, async (taskId) => { const c = await route({ commandId: `mwl-route:${taskId}`, taskId }); return "none" in c ? undefined : c.harness; }, () => live.dispatcher))), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects, liveProjects), ...eventLoops(events), ...watchLoops(watches),
     // The event is already in the agent's inbox; waking it is making sure an attempt is there to read it: one running will at its next boundary, one waiting for a place will when it starts (card H13c).
