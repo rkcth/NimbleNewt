@@ -38,7 +38,7 @@ export class HttpModelCall implements ModelCall {
       throw new Error(`${kind}: ${text}`);
     };
     const headers = new Headers({ "content-type": "application/json", accept: "application/json" });
-    try { for (const [k, v] of Object.entries(await endpoint.headers?.() ?? {})) headers.set(k, v); } catch { return fail(undefined, "the endpoint's credentials could not be read"); }
+    try { for (const [k, v] of Object.entries(await endpoint.headers?.() ?? {})) headers.set(k, v); } catch (error) { return fail(undefined, `the endpoint's credentials could not be read${error instanceof Error && error.message !== "" ? `: ${error.message}` : ""}`); } // the reason (a refused secret name, a missing secret) names the secret, never its value, and is redacted
     const model = this.#o.model?.(route) ?? route.slice(route.indexOf("/") + 1);
     let response: Response;
     try {
