@@ -5,7 +5,35 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
-export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "error", "unclassified"]);
+export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "server-rejected-history", "error", "unclassified"]);
+
+/**
+ * The server refused the conversation Pi sent back: an HTTP 400 that names one of the request's messages
+ * ("400: {"message":"messages: messages[74].tool_calls[0].function.arguments is not JSON", ...}"). The model's reply was
+ * not the problem; the history Pi rebuilt from it was (W01 night batch, 2026-11-17: Pi's `edit` tool parses an `edits`
+ * argument the model sent as a JSON string in place, so the stored call later went back with lone surrogate escapes
+ * the server will not read as JSON). A non-finish with its own name, so a batch can tell it from a server or bench
+ * fault. Read narrowly (anything else stays a plain `error`): a 400 whose text names `messages[N]` within its first 200
+ * characters, AND says the entry is not valid JSON or Unicode (or names a tool call's `arguments` field), AND says nothing
+ * of a size or context limit. So a context-length 400, an unknown role or a content-type refusal that names a message
+ * stays `error`: those are limits or a server incompatibility a batch should stop on, not a malformed history entry.
+ */
+export const REJECTED_HISTORY = /^400\b[^\n]{0,200}?\bmessages\[(\d+)\]((?:\.\w+(?:\[\d+\])?)*)/;
+const MALFORMED_ENTRY = /\bnot (?:valid )?JSON\b|\binvalid JSON\b|\bsurrogate|\binvalid unicode\b|\bnot valid UTF-?8\b/i;
+// A token count ("32768 tokens", "max_tokens") is a size limit; the bare word is not: a JSON parser's "Unexpected token" is
+// the same refusal (second review).
+const SIZE_OR_CONTEXT = /\bcontext\b|\d[\d,]*\s*tokens?\b|\bmax_tokens\b|\btoo (?:long|large|many)\b|\bmaximum\b|\bexceed/i;
+
+/** The `messages[N]` index and field path of a 400 that refused a malformed history entry, or null (see REJECTED_HISTORY). */
+export function rejectedHistory(errorMessage) {
+  if (typeof errorMessage !== "string") return null;
+  const m = REJECTED_HISTORY.exec(errorMessage);
+  if (m === null) return null;
+  const head = errorMessage.slice(0, 400);
+  if (SIZE_OR_CONTEXT.test(head)) return null;
+  if (!/\.arguments$/.test(m[2]) && !MALFORMED_ENTRY.test(head)) return null;
+  return { index: Number(m[1]), path: m[2] };
+}
 
 /** Words a final report uses when it says the work is done. Read only to tell a false done (`wrong`) from a stop mid-work; it never makes a run a finish. */
 const DONE_CLAIM = /\b(?:done|complete(?:d|s)?|finished|all (?:\d+ )?(?:of the )?(?:tests?|checks?|steps?) (?:now )?pass(?:ed|es)?|implemented|summary of (?:the )?(?:work|changes)|work is complete)\b/i;
@@ -235,6 +263,8 @@ export function classify({ summary, hidden, plan = null, changed, dirty = null, 
   const out = (outcome, reason) => ({ outcome, reason, endKind, claimsDone: done, doneClaim: claim });
   if (timedOut) return out("timeout", "the agent was stopped at its wall-clock limit");
   if (!summary.sawSession && summary.assistantMessages === 0) return out("error", `the agent wrote no Pi session (exit ${exitCode})`);
+  const rejected = summary.last?.stopReason === "error" ? rejectedHistory(summary.last.errorMessage) : null;
+  if (rejected !== null) return out("server-rejected-history", `the server refused the conversation Pi sent back (HTTP 400 on messages[${rejected.index}]${rejected.path}): ${summary.last.errorMessage}`);
   if (summary.last !== null && (summary.last.stopReason === "error" || summary.last.stopReason === "aborted")) return out("error", `the last reply ended with ${summary.last.stopReason}${summary.last.errorMessage ? `: ${summary.last.errorMessage}` : ""}`);
   if (!summary.agentEnd && exitCode !== 0) return out("error", `the agent process exited ${exitCode} before its run ended`);
   if (hidden?.passed === true) {

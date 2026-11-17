@@ -77,6 +77,52 @@ test("errors: no session at all, a reply that ended in error, and a process that
   assert.equal(classify({ summary: died, hidden: failed, changed: true, exitCode: 137 }).outcome, "error");
 });
 
+// The W01 night batch's first run (2026-11-17): Pi's 35th request was refused because a tool call in its history went
+// back with lone surrogate escapes in its arguments. The error text is the one that run's log recorded.
+const errorEnd = (errorMessage) => ({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage, usage: { input: 0, output: 0 } } });
+const NIGHT_400 = '400: {"message":"messages: messages[74].tool_calls[0].function.arguments is not JSON","type":"invalid_request_error","param":"messages","code":null}';
+
+test("a 400 that names a message of the request is the server refusing the history Pi sent, not a generic error", () => {
+  const s = summarizeLogText(ev(...head, tool, msg([{ type: "text", text: "Editing." }], "toolUse"), errorEnd(NIGHT_400), ...tail));
+  const r = classify({ summary: s, hidden: failed, changed: true, plan: { checked: 0, unchecked: 7 }, dirty: true });
+  assert.equal(r.outcome, "server-rejected-history", r.reason);
+  assert.match(r.reason, /messages\[74\]\.tool_calls\[0\]\.function\.arguments\)/);
+  assert.match(r.reason, /is not JSON/, "the server's own words are kept");
+  assert.equal(r.endKind, "error");
+  assert.equal(r.claimsDone, false);
+  // A timeout still wins, as for every other ending.
+  assert.equal(classify({ summary: s, hidden: failed, changed: true, timedOut: true }).outcome, "timeout");
+  // Other wordings of the same refusal read the same way: a field path that ends in arguments, or an entry said not to be JSON.
+  const one = (text) => classify({ summary: summarizeLogText(ev(...head, errorEnd(text), ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(one('400: {"message":"messages[3].tool_calls[1].function.arguments: unexpected end"}'), "server-rejected-history");
+  assert.equal(one("400 Invalid request: messages[9] is not valid JSON (lone surrogate)"), "server-rejected-history");
+  // A JSON parser's own words name a token without any size limit (second review).
+  assert.equal(one('400: {"message":"messages[74].tool_calls[0].function.arguments is not JSON: Unexpected token \\\\ in JSON at position 812"}'), "server-rejected-history");
+  // The same refusal after the hidden tests passed is still not a finish (as a generic error was not).
+  assert.equal(classify({ summary: s, hidden: { ran: true, passed: true }, changed: true }).outcome, "server-rejected-history");
+});
+
+test("a 400 that names a message for another reason stays a generic error: a context limit, a role, a content type", () => {
+  const one = (text) => classify({ summary: summarizeLogText(ev(...head, errorEnd(text), ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(one('400: {"message":"messages[3].content must be a string"}'), "error");
+  assert.equal(one("400: {\"message\":\"Invalid value for 'messages[5].role': 'developer' is not supported\"}"), "error");
+  assert.equal(one('400: {"message":"messages[40] exceeds the context length of 32768 tokens"}'), "error");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments: invalid JSON, 40000 tokens"}'), "error", "a token count is a size");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments not JSON; check max_tokens"}'), "error");
+  assert.equal(one('400: {"message":"messages[12].tool_calls[0].function.arguments is too long (maximum 65536)"}'), "error", "a size limit, even on arguments");
+  assert.equal(one('400: {"message":"messages[80].content: not valid JSON after truncation to the context window"}'), "error", "a context limit wins over the JSON words");
+});
+
+test("other error replies stay generic errors: a 400 naming no message, a 500 or 401 that does, an aborted reply", () => {
+  const as = (text, stop = "error") => classify({ summary: summarizeLogText(ev(...head, { ...errorEnd(text), message: { ...errorEnd(text).message, stopReason: stop } }, ...tail)), hidden: failed, changed: false }).outcome;
+  assert.equal(as('400: {"message":"max_tokens is too large"}'), "error");
+  assert.equal(as('500: {"message":"messages[74] could not be processed"}'), "error");
+  assert.equal(as('401: messages[2] unauthorized'), "error");
+  assert.equal(as("the engine stopped on an error, see messages[1] in the log"), "error");
+  assert.equal(as(NIGHT_400, "aborted"), "error", "only an error reply, not an aborted one");
+  assert.equal(as(`400: ${"x".repeat(250)} messages[74].tool_calls[0].function.arguments is not JSON`), "error", "the message index must come early in the text");
+});
+
 test("a log that just stops (exit 0, no agent_end) is stopped early, not finished", () => {
   const s = summarizeLogText(ev(...head, tool, msg([{ type: "text", text: "Now I'll edit it." }], "toolUse")));
   assert.equal(classify({ summary: s, hidden: failed, changed: true, exitCode: 0 }).outcome, "stopped-early");
