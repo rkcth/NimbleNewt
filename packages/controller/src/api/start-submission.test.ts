@@ -45,6 +45,8 @@ test("submissions by role go through the state API: the author submits code tied
     assert.equal((await call(stranger.token, "submission.record", code, "sx")).error.code, "forbidden", "an agent that does not own the attempt cannot submit code");
     assert.equal((await call(ann.token, "submission.record", { ...code, role: "qa" }, "sr")).error.code, "forbidden", "a role the agent does not hold (or that may not submit code)");
     assert.equal((await call(ann.token, "submission.record", code)).error.code, "invalid_command", "a command ID is required");
+    const named = await call(ann.token, "submission.record", { ...code, attemptId: (await s.assignments.getAssignment(task))!.activeAttemptId }, "sa");
+    assert.deepEqual([named.error?.code, named.error?.field], ["invalid_command", "args.attemptId"], `an agent cannot name the attempt itself: ${JSON.stringify(named.error)}`);
 
     const first = await call(ann.token, "submission.record", { ...code, evidence: [{ check: "unit", result: "pass", boundTo: tree }] }, "s1");
     assert.equal(first.ok, true, JSON.stringify(first));
@@ -62,6 +64,9 @@ test("submissions by role go through the state API: the author submits code tied
     const got = await call(boot.token, "submission.get", { submissionId: id });
     assert.equal(got.ok, true, JSON.stringify(got));
     assert.deepEqual([got.result.item.kind, got.result.item.tree, got.result.item.submittedBy], ["code", tree, ann.id]);
+    assert.equal(got.result.item.attemptId, (await s.assignments.getAssignment(task))!.activeAttemptId, "the code record names the attempt it came from");
+    assert.equal(typeof got.result.item.attemptId, "string");
+    assert.equal((await call(boot.token, "submission.get", { submissionId: reviewId })).result.item.attemptId, undefined, "a review names no attempt");
     const review = await call(boot.token, "submission.get", { submissionId: reviewId });
     assert.deepEqual([review.result.item.verdict, review.result.item.tree], ["approve", tree], "the verdict is bound to the tree it was given");
     assert.equal((await call(ann.token, "submission.get", { submissionId: id })).ok, true, "the submitter reads its own");
