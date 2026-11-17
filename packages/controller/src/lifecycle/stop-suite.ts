@@ -8,6 +8,7 @@ import { ProjectService } from "../domain/service.js";
 import { backendsNamed, stopServer } from "../domain/testing/backends.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { PauseService, STOP_LIMITS, StopService, addCapped, type InventoryItem, type StopPorts } from "./index.js";
+import type { StopSettled } from "./stop.js";
 import { dispatchStopPorts } from "./dispatch-ports.js";
 import type { PauseScope } from "./pause.js";
 
@@ -83,6 +84,8 @@ export function defineStopTests(backendName: string): void {
     const suite = (name: string, body: (c: {
       owner: Principal; mgr: Principal; ann: Principal; task: string; agentA: string; project: string; rt: Runtime; stops: StopService; pauses: PauseService; reopen(): StopService;
       assignments: AssignmentService; projects: ProjectService; agents: AgentService; runner: CommandRunner; storage: unknown; edit(intentId: string, change: (body: Record<string, unknown>) => Record<string, unknown>): Promise<void>;
+      /** What `onSettled` was told, in order (every service `make` builds reports here). */
+      settled: Parameters<StopSettled>[1][];
     }) => Promise<void>) =>
       test(`${backend.name}: ${name}`, async () => {
         now = Date.parse("2026-10-28T10:00:00.000Z");
@@ -112,8 +115,9 @@ export function defineStopTests(backendName: string): void {
             await new CommandRunner(world.storage, epoch, options).command("test.edit-stop", { commandId: cid("edit"), actor: "system" }, async () => ({ payload: { intentId }, build: async () => ({ ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: found.revision, body: change({ ...(found.body as Record<string, unknown>) }) as never }], detail: {} }) }));
           };
           mayHoldHook = async () => true;
-          const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t) });
-          await body({ owner, mgr, ann, task, agentA, project, rt, stops: make(), pauses, reopen: make, assignments, projects, agents, edit, runner: new CommandRunner(world.storage, epoch, options), storage: world.storage });
+          const settled: Parameters<StopSettled>[1][] = [];
+          const make = (): StopService => StopService.withEpoch(world.storage, epoch, PauseService.withEpoch(world.storage, epoch, {}, options), rt, { ...options, mayHold: (by, t) => mayHoldHook(by, t), onSettled: async (_by, e) => { settled.push(e); } });
+          await body({ owner, mgr, ann, task, agentA, project, rt, stops: make(), pauses, reopen: make, assignments, projects, agents, edit, runner: new CommandRunner(world.storage, epoch, options), storage: world.storage, settled });
         } finally { await world.close(); }
       });
     const scopeOf = (task: string) => ({ kind: "task", id: task }) as const;
@@ -1276,6 +1280,31 @@ export function defineStopTests(backendName: string): void {
       assert.equal(seen.phase, "recovery-required", "the resume moved it while terminate was running");
       assert.equal(sumOf(c, "att-c"), 20);
       assert.deepEqual([seen.endingRan, seen.attempts.map((a) => a.attemptId)], [true, ["att-c"]]);
+    });
+
+    suite("the end a request is reported with is the one its record holds: a stop another caller moved to recovery required while the ending ran is not reported as stopped, and one another caller settled is reported with that caller's outcome (T3 review)", async (c) => {
+      const plain = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "control" });
+      await c.stops.advance(c.owner, { intentId: plain.intentId });
+      assert.deepEqual(c.settled.map((e) => [e.intentId, e.outcome.state, e.outcome.graceful]), [[plain.intentId, "stopped", true]], "an ordinary stop is reported once");
+      await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+      c.settled.length = 0;
+      // The scope is resumed while the ending runs, and another pass moves the request to recovery required; this pass's ending then finishes cleanly.
+      const moved = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "x" });
+      c.rt.duringTerminate = async () => {
+        await c.pauses.resume(c.owner, { commandId: cid("rs"), scope: scopeOf(c.task), reason: "again" });
+        await c.reopen().advance(c.owner, { intentId: moved.intentId });
+      };
+      const after = await c.stops.advance(c.owner, { intentId: moved.intentId });
+      assert.equal(after.phase, "recovery-required");
+      assert.equal(c.settled.length, 0, "not reported as stopped: the record says recovery required");
+      // A Force Stop from another caller settles the request while this pass's graceful ending runs: the report carries the forced (not graceful) outcome that was recorded.
+      c.settled.length = 0;
+      const raced = await c.stops.request(c.owner, { commandId: cid("s"), scope: scopeOf(c.task), mode: "stop", reason: "y" });
+      c.rt.duringTerminate = async () => { await c.reopen().force(c.owner, { commandId: cid("f"), scope: scopeOf(c.task), reason: "now" }); };
+      const forced = await c.stops.advance(c.owner, { intentId: raced.intentId });
+      assert.deepEqual([forced.phase, forced.outcome?.state, forced.outcome?.graceful], ["done", "stopped", false]);
+      assert.ok(c.settled.length >= 1);
+      for (const e of c.settled) assert.deepEqual([e.intentId, e.outcome.state, e.outcome.graceful], [raced.intentId, "stopped", false], "every report says what the record says");
     });
 
     suite("a note whose wait loses six races in a row fails the pass, which stays retryable: a later sweep charges the figure (card L02d review 7, 3)", async (c) => {

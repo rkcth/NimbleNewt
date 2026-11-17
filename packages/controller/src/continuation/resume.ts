@@ -104,6 +104,7 @@ const KIND = "resume-check";
 const DECLINE_KIND = "resume-decline";
 const ORPHANED = "not committed: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so nothing is resumed";
 /** Internal: a start over refused because this check's own resume was recorded meanwhile (the check then ends done from that record). */
+const ROUND_MOVED = "not started over: the check was started over by another advance meanwhile";
 const RECORDED_MEANWHILE = "not started over: this check's resume was recorded meanwhile";
 const NOT_APPROVED_ORPHANED = "not approved: the attempt this resume check was for is no longer the task's active attempt (the task was released, transferred or given another attempt), so there is nothing to let go on";
 const ACTIVE = "resume-active";
@@ -123,7 +124,7 @@ const checkModel = (v: unknown, field: string): { provider: string; id: string }
 export interface ResumeCheckDeps {
   readonly continuations: Pick<ContinuationService, "latest" | "resume"> & Partial<Pick<ContinuationService, "forCheckpoint">>;
   readonly dependencies: Pick<DependencyService, "check">;
-  readonly blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
+  readonly blockers: Pick<BlockerService, "openBlocker" | "getBlocker"> & Partial<Pick<BlockerService, "resolveBlocker">>;
   readonly ports: ResumePorts;
   /** Releases the task whose held resume the owner declined, while `attemptId` is still its active attempt (card L04c). Must be repeatable (a command ID derived from the attempt). Absent: `decline` is unavailable for a dispatcher's check. */
   readonly release?: (by: Principal, taskId: string, attemptId: string) => Promise<void>;
@@ -145,7 +146,7 @@ export class ResumeCheckService {
   readonly #reviewing = new Set<string>();
   readonly #continuations: Pick<ContinuationService, "latest" | "resume"> & Partial<Pick<ContinuationService, "forCheckpoint">>;
   readonly #dependencies: Pick<DependencyService, "check">;
-  readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker">;
+  readonly #blockers: Pick<BlockerService, "openBlocker" | "getBlocker"> & Partial<Pick<BlockerService, "resolveBlocker">>;
   readonly #ports: ResumePorts;
   readonly #rounds: number | (() => Promise<number>);
   readonly #release: ResumeCheckDeps["release"];
@@ -634,13 +635,28 @@ export class ResumeCheckService {
   /** The inputs moved after the review: start over, or stop as churn when the rounds are used up. */
   /** `guard`: extra changes the start over (or the churn block) is written with; it may refuse by throwing, and is asked once before a churn blocker is opened, so a refused one opens none. */
   async #restart(by: Principal, id: string, why: string, from: readonly ResumePhase[] = ["ready"], guard?: () => Promise<readonly Change[]>): Promise<void> {
-    const b = (await this.#runner.get(KIND, id))!.body as unknown as ResumeCheckBody;
-    if (b.round + 1 >= b.maxRounds) {
-      if (guard !== undefined) await guard();
-      await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, from, guard);
-      return;
+    // The round limit is judged on the round read here and the write must be made on that same round (T8b): another advance of the check can start it over, and bring it back to the same phase, between
+    // the read and the write. Judged on the old round the write would take the check past its limit without the block; so it is read and judged again, a bounded number of times.
+    for (let tries = 1; ; tries++) {
+      const b = (await this.#runner.get(KIND, id))!.body as unknown as ResumeCheckBody;
+      // Moved on meanwhile (another advance blocked, committed or cancelled it): nothing to start over, and no churn blocker is opened for a check that would not name it (T8b review).
+      if (!from.includes(b.phase)) return;
+      if (b.round + 1 >= b.maxRounds) {
+        if (guard !== undefined) await guard();
+        await this.#block(by, id, b, "resume_churn", `the inputs kept changing (${why}); ${b.maxRounds} rounds did not settle`, from, guard);
+        return;
+      }
+      try {
+        await this.#update(id, (x) => {
+          if (x.round !== b.round) throw new DomainError("invalid_transition", ROUND_MOVED);
+          return { ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) };
+        }, from, guard);
+        return;
+      } catch (error) {
+        if (!(error instanceof DomainError) || error.message !== ROUND_MOVED) throw error;
+        if (tries >= 6) throw new DomainError("unavailable", "the resume check was started over by other advances on each of 6 tries, so this start over was not written; the same request can be made again");
+      }
     }
-    await this.#update(id, (x) => ({ ...x, phase: "verifying", round: x.round + 1, history: this.#push(x, "verifying", by.id, `started over: ${why}`) }), from, guard);
   }
 
   async #block(by: Principal, id: string, b: ResumeCheckBody, type: NonNullable<ResumeCheckBody["blocked"]>["type"], reason: string, from: readonly ResumePhase[] = LIVE, guard?: () => Promise<readonly Change[]>): Promise<void> {
@@ -649,7 +665,36 @@ export class ResumeCheckService {
       const opened = await this.#blockers.openBlocker({ commandId: `${id}-blk-${type}-${b.blocks}`, actor: "system", type, subject: { kind: "task", id: b.taskId }, summary: short(reason), resolver: "owner" });
       blockerId = opened.id;
     }
-    await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from, guard);
+    let wrote: boolean;
+    try {
+      wrote = await this.#update(id, (x) => ({ ...x, phase: "blocked", blocks: x.blocks + 1, blocked: { type, reason: short(reason), ...(blockerId === undefined ? {} : { blockerId }) }, history: this.#push(x, "blocked", by.id, short(reason)) }), from, guard);
+    } catch (error) {
+      // The attempt ended between opening the blocker and writing the block (T8b): the check is cancelled by the caller and never blocked, so nothing is waiting for the owner. Likewise when this
+      // check's resume was recorded meanwhile (the caller then ends the check done from that record; T8b second review). The blocker is closed unless a check names it (another advance of this
+      // check blocked it with this very blocker, or the task's newer check did: blockers are one per task and type). Any other failure leaves it open: the same command ID finds it again at the next try.
+      if (blockerId !== undefined && error instanceof DomainError && (error.message === ORPHANED || error.message === RECORDED_MEANWHILE)) {
+        await this.#closeUnused(id, b.taskId, blockerId, b.blocks, error.message === ORPHANED ? "The attempt this resume check was for ended before the check could be blocked, so nothing is waiting on this." : "The task's resume was recorded before the check could be blocked, so nothing is waiting on this.");
+      }
+      throw error;
+    }
+    // The check moved on between opening the blocker and the write (T8b second review): another advance committed, cancelled (the dispatcher, when the attempt ended) or blocked it. The block was not
+    // written; the blocker is closed unless a check names it (the other advance blocked it with this very blocker).
+    if (!wrote && blockerId !== undefined) await this.#closeUnused(id, b.taskId, blockerId, b.blocks, "The resume check moved on (it was committed, cancelled or blocked for another reason) before it could be blocked, so nothing is waiting on this.");
+  }
+
+  async #closeUnused(id: string, taskId: string, blockerId: string, blocks: number, resolution: string): Promise<void> {
+    const names = async (checkId: string): Promise<boolean> => ((await this.#runner.get(KIND, checkId))?.body as unknown as ResumeCheckBody | undefined)?.blocked?.blockerId === blockerId;
+    try {
+      const open = await this.#blockers.getBlocker(blockerId);
+      if (open === undefined || open.state !== "open") return;
+      // Read after the blocker: a check that names it (this one, or the task's current one, which may be a newer check that was given the same open blocker) keeps it open.
+      if (await names(id)) return;
+      const current = ((await this.#runner.get(ACTIVE, derivedId("rck", `active\0${taskId}`)))?.body as unknown as { checkId?: string } | undefined)?.checkId;
+      if (current !== undefined && current !== id && await names(current)) return;
+      await this.#blockers.resolveBlocker?.({ commandId: `${id}-blk-end-${blocks}`, actor: "system", blockerId, expectedRevision: open.revision, resolution });
+    } catch (error) {
+      if (!(error instanceof DomainError) || (error.code !== "invalid_command" && error.code !== "stale_revision" && error.code !== "not_found" && error.code !== "command_conflict")) throw error;
+    }
   }
 
   /**
@@ -680,7 +725,9 @@ export class ResumeCheckService {
         }));
         return true;
       } catch (error) {
-        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict") || attempt >= 6) throw error;
+        if (!(error instanceof DomainError) || (error.code !== "stale_revision" && error.code !== "command_conflict")) throw error;
+        // T8b: six lost races in a row used to surface as a bare stale_revision, which reads as a fault of the caller. It is a busy check: nothing was written, and the same call can be made again.
+        if (attempt >= 6) throw new DomainError("unavailable", "the resume check was changed by other writers on each of 6 tries, so this change was not written; the same request can be made again");
       }
     }
   }
