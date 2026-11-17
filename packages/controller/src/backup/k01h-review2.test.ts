@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -514,5 +514,24 @@ test("refreshes that come due while a rewrite runs wait as ONE: the holder's cha
     counting = false;
     assert.ok(beats >= 1 && beats <= 3, `the refreshes due during a 150 ms rename ran once, not once per 5 ms tick (${beats})`);
     await lock.release();
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("a release whose file cannot be removed still lets the lock go in this process: the record left behind is this process's leaked lock, and a later start here takes it over instead of being refused as busy for good (CI repair winflake, re-check)", { skip: !POSIX || process.getuid?.() === 0 ? "needs a folder whose entries this user cannot remove (POSIX, not root)" : false }, async () => {
+  const d = tmp();
+  try {
+    const first = await acquireDataLock(d, { heartbeatMs: 3_600_000 });
+    const firstNonce = (JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce;
+    chmodSync(d, 0o500);
+    try {
+      await assert.rejects(first.release(), (e: NodeJS.ErrnoException) => e.code === "EACCES" || e.code === "EPERM", "the removal failed and is said");
+    } finally { chmodSync(d, 0o700); }
+    assert.equal((JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce, firstNonce, "the record stayed");
+    await first.release(); // a second release does nothing
+    const second = await acquireDataLock(d, { heartbeatMs: 3_600_000 });
+    assert.notEqual((JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce, firstNonce);
+    assert.equal(await second.isHeld(), true);
+    await second.release();
+    assert.equal(existsSync(join(d, LOCK_FILE)), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

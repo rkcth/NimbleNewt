@@ -162,3 +162,19 @@ test("the watchdog's record reaches its file on Windows while the controller has
     assert.deepEqual(readdirSync(root).filter((n) => n.endsWith(".tmp")), [], "and no temporary file");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("the watchdog's own process loads only its small modules: the compiled watchdog imports no more than the heartbeat and the rename rule (not the launcher and what it needs) (CI repair winflake, re-check)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { dirname: dirOf, relative, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = dirOf(fileURLToPath(import.meta.url));
+  const root = resolve(here, "..");
+  const seen = new Set<string>();
+  const walk = (file: string): void => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    for (const m of readFileSync(file, "utf8").matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s*["'](\.[^"']+)["']/g)) walk(resolve(dirOf(file), m[1]!));
+  };
+  walk(join(here, "watchdog.js"));
+  assert.deepEqual([...seen].map((f) => relative(root, f).split("\\").join("/")).sort(), ["notifications/watchdog.js", "release/heartbeat.js", "release/rename-replacing.js"]);
+});
