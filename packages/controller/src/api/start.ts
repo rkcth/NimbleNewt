@@ -1276,7 +1276,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       const manifest = await contextDependencies.get(RESUME_READER, taskId).catch(() => undefined);
       if (manifest === undefined || !manifest.entries.some((e) => e.kind === "external" || e.kind === "mcp-resource")) return files;
       const read = await readResources(manifest, "resume-check");
-      for (const e of manifest.entries) if (e.kind === "external" || e.kind === "mcp-resource") recentTexts.set(taskId, e.id, read.texts[e.id]);
+      for (const e of manifest.entries) if (e.kind === "external" || e.kind === "mcp-resource") recentTexts.set(taskId, e.id, read.texts[e.id], read.observations[e.id]?.hash);
       return { ...read.observations, ...files };
     };
     // The reviewer's view of each change (card L04g): a diff of the text kept at recording and the text read now, unless the owner turned it off (resume.reviewerSeesChanges).

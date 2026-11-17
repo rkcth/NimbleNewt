@@ -43,6 +43,11 @@ test("the view of a change: the kept text against the text read now; why not, wh
   recent.set("t", "f1", "fresh", "e".repeat(64));
   assert.equal(recent.at("t", "f1", "e".repeat(64)), "fresh");
   assert.equal(recent.at("t", "f1", "f".repeat(64)), undefined);
+  // A text this process read at the hash the entry was recorded with is the earlier text (an earlier look kept it, and this check looked elsewhere, such as on a remote host): it is never shown
+  // as the text now, which would make a real change look like nothing visible changed.
+  kept["f1"] = "a\nc\n";
+  recent.set("t", "f1", "a\nc\n", "a".repeat(64));
+  assert.match((await view("t", { id: "f1", kind: "file", status: "changed" }) as { none: string }).none, /could not be read here/);
   // A read that found no text forgets the older one.
   recent.set("t", "f1", undefined);
   assert.equal(recent.get("t", "f1"), undefined);

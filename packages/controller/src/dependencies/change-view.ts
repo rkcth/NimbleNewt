@@ -74,11 +74,15 @@ export class RecentTexts {
     return got !== undefined && got.hash === hash.replace(/^sha256:/, "") ? this.get(taskId, entryId) : undefined;
   }
   get(taskId: string, entryId: string): string | undefined {
+    return this.read(taskId, entryId)?.text;
+  }
+  /** The text kept for this entry and the hash it was read at (when the reader gave one), while it is not too old. */
+  read(taskId: string, entryId: string): { readonly text: string; readonly hash?: string } | undefined {
     const k = `${taskId}\0${entryId}`;
     const got = this.#items.get(k);
     if (got === undefined) return undefined;
     if (this.#now() - got.at > CHANGE_VIEW_LIMITS.ms) { this.#items.delete(k); return undefined; }
-    return got.text;
+    return { text: got.text, ...(got.hash === undefined ? {} : { hash: got.hash }) };
   }
 }
 
@@ -96,7 +100,9 @@ export function changeViews(deps: { manifest(taskId: string): Promise<ManifestBo
       if (entry === undefined) return { none: "the dependency is no longer recorded" };
       const before = await deps.textOf(taskId, entry);
       if (before === undefined) return { none: "the text seen when it was recorded was not kept (it was recorded by its hash only, or is not text, or is larger than the controller keeps)" };
-      const after = change.status === "deleted" ? "" : deps.recent.get(taskId, entry.id);
+      // A text read at the hash the entry was recorded with is the earlier text, not the one the check found (it was kept by an earlier look, and this check looked elsewhere, for example on a remote host): no diff from it.
+      const now = change.status === "deleted" ? { text: "" } : deps.recent.read(taskId, entry.id);
+      const after = now === undefined || (now.hash !== undefined && now.hash === entry.hash?.replace(/^sha256:/, "")) ? undefined : now.text;
       if (after === undefined) return { none: "the text now could not be read here (it is on a remote host, is not text, or is larger than the controller reads)" };
       const diff = boundedDiff(before, after);
       return diff === "" ? { none: "the visible text is the same; what differs was redacted or is outside the text" } : { diff };

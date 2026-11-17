@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer as createHttpsServer } from "node:https";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { connect as netConnect, type Socket } from "node:net";
+import { connect as netConnect, createServer as createNetServer, type Socket } from "node:net";
+import { gzipSync } from "node:zlib";
 import { after, test } from "node:test";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -221,4 +222,76 @@ test("a read that never answers is given up at the observation's bound, whatever
   assert.deepEqual(got.observations["dpm-a"], { unread: "the resource did not answer in time" });
   assert.deepEqual(got.observations["dpm-b"], { unread: "the server fell over" });
   assert.deepEqual(got.texts, {});
+});
+
+// A server that answers badly on purpose: the read stays within its bounds and says why, and nothing of a credential (the grant's header, a secret in the address's query) reaches a reason, the log or the faults.
+test("a hostile answer is bounded: an endless stream, a drip, a header flood, a compressed or binary body, an oversized ETag; no credential or query secret in any reason, log or fault", async () => {
+  const world = await backends[0]!.open();
+  const QUERY = ["a", "p", "i", "_", "k", "e", "y", "="].join("") + "QQ77".repeat(8);
+  const asked: string[] = [];
+  const srv = createNetServer((sock) => {
+    let head = "";
+    sock.on("error", () => undefined);
+    sock.on("data", (d: Buffer) => {
+      head += d.toString("latin1");
+      if (!head.includes("\r\n\r\n")) return;
+      const path = head.split(" ")[1] ?? "";
+      asked.push(path);
+      if (path === "/endless") {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n");
+        const t = setInterval(() => { if (sock.destroyed) { clearInterval(t); return; } sock.write(`400\r\n${"y".repeat(1024)}\r\n`); }, 1);
+        sock.on("close", () => clearInterval(t));
+      } else if (path === "/drip") {
+        sock.write("HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 100\r\n\r\n");
+        const t = setInterval(() => { if (sock.destroyed) { clearInterval(t); return; } sock.write("z"); }, 300);
+        sock.on("close", () => clearInterval(t));
+      } else if (path === "/headers") {
+        let h = "HTTP/1.1 200 OK\r\n";
+        for (let i = 0; i < 4000; i++) h += `x-h${i}: ${"v".repeat(20)}\r\n`;
+        sock.end(`${h}content-length: 2\r\n\r\nok`);
+      } else if (path === "/gzip") {
+        const body = gzipSync(Buffer.from("plain words"));
+        sock.end(Buffer.concat([Buffer.from(`HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-encoding: gzip\r\netag: "${"e".repeat(300)}"\r\ncontent-length: ${body.length}\r\n\r\n`, "latin1"), body]));
+      } else if (path.startsWith("/secret")) {
+        sock.end("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+      } else sock.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
+    });
+  });
+  await new Promise<void>((ok) => srv.listen(0, "127.0.0.1", ok));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+    const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+    const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+    const projectId = (await projects.createProject({ commandId: cid("p"), actor: "owner:rob", name: "A" })).id;
+    const taskId = (await projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId, title: "T" })).id;
+    const grants = NetworkGrantService.withEpoch(world.storage, projects.epoch, options);
+    const deps = DependencyService.withEpoch(world.storage, projects.epoch, options);
+    await grants.grant(owner, { commandId: cid("g"), taskId, host: "docs.example.com", port: 80, credential: { header: "x-docs-key", ref: "docs-token" } } as never);
+    const reader = new WebFetch({ grants, resolve: async () => [PUBLIC], dial: () => netConnect({ host: "127.0.0.1", port }), secret: () => SECRET });
+    const faults: string[] = [];
+    const read = resourceReader({ allowed: async () => true, external: reader, limits: { bytes: 4096, ms: 1500 }, onFault: (d) => faults.push(d) });
+    const at = (path: string): string => `http://docs.example.com${path}`;
+    const x = createHashHex("x");
+    await deps.record(owner, { commandId: cid("d"), taskId, dependencies: ["/endless", "/drip", "/headers", "/gzip", `/secret?${QUERY}`].map((p) => ({ kind: "external" as const, key: at(p), hash: x, freshness: "conditional-read" as const })) });
+    const manifest = (await deps.get(owner, taskId))!;
+    const t0 = Date.now();
+    const got = await read(manifest, "resume-check");
+    assert.ok(Date.now() - t0 < 4000, `the reads end within the bound (${Date.now() - t0} ms)`);
+    const checks = Object.fromEntries((await deps.check(owner, taskId, got.observations)).map((c) => [c.key.replace(/^http:\/\/[^/]+/, "").replace(/\?.*/, ""), [c.status, c.detail] as [string, string]]));
+    assert.match(checks["/endless"]![1], /larger than the 4096 bytes/, "an endless stream is cut at the bound");
+    assert.match(checks["/drip"]![1], /did not answer in time/, "a drip-fed answer is given up at the observation's bound");
+    assert.equal(checks["/headers"]![0], "unknown", "a flood of headers is not an answer");
+    assert.equal(checks["/gzip"]![0], "changed", "a compressed body is compared as the bytes it came as");
+    const gz = manifest.entries.find((e) => e.key.endsWith("/gzip"))!;
+    assert.equal(got.texts[gz.id], undefined, "bytes that are not text are not kept for the reviewer");
+    assert.equal(got.observations[gz.id]!.etag, undefined, "an ETag longer than 200 characters is not taken");
+    assert.match(checks["/secret"]![1], /HTTP 503/);
+    const log = JSON.stringify(await grants.connections(owner, taskId));
+    for (const [where, text] of [["checks", JSON.stringify(checks)], ["observations", JSON.stringify(got.observations)], ["log", log], ["faults", faults.join("\n")]] as const) {
+      assert.equal(text.includes(SECRET), false, `no grant credential in the ${where}`);
+      assert.equal(text.includes(QUERY), false, `no query secret in the ${where}`);
+    }
+    assert.ok(asked.length <= 5, "one request per resource");
+  } finally { srv.close(); await world.close(); }
 });

@@ -179,3 +179,18 @@ test("the model is told how a first-run owner gives a task to an agent and makes
   assert.match(system, /To give a task to an agent[\s\S]*?task\.assign with taskTitle[\s\S]*?agentName[\s\S]*?never an ID/);
   assert.match(system, /the controller itself starts the attempt on the worker host/);
 });
+
+test("the prompt tells the model how the owner lets resume checks re-read web pages and MCP resources and whether the resume reviewer sees the change itself, in any words (card L04g); the intents pass the checks", async () => {
+  let system = "";
+  const intents = [
+    { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "resume.externalReads", value: true }, evidence: "let resume checks re-read the web pages my tasks used", basis: "owner" },
+    { kind: "policy_edit", change: { type: "setting", layer: "installation", key: "resume.reviewerSeesChanges", value: false }, evidence: "don't show the reviewer what changed in my files", basis: "owner" },
+  ];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intents); } }, () => ["a/primary"]);
+  const out = await m.interpret({ ...input, text: "let resume checks re-read the web pages my tasks used, and don't show the reviewer what changed in my files", quoted: [] }) as unknown[];
+  assert.equal(out.length, 2, JSON.stringify(out));
+  assert.match(system, /resume\.externalReads \(false by default/);
+  assert.match(system, /resume\.reviewerSeesChanges \(true by default/);
+  assert.match(system, /the task's own network grant for that address, or an approved remote MCP server that lists the resource/);
+  assert.match(system, /at most 3,000 characters, so a short file or page can appear in it whole/, "the owner is not told a whole file never goes to the route");
+});

@@ -113,6 +113,18 @@ for (const backend of backends) {
       const word = await note(ann, [{ kind: "file", key: "../outside.txt", hash: H("not yours") }]);
       assert.equal(word.entries[0]!.checkedBy, "recorder");
       assert.equal(await deps.textOf(task, (await deps.get(owner, task))!.entries.find((e) => e.key === "../outside.txt")!), undefined, "no text is kept for what the controller did not read");
+      // The same note sent again (a retried call with its command ID) records once: the manifest and the kept text stay as the first recorded them, even when the file changed in between;
+      // the same command ID for a different note is a conflict.
+      writeFileSync(join(dir, "beds", "north"), "lettuce", "utf8");
+      const again = { commandId: cid("n-again"), taskId: task, dependencies: [{ kind: "file", key: "beds/north" }] as never };
+      assert.equal((await notes.note(ann, again)).recorded, 1);
+      const first = (await deps.get(owner, task))!.entries.find((e) => e.key === "beds/north")!;
+      writeFileSync(join(dir, "beds", "north"), "lettuce and kale", "utf8");
+      assert.equal((await notes.note(ann, again)).recorded, 1);
+      const second = (await deps.get(owner, task))!.entries.find((e) => e.key === "beds/north")!;
+      assert.deepEqual([second.hash, second.observedAt], [first.hash, first.observedAt], "a replay records nothing new");
+      assert.equal(await deps.textOf(task, second), "lettuce");
+      await refuses("command_conflict", () => notes.note(ann, { ...again, dependencies: [{ kind: "file", key: "guide.md" }] as never }));
       // Bounds and shapes.
       await refuses("invalid_command", () => note(ann, Array.from({ length: 21 }, (_, i) => ({ kind: "file", key: `f${i}` }))), /1 to 20/);
       await refuses("invalid_command", () => note(ann, [{ kind: "tool-version", key: "x" }]), /must be one of/);
