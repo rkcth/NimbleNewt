@@ -41,6 +41,41 @@ test("a checkout has the files and no .git; its repository is elsewhere", { skip
   } finally { await w.done(); }
 });
 
+test("a checkout holds exactly the committed bytes even when the base's attributes ask for line-ending, ident or filter conversion, so nothing reads as changed (H12n re-check follow-up)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-git-attr-"));
+  try {
+    const shared = join(dir, "shared");
+    await mkdir(join(shared, "src"), { recursive: true });
+    sh(dir, "init", "-q", "-b", "main", shared);
+    // The base asks for CRLF in the working tree for every text file, an $Id$ expansion and a filter (which is not configured anywhere, so git would pass it through).
+    await writeFile(join(shared, ".gitattributes"), "* text eol=crlf\nsrc/id.ts ident\nsrc/f.ts filter=nnmissing\n");
+    await writeFile(join(shared, "src", "a.ts"), "export const a = 1;\nexport const b = 2;\n");
+    await writeFile(join(shared, "src", "id.ts"), "// $Id$\nexport const id = 1;\n");
+    await writeFile(join(shared, "src", "f.ts"), "export const f = 1;\n");
+    sh(shared, "-c", "core.safecrlf=false", "add", "-A"); sh(shared, "commit", "-q", "-m", "attributes");
+    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+    const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
+    const commit = await git.head(shared);
+    await git.createCheckout({ shared, commit, gitDir, checkout });
+    for (const path of [".gitattributes", "src/a.ts", "src/id.ts", "src/f.ts"]) {
+      const committed = execFileSync("git", ["--git-dir", join(shared, ".git"), "cat-file", "blob", `${commit}:${path}`]);
+      assert.ok((await readFile(join(checkout, path))).equals(committed), `${path} holds the committed bytes, not a converted copy`);
+    }
+    assert.equal(await readFile(join(checkout, "src", "a.ts"), "utf8"), "export const a = 1;\nexport const b = 2;\n", "no CRLF was written");
+    assert.equal(await readFile(join(checkout, "src", "id.ts"), "utf8"), "// $Id$\nexport const id = 1;\n", "no $Id$ was expanded");
+    // Every later read agrees: nothing is changed, nothing is staged.
+    assert.deepEqual(await git.status({ gitDir, checkout }), { dirty: false, entries: [] });
+    assert.deepEqual(await git.changes({ gitDir, checkout }), []);
+    const staged = await git.stage({ gitDir, checkout });
+    assert.deepEqual(staged.files, [], "a fresh checkout has nothing to submit");
+    assert.equal(staged.tree, sh(shared, "rev-parse", `${commit}^{tree}`), "the staged tree is the base's tree");
+    assert.deepEqual((await git.submitView({ shared, gitDir, checkout })).mine, []);
+    // A real change is still seen.
+    await writeFile(join(checkout, "src", "a.ts"), "export const a = 1;\r\nexport const b = 2;\r\n");
+    assert.deepEqual((await git.submitView({ shared, gitDir, checkout })).mine, ["src/a.ts"], "a line-ending change the agent makes is its change");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("the agent's changes reach the shared workspace only through expected-version writes: modified, new and deleted files", { skip }, async () => {
   const w = await world();
   try {

@@ -145,6 +145,9 @@ export class GitBridge {
     await mkdir(options.checkout, { recursive: true });
     if ((await readdir(options.checkout)).length > 0) throw new WorkspaceError("invalid_path", "the checkout directory must be empty");
     await this.#run(["init", "--bare", options.gitDir]);
+    // The checkout holds exactly the committed bytes (follow-up of the H12n re-check): without the neutral attribute file an `eol`, `text`, `ident` or `filter` attribute of the base would write converted
+    // files, which every later read through the neutral file (`stage`, `submitView`, `doneState`) would then see as changes the agent never made. The file stays in the git directory, so later reads agree.
+    await this.#neutralAttributes(options.gitDir);
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.commit], { gitDir: options.gitDir, allowFile: true });
     await this.#run(["update-ref", "refs/nn/base", options.commit], { gitDir: options.gitDir });
@@ -420,6 +423,8 @@ export class GitBridge {
    * checkout as it stands (the tree a submission would carry: committed or not, not ignored; a link or a folder is not a file). Paths are taken literally (no pattern), and nothing outside the checkout's own repository is read.
    */
   async doneState(options: { gitDir: string; checkout: string; paths: readonly string[] }): Promise<{ uncommitted: string[]; uncommittedCount: number; ahead: number; changed: number; evidence: { path: string; present: boolean; why?: string }[] }> {
+    // The same attribute neutralizing as `stage` and `submitView` (W05 follow-up): a `text`, `eol`, `ident` or encoding attribute must not turn a change the submission would carry into "no change" here.
+    await this.#neutralAttributes(options.gitDir);
     const base = await this.#base(options.gitDir);
     const status = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], { gitDir: options.gitDir, workTree: options.checkout })).stdout;
     const uncommitted = status.split("\0").filter(Boolean).map((e) => e.slice(3));
