@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { redactText } from "../security/redact.js";
 import { keptSecretRefusal } from "./reserved-secrets.js";
 
 /**
@@ -91,7 +92,7 @@ export async function reportKeptSecretUses(check: KeptSecretUseCheck, notificati
     }
     return { found: uses.length, closed };
   } catch (error) {
-    try { onError?.(`checking records that name a kept secret failed: ${error instanceof Error ? error.message.slice(0, 160) : "error"}`); } catch { /* ignored */ }
+    try { onError?.(`checking records that name a kept secret failed: ${error instanceof Error ? redactText(error.message).slice(0, 160) : "error"}`); } catch { /* ignored */ }
     return { found: 0, closed: 0 };
   }
 }

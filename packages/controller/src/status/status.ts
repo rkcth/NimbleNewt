@@ -1143,7 +1143,7 @@ export class StatusService {
 
   /** Records that name a secret the installation keeps for something else (task T4b), for the owner: the secret's name, never a value, and what to change. One header line, at most 28 records and one line for the rest: never more than the chat shows. */
   async keptSecretUseLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (this.#deps.keptSecretUses === undefined || by.kind !== "owner") return undefined;
+    if (this.#deps.keptSecretUses === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const uses = await this.#deps.keptSecretUses.find();
     const c = cite("kept-secret-uses", "installation");
     if (uses.length === 0) return { observedAt: this.#runner.now(), lines: [line("No network grant, backup target or work-in-progress backup names a secret the installation keeps for something else.", c)] };

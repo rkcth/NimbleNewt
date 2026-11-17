@@ -123,6 +123,22 @@ for (const backend of backends) {
     } finally { await x.w.close(); }
   });
 
+  test(`${backend.name}: two controllers starting at the same moment tell each old record once (task T4b)`, async () => {
+    const x = await world(backend);
+    try {
+      await x.oldGrants.grant(x.owner, { commandId: cid("g"), taskId: x.taskId, host: "api.example.com", port: 443, credential: { header: "x-api-key", ref: "controller-db-url" } });
+      await x.oldWip.set(x.owner, { commandId: cid("w"), projectId: x.projectId, enabled: true, remote: "https://git.example.invalid/wip.git", credential: "my-signing-key" });
+      const one = NotificationService.withEpoch(x.w.storage, x.e, {});
+      const two = NotificationService.withEpoch(x.w.storage, x.e, {});
+      const errors: string[] = [];
+      const results = await Promise.all([reportKeptSecretUses(x.check, one, (m) => errors.push(m)), reportKeptSecretUses(x.check, two, (m) => errors.push(m))]);
+      assert.deepEqual(errors, []);
+      assert.deepEqual(results, [{ found: 2, closed: 0 }, { found: 2, closed: 0 }]);
+      const items = (await one.inbox(x.owner)).items.filter((i) => i.ref.kind === KEPT_SECRET_USE_REF && i.state !== "settled");
+      assert.equal(items.length, 2, "one notice per record, not one per controller");
+    } finally { await x.w.close(); }
+  });
+
   test(`${backend.name}: a failure while looking is reported to the caller and never thrown (task T4b)`, async () => {
     const x = await world(backend);
     try {
@@ -133,6 +149,13 @@ for (const backend of backends) {
       assert.equal(errors.length, 1);
       assert.ok(errors[0]!.length < 260);
       assert.deepEqual(await reportKeptSecretUses(broken, notes, () => { throw new Error("a callback that fails"); }), { found: 0, closed: 0 });
+      // A store error that carries an address with a password in it: the password is never passed on (the text is cleaned before it is cut).
+      const password = ["pw", Date.now().toString(36), "Q7xLm2Vb9Rk4"].join("");
+      const leaky = new KeptSecretUseCheck({ kept: () => KEPT, grants: () => ({ credentialUses: async () => { throw new Error(`connection to postgres://nn:${password}@db.example.invalid:5432/nn refused`); } }) });
+      const said: string[] = [];
+      await reportKeptSecretUses(leaky, notes, (m) => said.push(m));
+      assert.equal(said.length, 1);
+      assert.equal(said[0]!.includes(password), false, said[0]);
     } finally { await x.w.close(); }
   });
 
@@ -191,8 +214,10 @@ for (const backend of backends) {
       assert.match(ans!.lines[1]!.text, /names the secret "(controller-db-url|MY-SIGNING-KEY)"/);
       assert.equal(JSON.stringify(ans).includes(FAKE_VALUE), false);
       // Only the owner reads it; a controller without the check does not offer it.
-      const agent = { kind: "agent", id: "agent:ann", name: "ann" } as never;
-      assert.equal(await status.ask(agent, { kind: "kept_secret_uses" }), undefined);
+      for (const kind of ["agent", "client", "host", "service"]) assert.equal(await status.ask({ kind, id: `${kind}:ann`, name: "ann", grants: [{ action: "*", scope: { kind: "installation" } }] } as never, { kind: "kept_secret_uses" }), undefined, `${kind} is refused`);
+      // A principal acting for one task is refused too, whatever its kind.
+      assert.equal(await status.ask({ ...x.owner, taskScope: { projectId: x.projectId, taskId: x.taskId } } as never, { kind: "kept_secret_uses" }), undefined, "a task-scoped principal is refused");
+      assert.equal(await status.ask({ kind: "agent", id: "agent:ann", name: "ann", grants: [], taskScope: { projectId: x.projectId, taskId: x.taskId } } as never, { kind: "kept_secret_uses" }), undefined);
       assert.equal(await StatusService.withEpoch(x.w.storage, x.e, {} as never).ask(x.owner, { kind: "kept_secret_uses" }), undefined);
     } finally { await x.w.close(); }
   });

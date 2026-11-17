@@ -12270,3 +12270,9 @@ Breakages on built files, each failing a test and restored byte for byte: `#sett
 ASSUMPTION: when the note fails, the lifecycle entry is written first and the note's error is still raised to `#settle` (which keeps it best effort), so the behaviour seen by the stop is unchanged.
 
 **Third check (Claude agent, Opus 5.5, clean context, 2026-11-16).** Re-checked the second review's commit. The order is right: the note and the entry each have a fixed command id per request, so a second report of the same request (the Force Stop race reports it from both passes) writes neither twice, and nothing retries `onSettled`. Found and fixed: a note that could not be written left no trace anywhere (`#settle` swallows the error and the lifecycle entry does not mention it). `onSettled` now also prints one line to the controller's log naming the request and the error ("... its note on the affected responsibilities could not all be written ..."); the stop is unchanged. Test: the failing-history case in `api/start-t3-p04.test.ts` checks the line, and that nothing is printed when the note is written. Breakages on built files, each failing a test and restored byte for byte: note first again (error raised before the entry), note failure not caught, phase check dropped in `#settle`, own outcome reported, task port unwired, log line removed. Remaining limit: the owner is not told in chat; a lost note shows only in the log.
+
+### T4b first review (Claude agent)
+
+- The `kept_secret_uses` view also refuses a principal acting for one task (`taskScope`), as the secrets writes and the other owner-only views do; test covers agent, client, host, service and task-scoped principals.
+- The start check's failure text is passed through `redactText` before it is cut, so a store error that carries an address with a password does not pass it on; test added.
+- New test on all four backends: two controllers reporting at the same moment raise one notice per record.
