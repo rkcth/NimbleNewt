@@ -103,6 +103,34 @@ const MAX_PER_TASK = 100;
 const MAX_NOTE = 4000;
 const MAX_REASON = 2000;
 const SKEW_MS = 5 * 60 * 1000;
+/**
+ * The contract fields that say what the work must be (card U13). ASSUMPTION: only a change of these makes a submitted or accepted deliverable stale; priority, budget, difficulty, class,
+ * permissions and recovery change how the work is run, not what it must deliver. Reversible: add a field here.
+ */
+export const CONTRACT_WORK_FIELDS = ["expectedResult", "acceptanceCriteria", "requiredEvidence", "checks"] as const;
+const DEFAULT_CONTRACT_WORK: Record<string, unknown> = { acceptanceCriteria: [], requiredEvidence: [], checks: [] };
+/** How many contract versions after the one a deliverable was checked against are read to find when the work first changed. */
+const CONTRACT_WALK = 20;
+
+/** A deliverable that stands on a task contract that has since changed in what it asks for (card U13). */
+export interface StaleDeliverable {
+  readonly id: string;
+  readonly revision: number;
+  /** The deliverable's title as its author gave it: shown quoted, never as an instruction. */
+  readonly title: string;
+  readonly version: number;
+  readonly state: "submitted" | "under-review" | "accepted";
+  readonly responsibleAgent: string;
+  /** The contract version the newest version was submitted against, and the one in force now. */
+  readonly checkedAgainst: number;
+  readonly contractVersion: number;
+  /** The names of the work fields that differ (never their text). */
+  readonly fields: readonly string[];
+  /** When the work first changed after `checkedAgainst`; absent when no stored version says so. */
+  readonly changedAt?: string;
+  /** Set (to `CONTRACT_WALK`) when the first change lies further back than the walk reads: `changedAt` is then the current version's time, a time by which the work had changed, not when it first did. */
+  readonly firstChangeBeyond?: number;
+}
 const WRITERS = ["author", "docs", "qa"] as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -636,6 +664,65 @@ export class AcceptanceService {
     }
     const last = items.length === 0 ? after : items[items.length - 1]!.seq;
     return { items, ...(last < d.eventSeq ? { next: last } : {}) };
+  }
+
+  /**
+   * The deliverables of a task, readable by the caller, whose newest version stands (submitted, under review or accepted) on a task contract that has since changed in what it asks for
+   * (card U13: a stale artifact in the overview). Only the fields that say what the work must be count (`CONTRACT_WORK_FIELDS`): a new priority, budget, difficulty, class, permission or
+   * recovery need does not make a delivered result out of date. `changedAt` is when the first such change after the version's contract was stored (the current version's time when the
+   * walk would pass `CONTRACT_WALK` versions, marked by `firstChangeBeyond`). Read only and bounded whatever the history: at most `MAX_PER_TASK` deliverables and the newest version of each, and each contract version at most once (a task with no deliverable costs one read and its contract is not read); the walk covers at most
+   * `CONTRACT_WALK` versions after the one a deliverable was checked against, so a call reads at most 3 + `MAX_PER_TASK` x (`CONTRACT_WALK` + 3) records, and as few as 3 + `MAX_PER_TASK` x 2 + `CONTRACT_WALK` + 1 when the deliverables were checked against one version. `reads` counts them.
+   * Nothing the agent wrote is returned except the title, which the caller shows quoted; the contract's own text is never returned, only the names of the fields that changed.
+   */
+  async contractStale(by: Principal, taskIdValue: string): Promise<{ items: StaleDeliverable[]; reads: number }> {
+    const taskId = checkTaskId(taskIdValue);
+    if (by.kind !== "owner" && by.kind !== "agent") return { items: [], reads: 0 };
+    let reads = 1;
+    const ids = ((await this.#runner.get("deliverable-index", taskId))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+    // Most tasks have no deliverable: one read, and the contract is not read at all.
+    if (ids.length === 0) return { items: [], reads };
+    reads++;
+    const now = (await this.#runner.get("task-contract", taskId))?.body as unknown as (Record<string, unknown> & { version?: number }) | undefined;
+    const nowVersion = now?.version ?? 0;
+    if (now === undefined || nowVersion === 0) return { items: [], reads };
+    // Each contract version is read at most once per call, however many deliverables stand on it (deliverables checked against one version share one walk). The answer for a deliverable does not depend on which others the caller may read.
+    const versions = new Map<number, (Record<string, unknown> & { changedAt?: string }) | undefined>();
+    const versionAt = async (n: number): Promise<(Record<string, unknown> & { changedAt?: string }) | undefined> => {
+      if (n === 0) return { ...DEFAULT_CONTRACT_WORK };
+      if (versions.has(n)) return versions.get(n);
+      reads++;
+      const found = (await this.#runner.get("task-contract-version", `${taskId}.${n}`))?.body as unknown as (Record<string, unknown> & { changedAt?: string }) | undefined;
+      versions.set(n, found);
+      return found;
+    };
+    const differ = (a: Record<string, unknown>, b: Record<string, unknown>): string[] => CONTRACT_WORK_FIELDS.filter((f) => JSON.stringify(a[f] ?? null) !== JSON.stringify(b[f] ?? null));
+    const items: StaleDeliverable[] = [];
+    for (const id of ids.slice(0, MAX_PER_TASK)) {
+      reads++;
+      const agg = await this.#runner.get("deliverable", id);
+      if (agg === undefined) continue;
+      const d = agg.body as unknown as DeliverableBody;
+      if (d.taskId !== taskId || (d.state !== "submitted" && d.state !== "under-review" && d.state !== "accepted")) continue;
+      if (!(await this.#mayRead(by, d))) continue;
+      reads++;
+      const v = (await this.#runner.get("deliverable-version", `${id}.${d.currentVersion}`))?.body as unknown as VersionBody | undefined;
+      if (v === undefined || v.contractVersion === undefined || v.contractVersion >= nowVersion) continue;
+      const base = await versionAt(v.contractVersion);
+      // No record of the version it was checked against: what it was judged on cannot be compared, so it is not called stale (nothing is guessed).
+      if (base === undefined) continue;
+      const fields = differ(base, now);
+      if (fields.length === 0) continue;
+      let changedAt: string | undefined;
+      let found = false;
+      for (let k = v.contractVersion + 1; k <= nowVersion && k <= v.contractVersion + CONTRACT_WALK; k++) {
+        const step = await versionAt(k);
+        if (step !== undefined && differ(base, step).length > 0) { changedAt = step.changedAt; found = true; break; }
+      }
+      // Past the walk the current version's time stands in, and the item says so (`firstChangeBeyond`): the work had changed by then, but it first changed earlier.
+      if (!found) changedAt = (await versionAt(nowVersion))?.changedAt;
+      items.push({ id, revision: agg.revision, title: d.title, version: v.version, state: d.state, responsibleAgent: d.responsibleAgent, checkedAgainst: v.contractVersion, contractVersion: nowVersion, fields, ...(changedAt === undefined ? {} : { changedAt }), ...(found ? {} : { firstChangeBeyond: CONTRACT_WALK }) });
+    }
+    return { items, reads };
   }
 
   /** Whether the task has an accepted deliverable (for the cards that wait on acceptance). No principal: an internal question; it reveals nothing to a caller. */
