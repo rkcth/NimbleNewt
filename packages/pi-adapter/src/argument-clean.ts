@@ -8,9 +8,10 @@
 // cleanPayload() is applied to every request body pi-ai builds for the adapter's models (cache-shaping.ts, onPayload). It
 // changes only lone surrogates (U+D800..U+DFFF not part of a valid pair), into U+FFFD:
 //   - in the JSON text of every tool call's arguments (OpenAI chat `messages[].tool_calls[].function.arguments`, OpenAI
-//     responses `input[]` items of type `function_call`): an escape that is not half of an escaped pair becomes `�`,
+//     responses `input[]` items of type `function_call`): an escape that is not half of a pair becomes `\ufffd`,
 //     a raw lone surrogate becomes U+FFFD; every other character, escape, pair and piece of formatting stays as it was;
-//   - in every other string (Anthropic's `input` objects among them): a raw lone surrogate becomes U+FFFD.
+//   - in every other string and every object key (Anthropic's `input` objects among them), and in an arguments text that is
+//     not valid JSON: a raw lone surrogate becomes U+FFFD.
 // It copies only along changed paths and returns the same object when nothing needs it. It never throws.
 // The bench's Pi extension carries the same rules in JavaScript (scripts/pi-eval/lib/arg-clean.mjs).
 
@@ -28,7 +29,11 @@ export function wellFormed(s: string): string {
   return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "�");
 }
 
-/** JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD. `text` is the same string when `replaced` is 0. */
+/**
+ * JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD. `text` is the same string when `replaced` is 0.
+ * A pair is kept however its halves are written (both escaped, both raw, or one of each: JSON decodes all four to the pair).
+ * Text that is not valid JSON is not read as escapes: only its raw lone surrogates are replaced, as in any other string.
+ */
 export function cleanJsonText(s: string): { text: string; replaced: number } {
   let out = "";
   let last = 0;
@@ -39,15 +44,22 @@ export function cleanJsonText(s: string): { text: string; replaced: number } {
       const u = escapeAt(s, i);
       if (u === -1) { i += 2; continue; }
       if (isHigh(u) && isLow(escapeAt(s, i + 6))) { i += 12; continue; }
+      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { i += 7; continue; }
       if (isHigh(u) || isLow(u)) { out += `${s.slice(last, i)}\\ufffd`; i += 6; last = i; replaced++; continue; }
       i += 6;
       continue;
     }
     if (isHigh(c) && isLow(s.charCodeAt(i + 1))) { i += 2; continue; }
+    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { i += 7; continue; }
     if (isHigh(c) || isLow(c)) { out += `${s.slice(last, i)}�`; i += 1; last = i; replaced++; continue; }
     i++;
   }
-  return replaced === 0 ? { text: s, replaced: 0 } : { text: out + s.slice(last), replaced };
+  if (replaced === 0) return { text: s, replaced: 0 };
+  try { JSON.parse(s); } catch {
+    const w = wellFormed(s);
+    return { text: w, replaced: w === s ? 0 : 1 };
+  }
+  return { text: out + s.slice(last), replaced };
 }
 
 const MAX_DEPTH = 64;
@@ -89,9 +101,21 @@ export function cleanPayload(payload: unknown): CleanResult {
       }
       if (isPlain(v)) {
         let copy: Record<string, unknown> | undefined;
-        for (const k of Object.keys(v)) {
+        const keys = Object.keys(v);
+        for (const k of keys) {
           const n = walk(v[k], [...path, k], v, depth + 1);
           if (n !== v[k]) { copy ??= { ...v }; copy[k] = n; }
+        }
+        // A key is a string too (an Anthropic `input` object's own keys): the object is rebuilt in the same order when one changes.
+        if (keys.some((k) => wellFormed(k) !== k)) {
+          const from = copy ?? v;
+          const rebuilt = (Object.getPrototypeOf(v) === null ? Object.create(null) : {}) as Record<string, unknown>;
+          for (const k of keys) {
+            const w = wellFormed(k);
+            if (w !== k) strings++;
+            Object.defineProperty(rebuilt, w, { value: from[k], enumerable: true, writable: true, configurable: true });
+          }
+          return rebuilt;
         }
         return copy ?? v;
       }

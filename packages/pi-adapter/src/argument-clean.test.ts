@@ -4,6 +4,7 @@ import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai"
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { requestId } from "@nimblenewt/contracts";
 import { cleanJsonText, cleanPayload } from "./argument-clean.js";
+import { shapeModels } from "./cache-shaping.js";
 import { PiAdapter } from "./index.js";
 import { rig, wireBody, type WireApi } from "./testing/wire.js";
 
@@ -99,4 +100,74 @@ test("a request with nothing to clean is built exactly as pi-ai builds it withou
     const raw = await wireBody({ ...second, options: { ...(second.options ?? {}), onPayload: undefined } });
     assert.equal(JSON.stringify(await wireBody(second)), JSON.stringify(raw), api);
   }
+});
+
+test("the cleaner, exact cases: a pair is kept however its halves are written; text that is not JSON is not read as escapes; keys are strings too; idempotent", () => {
+  // JSON decodes an escaped half next to a raw half to the pair, so these need nothing.
+  for (const s of [`{"a":"\\ud800${LONE_LOW}"}`, `{"a":"${LONE_HIGH}\\udfff"}`, '{"a":"\\uD800\\uDFFF"}']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  assert.deepEqual(cleanJsonText(`{"a":"\\ud800${LONE_HIGH}"}`), { text: '{"a":"\\ufffd�"}', replaced: 2 });
+  // Not valid JSON: escapes are left as written, raw lone surrogates are replaced, nothing throws.
+  for (const s of ['{"a":"\\ud800', "\\ud800 not json", '{"a":"\\ud800"} trailing']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  assert.deepEqual(cleanJsonText(`{"a":"\\ud800 ${LONE_LOW}`), { text: '{"a":"\\ud800 �', replaced: 1 });
+  // An object key with a lone surrogate (Anthropic's `input` is an object): replaced, the key order and every value kept.
+  const keyed = { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "n", input: { first: 1, [`k${LONE_HIGH}`]: "v", ["__proto__"]: "own", last: [2] } }] }] };
+  Object.defineProperty(keyed.messages[0]!.content[0]!.input, "__proto__", { value: "own", enumerable: true, writable: true, configurable: true });
+  const k = cleanPayload(keyed);
+  const input = (k.payload as typeof keyed).messages[0]!.content[0]!.input as Record<string, unknown>;
+  assert.deepEqual(Object.keys(input), ["first", "k�", "__proto__", "last"]);
+  assert.equal(Object.getPrototypeOf(input), Object.prototype);
+  assert.equal(input["__proto__"], "own");
+  assert.equal(k.strings, 1);
+  // Idempotent: a cleaned payload needs nothing more.
+  const messy = { messages: [{ role: "assistant", tool_calls: [{ function: { arguments: '{"a":"\\ud800 \\udfff"}' } }] }, { role: "user", content: `x${LONE_LOW}` }] };
+  const once = cleanPayload(messy);
+  const twice = cleanPayload(once.payload);
+  assert.equal(twice.payload, once.payload);
+  assert.equal(twice.strings, 0);
+});
+
+test("the cleaner is linear on large text: a megabyte of arguments, of backslashes and of lone surrogates each stay within a generous time bound (linear, no backtracking)", () => {
+  const cases = [
+    `{"a":"${"x\\ud800\\udfff\\n".repeat(80_000)}\\ud800"}`,
+    `{"a":"${"\\\\".repeat(500_000)}\\ud800"}`,
+    `{"a":"${LONE_HIGH.repeat(1_000_000)}"}`,
+  ];
+  for (const s of cases) {
+    const t0 = performance.now();
+    const r = cleanPayload({ messages: [{ role: "assistant", tool_calls: [{ function: { arguments: s } }] }], other: s });
+    assert.equal(r.arguments, 1);
+    assert.ok(performance.now() - t0 < 3000, `${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
+test("shapeModels: the repair runs last on every model call, the compaction call included, after the shaping and the caller's own onPayload, whose result it cleans", async () => {
+  const captured: Record<string, unknown>[] = [];
+  const fake = { streamSimple: (_m: unknown, _c: unknown, o: Record<string, unknown>) => { captured.push(o); return { result: async () => "done" }; } };
+  const model = { provider: "p", api: "openai-completions", id: "m" };
+  const order: string[] = [];
+  const shaped = shapeModels(fake as never, { policy: () => ({ payload: (b: unknown) => { order.push("shape"); return b; } }) });
+  const lone = { messages: [{ role: "assistant", tool_calls: [{ function: { arguments: '{"a":"\\ud800"}' } }] }] };
+  const callerSaw: unknown[] = [];
+  const earlier = async (b: unknown): Promise<unknown> => { order.push("caller"); callerSaw.push(b); return undefined; };
+  await (shaped.completeSimple as (m: unknown, c: unknown, o: unknown) => Promise<unknown>)(model, { messages: [] }, { onPayload: earlier });
+  (shaped.streamSimple as (m: unknown, c: unknown, o: unknown) => unknown)(model, { messages: [] }, { onPayload: earlier });
+  assert.equal(captured.length, 2);
+  for (const o of captured) {
+    const onPayload = o["onPayload"] as (p: unknown, m: unknown) => Promise<unknown>;
+    const out = await onPayload(lone, model) as typeof lone;
+    assert.equal(out.messages[0]!.tool_calls[0]!.function.arguments, '{"a":"\\ufffd"}');
+    const clean = { messages: [{ role: "user", content: "fine" }] };
+    assert.equal(await onPayload(clean, model), clean, "a body that needs nothing is the same object");
+  }
+  assert.deepEqual(order, ["caller", "caller", "shape", "caller", "shape", "caller"]);
+  assert.equal(callerSaw.filter((b) => b === lone).length, 2, "the caller sees the body before the repair");
+  // A caller that replaces the body: its replacement is what gets cleaned.
+  captured.length = 0;
+  (shaped.streamSimple as (m: unknown, c: unknown, o: unknown) => unknown)(model, { messages: [] }, { onPayload: async () => lone });
+  const out = await (captured[0]!["onPayload"] as (p: unknown, m: unknown) => Promise<unknown>)({ messages: [] }, model) as typeof lone;
+  assert.equal(out.messages[0]!.tool_calls[0]!.function.arguments, '{"a":"\\ufffd"}');
+  // A caller's error still reaches pi-ai as before (the repair does not swallow the caller's own failure).
+  captured.length = 0;
+  (shaped.streamSimple as (m: unknown, c: unknown, o: unknown) => unknown)(model, { messages: [] }, { onPayload: async () => { throw new Error("caller failed"); } });
+  await assert.rejects(() => (captured[0]!["onPayload"] as (p: unknown, m: unknown) => Promise<unknown>)({ messages: [] }, model), /caller failed/);
 });

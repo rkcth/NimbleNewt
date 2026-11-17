@@ -53,6 +53,31 @@ test("the cleaner on JSON text: only lone surrogates change, escaped or raw; pai
   assert.equal(wellFormed("😀"), "😀");
 });
 
+test("exact cases: a pair is kept however its halves are written; text that is not JSON is not read as escapes; keys are strings too; idempotent; linear on a megabyte", () => {
+  const H = String.fromCharCode(0xd800); const L = String.fromCharCode(0xdfff);
+  for (const s of [`{"a":"\\ud800${L}"}`, `{"a":"${H}\\udfff"}`]) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  assert.deepEqual(cleanJsonText(`{"a":"\\ud800${H}"}`), { text: '{"a":"\\ufffd\ufffd"}', replaced: 2 });
+  for (const s of ['{"a":"\\ud800', "\\ud800 not json", '{"a":"\\ud800"} trailing']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  assert.deepEqual(cleanJsonText(`{"a":"\\ud800 ${L}`), { text: '{"a":"\\ud800 \ufffd', replaced: 1 });
+  const input = { first: 1, [`k${H}`]: "v", last: [2] };
+  Object.defineProperty(input, "__proto__", { value: "own", enumerable: true, writable: true, configurable: true });
+  const k = cleanPayload({ messages: [{ role: "assistant", content: [{ type: "tool_use", input }] }] });
+  const got = k.payload.messages[0].content[0].input;
+  assert.deepEqual(Object.keys(got), ["first", "k\ufffd", "last", "__proto__"]);
+  assert.equal(Object.getPrototypeOf(got), Object.prototype);
+  assert.equal(got.__proto__, "own");
+  assert.equal(k.strings, 1);
+  const once = cleanPayload(toolCallPayload('{"a":"\\ud800 \\udfff"}'));
+  const twice = cleanPayload(once.payload);
+  assert.equal(twice.payload, once.payload); assert.equal(twice.strings, 0);
+  for (const s of [`{"a":"${"x\\ud800\\udfff\\n".repeat(80_000)}\\ud800"}`, `{"a":"${"\\\\".repeat(500_000)}\\ud800"}`, `{"a":"${H.repeat(1_000_000)}"}`]) {
+    const t0 = performance.now();
+    const r = cleanPayload({ ...toolCallPayload(s), other: s });
+    assert.equal(r.arguments, 1);
+    assert.ok(performance.now() - t0 < 3000, `${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
 test("the night batch's failure shape: a string `edits` with \\ud800 and \\udfff escapes, decoded by Pi's step and re-sent, is refused; cleaned, it is valid Unicode JSON", () => {
   // As the model sent it: `edits` is a JSON string whose text holds the escapes (and an escaped pair that is fine).
   const edits = JSON.stringify([{ oldText: "const BAD = /x/;", newText: "const BAD = /[\\u0000-\\u001f]/u; // RANGE" }]).replace("RANGE", "\\ud800-\\udfff \\ud800\\udfff");

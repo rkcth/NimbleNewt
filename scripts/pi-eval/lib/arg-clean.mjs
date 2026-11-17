@@ -9,10 +9,10 @@
 // surrogates (U+D800..U+DFFF not part of a valid pair), into U+FFFD:
 //   - in the JSON text of every tool call's arguments (OpenAI chat `messages[].tool_calls[].function.arguments` and
 //     OpenAI responses `input[]` items of type `function_call`): a `\uD800`-style escape that is not half of an escaped
-//     pair becomes the escape `�`, a raw lone surrogate becomes U+FFFD; every other character, escape, pair and
-//     piece of formatting is left as it was;
-//   - in every other string of the payload: a raw lone surrogate becomes U+FFFD (an escape-like text there is the
-//     author's own text and is left alone).
+//     pair becomes the escape `\ufffd`, a raw lone surrogate becomes U+FFFD; every other character, escape, pair (both
+//     halves escaped, both raw, or one of each) and piece of formatting is left as it was;
+//   - in every other string and every object key of the payload, and in an arguments text that is not valid JSON: a raw
+//     lone surrogate becomes U+FFFD (an escape-like text there is the author's own text and is left alone).
 // Nothing is changed in place: a changed payload is a copy along the changed paths only, so a payload that needs nothing
 // is returned as the same object. It never throws (anything unexpected returns the payload as it was).
 
@@ -33,8 +33,10 @@ export function wellFormed(s) {
 }
 
 /**
- * JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD (an escape `�` for an escape, the
- * character for a raw one). Returns { text, replaced }; text is the same string when nothing was replaced.
+ * JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD (an escape `\ufffd` for an escape, the
+ * character for a raw one). Returns { text, replaced }; text is the same string when nothing was replaced. A pair is kept
+ * however its halves are written (JSON decodes escaped, raw and mixed halves alike to the pair). Text that is not valid
+ * JSON is not read as escapes: only its raw lone surrogates are replaced, as in any other string.
  */
 export function cleanJsonText(s) {
   let out = "";
@@ -46,15 +48,22 @@ export function cleanJsonText(s) {
       const u = escapeAt(s, i);
       if (u === -1) { i += 2; continue; } // any other escape, `\\` included: its second character is not looked at again
       if (isHigh(u) && isLow(escapeAt(s, i + 6))) { i += 12; continue; }
+      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { i += 7; continue; } // an escaped high half before a raw low half
       if (isHigh(u) || isLow(u)) { out += `${s.slice(last, i)}\\ufffd`; i += 6; last = i; replaced++; continue; }
       i += 6;
       continue;
     }
     if (isHigh(c) && isLow(s.charCodeAt(i + 1))) { i += 2; continue; }
+    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { i += 7; continue; } // a raw high half before an escaped low half
     if (isHigh(c) || isLow(c)) { out += `${s.slice(last, i)}�`; i += 1; last = i; replaced++; continue; }
     i++;
   }
-  return replaced === 0 ? { text: s, replaced: 0 } : { text: out + s.slice(last), replaced };
+  if (replaced === 0) return { text: s, replaced: 0 };
+  try { JSON.parse(s); } catch {
+    const w = wellFormed(s);
+    return { text: w, replaced: w === s ? 0 : 1 };
+  }
+  return { text: out + s.slice(last), replaced };
 }
 
 const MAX_DEPTH = 64;
@@ -99,9 +108,21 @@ export function cleanPayload(payload) {
       }
       if (plain(v)) {
         let copy = null;
-        for (const k of Object.keys(v)) {
+        const keys = Object.keys(v);
+        for (const k of keys) {
           const n = walk(v[k], [...path, k], v, depth + 1);
           if (n !== v[k]) { copy ??= { ...v }; copy[k] = n; }
+        }
+        // A key is a string too (an Anthropic-style `input` object's own keys): the object is rebuilt in the same order.
+        if (keys.some((k) => wellFormed(k) !== k)) {
+          const from = copy ?? v;
+          const rebuilt = Object.getPrototypeOf(v) === null ? Object.create(null) : {};
+          for (const k of keys) {
+            const w = wellFormed(k);
+            if (w !== k) counts.strings++;
+            Object.defineProperty(rebuilt, w, { value: from[k], enumerable: true, writable: true, configurable: true });
+          }
+          return rebuilt;
         }
         return copy ?? v;
       }
