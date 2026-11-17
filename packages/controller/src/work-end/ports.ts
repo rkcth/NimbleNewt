@@ -79,7 +79,7 @@ export function stagedSubmit(deps: {
     const staged = await deps.stage(attempt);
     if (staged.base !== base) throw new DomainError("checkout_changed", `the staged work is based on ${staged.base}, not on ${base} that was checked; it was not submitted`);
     const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
-    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound });
+    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId });
     return { submissionId: made.id };
   };
 }
