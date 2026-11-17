@@ -90,3 +90,25 @@ test("the report counts timeouts whose acceptance tests pass, and warns when var
   // An interface mismatch is reported as counted in the false-done gate, as gatesFor counts it.
   assert.match(renderReport([{ variant: "A", size: "S", outcome: "interface-mismatch", wallMs: 1 }]).text, /false done 1\/1[\s\S]*counted as non-finishes and in the false-done gate/);
 });
+
+test("a contaminated run is never a verified finish: it is left out of the table and the gates, and the report says so", async () => {
+  // Enough clean verified finishes to pass every gate; one more run that "finished" but tried to push.
+  const good = [...runs("A", "S", { "verified-finish": 10 }), ...runs("A", "M", { "verified-finish": 10 }), ...runs("A", "L", { "verified-finish": 10 })];
+  const pushed = { variant: "A", size: "S", outcome: "verified-finish", wallMs: 1, contaminated: true, runId: "t-A-r9", credentialAttempts: ["push", "remote"], guardRefusals: 2, foreignPaths: [] };
+  const s = aggregate([...good, pushed]).find((g) => g.size === "S");
+  assert.equal(s.n, 10);
+  assert.equal(s.counts["verified-finish"], 10);
+  const text = renderReport([...good, pushed]).text;
+  assert.match(text, /31 run\(s\), 1 of them contaminated and left out of the table and the gates \(t-A-r9\)/);
+  assert.match(text, /contaminated \(left out, never a finish\): 1 run\(s\), 1 of them otherwise a verified finish; kinds: push, remote, git refused/);
+  // Only contaminated "finishes": the variant is not measured, and fails.
+  const only = renderReport([pushed, { ...pushed, size: "M" }, { ...pushed, size: "L" }]);
+  assert.equal(only.pass, false);
+  assert.match(only.text, /S verified finish: not measured/);
+  // The comparison of agents: shown as C, never counted a finish.
+  const { compare } = await import("./compare.mjs");
+  const c = compare([{ ...pushed, taskId: "t", agent: "pi" }, { ...pushed, taskId: "t", agent: "pi", contaminated: false }]);
+  assert.equal(c.totals[0].finish, 1);
+  assert.equal(c.totals[0].contaminated, 1);
+  assert.match(c.table[0].at(-1), /^1\/2 CF$/);
+});

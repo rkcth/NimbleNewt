@@ -28,12 +28,12 @@
 //                        GET /stats and /v1/models before each run (key only in the Authorization header) and starts a
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
-//   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, the
-//                        runtime folder of sockets, /srv/ai, the team's and test database's key folders and the
-//                        container engine's socket (README "The agent's isolation")
+//   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, /srv/ai,
+//                        the team's and test database's key folders and credential-like names and owner-only folders
+//                        in what stays readable (/tmp, /run and /dev/shm are the agent's own; README "The agent's isolation")
 //   --allow-visible-home run the agent even where its owner's folders cannot be hidden (no usable bubblewrap: macOS,
 //                        Windows, a Linux without user namespaces); it still gets a fresh home, environment and git
-//                        settings, but can read the owner's files by their full path
+//                        settings, but can read the owner's files by their full path and reach the network
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -157,7 +157,7 @@ async function main() {
     for (const [t, v, r] of jobs) process.stdout.write(`${t.id} (${t.size}) variant ${v} repeat ${r}: base ${t.base.slice(0, 8)}, ${t.testFiles.length} hidden test file(s), limit ${ctx.timeoutMinutes ?? t.timeoutMinutes} min\n`);
     process.stdout.write(`${jobs.length} run(s), concurrency ${concurrency}, results ${resultsDir}, checkouts ${workRoot}, agent ${agentPath}\n`);
     process.stdout.write(`Radiance gate ${useGate ? `on (idle wait ${idleWaitMinutes} min)` : "off"}, token budget ${Number.isFinite(tokenBudget) ? tokenBudget : "none"}\n`);
-    process.stdout.write(`agent isolation: fresh home, scrubbed environment, git push refused; owner's folders ${sandboxUsable() ? "hidden (bubblewrap)" : ctx.allowVisibleHome ? "NOT hidden (--allow-visible-home)" : "cannot be hidden here: runs would be refused"}; network not cut off\n`);
+    process.stdout.write(`agent isolation: fresh home, scrubbed environment, git push refused; owner's folders ${sandboxUsable() ? "hidden, file system read-only, /tmp and /run private, no network but the model route (bubblewrap)" : ctx.allowVisibleHome ? "NOT hidden and network not cut off (--allow-visible-home)" : "cannot be hidden here: runs would be refused"}\n`);
     return 0;
   }
   const resultsFile = join(resultsDir, "results.jsonl");

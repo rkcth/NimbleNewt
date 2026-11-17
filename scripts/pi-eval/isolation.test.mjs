@@ -3,8 +3,8 @@
 // key, ~/.ssh and ~/.git-credentials listed) and some ways around the obvious, against a decoy "real home" with planted
 // fake keys. Only loopback and local folders are ever used: no request leaves the machine, none goes to Radiance.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { checkConfig, decide, localPath, splitAlias } from "./lib/git-guard.mjs";
-import { PROXY_KEY_PREFIX, PUSH_REFUSED, bwrapPrefix, credentialAttempts, defaultHidden, gitConfigText, machineHidden, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
+import { PRIVATE_DIRS, PROXY_KEY_PREFIX, PUSH_REFUSED, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
 import { piBinOf, runOne } from "./lib/runner.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
 
@@ -31,6 +31,10 @@ const outsideBare = join(root, "outside.git");
 const shared = join(root, "shared-code");
 const sharedSecrets = join(shared, "team", "secrets");
 const decoySocket = join(root, "engine.sock");
+// A decoy script in the host's own /tmp (like /tmp/nn-slot.sh, which the owner runs outside any sandbox) and a decoy
+// shared-memory file: the agent's /tmp and /dev/shm are its own.
+const tmpScript = `/tmp/pi-eval-decoy-${process.pid}.sh`;
+const shmDecoy = `/dev/shm/pi-eval-decoy-${process.pid}`;
 const MARKERS = { ssh: "DECOY-PRIVATE-KEY-7f3a", gh: "DECOY-GH-TOKEN-91c2", key: "DECOY-RADIANCE-KEY-55d1", env: "DECOY-ENV-TOKEN-3b8e", team: "DECOY-TEAM-KEY-c41d" };
 const g = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" }).trim();
 let set, upstream, listener, engine;
@@ -93,6 +97,10 @@ before(async () => {
   mkdirSync(sharedSecrets, { recursive: true });
   writeFileSync(join(sharedSecrets, "deploy_ed25519"), `${MARKERS.team}\n`, { mode: 0o600 });
   writeFileSync(join(shared, "README.md"), "shared\n");
+  if (process.platform === "linux") {
+    writeFileSync(tmpScript, `echo ${MARKERS.env}\n`);
+    try { writeFileSync(shmDecoy, `${MARKERS.env}\n`); } catch { /* no /dev/shm */ }
+  }
   if (process.platform !== "win32") {
     engine = net.createServer((s) => { engineConnections++; s.destroy(); });
     await new Promise((r) => engine.listen(decoySocket, r));
@@ -125,6 +133,7 @@ after(() => {
   listener?.close();
   engine?.close();
   rmSync(root, { recursive: true, force: true });
+  rmSync(tmpScript, { force: true }); rmSync(shmDecoy, { force: true });
 });
 
 // The operator's environment as a batch might see it: credentials of every kind the agent must not inherit.
@@ -145,7 +154,7 @@ const incidentCtx = (extra = {}) => {
       set, repo, referenceDirs: [repo], depsFrom: repo, workRoot: join(root, "work"), resultsDir: join(root, "results"),
       agent: ["node", join(here, "test-agents", "incident-agent.mjs")], agentLabel: "incident", batchId: "t", benchCommit: "test",
       ownerHome: decoy, sourceEnv: sourceEnv(), isoDirs, hide: [sharedSecrets, decoySocket], readOnlyTrees: [shared],
-      agentEnv: { INCIDENT_DECOY_HOME: decoy, INCIDENT_HOST_PID: String(process.pid), INCIDENT_OUTSIDE_BARE: outsideBare, INCIDENT_LISTENER: `http://127.0.0.1:${listener.address().port}/`, INCIDENT_SHARED: shared, INCIDENT_SOCKET: decoySocket },
+      agentEnv: { INCIDENT_DECOY_HOME: decoy, INCIDENT_HOST_PID: String(process.pid), INCIDENT_OUTSIDE_BARE: outsideBare, INCIDENT_LISTENER: `http://127.0.0.1:${listener.address().port}/`, INCIDENT_SHARED: shared, INCIDENT_SOCKET: decoySocket, INCIDENT_TMP_SCRIPT: tmpScript, INCIDENT_SHM: shmDecoy, INCIDENT_OUTSIDE_DIR: root },
       ...extra,
     },
   };
@@ -156,6 +165,7 @@ const noMarkers = (text, where) => { for (const [k, m] of Object.entries(MARKERS
 
 test("the incident, replayed under the bench's isolation: an empty home, every push refused locally, no planted key readable, nothing sent out, and the run flagged", needsSandbox, async () => {
   const { ctx, seen } = incidentCtx();
+  ctx.agentEnv.INCIDENT_NET_TOOLS = "1";
   const before = upstreamSeen.length;
   const r = await runOne(ctx, set.tasks[0], "A", 1);
   const s = JSON.parse(readFileSync(join(r.artifacts, "incident-report.json"), "utf8")).steps;
@@ -224,13 +234,35 @@ test("the incident, replayed under the bench's isolation: an empty home, every p
   // The per-run configuration holds the run's proxy token (a random one), and the proxy is closed with the run.
   const agentEntry = Object.values(JSON.parse(s.piConfig.stdout).providers)[0];
   assert.ok(agentEntry.apiKey.startsWith(PROXY_KEY_PREFIX) && agentEntry.apiKey.length > PROXY_KEY_PREFIX.length + 30, "a per-run token");
-  const closed = await new Promise((res) => http.get(`${agentEntry.baseUrl}/models`, { headers: { authorization: `Bearer ${agentEntry.apiKey}` } }, (x) => { x.resume(); res(x.statusCode); }).on("error", (e) => res(e.code)));
-  assert.equal(closed, "ECONNREFUSED", "the proxy stopped with the run");
+  // The agent reached the proxy through the bridge in its own network namespace (a loopback address there), and the
+  // proxy's socket went with the run.
+  assert.match(agentEntry.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
+  const closed = await new Promise((res) => { const c = net.connect(join(seen[0], "model.sock")); c.on("connect", () => { c.destroy(); res("connected"); }); c.on("error", (e) => res(e.code)); });
+  assert.equal(closed, "ENOENT", "the proxy stopped with the run");
+  // No network but the model route: the host's loopback services (the listener stands for the team database's port) are
+  // out of reach; the host's /tmp, /run and /dev/shm are the agent's own; outside its folders nothing is writable.
+  assert.equal(s.loopback?.connected, false, JSON.stringify(s.loopback));
+  failed("realGitAllowAll");
+  failed("submodule");
+  failed("curl");
+  failed("python");
+  if (s.nc.status !== 127) failed("nc");
+  assert.match(s.hookPush.stdout, /hook-status=/, JSON.stringify(s.hookPush));
+  assert.equal(listenerConnections, 0, "nothing reached the host's loopback listener: not git, its hook, curl, python or nc");
+  failed("tmpScriptRead", /No such file/);
+  assert.equal(readFileSync(tmpScript, "utf8"), `echo ${MARKERS.env}\n`, "the host's /tmp script is untouched");
+  failed("shmRead", /No such file/);
+  failed("runListing", /No such file/);
+  assert.doesNotMatch(s.runListing.stdout, /docker|user|systemd|dbus/, s.runListing.stdout);
+  failed("writeOutside", /Read-only file system/);
+  assert.equal(existsSync(join(root, "written-by-agent")), false);
   // Detected, not only blocked.
   assert.equal(r.contaminated, true);
   assert.deepEqual(r.credentialAttempts, ["credentials", "push", "remote"]);
   assert.ok(r.guardRefusals >= 10, `refusals logged: ${r.guardRefusals}`);
-  assert.ok(r.isolation.hidden.includes(sharedSecrets) && r.isolation.readOnly.includes(shared), JSON.stringify(r.isolation));
+  assert.ok(r.isolation.hidden.includes(sharedSecrets), JSON.stringify(r.isolation));
+  assert.deepEqual(r.isolation.readOnly, ["/"]);
+  assert.equal(r.isolation.network, "none (the model route only)");
   assert.equal(r.isolation.ownerHomeHidden, true);
   assert.equal(r.isolation.modelKey, "proxied");
   // No decoy secret anywhere the bench wrote: the record, every artifact (the agent's log and its own report included).
@@ -250,14 +282,19 @@ test("where the owner's folders cannot be hidden no agent starts, unless the ope
   assert.equal(refused.startedAt, null, "no agent was started");
   const { ctx: allowed, seen } = incidentCtx({ bwrap: false, allowVisibleHome: true });
   // No process outside to look through here: the agent would read that process's environment (this mode hides nothing).
-  allowed.agentEnv = { ...allowed.agentEnv, INCIDENT_HOST_PID: "999999999" };
+  allowed.agentEnv = { ...allowed.agentEnv, INCIDENT_HOST_PID: "999999999", INCIDENT_TMP_SCRIPT: join(root, "visible-mode.sh"), INCIDENT_SHM: join(root, "no-shm") };
+  const connectionsBefore = listenerConnections;
   const r = await runOne(allowed, set.tasks[0], "A", 1);
   const s = JSON.parse(readFileSync(join(r.artifacts, "incident-report.json"), "utf8")).steps;
   assert.equal(r.isolation.ownerHomeHidden, false);
+  assert.equal(r.isolation.network, "not cut off");
+  // The network is shared in this mode: the agent's own connection to the loopback listener is made (the stated limit);
+  // git still made none.
+  assert.equal(s.loopback?.connected, true, JSON.stringify(s.loopback));
+  assert.equal(listenerConnections - connectionsBefore, 1, "only the agent's own connection, none from git");
   assert.match(s.home.stdout, /HOME=\S*pi-eval-iso-/);
   assert.match(s.push.stderr, new RegExp(PUSH_REFUSED));
   assert.notEqual(s.realGitRemote.status, 0);
-  assert.equal(listenerConnections, 0);
   assert.match(s.piConfig.stdout, /pi-eval-local-proxy/);
   assert.ok(!s.piConfig.stdout.includes(MARKERS.key), "the per-run Pi configuration never holds the key");
   // The limit this mode has, said plainly: the decoy is readable by its full path. The run is still flagged.
@@ -403,21 +440,46 @@ test("detection in the agent's log: a push, a remote and the owner's keys are se
   assert.deepEqual(credentialAttempts([`{"command":"git push origin main ${"x".repeat(50)}`]), ["push"]);
 });
 
-test("the folders hidden and made read-only: the machine's key folders and the container engine's socket by default, a hidden folder inside a read-only one stays hidden, the run's folders bound back", { skip: process.platform === "win32" }, () => {
-  const m = machineHidden(1234, "/tmp");
-  for (const p of ["/srv/ai", "/srv/code/team", "/srv/code/test-postgres", "/run/docker.sock", "/var/run/docker.sock", "/tmp/codex-daemon-1234", "/tmp/claude-1234", "/tmp/tmux-1234"]) assert.ok(m.includes(p), p);
+test("the folders hidden and made read-only: the machine's key folders by default, the whole file system read-only, /tmp, /var/tmp, /run and /dev/shm private, no network, a hidden folder inside a shown tree stays hidden, the run's folders bound back", { skip: process.platform === "win32" }, () => {
+  const m = machineHidden();
+  for (const p of ["/srv/ai", "/srv/code/team", "/srv/code/test-postgres"]) assert.ok(m.includes(p), p);
   const h = defaultHidden({ ownerHome: decoy, extra: [sharedSecrets] });
   assert.ok(h.includes(decoy) && h.includes(sharedSecrets));
-  if (process.getuid && existsSync(`/run/user/${process.getuid()}`)) assert.ok(h.includes(`/run/user/${process.getuid()}`));
-  for (const sock of ["/run/docker.sock", "/var/run/docker.sock"]) if (existsSync(sock)) assert.ok(h.includes(realpathSync(sock)), `${sock} is hidden on this machine`);
+  assert.deepEqual(PRIVATE_DIRS, ["/tmp", "/var/tmp", "/run", "/dev/shm"]);
   const own = join(shared, "own-checkout");
   mkdirSync(own, { recursive: true });
-  const argv = bwrapPrefix({ hidden: [sharedSecrets], readOnlyTrees: [shared, join(decoy, "inside-hidden")], writable: [own], readable: [], readOnly: [] });
+  const argv = bwrapPrefix({ hidden: [sharedSecrets], readOnlyTrees: [shared, join(decoy, "inside-hidden"), "/tmp", "/"], writable: [own], readable: [], readOnly: [] });
   const at = (...seq) => argv.findIndex((_, i) => seq.every((x, j) => argv[i + j] === x));
+  assert.equal(at("--ro-bind", "/", "/"), 1, "the whole file system read-only, first");
+  for (const flag of ["--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent"]) assert.ok(argv.includes(flag), flag);
+  assert.ok(at("--dev", "/dev") > 0 && !argv.includes("--dev-bind"), "a /dev of its own");
+  const tmp = at("--tmpfs", "/tmp");
+  for (const d of PRIVATE_DIRS) assert.ok(at("--tmpfs", d) > 0, d);
+  // The shared tree lies under the private /tmp here: bound back read-only after it, its key folder hidden after that.
   const ro = at("--ro-bind", realpathSync(shared), realpathSync(shared)), hid = at("--tmpfs", sharedSecrets), back = at("--bind", own, own);
-  assert.ok(ro > 0 && hid > ro && back > ro, argv.join(" "));
+  if (PRIVATE_DIRS.some((d) => realpathSync(shared).startsWith(`${d}/`))) assert.ok(tmp > 0 && ro > tmp && hid > ro && back > ro, argv.join(" "));
+  else assert.ok(tmp > 0 && ro === -1 && hid > tmp && back > hid, argv.join(" "));
   assert.equal(argv.indexOf(join(decoy, "inside-hidden")), -1, "a read-only tree inside a hidden folder is not shown again");
+  assert.equal(at("--ro-bind", "/tmp", "/tmp"), -1, "a tree that is a private folder does not bring the host's back");
   assert.equal(argv.at(-1), "--");
+});
+
+test("credential-like places in the readable trees are found by name and by an owner-only mode; the run's own folders are not searched", { skip: process.platform === "win32" }, () => {
+  const t = join(root, "scan");
+  const wt = join(t, "worktrees", "other");
+  mkdirSync(join(wt, "packages", "a"), { recursive: true });
+  mkdirSync(join(wt, "node_modules", "x"), { recursive: true });
+  mkdirSync(join(t, "own", "deep"), { recursive: true });
+  mkdirSync(join(t, "private-vm"), { recursive: true, mode: 0o700 });
+  chmodSync(join(t, "private-vm"), 0o700);
+  for (const f of [".env", ".env.local", "packages/a/server.pem", "packages/a/id_ed25519", ".git-credentials", "packages/a/credentials.json", "gh-token"]) writeFileSync(join(wt, f), "x");
+  for (const f of [".env.example", "packages/a/id_ed25519.pub", "packages/a/env.ts", "README.md", "node_modules/x/.env"]) writeFileSync(join(wt, f), "x");
+  writeFileSync(join(t, "own", "deep", ".env"), "x");
+  const { paths, truncated } = credentialPaths([t, wt], { exclude: [join(t, "own")] });
+  const rel = paths.map((p) => p.slice(realpathSync(t).length + 1)).sort();
+  assert.deepEqual(rel, ["private-vm", ...[".env", ".env.local", ".git-credentials", "gh-token", "packages/a/credentials.json", "packages/a/id_ed25519", "packages/a/server.pem"].map((f) => `worktrees/other/${f}`)].sort());
+  assert.equal(truncated, false);
+  assert.equal(credentialPaths([t], { limit: 2 }).truncated, true);
 });
 
 test("a run whose isolation cannot be finished leaves nothing behind: no per-run folder, and no key in the error", async () => {
@@ -484,6 +546,111 @@ test("the key proxy: the key goes only upstream, whatever the client sends; a de
     assert.equal(r.status, 502);
     noMarkers(r.body, "the 502 answer");
   } finally { await q.close(); }
+});
+
+test("the key proxy, more: on a unix socket; the key cut out of answers that echo it (headers, and a body split mid-key); a body over the cap refused; a stream cut short ends without an appended text; absolute-form and odd request lines not forwarded", { skip: process.platform === "win32" }, async () => {
+  const KEY = MARKERS.key;
+  let mode = "echo";
+  const seen = [];
+  const echo = http.createServer((req, res) => {
+    seen.push(req.url);
+    let n = 0;
+    req.on("data", (c) => { n += c.length; });
+    req.on("end", () => {
+      if (mode === "echo") {
+        // A server that echoes the request's headers (as some error pages do), split in the middle of the key.
+        const text = JSON.stringify({ got: req.headers.authorization, size: n });
+        const cut = text.indexOf(KEY) + 5;
+        res.writeHead(401, { "content-type": "application/json", "x-echo": req.headers.authorization, "content-length": Buffer.byteLength(text) });
+        res.write(text.slice(0, cut));
+        setTimeout(() => res.end(text.slice(cut)), 20);
+      } else if (mode === "cut") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write("data: {\"x\":1}\n\n");
+        setTimeout(() => res.socket.destroy(), 20);
+      } else { res.writeHead(200); res.end(`size ${n}`); }
+    });
+  });
+  await new Promise((r) => echo.listen(0, "127.0.0.1", r));
+  const sockDir = mkdtempSync(join(tmpdir(), "pxs-"));
+  const p = await startKeyProxy({ upstreamBaseUrl: `http://127.0.0.1:${echo.address().port}/v1`, apiKey: KEY, socketPath: join(sockDir, "m.sock"), maxBody: 1000 });
+  try {
+    assert.equal(p.baseUrl, null);
+    const call = (method, path, { body, headers = {} } = {}) => new Promise((res) => {
+      const rq = http.request({ socketPath: p.socketPath, method, path, headers: { authorization: `Bearer ${p.token}`, ...headers } }, (r) => {
+        let b = ""; r.on("data", (c) => { b += c; }); r.on("end", () => res({ status: r.statusCode, headers: r.headers, body: b })); r.on("error", (e) => res({ status: r.statusCode, body: b, error: e.code ?? "aborted" })); r.on("aborted", () => res({ status: r.statusCode, body: b, error: "aborted" }));
+      });
+      rq.on("error", (e) => res({ error: e.code }));
+      rq.end(body);
+    });
+    const e = await call("POST", "/v1/chat/completions", { body: "{}" });
+    assert.equal(e.status, 401);
+    assert.ok(!JSON.stringify(e).includes(KEY), JSON.stringify(e));
+    assert.equal(e.headers["x-echo"], undefined, "a header holding the key is dropped");
+    assert.match(e.body, /key withheld by the pi-eval proxy/);
+    mode = "plain";
+    assert.equal((await call("POST", "/v1/chat/completions", { body: "x".repeat(900) })).body, "size 900");
+    const before = seen.length;
+    assert.equal((await call("POST", "/v1/chat/completions", { body: "x".repeat(2000) })).status, 413, "declared too large");
+    const chunked = await call("POST", "/v1/chat/completions", { body: "x".repeat(5000), headers: { "transfer-encoding": "chunked" } });
+    assert.ok(chunked.status === 413 || chunked.error || /^size [0-9]+$/.test(chunked.body) && Number(chunked.body.slice(5)) <= 1000, JSON.stringify(chunked));
+    assert.ok(seen.length <= before + 1, "at most the cut-off chunked request reached the server");
+    mode = "cut";
+    const cut = await call("POST", "/v1/chat/completions", { body: "{}" });
+    assert.doesNotMatch(cut.body, /could not be reached/, "nothing appended to a stream cut short");
+    for (const [m, path] of [["POST", `http://127.0.0.1:${echo.address().port}/v1/chat/completions`], ["HEAD", "/v1/models"], ["OPTIONS", "/v1/models"], ["POST", "/v1/chat/completions?x=1"], ["POST", "/v1//chat/completions"], ["POST", "/v1/chat/%2e%2e/completions"], ["POST", "/v1/chat/completions/"]]) {
+      const before2 = seen.length;
+      assert.equal((await call(m, path, { body: m === "POST" ? "{}" : undefined })).status, 404, `${m} ${path}`);
+      assert.equal(seen.length, before2, `${m} ${path} not forwarded`);
+    }
+  } finally {
+    await p.close();
+    echo.close(); echo.closeAllConnections?.();
+    rmSync(sockDir, { recursive: true, force: true });
+  }
+  // The filter on its own: every split of the key across two chunks.
+  for (let i = 0; i <= KEY.length; i++) {
+    const out = [];
+    const f = redactStream(KEY, "[x]");
+    f.on("data", (c) => out.push(c));
+    const done = new Promise((r) => f.on("end", r));
+    f.write(`a${KEY.slice(0, i)}`); f.end(`${KEY.slice(i)}b${KEY}`);
+    await done;
+    assert.equal(Buffer.concat(out).toString(), "a[x]b[x]", `split at ${i}`);
+  }
+});
+
+test("the bridge: inside a network namespace of its own the agent reaches the proxy's socket on a loopback port, and the agent's exit status and signal come back", { skip: needsSandbox.skip }, async () => {
+  const sockDir = mkdtempSync(join(tmpdir(), "brg-"));
+  const p = await startKeyProxy({ upstreamBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: MARKERS.key, socketPath: join(sockDir, "m.sock") });
+  const bridge = join(here, "lib", "net-bridge.mjs");
+  try {
+    const before = upstreamSeen.length;
+    const script = `require("node:http").get("http://127.0.0.1:43123/v1/models", { headers: { authorization: "Bearer ${p.token}" } }, (r) => { let b = ""; r.on("data", (c) => { b += c; }); r.on("end", () => { console.log(r.statusCode, b.length > 0); process.exit(7); }); }).on("error", (e) => { console.log("error", e.code); process.exit(3); })`;
+    // Run asynchronously: the proxy and the stand-in server answer from this process.
+    const spawnAsync = (cmd, args) => new Promise((res) => {
+      const c = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      c.stdout.on("data", (d) => { stdout += d; }); c.stderr.on("data", (d) => { stderr += d; });
+      const t = setTimeout(() => c.kill("SIGKILL"), 60_000);
+      c.on("close", (status, signal) => { clearTimeout(t); res({ status, signal, stdout, stderr }); });
+    });
+    const r = await spawnAsync("bwrap", ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--unshare-pid", "--proc", "/proc", "--", process.execPath, bridge, p.socketPath, "43123", "--", process.execPath, "-e", script]);
+    assert.equal(r.status, 7, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^200 true$/m);
+    assert.equal(upstreamSeen.at(-1).authorization, `Bearer ${MARKERS.key}`);
+    assert.equal(upstreamSeen.length, before + 1);
+    // A port taken, a missing command, a signal.
+    assert.equal(spawnSync(process.execPath, [bridge, p.socketPath, "x", "--", "true"], { encoding: "utf8" }).status, 2);
+    // (In a namespace of its own, so no port of the host's can be taken already; bubblewrap reports a signal as 128 + its number.)
+    const inNs = (...a) => spawnSync("bwrap", ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--unshare-pid", "--proc", "/proc", "--", process.execPath, bridge, p.socketPath, ...a], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(inNs("43124", "--", join(root, "no-such-program")).status, 127);
+    assert.equal(inNs("43125", "--", "/bin/sh", "-c", "kill -TERM $$").status, 128 + 15, "the agent's signal comes back");
+    assert.equal(inNs("43126", "--", "/bin/sh", "-c", "exit 5").status, 5);
+  } finally {
+    await p.close();
+    rmSync(sockDir, { recursive: true, force: true });
+  }
 });
 
 // The real Pi program in the isolated home, against the stand-in model server (never Radiance): it starts with only the

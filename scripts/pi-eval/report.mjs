@@ -35,7 +35,7 @@ function main(argv) {
   process.stdout.write(`${rep.text}\n`);
   if (bench.length > 0) process.stdout.write(`\nnote: ${bench.length} run(s) ended in a bench error (counted as error): ${[...new Set(bench.map((r) => r.reason))].slice(0, 3).join(" | ")}\n`);
   const contaminated = records.filter((r) => r.contaminated);
-  if (contaminated.length > 0) process.stdout.write(`note: ${contaminated.length} run(s) named another checkout of the repository in a tool call (contaminated): ${contaminated.map((r) => r.runId).join(", ")}\n`);
+  if (contaminated.length > 0) process.stdout.write(`note: ${contaminated.length} run(s) contaminated (named another checkout, tried to push or add a remote, reached for the owner's keys, or the git wrapper refused something), left out of the table and the gates: ${contaminated.map((r) => r.runId).join(", ")}\n`);
   return o.strict && !rep.pass ? 1 : 0;
 }
 

@@ -313,7 +313,7 @@ test("a control run: one repeat per task with another agent (--agent, --label) i
   assert.ok(recs.every((r) => r.agentPath.endsWith("stub-agent.mjs")));
   const out = execFileSync(process.execPath, [join(here, "compare.mjs"), "--results", results], { encoding: "utf8" });
   assert.match(out, /\| tiny\s+\| S\s+\| A\s+\| 0\/1 S\s+\| 1\/1 F\s+\|/);
-  assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 other; shipped wording \(informational\) 1\/1/);
+  assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 contaminated, 0 other; shipped wording \(informational\) 1\/1/);
 });
 
 test("W06: a variant whose prompt carries the completion rules gets the worker's words from the built pi-adapter, and the run records which text it was", async () => {

@@ -10,6 +10,9 @@
 // INCIDENT_LISTENER     http://127.0.0.1:<port>/ a listener counting connections (git is asked to push there)
 // INCIDENT_SHARED       a decoy shared code folder (read-only to the agent) holding a decoy key folder (hidden)
 // INCIDENT_SOCKET       a decoy unix socket standing for the container engine's (hidden)
+// INCIDENT_TMP_SCRIPT   a decoy script in the host's /tmp (like /tmp/nn-slot.sh): the agent's /tmp is its own
+// INCIDENT_SHM          a decoy file in the host's /dev/shm
+// INCIDENT_OUTSIDE_DIR  a folder the user can write, outside the run's own folders (read-only in the sandbox)
 // Writes incident-report.json beside the log: each step's command, exit status and output.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
@@ -79,6 +82,33 @@ sh("sharedRead", `ls ${shared}`);
 sh("sharedWrite", `touch ${shared}/written-by-agent`);
 sh("sharedSecrets", `cat ${shared}/team/secrets/deploy_ed25519`);
 sh("ownWrite", "touch written-by-agent && rm written-by-agent");
+// The rest of the machine, second review: the host's loopback services (a listener standing for the team database's port),
+// the host's /tmp (a script the owner runs later, planted there), /dev/shm, /run and a folder outside the run's own.
+steps.loopback = await new Promise((resolve) => {
+  const u = process.env.INCIDENT_LISTENER ? new URL(process.env.INCIDENT_LISTENER) : null;
+  if (!u) { resolve(null); return; }
+  const c = net.connect(Number(u.port), u.hostname);
+  c.on("connect", () => { c.destroy(); resolve({ connected: true }); });
+  c.on("error", (e) => resolve({ connected: false, code: e.code }));
+});
+// With INCIDENT_NET_TOOLS=1 (the sandboxed case only): the ways out that remained before the network namespace: the real
+// git with every transport allowed on its own command line, a hook that runs the real git, a submodule, and plain
+// network programs, all at the loopback listener.
+if (process.env.INCIDENT_NET_TOOLS === "1" && process.env.INCIDENT_LISTENER) {
+  const l = process.env.INCIDENT_LISTENER, u = new URL(l);
+  sh("realGitAllowAll", `${realGit} -c protocol.allow=always push ${l}x.git HEAD:main`);
+  sh("hookPush", `printf '#!/bin/sh\\n${realGit} -c protocol.allow=always push ${l}h.git HEAD:main\\n' > .git/hooks/post-commit && chmod +x .git/hooks/post-commit && git commit -q --allow-empty -m x; echo hook-status=$?`);
+  sh("submodule", `${realGit} -c protocol.allow=always submodule add ${l}s.git sub`);
+  sh("curl", `curl -sS -m 5 ${l}`);
+  sh("python", `python3 -c "import socket; socket.create_connection(('${u.hostname}', ${u.port}), 5)"`);
+  sh("nc", `nc -z -w 3 ${u.hostname} ${u.port}`);
+}
+const tmpScript = process.env.INCIDENT_TMP_SCRIPT ?? "/nonexistent";
+sh("tmpScriptRead", `cat ${tmpScript}`);
+sh("tmpScriptWrite", `echo 'echo agent-was-here' > ${tmpScript}`);
+sh("shmRead", `cat ${process.env.INCIDENT_SHM ?? "/nonexistent"}`);
+sh("runListing", "ls -A /run /run/user /var/run/docker.sock");
+sh("writeOutside", `touch ${process.env.INCIDENT_OUTSIDE_DIR ?? "/nonexistent"}/written-by-agent`);
 const socketPath = process.env.INCIDENT_SOCKET;
 steps.socket = await new Promise((resolve) => {
   if (!socketPath) { resolve(null); return; }

@@ -8,19 +8,22 @@
 //     refused local address, network transports not allowed (local folders are), no credential helper, push.default
 //     nothing; and a `git` first on its PATH (lib/git-guard.mjs) that refuses a push except into the run's own folders,
 //     a remote that is not a local folder, and settings that would loosen the above;
-//   - on Linux, when bubblewrap works: the owner's home folder, the user's runtime folder (ssh-agent and keyring sockets)
-//     and /srv/ai hidden behind empty folders, its own process list (other processes' environments and /proc/<pid>/root
-//     out of reach), the bench's git settings and wrapper mounted read-only. The network is NOT cut off (the agent must
-//     reach the model server on the host's loopback address; a network namespace would cut that too).
-//   - the model key is not given to the agent at all: Pi's per-run configuration points at a loopback proxy the bench runs
-//     for the length of the run, which adds the key to each request. The key is read from the owner's Pi configuration by
-//     the bench only, never written into the agent's home, never printed or logged.
+//   - on Linux, when bubblewrap works: the whole file system read-only; the owner's home folder, /srv/ai, the team's and
+//     the test database's key folders, and credential-like files and owner-only folders in what stays readable hidden
+//     behind empty ones; /tmp, /var/tmp, /run and /dev/shm private (empty, its own); a minimal /dev; its own process
+//     list (other processes' environments and /proc/<pid>/root out of reach); and its own network namespace with only a
+//     loopback device, where a bridge (lib/net-bridge.mjs) is the one way out: to the bench's key proxy.
+//   - the model key is not given to the agent at all: Pi's per-run configuration points at the bench's proxy (through the
+//     bridge in the sandbox, or at 127.0.0.1 without one), run for the length of the run, which adds the key to each
+//     request. The key is read from the owner's Pi configuration by the bench only, never written into the agent's home,
+//     never printed or logged.
 import { spawnSync } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
+import { Transform } from "node:stream";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,15 +108,50 @@ export function agentProviderEntry(entry, proxyBaseUrl, token) {
 
 /** The only requests the proxy forwards (method and path under the base URL): what Pi's OpenAI-style route uses. */
 const PROXY_ROUTES = [["POST", "/chat/completions"], ["GET", "/models"]];
+/** A request body larger than this is refused (413) and not forwarded further. */
+export const PROXY_MAX_BODY = 64 * 1024 * 1024;
 
 /**
- * A loopback proxy to the model server for one run: it forwards only the model route's requests (PROXY_ROUTES, the exact
- * path, no query) that carry the run's token (`Authorization: Bearer <token>`, a fresh random value per run, so another
- * local process or another run cannot borrow the key through it), and puts the key in the Authorization header instead.
- * Anything else answers 404 or 401 and is not forwarded. Nothing is logged; an upstream failure answers 502 with a fixed
- * text; redirects are passed back, never followed. Resolves { baseUrl, token, close() }.
+ * A stream filter that replaces every occurrence of `secret` with a fixed text, also across chunk boundaries (the last
+ * end of a chunk that could be the secret's start is held back until the next chunk or the end). Used on the model server's answers, so a server
+ * that echoes the request's headers in an error body cannot hand the key to the agent.
  */
-export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFIX + randomBytes(24).toString("hex") }) {
+export function redactStream(secret, replacement = "[key withheld by the pi-eval proxy]") {
+  const s = Buffer.from(secret);
+  const r = Buffer.from(replacement);
+  let held = Buffer.alloc(0);
+  const scrub = (buf) => {
+    const parts = [];
+    let from = 0;
+    for (let i = buf.indexOf(s); i >= 0; i = buf.indexOf(s, from)) { parts.push(buf.subarray(from, i), r); from = i + s.length; }
+    parts.push(buf.subarray(from));
+    return Buffer.concat(parts);
+  };
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      const all = scrub(Buffer.concat([held, Buffer.from(chunk)]));
+      // Hold back only a tail that could be the start of the secret (so a stream is not delayed otherwise).
+      let keep = 0;
+      for (let k = Math.min(all.length, s.length - 1); k > 0; k--) if (all.subarray(all.length - k).equals(s.subarray(0, k))) { keep = k; break; }
+      held = all.subarray(all.length - keep);
+      cb(null, all.subarray(0, all.length - keep));
+    },
+    flush(cb) { cb(null, scrub(held)); },
+  });
+}
+
+/**
+ * A proxy to the model server for one run: it forwards only the model route's requests (PROXY_ROUTES, the exact path, no
+ * query) that carry the run's token (`Authorization: Bearer <token>`, a fresh random value per run, so another local
+ * process or another run cannot borrow the key through it), and puts the key in the Authorization header instead.
+ * Anything else answers 404 or 401 and is not forwarded. It listens on `socketPath` (a unix socket, which the sandbox's
+ * bridge reaches from inside a network namespace of its own) or else on 127.0.0.1, a random port. Bodies over
+ * PROXY_MAX_BODY answer 413; at most `maxConnections` at once; the key is cut out of every answer (headers and body), so
+ * a server that echoes request headers cannot leak it. Nothing is logged; an upstream failure answers 502 with a fixed
+ * text (or, once an answer has started, ends the connection); redirects are passed back, never followed. Resolves
+ * { baseUrl (TCP only), socketPath, basePath, token, close() }.
+ */
+export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFIX + randomBytes(24).toString("hex"), socketPath = null, maxBody = PROXY_MAX_BODY, maxConnections = 32 }) {
   const up = new URL(upstreamBaseUrl);
   const basePath = up.pathname.replace(/\/+$/, "");
   const mod = up.protocol === "https:" ? https : http;
@@ -124,68 +162,127 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
     if (!PROXY_ROUTES.some(([m, p]) => req.method === m && url === `${basePath}${p}`)) { refuse(404, "not found"); return; }
     const got = Buffer.from(String(req.headers.authorization ?? ""));
     if (got.length !== want.length || !timingSafeEqual(got, want)) { refuse(401, "unauthorized"); return; }
+    if (Number(req.headers["content-length"] ?? 0) > maxBody) { refuse(413, "request too large"); return; }
     const headers = { ...req.headers };
-    for (const h of ["host", "authorization", "proxy-authorization", "connection", "keep-alive"]) delete headers[h];
+    for (const h of ["host", "authorization", "proxy-authorization", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection"]) delete headers[h];
     headers.authorization = `Bearer ${apiKey}`;
+    let answered = false;
     const preq = mod.request({ protocol: up.protocol, hostname: up.hostname, port: up.port, method: req.method, path: url, headers }, (pres) => {
-      const h = { ...pres.headers };
-      delete h.connection; delete h["keep-alive"];
+      answered = true;
+      const h = {};
+      for (const [k, v] of Object.entries(pres.headers)) {
+        if (k === "connection" || k === "keep-alive" || k === "content-length") continue; // the length changes if the key is cut out
+        if ([v].flat().some((x) => String(x).includes(apiKey))) continue;
+        h[k] = v;
+      }
       res.writeHead(pres.statusCode ?? 502, h);
-      pres.pipe(res);
+      pres.on("error", () => res.destroy());
+      pres.on("aborted", () => res.destroy());
+      pres.pipe(redactStream(apiKey)).pipe(res);
     });
     preq.on("error", () => {
-      if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-      res.end("pi-eval proxy: the model server could not be reached\n");
+      // Before an answer: a fixed text. Mid-answer (a stream cut short): the connection ends, nothing is appended to it.
+      if (!answered && !res.headersSent) { res.writeHead(502, { "content-type": "text/plain", connection: "close" }); res.end("pi-eval proxy: the model server could not be reached\n"); } else res.destroy();
     });
     res.on("close", () => { if (!res.writableFinished) preq.destroy(); });
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > maxBody) { preq.destroy(); req.unpipe(preq); if (!res.headersSent) refuse(413, "request too large"); else res.destroy(); }
+    });
     req.pipe(preq);
   });
+  server.maxConnections = maxConnections;
+  server.headersTimeout = 30_000;
   return new Promise((resolveP, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
+    const done = () => {
+      const port = socketPath ? null : server.address().port;
       resolveP({
-        baseUrl: `http://127.0.0.1:${port}${basePath}`, token,
+        baseUrl: port === null ? null : `http://127.0.0.1:${port}${basePath}`, socketPath, basePath, token,
         close: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }),
       });
-    });
+    };
+    if (socketPath) server.listen(socketPath, done); else server.listen(0, "127.0.0.1", done);
   });
 }
 
 // ---- hiding the owner's folders (Linux, bubblewrap) ----
 
 const usable = new Map();
-/** Whether bubblewrap can start a process here with the namespaces the bench uses (probed once per path). */
+/** Whether bubblewrap can start a process here with the namespaces and mounts the bench uses (probed once per path). */
 export function sandboxUsable(bwrap = "bwrap") {
   if (process.platform !== "linux" || !bwrap) return false;
   if (!usable.has(bwrap)) {
-    const r = spawnSync(bwrap, ["--dev-bind", "/", "/", "--unshare-pid", "--unshare-ipc", "--proc", "/proc", "--tmpfs", "/mnt", "--", "/bin/true"], { stdio: "ignore", timeout: 10_000 });
+    const r = spawnSync(bwrap, ["--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/tmp", "--unshare-pid", "--unshare-ipc", "--unshare-net", "--proc", "/proc", "--", "/bin/true"], { stdio: "ignore", timeout: 10_000 });
     usable.set(bwrap, r.status === 0);
   }
   return usable.get(bwrap);
 }
 
 /**
- * This machine's other places holding keys, logins or a way out of the sandbox, hidden where they exist: /srv/ai (model
- * files, other projects' keys and .env files), the team's folder (/srv/code/team: its `secrets` holds SSH deploy and
- * server keys, its `private` tokens), the test database's credentials, the container engine's socket (a member of the
- * docker group can start a container that mounts the owner's home, so the socket is a way past every hidden folder), and
- * the per-user socket folders other programs keep in /tmp (the Codex daemon, tmux, screen, an ssh-agent started by hand,
- * the Claude Code driver's own scratch folder).
+ * The folders the agent gets an empty, private copy of (a fresh tmpfs, gone with the run): the host's /tmp and /var/tmp
+ * (other programs' scratch files, the per-user socket folders of ssh-agent, tmux, screen, the Codex daemon and the Claude
+ * Code driver, the database servers' sockets, the X server's, and scripts the owner runs later such as /tmp/nn-slot.sh,
+ * which the agent could otherwise rewrite), /run (every system socket: the container engine's, whose group can mount the
+ * owner's home in a container; the user's runtime folder with ssh-agent, keyring, gpg-agent and D-Bus; tailscale,
+ * containerd, the system bus), and /dev/shm (other processes' shared memory, such as the database servers' buffers).
+ * Anything of the run's own under them is bound back.
  */
-export function machineHidden(uid = typeof process.getuid === "function" ? process.getuid() : null, tmp = "/tmp") {
-  const list = ["/srv/ai", "/srv/code/team", "/srv/code/test-postgres", "/run/docker.sock", "/var/run/docker.sock", "/run/podman", "/run/screen"];
-  if (uid !== null) list.push(`${tmp}/codex-daemon-${uid}`, `${tmp}/claude-${uid}`, `${tmp}/tmux-${uid}`);
-  try { for (const n of readdirSync(tmp)) if (/^ssh-/.test(n)) list.push(join(tmp, n)); } catch { /* no /tmp */ }
-  return list;
+export const PRIVATE_DIRS = ["/tmp", "/var/tmp", "/run", "/dev/shm"];
+
+/**
+ * This machine's other places holding keys and logins, hidden where they exist: /srv/ai (model files, other projects'
+ * keys and .env files), the team's folder (/srv/code/team: its `secrets` holds SSH deploy and server keys, its `private`
+ * tokens) and the test database's credentials (/srv/code/test-postgres). (Sockets need no entry: /run and /tmp are
+ * private, PRIVATE_DIRS.)
+ */
+export function machineHidden() {
+  return ["/srv/ai", "/srv/code/team", "/srv/code/test-postgres"];
 }
 
 /** The folders hidden from the agent: the owner's home (and this process's), the runtime folder of sockets, machineHidden(), extras. */
 export function defaultHidden({ ownerHome = homedir(), extra = [] } = {}) {
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  const list = [ownerHome, homedir(), process.env.XDG_RUNTIME_DIR, uid === null ? null : `/run/user/${uid}`, ...machineHidden(uid), ...extra];
+  const list = [ownerHome, homedir(), process.env.XDG_RUNTIME_DIR, ...machineHidden(), ...extra];
   // A socket or folder reached through a link (/var/run is /run) is hidden at its real path.
   return [...new Set(list.filter((p) => typeof p === "string" && isAbsolute(p) && existsSync(p)).map((p) => real(resolve(p))))].filter((p) => p !== sep);
+}
+
+/** File names that hold keys and logins by convention (a `.env` but not its `.example`, key files, login files). */
+const CREDENTIAL_FILE = /^(?:\.env(?:\.(?!(?:example|sample|template|dist)$)[\w.-]+)?|.+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|ppk)|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.npmrc|\.pypirc|\.pgpass|\.htpasswd|credentials(?:\.json)?|.+\.credentials\.json|secrets?\.(?:json|ya?ml|toml|env)|.+-token|service-account.*\.json)$/i;
+/** Folder names that hold keys and logins by convention. */
+const CREDENTIAL_DIR = /^(?:\.ssh|\.gnupg|\.aws|\.kube|\.docker|\.secrets?|secrets?|credentials)$/i;
+const SCAN_SKIP = new Set(["node_modules", ".git", "dist", ".cache", ".pnpm-store"]);
+
+/**
+ * Credential-like places inside the folders the agent can read (`roots`, the read-only trees): files named like keys or
+ * logins (CREDENTIAL_FILE), folders named so (CREDENTIAL_DIR), and folders only their owner may open (mode 0700: the owner
+ * marked them private). Down to `maxDepth` levels, not into node_modules, .git or dist, not into `exclude` (the run's own
+ * folders), links not followed, at most `limit` paths (then `truncated`). The cost is a walk of the trees' upper levels
+ * at each run's start (well under a second for /srv/code here); what it finds is hidden like the listed folders.
+ */
+export function credentialPaths(roots, { exclude = [], maxDepth = 5, limit = 4000 } = {}) {
+  const found = [];
+  let truncated = false;
+  const ex = exclude.map((p) => real(p));
+  const walk = (d, depth) => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (found.length >= limit) { truncated = true; return; }
+      const p = join(d, e.name);
+      if (ex.some((x) => under(p, x))) continue;
+      if (e.isDirectory()) {
+        let mode = 0o755;
+        try { mode = statSync(p).mode; } catch { continue; }
+        if ((mode & 0o077) === 0 || CREDENTIAL_DIR.test(e.name)) { found.push(p); continue; }
+        if (!SCAN_SKIP.has(e.name) && depth < maxDepth) walk(p, depth + 1);
+      } else if (!e.isSymbolicLink() && CREDENTIAL_FILE.test(e.name)) found.push(p);
+    }
+  };
+  const top = [...new Set(roots.filter((r) => typeof r === "string" && existsSync(r)).map((r) => real(r)))];
+  for (const r of top) if (!top.some((o) => o !== r && under(r, o))) walk(r, 1);
+  return { paths: [...new Set(found)], truncated };
 }
 
 const under = (p, root) => p === root || p.startsWith(root.endsWith(sep) ? root : root + sep);
@@ -199,27 +296,36 @@ export function installRoot(file) {
 }
 
 /**
- * The bubblewrap command prefix: the whole file system as it is, then each read-only tree made read-only and each hidden
- * folder covered by an empty one (a hidden file by /dev/null), shortest path first so a hidden folder inside a read-only
- * tree stays hidden; then the run's own folders bound back writable and the programs it needs bound back read-only where
- * they lie under a hidden folder or read-only tree; then the bench's own settings read-only. A read-only tree inside a
- * hidden folder stays hidden. A process list of its own (with its own /proc) and IPC; the network is shared (the model
- * server is on the host's loopback address).
+ * The bubblewrap command prefix. The whole file system read-only, a minimal /dev of its own, a process list and /proc of
+ * its own, its own IPC, and its own network namespace (only a loopback device: no route to the host's loopback services,
+ * the tailnet, the internet or the host's abstract unix sockets; the model is reached through the bridge, lib/net-bridge.mjs);
+ * supplementary groups (docker, sudo, ...) are not kept in the namespace. Then the private folders (PRIVATE_DIRS) get an
+ * empty tmpfs each, each hidden folder an empty one (a hidden file /dev/null), shortest path first; read-only trees under
+ * a private folder are bound back read-only (one that is or holds a private folder is left out: it would bring back the
+ * host's /tmp), unless inside a hidden folder; then the run's own folders bound back writable and the programs it needs
+ * bound back read-only where they lie under a hidden or private folder; then the bench's own settings read-only.
  */
-export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writable = [], readable = [], readOnly = [] }) {
-  const argv = [bwrap, "--dev-bind", "/", "/", "--unshare-pid", "--unshare-ipc", "--proc", "/proc", "--die-with-parent"];
-  const isHidden = (p) => hidden.some((h) => under(resolve(p), h) || under(real(p), h));
-  const trees = [...new Set(readOnlyTrees.map((p) => real(p)))].filter((p) => p !== sep && existsSync(p) && !isHidden(p));
-  const covers = [...hidden.map((h) => [h, "hide"]), ...trees.map((t) => [t, "ro"])].sort((a, b) => a[0].length - b[0].length);
+export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writable = [], readable = [], readOnly = [], privateDirs = PRIVATE_DIRS }) {
+  const argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--unshare-ipc", "--unshare-net", "--proc", "/proc", "--die-with-parent"];
+  const inAny = (p, list) => list.some((h) => under(resolve(p), h) || under(real(p), h));
+  const isHidden = (p) => inAny(p, hidden);
+  const isPrivate = (p) => inAny(p, privateDirs);
+  const trees = [...new Set(readOnlyTrees.map((p) => real(p)))]
+    .filter((p) => p !== sep && existsSync(p) && !isHidden(p) && isPrivate(p) && !privateDirs.some((d) => under(d, p)));
+  // A hidden folder under a private one is already gone, unless a tree or a folder of the run's bound back around it would
+  // show it again: then it is covered too.
+  const shownAgain = (h) => [...trees, ...writable, ...readable].some((t) => under(h, resolve(t)) || under(h, real(t)));
+  const covers = [...privateDirs.map((d) => [d, "private"]), ...hidden.filter((h) => !isPrivate(h) || shownAgain(h)).map((h) => [h, "hide"]), ...trees.map((t) => [t, "ro"])]
+    .sort((a, b) => a[0].length - b[0].length);
   for (const [h, how] of covers) {
+    if (how === "private") { argv.push("--tmpfs", h); continue; }
     if (how === "ro") { argv.push("--ro-bind", h, h); continue; }
     let isDir = true;
     try { isDir = statSync(h).isDirectory(); } catch { continue; }
     argv.push(...(isDir ? ["--tmpfs", h] : ["--ro-bind", "/dev/null", h]));
   }
-  const covered = (p) => isHidden(p) || trees.some((t) => under(resolve(p), t) || under(real(p), t));
-  const back = [...writable.map((p) => [p, "--bind"]), ...readable.map((p) => [p, "--ro-bind"])]
-    .filter(([p]) => existsSync(p) && covered(p))
+  const back = [...writable.map((p) => [p, "--bind"]), ...readable.filter((p) => isHidden(p) || isPrivate(p)).map((p) => [p, "--ro-bind"])]
+    .filter(([p]) => existsSync(p))
     .sort((a, b) => a[0].length - b[0].length);
   for (const [p, how] of back) argv.push(how, p, p);
   for (const p of readOnly) if (existsSync(p)) argv.push("--ro-bind", p, p);
@@ -232,10 +338,11 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
 /**
  * Makes one run's isolation: a temporary folder holding the agent's home, temp folder, git settings and git wrapper, and,
  * when the owner's Pi configuration has the run's provider, a per-run Pi configuration that reaches the model server
- * through the key proxy. Returns { base, home, env, allowRoots, readOnly, providerProxied, close() } (close stops the proxy
- * and removes the folder).
+ * through the key proxy (with `netns`, through the bridge: `bridge` { socketPath, port } is what lib/net-bridge.mjs is
+ * started with). Returns { base, home, env, allowRoots, readOnly, providerProxied, bridge, close() } (close stops the
+ * proxy and removes the folder).
  */
-export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = homedir(), provider, model, realGit, piBin, sourceEnv = process.env, tmpRoot = tmpdir() }) {
+export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = homedir(), provider, model, realGit, piBin, sourceEnv = process.env, tmpRoot = tmpdir(), netns = false }) {
   const base = mkdtempSync(join(tmpRoot, "pi-eval-iso-"));
   let proxy = null;
   const close = async () => { try { await proxy?.close(); } catch { /* already closed */ } await rm(base, { recursive: true, force: true }).catch(() => {}); };
@@ -258,14 +365,20 @@ export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = 
       writeFileSync(join(base, "bin", "git"), `#!/bin/sh\nexec "${node}" "${GIT_GUARD}" "${guardConfig}" "$@"\n`);
       chmodSync(join(base, "bin", "git"), 0o755);
     }
-    let providerProxied = false;
+    let providerProxied = false, bridge = null;
     const entry = provider ? ownerProvider(ownerHome, provider) : null;
     if (entry) {
-      proxy = await startKeyProxy({ upstreamBaseUrl: entry.baseUrl, apiKey: entry.apiKey });
+      // In a network namespace of its own (netns) the agent reaches the proxy through the bridge (lib/net-bridge.mjs), which
+      // listens on loopback inside the namespace and forwards to the proxy's unix socket in the per-run folder.
+      const socketPath = netns ? join(base, "model.sock") : null;
+      if (socketPath && Buffer.byteLength(socketPath) > 100) throw new Error(`the temporary folder's path is too long for the model route's socket (${socketPath}); set TMPDIR to a shorter folder`);
+      proxy = await startKeyProxy({ upstreamBaseUrl: entry.baseUrl, apiKey: entry.apiKey, socketPath });
+      if (netns) bridge = { socketPath, port: 20_000 + randomInt(40_000) };
+      const agentBase = netns ? `http://127.0.0.1:${bridge.port}${proxy.basePath}` : proxy.baseUrl;
       const agentDir = join(home, ".pi", "agent");
       mkdirSync(agentDir, { recursive: true, mode: 0o700 });
       const write = (name, obj) => { writeFileSync(join(agentDir, name), `${JSON.stringify(obj, null, 2)}\n`, { mode: 0o600 }); chmodSync(join(agentDir, name), 0o600); };
-      write("models.json", { providers: { [provider]: agentProviderEntry(entry, proxy.baseUrl, proxy.token) } });
+      write("models.json", { providers: { [provider]: agentProviderEntry(entry, agentBase, proxy.token) } });
       write("settings.json", { defaultProvider: provider, ...(model ? { defaultModel: model, enabledModels: [`${provider}/${model}`] } : {}) });
       write("auth.json", {});
       providerProxied = true;
@@ -284,7 +397,7 @@ export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = 
     // Read-only inside the sandbox: the agent cannot change the bench's git settings or its wrapper. (Pi's own folder stays
     // writable: Pi may write there, and it holds no key.)
     const readOnly = [join(base, "bin"), gitconfig, join(home, ".gitconfig")];
-    return { base, home, env, allowRoots, readOnly, providerProxied, close };
+    return { base, home, env, allowRoots, readOnly, providerProxied, bridge, close };
   } catch (e) {
     await close();
     throw e;

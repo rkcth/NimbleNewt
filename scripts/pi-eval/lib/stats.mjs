@@ -24,10 +24,15 @@ export function wilson(k, n, z = 1.959963984540054) {
 
 const emptyCounts = () => Object.fromEntries(OUTCOMES.map((o) => [o, 0]));
 
-/** Groups result records (results.jsonl rows) by variant and size, counting each outcome. Unknown outcomes count as unclassified. */
+/**
+ * Groups result records (results.jsonl rows) by variant and size, counting each outcome. Unknown outcomes count as
+ * unclassified. A contaminated run (its agent named another checkout, tried to push or add a remote, or reached for the
+ * owner's keys; or the git wrapper refused something) is left out: it is never a verified finish, nor any other reading.
+ */
 export function aggregate(records) {
   const groups = new Map();
   for (const r of records) {
+    if (r.contaminated) continue;
     const variant = String(r.variant ?? "?");
     const size = SIZES.includes(r.size) ? r.size : "?";
     const key = `${variant}\u0000${size}`;
@@ -84,9 +89,10 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
   });
   const widths = cols.map((c, i) => Math.max(c.length, ...rows.map((r) => r[i].length)));
   const fmt = (r) => `| ${r.map((x, i) => x.padEnd(widths[i])).join(" | ")} |`;
-  const out = [`# ${title}`, "", `${records.length} run(s)`, "", fmt(cols), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...rows.map(fmt), "",
+  const dirty = records.filter((r) => r.contaminated);
+  const out = [`# ${title}`, "", `${records.length} run(s)${dirty.length > 0 ? `, ${dirty.length} of them contaminated and left out of the table and the gates (${dirty.map((r) => r.runId ?? "?").join(", ")})` : ""}`, "", fmt(cols), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...rows.map(fmt), "",
     "Repeats of one task are not independent samples: each interval treats every run as independent, so with few tasks per size it is narrower than the truth. A gate met on a handful of tasks is a first reading, not a proof.", ""];
-  const variants = [...new Set(groups.map((g) => g.variant))];
+  const variants = [...new Set([...groups.map((g) => g.variant), ...dirty.map((r) => String(r.variant ?? "?"))])];
   let allPass = variants.length > 0;
   for (const v of variants) {
     const r = gatesFor(v, groups);
@@ -94,8 +100,10 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
     // The card's shipped test files, also run on each agent's work: they carry wording later review rounds settled on that
     // no prompt states, so they are shown for information and never gate.
     const shipped = records.filter((x) => String(x.variant ?? "?") === v && x.shipped);
+    const vDirty = dirty.filter((x) => String(x.variant ?? "?") === v);
     const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
     const mism = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
+    if (vDirty.length > 0) info.push(`- contaminated (left out, never a finish): ${vDirty.length} run(s), ${vDirty.filter((x) => x.outcome === "verified-finish").length} of them otherwise a verified finish; kinds: ${[...new Set(vDirty.flatMap((x) => [...(x.credentialAttempts ?? []), ...(x.guardRefusals > 0 ? ["git refused"] : []), ...((x.foreignPaths ?? []).length > 0 ? ["another checkout"] : [])]))].join(", ") || "-"}`);
     if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes and in the false-done gate`);
     // A timeout whose acceptance tests pass at the limit: the work was done, the agent never ended (it is still a non-finish).
     const timeouts = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "timeout");

@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
-import { bwrapPrefix, credentialAttempts, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
+import { PRIVATE_DIRS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
@@ -422,24 +422,33 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
   const hideable = bwrap !== null && sandboxUsable(bwrap);
   if (!hideable && !ctx.allowVisibleHome) throw new Error("the owner's home folder cannot be hidden from the agent here (bubblewrap is not usable); no agent was started (--allow-visible-home runs it with a fresh home folder only)");
   const piBin = ctx.piBin ?? piBinOf(ownerHome);
-  const iso = await prepareIsolation({ checkoutDir: dir, artifactsDir: artifacts, ownerHome, provider: ctx.set?.agent?.provider, model: ctx.set?.agent?.model, realGit: ctx.realGit ?? findRealGit(), piBin, sourceEnv: ctx.sourceEnv ?? process.env });
+  const iso = await prepareIsolation({ checkoutDir: dir, artifactsDir: artifacts, ownerHome, provider: ctx.set?.agent?.provider, model: ctx.set?.agent?.model, realGit: ctx.realGit ?? findRealGit(), piBin, sourceEnv: ctx.sourceEnv ?? process.env, netns: hideable });
   ctx.isoDirs?.add(iso.base);
   try {
-    const hidden = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
-    // Read-only to the agent: the shared code folder (other worktrees, the reference checkouts, the bench's own scripts:
-    // nothing the agent may change, and code the owner runs later outside any sandbox), the reference repositories and
-    // the work root's parent. Its own checkout, temporary folder and artifacts are bound back writable.
+    const listed = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
+    // Read-only to the agent: the whole file system (in the sandbox), named here as the trees the agent may read: the
+    // shared code folder (other worktrees, the reference checkouts, the bench's own scripts), the reference repositories
+    // and the work root's parent. Its own checkout, temporary folder and artifacts are bound back writable.
     const readOnlyTrees = ["/srv/code", ctx.repo, ...(ctx.referenceDirs ?? []), BENCH_ROOT, ctx.workRoot ? dirname(ctx.workRoot) : null, ...(ctx.readOnlyTrees ?? [])].filter((p) => typeof p === "string");
+    const own = [dir, iso.base, artifacts];
+    // Credential-like files and owner-only folders in what stays readable (lib/isolation.mjs credentialPaths) are hidden too.
+    const scan = hideable ? credentialPaths(readOnlyTrees.filter((p) => !listed.some((h) => p === h || p.startsWith(h + "/"))), { exclude: [...own, ...listed] }) : { paths: [], truncated: false };
+    const hidden = [...listed, ...scan.paths];
     const agentFiles = ctx.agent.filter((x) => typeof x === "string" && x !== "node" && existsSync(x)).map((x) => dirname(realpathSync(x)));
-    const prefix = hideable ? bwrapPrefix({
+    const prefix = hideable ? [...bwrapPrefix({
       bwrap, hidden, readOnlyTrees,
-      writable: [dir, iso.base, artifacts],
+      writable: own,
       readable: [dirname(dirname(process.execPath)), dirname(dirname(fileURLToPath(import.meta.url))), ...agentFiles, ...(piBin ? [installRoot(piBin)] : [])],
       readOnly: iso.readOnly,
-    }) : [];
+    // The agent's only network: the bridge to the key proxy (none when the owner's Pi configuration has no such provider).
+    }), ...(iso.bridge ? [process.execPath, NET_BRIDGE, iso.bridge.socketPath, String(iso.bridge.port), "--"] : [])] : [];
     return {
       ...iso, prefix,
-      summary: { home: "fresh", ownerHomeHidden: hideable, hidden, readOnly: hideable ? readOnlyTrees.filter((p) => existsSync(p)) : [], ownProcessList: hideable, network: "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true },
+      summary: {
+        home: "fresh", ownerHomeHidden: hideable, hidden: listed, hiddenByName: scan.paths.length, ...(scan.truncated ? { hiddenByNameTruncated: true } : {}),
+        privateDirs: hideable ? PRIVATE_DIRS : [], readOnly: hideable ? ["/"] : [], ownProcessList: hideable,
+        network: hideable ? "none (the model route only)" : "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true,
+      },
     };
   } catch (e) {
     // Nothing is left behind when the sandbox could not be described: the proxy stops and the per-run folder goes.
@@ -448,6 +457,9 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
     throw e;
   }
 }
+
+/** The bridge from the agent's network namespace to the key proxy. */
+const NET_BRIDGE = fileURLToPath(new URL("./net-bridge.mjs", import.meta.url));
 
 /** The repository the bench itself runs from (scripts/pi-eval/lib -> the repository root). */
 const BENCH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
