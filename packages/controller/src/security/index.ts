@@ -7,3 +7,4 @@ export { SecureApi, type SecureDependencies } from "./secured.js";
 export { GrantService, GRANT_LIMITS, IDLE_DAYS_CEILING, checkTerms, heldRecords, idleEnd, lapsedCovering, lapsedFromNonUse, recordGrantUse, useWriteInterval, within, type LapsedGrant, type DeriveInput, type GrantInput, type GrantRecordBody, type GrantSource, type GrantTerms, type ResourceRef, type RestrictInput, type RestrictionBody } from "./grants.js";
 export { DISPATCHER_PRINCIPAL, TaskCredentialService, type IssuedTaskCredential, type TaskCredentialBody } from "./task-credentials.js";
 export { cleanUntrusted, type CleanOptions, type Cleaned } from "./clean.js";
+export { RELIANCE_LISTED, relianceOf, type Reliance, type RunningWork } from "./reliance.js";

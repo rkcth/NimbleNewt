@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, opendir, readlink, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, open, opendir, readlink, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { redactText } from "../security/redact.js";
 import { relativePath, scopeAllows } from "../projects/resources.js";
-import type { ManifestBody, Observation } from "./dependencies.js";
+import type { DependencyEntry, ManifestBody, Observation } from "./dependencies.js";
 
 /**
  * What a resume check may read while it looks at a task's dependencies before the resumed attempt's first turn (card L04d).
@@ -34,6 +34,11 @@ export interface ProbeFileSystem {
   readFile(path: string, maxBytes: number): Promise<ProbeRead>;
   /** Lists a directory at a path that has no link in it, reading at most `maxNames + 1` names. */
   readdir(path: string, maxNames: number): Promise<ProbeList>;
+  /**
+   * Whether something is at a path itself, a link included, without following it (L04e review): `false` when nothing is there (`ENOENT`, `ENOTDIR`). Used only when `realpath` says a path does not exist, to tell a file that is really gone
+   * from a link whose target is missing (which may point outside the checkout, so it is never reported as deleted). A file system without it reports a path `realpath` cannot find as deleted.
+   */
+  present?(path: string): Promise<boolean>;
 }
 
 const NO_FOLLOW = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
@@ -49,6 +54,9 @@ const descriptorPath = async (fd: number): Promise<string | undefined> => {
 /** This process's own file system, as a probe reads it. */
 export const nodeProbeFileSystem: ProbeFileSystem = {
   realpath: (path) => realpath(path),
+  async present(path) {
+    try { await lstat(path); return true; } catch (error) { if (missing(error)) return false; throw error; }
+  },
   async readFile(path, maxBytes) {
     // Looked at before it is opened: a pipe, a socket or a device is never opened at all.
     if (!(await stat(path)).isFile()) return { kind: "not-file" };
@@ -152,6 +160,11 @@ class ProbeTimeout extends Error {}
  * dependencies unobserved, which the check reads as what it is — unknown, and the owner decides.
  */
 export function checkoutDependencyObserver(options: DependencyObserverOptions): (taskId: string) => Promise<Readonly<Record<string, Observation>>> {
+  return probeWith(options, { hung: 0 });
+}
+
+/** The probe itself, with the count of abandoned file-system calls kept in `state`, so callers that build a probe per request (a remote host's `observe`) still share one count. */
+function probeWith(options: DependencyObserverOptions, state: { hung: number }): (taskId: string) => Promise<Readonly<Record<string, Observation>>> {
   const limit = bound(options.maxEntries, OBSERVE_LIMITS.entries);
   const maxBytes = bound(options.maxBytes, OBSERVE_LIMITS.fileBytes);
   const maxTotal = bound(options.maxTotalBytes, OBSERVE_LIMITS.totalBytes);
@@ -159,14 +172,13 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
   const fileSystem = options.fs ?? nodeProbeFileSystem;
   // File-system calls an earlier probe gave up on that have still not come back. Node runs them on a small shared thread pool, so a
   // mount that hangs would take one more thread at every probe until the whole process's file work stalls: while one is still out,
-  // no probe starts another call, and everything is left unobserved.
-  let hung = 0;
+  // no probe starts another call, and everything is left unobserved (`state.hung`).
   return async (taskId: string): Promise<Readonly<Record<string, Observation>>> => {
     const out: Record<string, Observation> = {};
     const deadline = Date.now() + timeoutMs;
     // One file-system call, cut off at the probe's deadline. A call that hangs past it is abandoned: what it would have said is not used.
     const timed = async <T>(start: () => Promise<T>): Promise<T> => {
-      if (hung > 0 || deadline - Date.now() <= 0) throw new ProbeTimeout();
+      if (state.hung > 0 || deadline - Date.now() <= 0) throw new ProbeTimeout();
       const step = start();
       const left = deadline - Date.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -175,7 +187,7 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
         return await Promise.race([step, new Promise<never>((_, reject) => { timer = setTimeout(() => { late = true; reject(new ProbeTimeout()); }, Math.max(0, left)); })]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
-        if (late) { hung++; step.then(() => { hung--; }, () => { hung--; }); } else step.catch(() => undefined);
+        if (late) { state.hung++; step.then(() => { state.hung--; }, () => { state.hung--; }); } else step.catch(() => undefined);
       }
     };
     let manifest: ManifestBody | undefined;
@@ -188,7 +200,18 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
     const scope = { mode: "read" as const, paths: typeof located === "object" ? [...(located.paths ?? [])] : [] };
     if (root === undefined || !isAbsolute(root)) return out; // nowhere to look: everything stays unknown
     let base: string;
-    try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
+    try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (state.hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
+    // A path `realpath` could not find: really gone only when the nearest part of it that is still there is that same path below the checkout, with no link in it, and is not the path itself (a link whose target is missing).
+    const goneInside = async (target: string): Promise<boolean> => {
+      const present = fileSystem.present;
+      if (present === undefined) return true;
+      for (let p = target; p === base || within(base, p); p = dirname(p)) {
+        if (!(await timed(() => present.call(fileSystem, p)))) { if (p === base) return false; continue; }
+        if (p === target) return false;
+        try { return (await timed(() => fileSystem.realpath(p))) === p; } catch (error) { if (missing(error)) return false; throw error; }
+      }
+      return false;
+    };
     let read = 0;
     for (const entry of wanted) {
       const key = relativePath(entry.key);
@@ -199,8 +222,11 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
       try {
         let real: string;
         try { real = await timed(() => fileSystem.realpath(target)); } catch (error) {
-          if (missing(error)) out[entry.id] = { exists: false }; // it is gone: the check says so
-          else throw error;
+          if (!missing(error)) throw error;
+          // It is gone, the check says so: but only when nothing on its way is a link. A link whose target is missing (or a folder link on the way to it) may point outside the checkout, and following it to say "deleted" would tell
+          // what is, or is not, on the disk outside (L04e review). Then it stays unobserved.
+          if (await goneInside(target)) out[entry.id] = { exists: false };
+          else fault(options, `${key} is missing through a link, which is not followed`);
           continue;
         }
         if (!within(base, real)) { fault(options, `${key} is a link to outside the checkout`); continue; }
@@ -233,23 +259,42 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 /**
- * Whether a controller probes by default (card L04d review): yes on one machine; with remote hosts only when the operator said so,
- * because the resumed attempt's host is chosen after the check and this machine's disk says nothing about another's.
+ * Whether a controller probes by default (card L04e): yes. A task last placed on a remote host is not read from this machine's disk (`locallyPlaced`): that host looks at its own disk when it is asked (`resume.observe`, `observeOnHost`),
+ * so remote hosts no longer turn the probe off. `remoteHosts` is kept for callers that still pass it.
  */
-export function resumeProbeEnabled(option: boolean | object | undefined, remoteHosts: number): boolean {
-  return option === undefined ? remoteHosts === 0 : option !== false;
+export function resumeProbeEnabled(option: boolean | object | undefined, remoteHosts?: number): boolean {
+  void remoteHosts;
+  return option === undefined ? true : option !== false;
 }
 
 /**
  * A `locate` that answers only for a task last placed on a host of this machine: a task placed on a remote host, or never placed in
- * an installation that has remote hosts, is nowhere the probe can look, so its files stay `unknown` and the owner decides.
+ * an installation that has remote hosts, is nowhere the probe can look from here, so its files stay `unknown` here (a remote host's own look answers for the first) and the owner decides.
  */
-export function locallyPlaced(remoteHostIds: ReadonlySet<string>, placedHostOf: (taskId: string) => Promise<string | undefined>, locate: (taskId: string) => Promise<ProbeLocation | undefined>): (taskId: string) => Promise<ProbeLocation | undefined> {
-  return async (taskId) => {
+export function locallyPlaced(remoteHostIds: ReadonlySet<string>, placedHostOf: (taskId: string) => Promise<string | undefined>, locate: (taskId: string, projectId: string) => Promise<ProbeLocation | undefined>): (taskId: string, projectId: string) => Promise<ProbeLocation | undefined> {
+  return async (taskId, projectId) => {
     if (remoteHostIds.size > 0) {
       const placed = await placedHostOf(taskId);
       if (placed === undefined || remoteHostIds.has(placed)) return undefined;
     }
-    return await locate(taskId);
+    return await locate(taskId, projectId);
   };
+}
+
+/**
+ * Looks at files and directories a caller names (a remote host answering `resume.observe`, card L04e) under one checkout, with exactly the rules of `checkoutDependencyObserver`: nothing outside the checkout or the project's `paths`, no
+ * guess, never a throw. `locate` is asked for the task's checkout on this machine. Returns what it could read, by entry ID; the rest is left out (unknown).
+ */
+export async function observeEntries(options: Omit<DependencyObserverOptions, "manifest">, scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[]): Promise<Readonly<Record<string, Observation>>> {
+  const { locate, ...rest } = options;
+  return await entriesObserver(rest)(scope, entries, locate);
+}
+
+/**
+ * `observeEntries` for a long-lived caller (a remote host answering every `observe` request it gets): one count of file-system calls a look gave up on is kept across all its looks, so a mount that hangs takes one of Node's few file-system
+ * threads once, not once more at every request, and later looks leave everything unobserved until that call comes back. `locate` is given per look (it carries the project's paths of that request).
+ */
+export function entriesObserver(options: Omit<DependencyObserverOptions, "manifest" | "locate">): (scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[], locate: DependencyObserverOptions["locate"]) => Promise<Readonly<Record<string, Observation>>> {
+  const state = { hung: 0 };
+  return async (scope, entries, locate) => await probeWith({ ...options, locate, manifest: async () => ({ taskId: scope.taskId, projectId: scope.projectId, entries: entries.map((e) => ({ id: e.id, kind: e.kind, key: e.key })) as unknown as readonly DependencyEntry[] }) }, state)(scope.taskId);
 }

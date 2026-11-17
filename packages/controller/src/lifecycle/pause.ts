@@ -639,6 +639,26 @@ export class PauseService implements PauseGuard, PauseLookup {
   }
 
   /**
+   * `agentHolds` for a caller that is about to write something that must not be written under a pause (card A09 follow-up T6b): whether a pause gate holds the agent, and the changes that lock what the answer rested on in the
+   * caller's commit. Every record the walk read (the agent, its teams) is checked at the revision read, and each gate is checked at its revision (an absent one is created as an active gate, so a pause that was about to create it
+   * conflicts with it). A pause landing between the read and the caller's commit therefore puts the two in one order: the pause first (the caller's write fails) or the caller's write first (the pause is repeated and lands after it).
+   */
+  async agentFence(agentId: string): Promise<{ readonly held: boolean; readonly changes: readonly Change[] }> {
+    if (typeof agentId !== "string" || !AGENT_ID.test(agentId)) invalid("agentId", "is not an agent ID");
+    const changes: Change[] = [];
+    let held = false;
+    for (const scope of await this.#chain({ kind: "agent", id: agentId }, changes)) {
+      const ref: AggregateRef = { kind: "pause-gate", id: gateIdOf(scope) };
+      const found = await this.#runner.get(ref.kind, ref.id);
+      if (found === undefined) { changes.push({ type: "create", ref, body: clean(this.#fresh(scope, undefined)) }); continue; }
+      changes.push({ type: "check", ref, expectedRevision: found.revision });
+      const gate = found.body as unknown as PauseGateBody;
+      if (gate.intent === "pause" && gate.requestId !== undefined) held = true;
+    }
+    return { held, changes };
+  }
+
+  /**
    * Which Suspend, Stop or Force Stop was last requested for a scope, as one string: its request and its mode (a Suspend still under way that is made a Stop keeps its record, so the mode tells the two apart), or `none`.
    * A Stop made while the scope is already paused keeps the gate's pause request, so this is what tells a meeting permission that the owner stopped the agent again after it was granted (card M04h review).
    */
