@@ -1748,10 +1748,10 @@ Arguments:
 
 - `projectId` (optional): only this project
 - `taskId` (optional): only this task
-- `agentId` (optional): only this agent (the task's owner of record, or the caller of the tool)
+- `agentId` (optional): only this agent (the task's owner of record, the caller of the tool, the one who recorded the artifact, or the deliverable's responsible agent)
 - `state` (optional): only tasks in this state
 - `kind` (optional): `paused_assignee`, `unreachable_worker`, `uncertain_tool_result` or `stale_artifact`
-- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time)
+- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed)
 - `until` (optional): only items up to this UTC time
 - `limit` (optional): 1 to 100, default 50
 - `after` (optional): the `next` of the previous page

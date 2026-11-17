@@ -668,21 +668,30 @@ export class AcceptanceService {
    * The deliverables of a task, readable by the caller, whose newest version stands (submitted, under review or accepted) on a task contract that has since changed in what it asks for
    * (card U13: a stale artifact in the overview). Only the fields that say what the work must be count (`CONTRACT_WORK_FIELDS`): a new priority, budget, difficulty, class, permission or
    * recovery need does not make a delivered result out of date. `changedAt` is when the first such change after the version's contract was stored (the current version's time when the
-   * history is longer than `CONTRACT_WALK` versions). Read only; at most `MAX_PER_TASK` deliverables and, per stale one, `CONTRACT_WALK` + 2 contract records are read. `reads` counts them.
+   * walk would pass `CONTRACT_WALK` versions). Read only and bounded whatever the history: at most `MAX_PER_TASK` deliverables and the newest version of each, and each contract version at most once (a task with no deliverable costs one read and its contract is not read); the walk covers at most
+   * `CONTRACT_WALK` versions after the one a deliverable was checked against, so a call reads at most 3 + `MAX_PER_TASK` x (`CONTRACT_WALK` + 3) records, and as few as 3 + `MAX_PER_TASK` x 2 + `CONTRACT_WALK` + 1 when the deliverables were checked against one version. `reads` counts them.
    * Nothing the agent wrote is returned except the title, which the caller shows quoted; the contract's own text is never returned, only the names of the fields that changed.
    */
   async contractStale(by: Principal, taskIdValue: string): Promise<{ items: StaleDeliverable[]; reads: number }> {
     const taskId = checkTaskId(taskIdValue);
     if (by.kind !== "owner" && by.kind !== "agent") return { items: [], reads: 0 };
-    let reads = 2;
+    let reads = 1;
     const ids = ((await this.#runner.get("deliverable-index", taskId))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+    // Most tasks have no deliverable: one read, and the contract is not read at all.
+    if (ids.length === 0) return { items: [], reads };
+    reads++;
     const now = (await this.#runner.get("task-contract", taskId))?.body as unknown as (Record<string, unknown> & { version?: number }) | undefined;
     const nowVersion = now?.version ?? 0;
-    if (ids.length === 0 || now === undefined || nowVersion === 0) return { items: [], reads };
+    if (now === undefined || nowVersion === 0) return { items: [], reads };
+    // Each contract version is read at most once per call, however many deliverables stand on it (deliverables checked against one version share one walk). The answer for a deliverable does not depend on which others the caller may read.
+    const versions = new Map<number, (Record<string, unknown> & { changedAt?: string }) | undefined>();
     const versionAt = async (n: number): Promise<(Record<string, unknown> & { changedAt?: string }) | undefined> => {
       if (n === 0) return { ...DEFAULT_CONTRACT_WORK };
+      if (versions.has(n)) return versions.get(n);
       reads++;
-      return (await this.#runner.get("task-contract-version", `${taskId}.${n}`))?.body as unknown as (Record<string, unknown> & { changedAt?: string }) | undefined;
+      const found = (await this.#runner.get("task-contract-version", `${taskId}.${n}`))?.body as unknown as (Record<string, unknown> & { changedAt?: string }) | undefined;
+      versions.set(n, found);
+      return found;
     };
     const differ = (a: Record<string, unknown>, b: Record<string, unknown>): string[] => CONTRACT_WORK_FIELDS.filter((f) => JSON.stringify(a[f] ?? null) !== JSON.stringify(b[f] ?? null));
     const items: StaleDeliverable[] = [];
