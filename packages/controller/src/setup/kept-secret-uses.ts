@@ -40,7 +40,9 @@ export function cutText(text: string, n: number): string {
   return text.slice(0, end);
 }
 
-const code = (...parts: string[]): string => `ks-${createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 20)}`;
+/** The record's code: `ks-<g|t|w>-<hash>`; the letter is the kind of record, so a start that could not look at one kind (backups not set up) leaves that kind's notices as they are. */
+const KIND_LETTER: Readonly<Record<KeptSecretUseKind, string>> = { "network grant": "g", "backup target": "t", "work-in-progress backup": "w" };
+const code = (kind: KeptSecretUseKind, ...parts: string[]): string => `ks-${KIND_LETTER[kind]}-${createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 20)}`;
 
 export class KeptSecretUseCheck {
   readonly #s: KeptSecretUseSources;
@@ -48,19 +50,29 @@ export class KeptSecretUseCheck {
 
   /** Every record, of the three kinds, that names a kept secret, in a fixed order, at most `KEPT_SECRET_USE_LIMIT` of each kind (the listings look at every record and keep only the matching ones). */
   async find(): Promise<KeptSecretUse[]> {
+    return (await this.scan()).uses;
+  }
+
+  /** `find`, and the kinds of record that were looked at (a kind whose source is absent is not, so nothing can be said about it). */
+  async scan(): Promise<{ readonly uses: KeptSecretUse[]; readonly looked: ReadonlySet<KeptSecretUseKind> }> {
     const kept = this.#s.kept();
     const out: KeptSecretUse[] = [];
+    const looked = new Set<KeptSecretUseKind>();
     const bad = (name: string, sentTo: string): boolean => keptSecretRefusal(name, kept, sentTo) !== undefined;
-    for (const g of (await this.#s.grants?.()?.credentialUses(KEPT_SECRET_USE_LIMIT, (ref) => bad(ref, "a network destination"))) ?? []) {
-      if (bad(g.ref, "a network destination")) out.push({ key: code("grant", g.id, g.ref.toLowerCase()), kind: "network grant", where: `${cutText(g.host, 60)}:${g.port}`, secret: cutText(g.ref, 64), remedy: "Revoke the grant and ask again with another secret." });
+    const grants = this.#s.grants?.();
+    if (grants !== undefined) looked.add("network grant");
+    if (this.#s.backupConfig !== undefined) looked.add("backup target");
+    if (this.#s.wip !== undefined) looked.add("work-in-progress backup");
+    for (const g of (await grants?.credentialUses(KEPT_SECRET_USE_LIMIT, (ref) => bad(ref, "a network destination"))) ?? []) {
+      if (bad(g.ref, "a network destination")) out.push({ key: code("network grant", g.id, g.ref.toLowerCase()), kind: "network grant", where: `${cutText(g.host, 60)}:${g.port}`, secret: cutText(g.ref, 64), remedy: "Revoke the grant and ask again with another secret." });
     }
     for (const t of (await this.#s.backupConfig?.effective())?.targets ?? []) {
-      if (t.credential !== undefined && bad(t.credential, "a backup target")) out.push({ key: code("target", t.id, t.credential.toLowerCase()), kind: "backup target", where: cutText(t.name, 40), secret: cutText(t.credential, 64), remedy: "Remove the target and add it again with the store's own credential." });
+      if (t.credential !== undefined && bad(t.credential, "a backup target")) out.push({ key: code("backup target", t.id, t.credential.toLowerCase()), kind: "backup target", where: cutText(t.name, 40), secret: cutText(t.credential, 64), remedy: "Remove the target and add it again with the store's own credential." });
     }
     for (const w of (await this.#s.wip?.credentialUses(KEPT_SECRET_USE_LIMIT, (c) => bad(c, "a backup remote"))) ?? []) {
-      if (bad(w.credential, "a backup remote")) out.push({ key: code("wip", w.projectId, w.credential.toLowerCase()), kind: "work-in-progress backup", where: `project ${cutText(w.projectId, 40)}`, secret: cutText(w.credential, 64), remedy: "Set the backup again with another secret." });
+      if (bad(w.credential, "a backup remote")) out.push({ key: code("work-in-progress backup", w.projectId, w.credential.toLowerCase()), kind: "work-in-progress backup", where: `project ${cutText(w.projectId, 40)}`, secret: cutText(w.credential, 64), remedy: "Set the backup again with another secret." });
     }
-    return out;
+    return { uses: out, looked };
   }
 }
 
@@ -81,12 +93,14 @@ export async function reportKeptSecretUses(check: KeptSecretUseCheck, notificati
   openRefIds(kind: string): Promise<string[]>;
 }, onError?: (message: string) => void): Promise<{ readonly found: number; readonly closed: number }> {
   try {
-    const uses = await check.find();
+    const { uses, looked } = await check.scan();
+    const letters = new Set([...looked].map((k) => KIND_LETTER[k]));
     for (const u of uses) await notifications.emitFromController({ commandId: `kept-secret-${u.key}`, kind: "maintenance", level: "needs-you", ref: { kind: KEPT_SECRET_USE_REF, id: u.key }, detail: keptSecretUseText(u, 200) });
     const live = new Set(uses.map((u) => u.key));
     let closed = 0;
     for (const id of await notifications.openRefIds(KEPT_SECRET_USE_REF)) {
-      if (live.has(id)) continue;
+      // A notice of a kind not looked at this time (backups not set up on this start) stays: closing it would keep it closed for good, as its id is fixed.
+      if (live.has(id) || !letters.has(id.slice(3, 4))) continue;
       await notifications.settleFromController({ commandId: `kept-secret-over-${id}`, kind: "maintenance", ref: { kind: KEPT_SECRET_USE_REF, id } });
       closed++;
     }

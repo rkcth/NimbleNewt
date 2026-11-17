@@ -139,6 +139,32 @@ for (const backend of backends) {
     } finally { await x.w.close(); }
   });
 
+  test(`${backend.name}: a start that cannot look at one kind of record (backups not set up) leaves that kind's notices open, so the owner is not told the record is fixed when it is not (task T4b)`, async () => {
+    const x = await world(backend);
+    try {
+      const notes = NotificationService.withEpoch(x.w.storage, x.e, {});
+      await x.oldGrants.grant(x.owner, { commandId: cid("g"), taskId: x.taskId, host: "api.example.com", port: 443, credential: { header: "x-api-key", ref: "controller-db-url" } });
+      await x.oldConfig.addTarget(x.owner, { commandId: cid("bt"), name: "Cloud", kind: "offsite", location: "https://backup.example.invalid/store", credential: "my-signing-key" });
+      await x.oldWip.set(x.owner, { commandId: cid("w"), projectId: x.projectId, enabled: true, remote: "https://git.example.invalid/wip.git", credential: "controller-db-url" });
+      assert.deepEqual(await reportKeptSecretUses(x.check, notes), { found: 3, closed: 0 });
+      const open = async () => (await notes.inbox(x.owner)).items.filter((i) => i.ref.kind === KEPT_SECRET_USE_REF && i.state !== "settled").map((i) => i.detail ?? "");
+      // Started without backups: the target is not looked at, so its notice stays; the grant and the work-in-progress backup are still looked at.
+      const noBackups = new KeptSecretUseCheck({ kept: () => KEPT, grants: () => x.grants, wip: x.wip });
+      assert.deepEqual(await reportKeptSecretUses(noBackups, notes), { found: 2, closed: 0 });
+      assert.equal((await open()).length, 3);
+      assert.ok((await open()).some((d) => d.startsWith("A backup target (Cloud)")));
+      // Without any source nothing is closed either.
+      assert.deepEqual(await reportKeptSecretUses(new KeptSecretUseCheck({ kept: () => KEPT }), notes), { found: 0, closed: 0 });
+      assert.equal((await open()).length, 3);
+      // A kind that is looked at and fixed still closes; the target closes once a start looks at backups again and finds it gone.
+      await x.oldGrants.revoke(x.owner, { commandId: cid("r"), taskId: x.taskId, host: "api.example.com", port: 443 });
+      assert.deepEqual(await reportKeptSecretUses(noBackups, notes), { found: 1, closed: 1 });
+      await x.config.removeTarget(x.owner, { commandId: cid("rt"), id: (await x.config.effective()).targets[0]!.id });
+      assert.deepEqual(await reportKeptSecretUses(x.check, notes), { found: 1, closed: 1 });
+      assert.deepEqual((await open()).map((d) => d.slice(0, 26)), ["A work-in-progress backup "]);
+    } finally { await x.w.close(); }
+  });
+
   test(`${backend.name}: a failure while looking is reported to the caller and never thrown (task T4b)`, async () => {
     const x = await world(backend);
     try {
