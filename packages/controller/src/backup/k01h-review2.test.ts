@@ -365,6 +365,73 @@ test("the owner's stale minutes reach the lock file on Windows while a reader ha
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+test("the lock's refresh, check, rewrite and release take turns: a release while the rewrite is still being tried leaves no lock file behind, the holder's refresh never runs inside the rename, and a rewrite that fails keeps the previous refresh period (CI repair winflake, first review)", async () => {
+  const d = tmp();
+  const until = async (ok: () => boolean, what: string) => { const end = Date.now() + 10_000; while (!ok()) { if (Date.now() > end) assert.fail(what); await new Promise((r) => setTimeout(r, 5)); } };
+  const leftovers = (dir: string) => readdirSync(dir).filter((n) => n.endsWith(".new"));
+  const sharing = (code: string) => Object.assign(new Error(`${code}: rename`), { code });
+  try {
+    // A release asked while the rewrite waits between two tries: it waits for the rewrite and then removes the file (it is not put back afterwards).
+    const one = join(d, "release"); mkdirSync(one);
+    const waits: (() => void)[] = [];
+    let calls = 0;
+    const lock = await acquireDataLock(one, { platform: "win32", heartbeatMs: 3_600_000, rename: async (from, to) => { calls += 1; if (calls === 1) throw sharing("EPERM"); renameSync(from, to); }, pause: () => new Promise<void>((r) => { waits.push(r); }) });
+    const set = lock.setStaleMinutes(null);
+    await until(() => waits.length === 1, "the rewrite waits after its first refusal");
+    let done = false;
+    const released = lock.release().finally(() => { done = true; });
+    // A release that did not wait would remove the file and settle well within half a second (the rename then puts the file back): watched for that long.
+    const end = Date.now() + 500;
+    while (!done && existsSync(join(one, LOCK_FILE)) && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(done, false, "the release waits for the rewrite");
+    assert.equal(existsSync(join(one, LOCK_FILE)), true);
+    assert.equal(calls, 1, "the next try waits for the pause");
+    waits[0]!();
+    await set; await released;
+    assert.equal(calls, 2);
+    assert.equal(existsSync(join(one, LOCK_FILE)), false, "released: the lock file is gone, not put back by the rewrite");
+    assert.deepEqual(leftovers(one), []);
+
+    // The holder refreshes every 5 ms; while the rename is under way (here: 60 ms) no refresh touches the file. Afterwards it refreshes again.
+    const two = join(d, "beat"); mkdirSync(two);
+    const old = new Date(Date.now() - 3_600_000);
+    let touched: number | undefined;
+    const beating = await acquireDataLock(two, { heartbeatMs: 5, rename: async (from, to) => {
+      utimesSync(join(two, LOCK_FILE), old, old);
+      await new Promise((r) => setTimeout(r, 60));
+      touched = statSync(join(two, LOCK_FILE)).mtimeMs;
+      renameSync(from, to);
+      utimesSync(join(two, LOCK_FILE), old, old);
+    } });
+    await beating.setStaleMinutes(null);
+    assert.ok(touched !== undefined && Math.abs(touched - old.getTime()) < 2_000, `no refresh ran while the rename was under way (${String(touched)})`);
+    await until(() => statSync(join(two, LOCK_FILE)).mtimeMs > old.getTime() + 60_000, "the holder refreshes after the rewrite");
+    await beating.release();
+
+    // A rewrite that fails: the refresh period goes back to the one the record in the file announces (a holder must not refresh more slowly than its record says).
+    const three = join(d, "period"); mkdirSync(three);
+    const delays: number[] = [];
+    const real = globalThis.setInterval;
+    globalThis.setInterval = ((fn: () => void, ms?: number) => { delays.push(ms ?? 0); return real(fn, ms); }) as typeof setInterval;
+    let failing = true;
+    try {
+      const l = await acquireDataLock(three, { staleMinutes: 1, platform: "linux", rename: async (from, to) => { if (failing) throw sharing("EPERM"); renameSync(from, to); } });
+      assert.equal(delays.at(-1), 15_000);
+      await assert.rejects(l.setStaleMinutes(2), (e: NodeJS.ErrnoException) => e.code === "EPERM");
+      const kept = JSON.parse(readFileSync(join(three, LOCK_FILE), "utf8")) as { staleMinutes: unknown; refreshMs: unknown };
+      assert.deepEqual([kept.staleMinutes, kept.refreshMs], [1, 15_000], "the old record stays");
+      assert.equal(delays.at(-1), 15_000, "and the holder keeps refreshing as it says");
+      assert.deepEqual(leftovers(three), []);
+      failing = false;
+      await l.setStaleMinutes(2);
+      const now = JSON.parse(readFileSync(join(three, LOCK_FILE), "utf8")) as { staleMinutes: unknown; refreshMs: unknown };
+      assert.deepEqual([now.staleMinutes, now.refreshMs], [2, 30_000]);
+      assert.equal(delays.at(-1), 30_000);
+      await l.release();
+    } finally { globalThis.setInterval = real; }
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test("the offline restore command takes the folders' lock: a controller holding the folder refuses it, and the lock is let go afterwards (finding 12)", async () => {
 
   const root = tmp(); const target = tmp();

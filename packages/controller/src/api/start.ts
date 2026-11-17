@@ -696,13 +696,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const preUpgradeNeed = async (): Promise<Awaited<ReturnType<MigrationGuardService["preUpgradeNeed"]>>> => { try { return await migrationGuardRef?.preUpgradeNeed(); } catch { return undefined; } };
     // The retention policy (card K06): the owner's chat settings over the installation defaults. Cached for a few seconds for the write guard; a change refreshes it and sets the reserve again.
     let retentionCache: { at: number; values: RetentionValues } | undefined;
+    // The owner's `dataLockStaleMinutes` that could not be written into the lock file (on Windows a reader can keep the file busy for longer than the bounded retry): the lock keeps its previous setting, and this is said.
+    const lockSettingFailed = (error: unknown): void => print(`The data directory lock's stale time could not be written; the lock keeps its previous setting until the setting is changed again or the controller restarts: ${error instanceof Error ? error.message : String(error)}`);
     const retentionSettings: RetentionSettingsService = RetentionSettingsService.withEpoch(storage, epoch, {
       ...(options.retention?.defaults === undefined ? {} : { defaults: options.retention.defaults }),
       preUpgradeDays: async () => (await preUpgradeNeed())?.periodDays ?? null,
-      onChange: async (values) => { retentionCache = { at: Date.now(), values }; quotaMeter.invalidate(); await dataLock?.setStaleMinutes(values.dataLockStaleMinutes).catch(() => undefined); await reserve?.apply(values.reserveBytes).catch((error: unknown) => print(`The retention reserve could not be set: ${error instanceof Error ? error.message : String(error)}`)); },
+      onChange: async (values) => { retentionCache = { at: Date.now(), values }; quotaMeter.invalidate(); await dataLock?.setStaleMinutes(values.dataLockStaleMinutes).catch(lockSettingFailed); await reserve?.apply(values.reserveBytes).catch((error: unknown) => print(`The retention reserve could not be set: ${error instanceof Error ? error.message : String(error)}`)); },
     });
     currentRetention = async () => { if (retentionCache !== undefined && Date.now() - retentionCache.at < 5_000) return retentionCache.values; const values = await retentionSettings.effective(); retentionCache = { at: Date.now(), values }; return values; };
-    await currentRetention().then((v) => dataLock?.setStaleMinutes(v.dataLockStaleMinutes)).catch(() => undefined);
+    await currentRetention().then((v) => dataLock?.setStaleMinutes(v.dataLockStaleMinutes).catch(lockSettingFailed)).catch(() => undefined);
     try { await reserve?.apply((await currentRetention()).reserveBytes); } catch (error) { print(`The retention reserve could not be set: ${error instanceof Error ? error.message : String(error)}`); }
     // The backup public key is pinned the first time it is loaded; a different one is refused until the owner approved its fingerprint (card K01b).
     const backupKeyPin = backupEncryption === undefined ? undefined : BackupKeyPinService.withEpoch(storage, epoch);
