@@ -544,6 +544,8 @@ export class GrantService {
    */
   async reliance(owner: Principal, query: { grantId?: string } = {}): Promise<{ items: readonly Reliance[]; more: boolean } | undefined> {
     requireOwner(owner);
+    // Second review: an owner credential narrowed to one task reads no other task's title, so it is not the owner for this read (the status kind refuses it the same way).
+    if (owner.taskScope !== undefined) throw new DomainError("forbidden", "a task credential may not read the running work of every right");
     if (query.grantId !== undefined && !(typeof query.grantId === "string" && GRANT_ID.test(query.grantId))) invalid("grantId", "is not a grant ID");
     return relianceOf(this.#runner, query);
   }

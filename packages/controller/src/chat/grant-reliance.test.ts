@@ -165,12 +165,24 @@ for (const backend of backends) {
         assert.equal(status.ok, false, JSON.stringify(status));
         assert.doesNotMatch(JSON.stringify(status), /Dig the first bed|Paint the shed|may rely|agent:ann/);
       }
+      // Second review: an owner principal narrowed to one task is not the owner here: the read is refused with no data, the status kind gives no answer.
+      const narrowed = { ...w.owner, taskScope: { taskId: a1, projectId: a } } as never;
+      for (const q of [{}, { grantId: everywhere.id }]) await assert.rejects(grants.reliance(narrowed, q), (e: Error & { code?: string }) => e.code === "forbidden" && !/Dig the first bed|agent:ann|grt-/.test(e.message));
+      assert.equal(await statusSvc!.ask(narrowed, { kind: "grant_reliance" }), undefined);
+      assert.equal(await statusSvc!.ask(narrowed, { kind: "grant_reliance", grantId: everywhere.id }), undefined);
       // A read that fails is said so in the take-back preview, never read as "nothing relies on it".
       const failing = w.chat({ status: statusSvc!, api: { handle: async (t: string, req: { op: string }) => (req.op === "grant.reliance" ? { ok: false, error: { code: "unavailable", message: "busy" } } : w.api.handle(t, req as never)) } as never });
       const tb = adminIntent("grant-revoke", { grantId: everywhere.id, reason: "check failure" });
-      const failed = JSON.stringify((await failing.submit(w.ownerToken, { messageId: cid("ui"), text: tb.text }, { fixedIntents: [tb.intent] } as never)).outcomes);
+      const failedOut = (await failing.submit(w.ownerToken, { messageId: cid("ui"), text: tb.text }, { fixedIntents: [tb.intent] } as never)).outcomes;
+      const failed = JSON.stringify(failedOut);
       assert.match(failed, /could not be checked just now/);
       assert.doesNotMatch(failed, /no running work relies on it/i);
+      // Second review: the take-back still applies when the look failed: the right is revoked, and the look reads it as taken back.
+      assert.equal(failedOut[0]!.status, "proposed", failed);
+      const appliedAnyway = await failing.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: (failedOut[0] as any).proposalId } as never);
+      assert.equal((appliedAnyway as any).applied, true, JSON.stringify(appliedAnyway));
+      assert.equal((await grants.getGrant(everywhere.id))!.state, "revoked");
+      assert.equal((await rely(everywhere.id)).state, "revoked");
       await assert.rejects(statusSvc!.ask(w.owner, { kind: "grant_reliance", grantId: "bogus" } as never), /grantId/);
       await assert.rejects(statusSvc!.ask(w.owner, { kind: "grant_reliance", extra: 1 } as never), /extra|unknown/i);
     } finally { await w.close(); }
@@ -219,6 +231,17 @@ for (const backend of backends) {
       assert.match(notes[11]!, /2 more running tasks are not listed/);
       assert.doesNotMatch(JSON.stringify(body), /sk-LEAK|‮/);
       assert.ok(body!.preview.length <= 40);
+
+      // Second review: the answer about every right names at most ten rights that have running work and counts the rest (twelve here: the right above and eleven more of dan's).
+      const actions = ["project.read", "task.create", "task.read", "task.transition", "assignment.read", "attempt.work", "artifact.publish", "artifact.read", "desk.write", "desk.read", "history.read"];
+      for (const action of actions) await grants.grant(w.owner, { commandId: cid("g"), grantee: "agent:dan", action, project: "*", source: "direct", basis: "test" });
+      const q = "is any running work using my rights?";
+      script[q] = [ask({ kind: "grant_reliance" }, q)];
+      const every = ((await chat.submit(w.ownerToken, { messageId: cid("m"), text: q })).outcomes[0] as any).lines.map((l: { text: string }) => l.text) as string[];
+      assert.equal(every.length, 12, JSON.stringify(every));
+      assert.match(every[0]!, /^12 of the 12 standing rights have running work that may rely on them\.$/);
+      assert.equal(every.filter((l) => /for agent:dan in every project \(grt-[a-z2-7]{20}\): 12 running tasks may rely on it/.test(l)).length, 10, "ten rights named");
+      assert.match(every[11]!, /^2 more rights with running work are not listed; ask about one by its ID\.$/);
     } finally { await w.close(); }
   });
 }

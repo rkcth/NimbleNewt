@@ -684,3 +684,29 @@ test("two agents with one name and one right held in two projects are told apart
   assert.deepEqual(takes, ["Take back: task.update for agent:ann in proj-1", "Take back: task.update for agent:ann in every project"]);
   assert.deepEqual(page.doc.violations, []);
 });
+
+test("second review: the page's clip is unchanged for text without a pair and never keeps half of one, at every length and cut position and for every limit the page uses", () => {
+  // The page's own clip, taken from the script as served (the T7b change to it touches every clipped field on the page).
+  const lines = APP_JS.split("\n");
+  const src = ["UNSEEN = ", "function unseen(", "function clip("].map((k) => lines.find((l) => l.includes(k))!.trim()).join("\n");
+  const clip = runInNewContext(`${src}\nclip`) as (v: unknown, n: number) => string;
+  const before = (v: string, n: number) => (v.length > n ? v.slice(0, n - 3) + "..." : v);
+  const E = "\u{1F600}";
+  const half = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const limits = [...new Set((APP_JS.match(/clip\([^()]*, (\d+)\)/g) ?? []).map((m) => Number(/(\d+)\)$/.exec(m)![1])))];
+  assert.ok(limits.length >= 10 && limits.every((n) => n >= 4), `the limits the page uses: ${limits}`);
+  for (const n of limits) for (let len = 0; len <= n + 3; len++) {
+    const plain = "a".repeat(len);
+    assert.equal(clip(plain, n), before(plain, n), `plain ${len} at ${n}`);
+    for (let at = 0; at + 2 <= len; at++) {
+      const s = "a".repeat(at) + E + "a".repeat(len - at - 2);
+      const got = clip(s, n);
+      if (len <= n) assert.equal(got, s, "text that fits is kept whole");
+      else {
+        assert.ok(!half.test(got) && got.endsWith("...") && got.length <= n && got.length >= n - 4, `${n} ${len} ${at}: ${JSON.stringify(got)}`);
+        assert.equal(got, at + 2 <= n - 3 ? s.slice(0, n - 3) + "..." : s.slice(0, Math.min(at, n - 3)) + "...", "only an emoji that would be cut is left out");
+      }
+    }
+  }
+  assert.deepEqual([clip(null, 10), clip(undefined, 10), clip(0, 10), clip("", 10), clip("a", 10)], ["", "", "0", "", "a"]);
+});

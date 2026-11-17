@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { relianceHead, relianceLines, relianceSummary } from "../status/reliance-words.js";
+import { effectiveOf, holdsNow } from "./grants.js";
 import { RELIANCE_RUNNING_MAX, RELIANCE_SCAN_MAX, relianceOf, runningWork, type Reliance } from "./reliance.js";
 
 // T7b review: the scan caps (10,000 assignment records, 500 running attempts) and what the words say when a cap is hit. A stub runner stands in for the store: the caps need more records than a storage
@@ -125,4 +126,57 @@ test("the words stay within their bounds for long, hostile and emoji names and t
   }
   assert.ok(relianceHead(r, 2).length < 400);
   assert.ok(relianceHead({ ...r, inForce: false }).length < 400);
+});
+
+test("second review: an assignment whose attempt has ended, or whose task is finished, is no running work, though the assignment still names the attempt", async () => {
+  const asg = (i: string) => rec(`asg-${i}`, { taskId: `task-${i}`, generation: 1, state: "assigned", owner: { kind: "agent", id: "ann" }, activeAttemptId: `att-${i}`, attempts: 1 });
+  const att = (i: string, state: string) => rec(`att-${i}`, { taskId: `task-${i}`, generation: 1, owner: { kind: "agent", id: "ann" }, number: 1, state, admittedBy: "inbox" });
+  const task = (i: string, state: string) => rec(`task-${i}`, { projectId: "proj-1", title: `Task ${i}`, state });
+  const ids = ["run", "ok", "failed", "abandoned", "superseded", "released", "done", "cancelled", "blocked"];
+  const runner = stub({
+    assignment: ids.map(asg),
+    attempt: ids.map((i) => att(i, i === "ok" ? "succeeded" : ["failed", "abandoned", "superseded", "released"].includes(i) ? i : "active")),
+    task: ids.map((i) => task(i, ["done", "cancelled", "blocked"].includes(i) ? i : "in_progress")),
+  });
+  const { work, complete } = await runningWork(runner);
+  assert.equal(complete, true);
+  assert.deepEqual(work.map((w) => w.taskId).sort(), ["task-blocked", "task-run"], "only an active attempt on an unfinished task (a blocked task is unfinished)");
+});
+
+test("second review: whether a right is in force is judged as the access snapshot judges it, over many shapes of windows, idle lapses, parents, cycles and deep chains", async () => {
+  // A small deterministic generator: the same shapes on every machine and every run.
+  let seed = 20261116;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const pick = <T>(a: readonly T[]): T => a[Math.floor(rnd() * a.length)]!;
+  const times = [undefined, "2026-10-01T00:00:00.000Z", NOW, "2026-10-22T10:00:00.001Z", "2026-10-22T09:59:59.999Z", "2026-12-01T00:00:00.000Z"];
+  let compared = 0, held = 0, deepHeld = 0;
+  for (let round = 0; round < 600; round++) {
+    const n = 1 + Math.floor(rnd() * 13);
+    const ids = Array.from({ length: n }, (_, i) => `grt-${pad(i)}${"a".repeat(14)}`);
+    const bodies = new Map<string, Record<string, unknown>>();
+    for (const id of ids) {
+      const derived = rnd() < 0.6;
+      const b: Record<string, unknown> = { grantee: pick(["agent:ann", "agent:ann", "host:box", "service:x"]), action: pick(["task.update", "task.*", "*"]), project: pick(["*", "*", "proj-1"]), source: derived ? "derived" : pick(["direct", "standing"]), decidedBy: "owner:rob", basis: "t", state: rnd() < 0.85 ? "active" : "revoked" };
+      const nb = pick(times); if (nb !== undefined && rnd() < 0.4) b["notBefore"] = nb;
+      const ex = pick(times); if (ex !== undefined && rnd() < 0.5) b["expiresAt"] = ex;
+      if (rnd() < 0.3) { b["idleDays"] = pick([1, 3, 30]); const lu = pick([...times, "2025-01-01T00:00:00.000Z"]); if (lu !== undefined) b["lastUsedAt"] = lu; }
+      if (derived && rnd() < 0.95) b["parentId"] = rnd() < 0.9 ? pick(ids) : "grt-missingmissingmissin";
+      bodies.set(id, b);
+    }
+    // Some rounds are one long chain on an open root: deeper than the snapshot follows, so the far end must not hold.
+    const chain = rnd() < 0.2;
+    if (chain) for (let i = 0; i < n; i++) { const b = bodies.get(ids[i]!)!; for (const k of ["notBefore", "expiresAt", "idleDays", "lastUsedAt"]) delete b[k]; Object.assign(b, { grantee: "agent:ann", action: "*", project: "*", state: "active" }, i === 0 ? { source: "direct", parentId: undefined } : { source: "derived", parentId: ids[i - 1] }); }
+    const runner = stub({ "grant-record": [...bodies].map(([id, b]) => rec(id, b)) }) as unknown as Parameters<typeof holdsNow>[0];
+    const inSnapshot = new Set<string>();
+    for (const g of new Set([...bodies.values()].map((b) => b["grantee"] as string))) {
+      const p = await effectiveOf(runner, { kind: g.split(":")[0] as "agent", id: g, name: g, grants: [] } as never, NOW);
+      for (const x of p.grants) if (x.grantId !== undefined) inSnapshot.add(x.grantId);
+    }
+    for (const [id, b] of bodies) {
+      const h = await holdsNow(runner, b as never, NOW);
+      assert.equal(h, inSnapshot.has(id), `${id} in ${JSON.stringify([...bodies])}`);
+      compared++; if (h) { held++; if (chain && ids.indexOf(id) >= 6) deepHeld++; }
+    }
+  }
+  assert.ok(compared > 3000 && held > 300 && held < compared - 300 && deepHeld > 0, `shapes on both sides: ${compared} compared, ${held} held, ${deepHeld} deep`);
 });
