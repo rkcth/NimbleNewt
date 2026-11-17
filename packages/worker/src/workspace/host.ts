@@ -7,7 +7,7 @@ import { WorkspaceBridge } from "./bridge.js";
 import { DEFAULT_PROTECTED_PATHS, isProtectedPath } from "./protected-paths.js";
 import { plainName } from "./names.js";
 import { WorkspaceError } from "./errors.js";
-import type { GitBridge } from "./git.js";
+import { isApprovedSubmission, type ApprovedSubmission, type GitBridge } from "./git.js";
 
 /**
  * The workspace side of a worker host (card H12m): the host that holds an agent's checkout answers the controller's operations on it, integration, landing (card H12q), refresh and quarantine (and refuses `release`), against the real checkout with real git. The controller package
@@ -43,6 +43,11 @@ export interface HostWorkspaceCall {
    * applies it by itself. A local host's request carries none.
    */
   readonly landing?: LandingPolicy;
+  /**
+   * A `release` only (card H12o): the approved submission to commit. The commit is then exactly its tree on its base (anything else in the checkout refuses the release: a new submission and approval are needed), carries the
+   * `NimbleNewt-Submission:` trailer, and is made once: a commit this checkout already made for it is answered again (`detail.recovered`) instead of a second one.
+   */
+  readonly submission?: ApprovedSubmission;
 }
 export interface HostSecurityEvent {
   readonly kind: "protected-path-touched" | "sandbox-escape-attempt";
@@ -138,6 +143,7 @@ export class WorkspaceHost {
     if (typeof requestId !== "string" || !REQUEST.test(requestId)) return no("the request ID is not one this host accepts");
     if (typeof operation !== "string" || !OPERATIONS.includes(operation)) return no(`the operation ${JSON.stringify(String(operation).slice(0, 30))} is not one this host knows`);
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
+    if (call.submission !== undefined && (operation !== "release" || !isApprovedSubmission(call.submission))) return no(operation !== "release" ? "only a release commits a submission" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
     if (call.assignee !== undefined && (typeof call.assignee !== "string" || !IDENT.test(call.assignee))) return no("the assignee name is malformed");
     if (operation === "release" && this.#options.release !== true) return no("this host does not commit reviewed work through this request: the commit needs the commit permit of the review gate (A06, H12o), which a workspace request does not carry");
@@ -318,7 +324,7 @@ export class WorkspaceHost {
     if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse));
     const patterns = [...(policy?.protectDefaults === false ? [] : DEFAULT_PROTECTED_PATHS), ...(policy?.protectedPaths ?? [])];
     let made;
-    try { made = await git.release({ gitDir: where.gitDir, checkout: where.checkout, requestId: call.requestId, taskId: call.taskId, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }) }); } catch (error) {
+    try { made = await git.release({ gitDir: where.gitDir, checkout: where.checkout, requestId: call.requestId, taskId: call.taskId, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...(call.submission === undefined ? {} : { submission: call.submission }) }); } catch (error) {
       this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
@@ -327,8 +333,9 @@ export class WorkspaceHost {
     const ignored = made.ignored.length;
     if (made.commitId === undefined) return { ok: true, summary: `the checkout holds no change from its head; nothing to commit${ignored === 0 ? "" : ` (${ignored} ignored file(s) are not committed and keep a landing from starting)`}`, detail: { committed: false, files: 0, ignored, changed: false } };
     const needsPermit = policy?.requirePermit !== false;
-    const summary = `${made.files.length} file(s) committed in the checkout as ${made.commitId.slice(0, 12)}${held.length === 0 ? "" : `; ${held.length} protected path(s) are kept for review when it lands`}${ignored === 0 ? "" : `; ${ignored} ignored file(s) are not committed and keep a landing from starting`}${needsPermit ? "; the commit is not a review-gate permit commit, so a landing that requires the permit will refuse it" : ""}`;
-    return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), changed: true } };
+    const sub = call.submission === undefined ? {} : { submission: call.submission.id, recovered: made.recovered === true };
+    const summary = `${made.recovered === true ? `submission ${call.submission!.id} was already committed in the checkout as ${made.commitId.slice(0, 12)} (no second commit was made)` : `${made.files.length} file(s)${call.submission === undefined ? "" : ` of approved submission ${call.submission.id}`} committed in the checkout as ${made.commitId.slice(0, 12)}`}${held.length === 0 ? "" : `; ${held.length} protected path(s) are kept for review when it lands`}${ignored === 0 ? "" : `; ${ignored} ignored file(s) are not committed and keep a landing from starting`}${needsPermit ? "; the commit is not a review-gate permit commit, so a landing that requires the permit will refuse it" : ""}`;
+    return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...sub, changed: made.recovered !== true } };
   }
 
   /**

@@ -369,3 +369,121 @@ test("a directory on the way swapped for a link after the walk cannot make the n
     assert.equal(sh(w.dir, "--git-dir", w.made.gitDir, "show", "HEAD:src/a.ts"), "export const a = 2;");
   } finally { await w.done(); }
 });
+
+// Card H12o: the commit of an approved submission. The release names the submission and the base and tree that were approved; the commit is exactly that, once.
+const SUB = "sbm-hhhhhhhhhhhhhhhhhhhh";
+const commitsSince = (w: { made: { gitDir: string } }, base: string): number => Number(execFileSync("git", ["--git-dir", w.made.gitDir, "rev-list", "--count", `${base}..HEAD`], { encoding: "utf8" }).trim());
+
+test("an approved submission is committed exactly as approved and once: its trailer and ledger line, and a repeat under another request ID (even with more work on top) finds that commit instead of making another (card H12o)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.made.checkout, "src", "new.ts"), "export const n = 1;\n");
+    const staged = await w.ws.stageWork({ taskId: "tsk-one", projectId: "prj-one" });
+    const submission = { id: SUB, base: staged.base, tree: staged.tree };
+    const r = await w.ws.port.run(call("release", { submission }));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const d = detailOf(r);
+    assert.deepEqual([d["committed"], d["submission"], d["recovered"], d["files"], d["parent"], d["tree"], d["changed"]], [true, SUB, false, 2, base, staged.tree, true]);
+    assert.equal(w.head(), d["commit"]);
+    assert.equal(w.log("HEAD", "%T"), staged.tree, "exactly the approved tree");
+    const message = w.log("HEAD", "%B");
+    assert.match(message, /^Approved submission sbm-h{20} of task tsk-one/);
+    assert.match(message, /^NimbleNewt-Submission: sbm-h{20}$/m);
+    assert.match(message, /^NimbleNewt-Task: tsk-one$/m);
+    assert.equal(w.log("HEAD", "%an <%ae>"), "NimbleNewt release <release@nimblenewt.invalid>");
+    assert.match(await readFile(releaseLedgerPath(w.made.gitDir), "utf8"), new RegExp(`^${d["commit"]} wsr-\\S+ att-first\\.1 ${SUB}$`, "m"));
+    assert.deepEqual(await w.git.unpermitted({ gitDir: w.made.gitDir, taskId: "tsk-one" }), [d["commit"]], "not a review-gate permit commit");
+    // Asked again under another request ID (a retry, or after a restart that lost the record): the same commit, recovered, no second one.
+    const again = await w.ws.port.run(call("release", { submission }));
+    assert.deepEqual([again.ok, detailOf(again)["commit"], detailOf(again)["recovered"], detailOf(again)["changed"], detailOf(again)["files"]], [true, d["commit"], true, false, 2]);
+    assert.match((again as { summary: string }).summary, /was already committed in the checkout as .*no second commit/);
+    // More work written on top since: still the same commit, and the new work is left uncommitted for its own submission.
+    await writeFile(join(w.made.checkout, "src", "later.ts"), "export const l = 1;\n");
+    const later = await w.ws.port.run(call("release", { submission }));
+    assert.deepEqual([later.ok, detailOf(later)["commit"], detailOf(later)["recovered"]], [true, d["commit"], true]);
+    assert.equal(commitsSince(w, base), 1, "one commit for the submission");
+    assert.equal(w.head(), d["commit"]);
+    assert.equal((await w.git.status({ gitDir: w.made.gitDir, checkout: w.made.checkout })).dirty, true, "the later work is still there, uncommitted");
+  } finally { await w.done(); }
+});
+
+test("a checkout that no longer holds the approved tree, or whose head moved from the approved base, is refused and nothing is committed: a new submission and approval are needed (card H12o)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const staged = await w.ws.stageWork({ taskId: "tsk-one", projectId: "prj-one" });
+    const submission = { id: SUB, base: staged.base, tree: staged.tree };
+    // The files changed after the approval.
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    const changed = await w.ws.port.run(call("release", { submission }));
+    assert.equal(changed.ok, false);
+    assert.match(reasonOf(changed), /no longer holds the approved work of submission sbm-h{20}: its files changed .*nothing was committed .*new submission and a new approval/);
+    assert.equal(w.head(), base);
+    assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false);
+    // Back to the approved files, but the head moved (a plain release made meanwhile): the base changed, refused.
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const plain = await w.ws.port.run(call("release"));
+    assert.equal(detailOf(plain)["committed"], true);
+    const moved = await w.ws.port.run(call("release", { submission }));
+    assert.equal(moved.ok, false);
+    assert.match(reasonOf(moved), /the commit it is based on changed/);
+    assert.equal(w.head(), detailOf(plain)["commit"]);
+    // A ledger line naming that plain commit for the submission does not make it the submission's commit: it carries no submission trailer and another parent.
+    await writeFile(releaseLedgerPath(w.made.gitDir), `${detailOf(plain)["commit"]} wsr-aaaaaaaaaaaaaaaaaaaa - ${SUB}\n`, { flag: "a" });
+    const forged = await w.ws.port.run(call("release", { submission: { id: SUB, base, tree: w.log("HEAD", "%T") } }));
+    assert.equal(forged.ok, false, JSON.stringify(forged));
+    assert.match(reasonOf(forged), /the commit it is based on changed/);
+  } finally { await w.done(); }
+});
+
+test("a commit listed in the ledger but never reached by the head (a crash between the ledger line and the head move) counts for nothing: the release commits again (card H12o)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const staged = await w.ws.stageWork({ taskId: "tsk-one", projectId: "prj-one" });
+    // What the crashed release left: a commit object with the right parent, tree and trailer, listed, and the head not moved to it.
+    const orphan = execFileSync("git", ["--git-dir", w.made.gitDir, "-c", "user.name=x", "-c", "user.email=x@x", "commit-tree", staged.tree, "-p", base, "-m", `crashed\n\nNimbleNewt-Submission: ${SUB}`], { encoding: "utf8" }).trim();
+    await writeFile(releaseLedgerPath(w.made.gitDir), `${orphan} wsr-aaaaaaaaaaaaaaaaaaaa att-first.1 ${SUB}\n`);
+    const r = await w.ws.port.run(call("release", { submission: { id: SUB, base: staged.base, tree: staged.tree } }));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(detailOf(r)["recovered"], false);
+    assert.notEqual(detailOf(r)["commit"], orphan);
+    assert.equal(w.head(), detailOf(r)["commit"]);
+    assert.equal(commitsSince(w, base), 1);
+  } finally { await w.done(); }
+});
+
+test("the host refuses a submission of another form, or on another operation, before anything is done (card H12o)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const tree = "e".repeat(40);
+    for (const bad of [{ id: "sbm-x", base, tree }, { id: SUB, base: "HEAD", tree }, { id: SUB, base, tree, extra: 1 }, "sbm-hhhhhhhhhhhhhhhhhhhh"]) {
+      const r = await w.ws.port.run(call("release", { submission: bad as never }));
+      assert.equal(r.ok, false);
+      assert.match(reasonOf(r), /not of the controller's form/);
+    }
+    const onRefresh = await w.ws.port.run(call("refresh", { submission: { id: SUB, base, tree } }));
+    assert.match(reasonOf(onRefresh), /only a release commits a submission/);
+    assert.equal(w.head(), base);
+  } finally { await w.done(); }
+});
+
+test("a submission that holds no change from its base is refused and nothing is committed (card H12o review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    // The checkout is as it was: the approved tree is the base's own tree.
+    const tree = w.log(base, "%T");
+    const r = await w.ws.port.run(call("release", { submission: { id: SUB, base, tree } }));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /submission sbm-h{20} holds no change from the commit it is based on; nothing was committed/);
+    assert.equal(w.head(), base);
+    assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false, "nothing was listed");
+  } finally { await w.done(); }
+});
