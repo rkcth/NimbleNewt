@@ -196,6 +196,11 @@ export interface DoneCheckReport {
   readonly checks: readonly DoneCheckRun[];
 }
 
+/** What a submit is checked against (card H12n): the checkout's base, the landing branch's head, the files the agent changed against the base and the files the landing branch changed since. */
+export interface HostSubmitView { readonly base: string; readonly head: string; readonly mine: readonly string[]; readonly landed: readonly string[] }
+/** The agent's work as the host staged it for a submission (card H12n). */
+export interface HostStagedWork { readonly base: string; readonly tree: string; readonly patchId: string; readonly files: readonly string[] }
+
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
 
@@ -256,6 +261,13 @@ export interface WorkerHost {
    * that cannot leaves it out, and a done of a task with a contract is then not taken as verified. One that fails throws.
    */
   verify?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): Promise<DoneCheckReport>;
+  /**
+   * What an agent's `work.end { submit: true }` is checked against (card H12n): the commit the task's checkout is based on, the landing branch's head now, the files the agent changed against the base and the files the landing
+   * branch changed since. `undefined`: this host holds no checkout for the task. A host that cannot say leaves it out, and a submit from it is refused as unavailable.
+   */
+  submitView?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }): Promise<HostSubmitView | undefined>;
+  /** Stages the task's checkout for a submission (card H12n): the base it is on, the tree and patch ID of the staged change and its files. Throws when nothing can be staged. A host that cannot leaves it out. */
+  stage?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }): Promise<HostStagedWork>;
   /** The host's side of integration, landing, checkout refresh and quarantine for the checkouts it holds (cards H12l, H12m). A host with none leaves it out and those requests are refused for it. */
   readonly workspace?: WorkspacePort;
 }

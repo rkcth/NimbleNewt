@@ -12,7 +12,13 @@ import { Ledger } from "./lib/ledger.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith("--") ? all[i + 1] : "true"]] : acc), []));
 const sc = JSON.parse(readFileSync(join(here, "scenarios", "checkpoint.json"), "utf8"));
-const provider = args.spec ? await fromSpec(args.spec, args) : makeProvider({ kind: "fake" });
+// A radiance:<model> spec runs the /stats idle check first (in specs.mjs); a busy server ends the run here with exit code 3, before
+// any question is sent or the budget file is written.
+let provider;
+try { provider = args.spec ? await fromSpec(args.spec, args) : makeProvider({ kind: "fake" }); } catch (e) {
+  if (e?.name !== "RadianceRefused") throw e;
+  console.log(e.message); process.exit(3);
+}
 const ledger = new Ledger({ capTokens: Number(args["cap-tokens"] ?? 100000), capUsd: Number(args["cap-usd"] ?? Infinity), prices: { in: Number(args["price-in"] ?? 0), cachedIn: Number(args["price-cached"] ?? 0), out: Number(args["price-out"] ?? 0) } });
 const prior = args.budget && existsSync(args.budget) ? JSON.parse(readFileSync(args.budget, "utf8")) : { tokens: 0, usd: 0, runs: 0 };
 ledger.tokens = prior.tokens; ledger.spent = prior.usd;

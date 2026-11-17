@@ -18,6 +18,15 @@ test("overlapOf: a stale base with overlapping files is the only refusal", () =>
   assert.deepEqual(overlapOf(l("h1", ["a", "a"], ["a"])), ["a"]);
 });
 
+test("a submit refusal names at most ten files, each cut to 200 characters (H12n first review)", () => {
+  const long = `src/${"x".repeat(5000)}.ts`;
+  const files = [long, ...Array.from({ length: 30 }, (_, i) => `f${i}.ts`)];
+  const e = new SubmitRefused("h".repeat(40), files);
+  assert.ok(e.message.length < 1000, `bounded: ${e.message.length}`);
+  assert.match(e.message, /changed 31 of your files \(src\/x{196}\.\.\., f0\.ts, .*f8\.ts, \.\.\.\)/);
+  assert.doesNotMatch(e.message, /f9\.ts/);
+});
+
 for (const backend of backends) {
   interface RigOpts {
     landed?: Landed; settle?: SettleReport; submitFails?: boolean; noSubmit?: boolean;
