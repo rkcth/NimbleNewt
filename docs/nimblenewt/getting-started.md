@@ -2,6 +2,8 @@
 
 Written 2026-10-30, updated for the launcher and first-run chat (card U14) and for credentials and the local worker host (card U14b) 2026-11-11, and for the guided next step, the Setup tab and the host-waiting note (card U14d) 2026-11-13. NimbleNewt is under development: this guide uses only commands and operations that exist today, and marks every step that is **not built yet**. Read [Where things stand](#where-things-stand) first; it is honest about how far a person can get.
 
+If you are not a programmer, start with the [user guide](user-guide.md) instead: it covers the same first run as one plain-language conversation. This guide is the detailed reference behind it.
+
 ## Where things stand
 
 - A **controller entry** exists for running without a terminal chat (`node scripts/nimblenewt-controller.mjs --data DIR`, the program the release launcher runs; see [maintenance-and-updates](maintenance-and-updates.md)). Agents' environment changes are off unless `--local-host-environments` (or `NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1`) is given to it or to `nimblenewt.mjs start`.
