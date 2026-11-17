@@ -1146,11 +1146,17 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const resumeSettings = ResumeSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `resume-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "resume-settings", id: "main" }, detail: d.detail }); } });
     // What happens when a host stops reporting while it holds work: warn, then (unless the owner turned it off) re-place after the grace period. The owner's setting over the start-up defaults (12 hours, on).
     const quietHostSettings = QuietHostSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `quiet-host-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "quiet-host-settings", id: "main" }, detail: d.detail }); } });
-    const contextDependencies = DependencyService.withEpoch(storage, epoch);
+    // A recorded search of the task's own project is made again by the controller with its recorder's current rights (card L04d), against the project's event stream for its position.
+    const searchEvents = EventService.withEpoch(storage, epoch);
+    const contextDependencies = DependencyService.withEpoch(storage, epoch, { searches: {
+      reader: (id) => principals.current(id),
+      digest: async (reader, projectId, query) => (await retrieval.searchDigest(reader, { projectId, query })).hash,
+      position: async (projectId) => { const at = await searchEvents.since(`project:${projectId}`, Number.MAX_SAFE_INTEGER, 1); return { next: at.head, floor: at.floor }; },
+    } });
     // Hosts capture continuations and the agent records what its work relied on through the state API (card L04c). A host captures only for a live attempt it runs or is pinned to; with no dispatcher, none.
     const continuationOps: ContinuationOps = {
       capture: (by, command) => continuations.capture(by, command), latest: (by, taskId) => continuations.latest(by, taskId), history: (by, taskId, page) => continuations.history(by, taskId, page),
-      record: (by, command) => contextDependencies.record(by, command), manifest: (by, taskId) => contextDependencies.get(by, taskId),
+      record: (by, command) => contextDependencies.record(by, command), manifest: (by, taskId) => contextDependencies.get(by, taskId), searchDependency: (by, query) => contextDependencies.searchDependency(by, query),
       hostHolds: async (hostId, taskId) => {
         if (dispatch === undefined) return false;
         for (const id of await dispatch.dispatcher.liveAttemptsOf(dispatch.principal, { taskId })) {

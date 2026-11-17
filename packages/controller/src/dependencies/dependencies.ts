@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { onlyKnown, taskId as checkTaskId, type TaskBody } from "../domain/model.js";
+import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { canRead, type DeskRecordBody } from "../context/desks.js";
 import { allows } from "../security/access.js";
@@ -35,6 +35,21 @@ export interface DependencyEntry {
   /** An MCP resource read: which server, and the protocol revision it spoke. */
   readonly server?: string;
   readonly protocol?: string;
+  /** A search of the task's own project that the controller makes again itself (card L04d): the principal that made it, set by the controller when it was recorded, never by the caller. */
+  readonly reader?: string;
+}
+
+/**
+ * How the controller makes a recorded search again (card L04d). A `search` dependency names a word search of the controller's own desk records and histories, so no worker can say better than the
+ * controller whether it still finds the same: with this port the controller answers it, for searches of the task's own project.
+ */
+export interface SearchJudge {
+  /** The principal with this ID as it stands now (current grants), or nothing when it is gone or not active. */
+  reader(principalId: string): Promise<Principal | undefined>;
+  /** The digest of what the search finds for `reader` now (`RetrievalService.searchDigest`). */
+  digest(reader: Principal, projectId: string, query: string): Promise<string>;
+  /** The project's event stream: the next position to be written, and the lowest one still kept. */
+  position(projectId: string): Promise<{ readonly next: number; readonly floor: number }>;
 }
 
 export interface ManifestBody { readonly taskId: string; readonly projectId: string; readonly entries: readonly DependencyEntry[] }
@@ -50,7 +65,7 @@ export interface Observation {
 }
 export interface DependencyCheck { readonly id: string; readonly kind: DependencyKind; readonly key: string; readonly status: DependencyStatus; readonly detail: string }
 
-export const DEPENDENCY_LIMITS = { entries: 500, key: 300, members: 200, member: 200, observations: 500 } as const;
+export const DEPENDENCY_LIMITS = { entries: 500, key: 300, members: 200, member: 200, observations: 500, /** Searches one check makes again (card L04d); the rest of a manifest's searches stay unknown. */ searches: 10 } as const;
 const HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (v: string): string => createHash("sha256").update(v).digest("hex");
@@ -66,11 +81,31 @@ export type NewDependency = Omit<DependencyEntry, "id" | "observedAt">;
  */
 export class DependencyService {
   readonly #runner: CommandRunner;
+  readonly #searches: SearchJudge | undefined;
 
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
+  private constructor(runner: CommandRunner, searches: SearchJudge | undefined) { this.#runner = runner; this.#searches = searches; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): DependencyService {
-    return new DependencyService(new CommandRunner(storage, epoch, options));
+  /** `searches`: the controller makes recorded searches of a task's own project again itself (card L04d); without it a search is judged only from a worker's observation, as before. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { searches?: SearchJudge } = {}): DependencyService {
+    const { searches, ...runner } = options;
+    return new DependencyService(new CommandRunner(storage, epoch, runner), searches);
+  }
+
+  /**
+   * What to record for a search this caller makes of a project now (card L04d): a `search` dependency with the query as its key (cut to the key bound), the project's event position and the digest of what
+   * the search finds for the caller, ready for `record`. Anyone who may search the project may ask; what they may not read is not in the digest. `unavailable` without the search port.
+   */
+  async searchDependency(by: Principal, query: { projectId: string; query: string; key?: string }): Promise<NewDependency> {
+    onlyKnown(query, ["projectId", "query", "key"]);
+    if (this.#searches === undefined) throw new DomainError("unavailable", "this controller does not make recorded searches again");
+    const projectId = checkProjectId(query.projectId);
+    if (typeof query.query !== "string") invalid("query", "must be text");
+    const key = query.key ?? query.query.replace(/[\0\r\n]+/g, " ").slice(0, DEPENDENCY_LIMITS.key);
+    if (typeof key !== "string" || key.length < 1 || key.length > DEPENDENCY_LIMITS.key || /[\0\r\n]/.test(key)) invalid("key", `must be 1 to ${DEPENDENCY_LIMITS.key} characters on one line`);
+    // The position first: a search made after it is at least as new as the position says, so a check never thinks it older than it is.
+    const at = await this.#searches.position(projectId);
+    const hash = await this.#searches.digest(by, projectId, query.query);
+    return { kind: "search", key, scope: { projectId, query: query.query }, cursor: at.next, hash };
   }
 
   /** Records dependencies of a task (the agent working it, or the owner). The same dependency again replaces its observation. */
@@ -84,6 +119,7 @@ export class DependencyService {
     const fresh = command.dependencies.map((d, i) => this.#entry(d, `dependencies[${i}]`, now));
     // What the controller can judge itself is recorded only as it really is, and only by someone who may read it: a guessed hash is never stored.
     for (const [i, e] of fresh.entries()) if (!(await this.#verifyAtRecording(by, e, `dependencies[${i}]`))) (fresh[i] as { unverified?: boolean }).unverified = true;
+    for (const [i, e] of fresh.entries()) if (e.kind === "search" && this.#judgesSearch(e, task.projectId)) fresh[i] = await this.#verifySearch(by, e, task.projectId, `dependencies[${i}]`);
     const ref: AggregateRef = { kind: "dependency-manifest", id: derivedId("dpm", taskId) };
     const r = await this.#runner.command("dependencies.record", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { taskId, entries: fresh.map((e) => e.id).join(",") },
@@ -114,9 +150,57 @@ export class DependencyService {
     if (manifest === undefined) throw new DomainError("not_found", "no dependency manifest for that task, or none you may read");
     if (typeof observations !== "object" || observations === null || Object.keys(observations).length > DEPENDENCY_LIMITS.observations) invalid("observations", `must map entry IDs to observations (at most ${DEPENDENCY_LIMITS.observations})`);
     const out: DependencyCheck[] = [];
+    const searched = await this.#searchAgain(manifest);
     for (const e of manifest.entries) {
-      const [status, detail] = (await this.#mayRead(by, e)) ? await this.#judge(e, observations[e.id]) : ((["unknown", "what this refers to is not something you may read"]) as [DependencyStatus, string]);
+      const own = searched.get(e.id);
+      const [status, detail] = !(await this.#mayRead(by, e)) ? ((["unknown", "what this refers to is not something you may read"]) as [DependencyStatus, string]) : own !== undefined ? (Array.isArray(own) ? own : await this.#judge(e, own)) : await this.#judge(e, observations[e.id]);
       out.push({ id: e.id, kind: e.kind, key: e.key, status, detail });
+    }
+    return out;
+  }
+
+  // ---- searches the controller makes again (card L04d) ------------------------------------------------------------------------
+
+  /** Whether the controller itself judges this search: it has the port, and the search is of the task's own project. A search of another project stays the worker's to observe. */
+  #judgesSearch(e: DependencyEntry, projectId: string): boolean {
+    return this.#searches !== undefined && e.kind === "search" && (e.scope?.projectId === undefined || e.scope.projectId === projectId);
+  }
+
+  /** A recorded search is made again now with the recorder's rights: the hash must be what it finds, and the position one the stream has reached. The entry then names its reader. */
+  async #verifySearch(by: Principal, e: DependencyEntry, projectId: string, field: string): Promise<DependencyEntry> {
+    const port = this.#searches!;
+    const at = await port.position(projectId);
+    if (e.cursor! > at.next) invalid(`${field}.cursor`, `is past the project's event position (${at.next})`);
+    const now = await port.digest(by, projectId, e.scope!.query);
+    if (now.replace(/^sha256:/, "") !== e.hash!.replace(/^sha256:/, "")) invalid(field, "the hash is not what this search finds now; a dependency is recorded as it was read (resume.dependencies.search gives it)");
+    return { ...e, reader: by.id };
+  }
+
+  /**
+   * The searches of a manifest the controller makes again, each with the rights its recorder has now, at most `DEPENDENCY_LIMITS.searches` of them (the same search by the same reader once). An entry maps to
+   * the observation to judge, or straight to a verdict when it could not be made again. It never throws: a failure is `unknown`.
+   */
+  async #searchAgain(manifest: ManifestBody): Promise<Map<string, Observation | [DependencyStatus, string]>> {
+    const out = new Map<string, Observation | [DependencyStatus, string]>();
+    const port = this.#searches;
+    if (port === undefined) return out;
+    const mine = manifest.entries.filter((e) => this.#judgesSearch(e, manifest.projectId));
+    if (mine.length === 0) return out;
+    let floor: number | undefined;
+    try { floor = (await port.position(manifest.projectId)).floor; } catch { floor = undefined; }
+    const made = new Map<string, Promise<string | undefined>>();
+    let n = 0;
+    for (const e of mine) {
+      if (e.reader === undefined) { out.set(e.id, ["unknown", "the search was recorded before the controller made searches again, so it was not repeated"]); continue; }
+      if (floor === undefined) { out.set(e.id, ["unknown", "the project's event position could not be read, so the search was not repeated"]); continue; }
+      const same = `${e.reader}\n${e.scope!.query}`;
+      if (!made.has(same)) {
+        if (n >= DEPENDENCY_LIMITS.searches) { out.set(e.id, ["unknown", `more than ${DEPENDENCY_LIMITS.searches} searches were recorded; this one was not repeated`]); continue; }
+        n++;
+        made.set(same, (async () => { const reader = await port.reader(e.reader!); return reader === undefined ? undefined : await port.digest(reader, manifest.projectId, e.scope!.query); })().catch(() => undefined));
+      }
+      const hash = await made.get(same)!;
+      out.set(e.id, hash === undefined ? ["unknown", "the search could not be made again with the rights of whoever made it"] : { hash, cursorFloor: floor });
     }
     return out;
   }
