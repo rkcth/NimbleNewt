@@ -216,6 +216,12 @@ test("a stream this side leaves at its end marker (Pi's SDK cancels at [DONE], t
   // Left before the end marker (the usage came, [DONE] did not): failed, and no size is taken.
   const before = await watch(open(["data: a\n\n", usage, "data: b\n\n"], "hang"), "cancel");
   assert.equal(before.told.length, 1); assert.match(before.told[0]!, /^finished:false:/); assert.deepEqual(before.first, []);
+  // This side aborts the call before the end marker (the stall monitor, the owner's cancel): failed too (second review).
+  const abortedEarly = await watch(open(["data: a\n\n", usage, "data: b\n\n"], "hang"), "abort");
+  assert.equal(abortedEarly.told.length, 1); assert.match(abortedEarly.told[0]!, /^finished:false:/); assert.deepEqual(abortedEarly.first, []);
+  // The words "data: [DONE]" inside the model's text are not the end marker: left there, the reply did not end well (second review).
+  const quoted = await watch(open([usage, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"say data: [DONE]\"}}]}\n\n"], "hang"), "cancel");
+  assert.equal(quoted.told.length, 1); assert.match(quoted.told[0]!, /^finished:false:/); assert.deepEqual(quoted.first, []);
   // The server fails the connection after [DONE] while this side still reads: still a failure.
   const reset = await watch(open([...done], "error"), "read");
   assert.equal(reset.told.length, 1); assert.match(reset.told[0]!, /^finished:false:/); assert.deepEqual(reset.first, []);

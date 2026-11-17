@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { assertNoKey, Budget, PINNED_MODEL, radianceKey, RadianceRefused, serverRoot, ServerGate } from "./g09-radiance-gate.js";
+import { Budget, PINNED_MODEL, radianceKey, RadianceRefused, serverRoot, ServerGate, writeEvidence } from "./g09-radiance-gate.js";
 import { runG09Proof } from "./g09-radiance-run.js";
 
 /**
@@ -42,17 +42,11 @@ let partial: unknown;
 process.once("exit", () => {
   if (partial === undefined || (partial as { finishedAt?: string }).finishedAt !== undefined) return;
   (partial as { stopped?: string }).stopped ??= "the run left nothing to wait on before it finished (a pending step never settled); this is what was recorded";
-  const text = `${JSON.stringify(partial, null, 1)}\n`;
-  assertNoKey(text, key, "the partial evidence");
-  mkdirSync(dirname(OUT), { recursive: true });
-  writeFileSync(OUT, text);
+  writeEvidence(OUT, partial, key, "the partial evidence");
   say(`partial evidence: ${OUT}`);
 });
 const evidence = await runG09Proof({ fetch: globalThis.fetch, key, baseUrl: key.baseUrl, model: PINNED_MODEL, dir, budget: new Budget(MAX_CALLS, MAX_REPLY), replyTokens: { short: Math.min(256, MAX_REPLY), long: MAX_REPLY }, log: say, onEvidence: (e) => { partial = e; }, ...(TRACE ? { trace: (l: string) => say(`  . ${l}`) } : {}) });
-const text = `${JSON.stringify(evidence, null, 1)}\n`;
-assertNoKey(text, key, "the evidence");
-mkdirSync(dirname(OUT), { recursive: true });
-writeFileSync(OUT, text);
+writeEvidence(OUT, evidence, key);
 rmSync(dir, { recursive: true, force: true });
 say(`checks ${evidence.summary?.passed}/${evidence.summary?.checks} held; ${evidence.summary?.calls} model calls${evidence.stopped === undefined ? "" : `; stopped: ${evidence.stopped}`}`);
 say(`evidence: ${OUT}`);

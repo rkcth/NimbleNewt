@@ -148,6 +148,45 @@ for (const backend of backends) {
     never.open();
   });
 
+  suite("a reply whose call this side aborts before its end marker (the stall monitor, the owner's cancel) is failed (card G09, second review)", async (c) => {
+    const reply = sse(chunk({ tool_calls: [{ index: 0, id: "call_k", type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({ content: "more" }));
+    const ac = new AbortController();
+    const gone = new Promise<void>((resolve) => ac.signal.addEventListener("abort", () => resolve(), { once: true }));
+    const e = endpoint([[reply, gone, new Error("This operation was aborted")]]);
+    const it = (await c.relayFor(e).relay({ ...request, signal: ac.signal } as never)).body![Symbol.asyncIterator]();
+    let text = "";
+    while (!text.includes("more")) { const r = await it.next(); assert.equal(r.done, false); text += Buffer.from(r.value as Uint8Array).toString("utf8"); }
+    const pending = it.next().catch(() => undefined);
+    ac.abort();
+    await pending;
+    let r = await run(c, 1);
+    for (let i = 0; i < 100 && r.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r = await run(c, 1); }
+    assert.equal(r.state, "failed", JSON.stringify(r));
+    assert.notEqual(r.toolCalls[0]!.state, "complete");
+  });
+
+  suite("each reply of one relay keeps its own end: the next reply, cut before its end marker, is failed though the one before ended (card G09, second review)", async (c) => {
+    const done = sse(chunk({ content: "first" }), chunk({}, "stop")) + "data: [DONE]\n\n";
+    const cut = sse(chunk({ content: "second" }));
+    const never = deferred();
+    const e = endpoint([[done, never.promise, ""], [cut, never.promise, ""]]);
+    const relay = c.relayFor(e);
+    const first = (await relay.relay(request as never)).body![Symbol.asyncIterator]();
+    let text = "";
+    while (!text.includes("[DONE]")) { const r = await first.next(); assert.equal(r.done, false); text += Buffer.from(r.value as Uint8Array).toString("utf8"); }
+    await first.return?.(undefined);
+    let r = await run(c, 1);
+    for (let i = 0; i < 100 && r.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r = await run(c, 1); }
+    assert.equal(r.state, "finished", JSON.stringify(r));
+    const second = (await relay.relay(request as never)).body![Symbol.asyncIterator]();
+    await second.next();
+    await second.return?.(undefined);
+    let r2 = await run(c, 2);
+    for (let i = 0; i < 100 && r2.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r2 = await run(c, 2); }
+    assert.equal(r2.state, "failed", JSON.stringify(r2));
+    never.open();
+  });
+
   suite("a tool call that was still being written when the stream broke is dropped for good and never complete", async (c) => {
     const half = sse(chunk({ content: "ok" }), chunk({ tool_calls: [{ index: 0, id: "call_9", type: "function", function: { name: "desk-write", arguments: "{\"body\":\"half" } }] }));
     const e = endpoint([[half]]);

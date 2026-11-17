@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { stopServer } from "@nimblenewt/controller/testing";
-import { assertNoKey, Budget, BudgetExceeded, idleOf, keyFrom, manifestOfBody, measuredFetch, observeBody, oneAtATime, pinnedServed, RadianceRefused, ServerGate, SseFacts, type CallRecord } from "./g09-radiance-gate.js";
+import { assertNoKey, Budget, BudgetExceeded, idleOf, keyFrom, manifestOfBody, measuredFetch, observeBody, oneAtATime, pinnedServed, RadianceRefused, ServerGate, SseFacts, writeEvidence, type CallRecord } from "./g09-radiance-gate.js";
 import { fakeRadiance } from "./g09-radiance-fake.js";
 import { runG09Proof } from "./g09-radiance-run.js";
 
@@ -28,6 +28,17 @@ test("the key is only a header: scrubbed from any text, counted, and refused in 
   assert.throws(() => keyFrom("short", "http://x"));
 });
 
+test("the evidence is written only when the key is not in it, and the refusal does not say the key (second review)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "g09-ev-"));
+  try {
+    const out = join(dir, "a", "run.json");
+    assert.throws(() => writeEvidence(out, { calls: [{ detail: `Bearer ${SECRET}` }] }, key), (e: Error) => !e.message.includes(SECRET));
+    assert.equal(existsSync(out), false, "nothing is written");
+    writeEvidence(out, { calls: [{ detail: "<key>" }] }, key);
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), { calls: [{ detail: "<key>" }] });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("the idle gate: idle only when in_flight, running and waiting are stated and 0; the pinned model must already be resident", () => {
   assert.equal(idleOf({ in_flight: 0, running: 0, waiting: 0 }).ok, true);
   assert.equal(idleOf({ in_flight: 1, running: 0, waiting: 0 }).ok, false);
@@ -37,6 +48,10 @@ test("the idle gate: idle only when in_flight, running and waiting are stated an
   assert.equal(pinnedServed({ data: [{ id: "qwen3.8-flash-next-iq4r", state: "cold" }] }, "qwen3.8-flash-next-iq4r").ok, false, "a cold model would have to be loaded");
   assert.equal(pinnedServed({ data: [{ id: "other", state: "resident" }] }, "qwen3.8-flash-next-iq4r").ok, false);
   assert.equal(pinnedServed({}, "qwen3.8-flash-next-iq4r").ok, false);
+  // The name is compared exactly: a resident model whose name only starts or ends like the pinned one is another model (second review).
+  assert.equal(pinnedServed({ data: [{ id: "qwen3.8-flash-next-iq4r-v2", state: "resident" }, { id: "qwen3.8-flash-next-iq4r", state: "cold" }] }, "qwen3.8-flash-next-iq4r").ok, false);
+  assert.equal(pinnedServed({ data: [{ id: "QWEN3.8-flash-next-iq4r", state: "resident" }] }, "qwen3.8-flash-next-iq4r").ok, false);
+  assert.equal(pinnedServed({ data: [{ id: "x-qwen3.8-flash-next-iq4r", state: "resident" }] }, "qwen3.8-flash-next-iq4r").ok, false);
 });
 
 test("the gate refuses a busy server and a model that is not served, with GET requests only", async () => {

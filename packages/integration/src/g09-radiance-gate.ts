@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * Card G09, the measured run against the owner's Radiance server: the safety and measurement pieces, kept apart from the scenario (`g09-radiance-run.ts`) and the command (`g09-radiance-bench.ts`) so they can be tested
@@ -309,4 +309,13 @@ export function measuredFetch(options: { fetch: typeof globalThis.fetch; gate: P
 export function assertNoKey(text: string, key: RadianceKey, where: string): void {
   const found = key.count(text);
   if (found !== 0) throw new Error(`the key was found ${found} time(s) in ${where}; nothing was written`);
+}
+
+/** Writes the evidence as JSON, only after checking the whole text for the key: with the key in it, nothing is written and the error does not say the key. */
+export function writeEvidence(path: string, evidence: unknown, key: RadianceKey, where = "the evidence"): string {
+  const text = `${JSON.stringify(evidence, null, 1)}\n`;
+  assertNoKey(text, key, where);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+  return text;
 }
