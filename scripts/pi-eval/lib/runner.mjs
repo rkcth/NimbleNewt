@@ -8,8 +8,9 @@ import { createWriteStream, existsSync, readdirSync, readFileSync, readlinkSync,
 import { cp, mkdir, readdir, readFile, rm, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
+import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
@@ -33,8 +34,9 @@ async function mustGit(args, opts) {
 /**
  * Runs a command (argv, no shell) with an optional wall-clock limit, writing its output to `outFile`.
  * "node" as argv[0] means this Node. On a timeout the whole process group is stopped (POSIX), or the child (Windows).
+ * `inheritEnv: false` gives the command `env` alone (an agent's isolated environment), not this process's plus `env`.
  */
-export function runCommand(argv, { cwd, env, timeoutMs, outFile, onSpawn } = {}) {
+export function runCommand(argv, { cwd, env, timeoutMs, outFile, onSpawn, inheritEnv = true } = {}) {
   return new Promise((resolve) => {
     const [cmd, ...args] = argv;
     const exe = cmd === "node" ? process.execPath : cmd;
@@ -44,7 +46,7 @@ export function runCommand(argv, { cwd, env, timeoutMs, outFile, onSpawn } = {})
     let child;
     try {
       // A bench started from inside `node --test` must not hand its test-runner context to the commands it runs.
-      const childEnv = { ...process.env, ...env };
+      const childEnv = inheritEnv ? { ...process.env, ...env } : { ...env };
       delete childEnv.NODE_TEST_CONTEXT;
       child = spawn(exe, args, { cwd, env: childEnv, stdio: ["ignore", "pipe", "pipe"], detached: !IS_WIN });
     } catch (e) {
@@ -296,6 +298,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
   const log = (m) => ctx.log?.(`[${runId}] ${m}`);
   const mark = { [RUN_MARK]: dir };
   ctx.activeDirs?.add(dir);
+  let iso = null;
   try {
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
     await prepareCheckout({ repo: ctx.repo, commit: task.base, dir, copy: task.copy, depsFrom: ctx.depsFrom, forbidden: [task.solution] });
@@ -323,12 +326,18 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
       const g = await beforeAgent();
       if (!g.ok) { record.gateRefused = String(g.why ?? "refused"); throw new Error(`the Radiance gate refused the agent start: ${record.gateRefused}`); }
     }
+    // The agent's isolation (README "The agent's isolation"): a fresh home and environment, git that cannot push out, the
+    // model key kept in the bench, and on Linux the owner's folders hidden. Without the hiding no agent starts, unless the
+    // operator said so (ctx.allowVisibleHome, --allow-visible-home).
+    iso = await isolateAgent(ctx, { dir, artifacts });
+    record.isolation = iso.summary;
     log(`agent started (limit ${task.timeoutMinutes} min)`);
     record.startedAt = new Date().toISOString();
     const t0 = Date.now();
-    const a = await runCommand([...ctx.agent, dir, promptFile, logFile], {
+    const a = await runCommand([...iso.prefix, ...ctx.agent.map((x, i) => (i === 0 && x === "node" ? process.execPath : x)), dir, promptFile, logFile], {
       cwd: dir, timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, outFile: join(artifacts, "agent-stderr.log"),
-      env: { PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...(ctx.agentEnv ?? {}), ...mark },
+      env: { ...iso.env, PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...(ctx.agentEnv ?? {}), ...mark },
+      inheritEnv: false,
       onSpawn: (child) => ctx.children?.add(child),
     });
     record.wallMs = Date.now() - t0;
@@ -367,7 +376,12 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     // the results, and the work root's siblings. The run's own checkout is never counted.
     const watched = [...(ctx.referenceDirs ?? [ctx.repo]).flatMap((d) => [d, dirname(d)]), ctx.resultsDir, dirname(ctx.workRoot)].filter(Boolean);
     const foreign = foreignPaths(summary.toolCommands, { ownDir: dir, watched });
-    const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m)));
+    // Also a run whose agent tried to push, add a remote or reach the owner's keys and logins, seen in its tool calls or
+    // in the git wrapper's refusals: blocked or not, it is not a run to score.
+    const attempts = credentialAttempts(summary.toolCommands);
+    let guardRefusals = 0;
+    try { guardRefusals = readFileSync(join(artifacts, "git-guard.log"), "utf8").split("\n").filter((l) => l.includes(" refused ")).length; } catch { /* nothing refused */ }
+    const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m))) || attempts.length > 0 || guardRefusals > 0;
     const verdict = classify({ summary, hidden, plan, changed: ch.changed, dirty: ch.dirty, timedOut: a.timedOut, exitCode: a.code });
     Object.assign(record, verdict, {
       stopReason: summary.last?.stopReason ?? null, visibleChars: summary.last?.visibleChars ?? 0, lastText: summary.last?.visibleTail.slice(-300) ?? "",
@@ -375,17 +389,83 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
       // The log shows no model reply, or a reply without token counts: the run's token use is not known (0 is not a reading).
       ...(summary.assistantMessages === 0 || summary.usageMissing > 0 ? { tokensUnknown: true } : {}),
       plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
+      credentialAttempts: attempts, guardRefusals,
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
   } finally {
     await killProcessesIn(dir).catch(() => {});
+    // The agent's home and temporary folder go whatever --keep says (they held the agent's Pi configuration).
+    if (iso) { await iso.close(); ctx.isoDirs?.delete(iso.base); }
     if (!ctx.keep) await rm(dir, { recursive: true, force: true }).catch(() => {});
     ctx.activeDirs?.delete(dir);
   }
   log(`=> ${record.outcome}: ${record.reason}`);
   return record;
 }
+
+/** Pi's command-line program: PI_EVAL_PI_BIN, else the owner's ~/.local/pi-cli install (resolved by the bench, whose home is real). */
+export function piBinOf(ownerHome, env = process.env) {
+  const p = env.PI_EVAL_PI_BIN || join(ownerHome, ".local", "pi-cli", "node_modules", ".bin", "pi");
+  try { return realpathSync(p); } catch { return null; }
+}
+
+/**
+ * Prepares one agent's isolation (lib/isolation.mjs): its folder, environment and the command prefix that starts it.
+ * ctx: ownerHome (default this user's home), bwrap (path, or false for none; default "bwrap" on Linux), hide (more folders
+ * to hide), readOnlyTrees (more folders made read-only), allowVisibleHome, piBin, realGit, sourceEnv, isoDirs. Throws, starting nothing, when the owner's folders
+ * cannot be hidden and allowVisibleHome is not set.
+ */
+export async function isolateAgent(ctx, { dir, artifacts }) {
+  const ownerHome = ctx.ownerHome ?? homedir();
+  const bwrap = process.platform === "linux" && ctx.bwrap !== false ? (ctx.bwrap ?? "bwrap") : null;
+  const hideable = bwrap !== null && sandboxUsable(bwrap);
+  if (!hideable && !ctx.allowVisibleHome) throw new Error("the owner's home folder cannot be hidden from the agent here (bubblewrap is not usable); no agent was started (--allow-visible-home runs it with a fresh home folder only)");
+  const piBin = ctx.piBin ?? piBinOf(ownerHome);
+  const iso = await prepareIsolation({ checkoutDir: dir, artifactsDir: artifacts, ownerHome, provider: ctx.set?.agent?.provider, model: ctx.set?.agent?.model, realGit: ctx.realGit ?? findRealGit(), piBin, sourceEnv: ctx.sourceEnv ?? process.env, netns: hideable });
+  ctx.isoDirs?.add(iso.base);
+  try {
+    const listed = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
+    // Read-only to the agent: the whole file system (in the sandbox), named here as the trees the agent may read: the
+    // shared code folder (other worktrees, the reference checkouts, the bench's own scripts), the reference repositories
+    // and the work root's parent. Its own checkout, temporary folder and artifacts are bound back writable.
+    const readOnlyTrees = ["/srv/code", ctx.repo, ...(ctx.referenceDirs ?? []), BENCH_ROOT, ctx.workRoot ? dirname(ctx.workRoot) : null, ...(ctx.readOnlyTrees ?? [])].filter((p) => typeof p === "string");
+    const own = [dir, iso.base, artifacts];
+    // Credential-like files and owner-only folders in what stays readable (lib/isolation.mjs credentialPaths) are hidden too.
+    const scan = hideable ? credentialPaths(readOnlyTrees.filter((p) => !listed.some((h) => p === h || p.startsWith(h + "/"))), { exclude: [...own, ...listed] }) : { paths: [], truncated: false };
+    // Sockets and what only a supplementary group opens in the system's folders (a snap's service socket, adm's files).
+    const sys = hideable ? credentialPaths(SYSTEM_ROOTS, { exclude: [...own, ...listed, ...readOnlyTrees, ...PRIVATE_DIRS], byName: false, maxDepth: 6 }) : { paths: [], truncated: false };
+    const hidden = [...listed, ...scan.paths, ...sys.paths];
+    const agentFiles = ctx.agent.filter((x) => typeof x === "string" && x !== "node" && existsSync(x)).map((x) => dirname(realpathSync(x)));
+    const prefix = hideable ? [...bwrapPrefix({
+      bwrap, hidden, readOnlyTrees,
+      writable: own,
+      readable: [dirname(dirname(process.execPath)), dirname(dirname(fileURLToPath(import.meta.url))), ...agentFiles, ...(piBin ? [installRoot(piBin)] : [])],
+      readOnly: iso.readOnly,
+    // The agent's only network: the bridge to the key proxy (none when the owner's Pi configuration has no such provider).
+    }), ...(iso.bridge ? [process.execPath, NET_BRIDGE, iso.bridge.socketPath, String(iso.bridge.port), "--"] : [])] : [];
+    return {
+      ...iso, prefix,
+      summary: {
+        home: "fresh", ownerHomeHidden: hideable, hidden: listed, hiddenByName: scan.paths.length, ...(scan.truncated ? { hiddenByNameTruncated: true } : {}),
+        hiddenSystem: sys.paths, ...(sys.truncated ? { hiddenSystemTruncated: true } : {}),
+        privateDirs: hideable ? PRIVATE_DIRS : [], readOnly: hideable ? ["/"] : [], ownProcessList: hideable,
+        network: hideable ? "none (the model route only)" : "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true,
+      },
+    };
+  } catch (e) {
+    // Nothing is left behind when the sandbox could not be described: the proxy stops and the per-run folder goes.
+    await iso.close();
+    ctx.isoDirs?.delete(iso.base);
+    throw e;
+  }
+}
+
+/** The bridge from the agent's network namespace to the key proxy. */
+const NET_BRIDGE = fileURLToPath(new URL("./net-bridge.mjs", import.meta.url));
+
+/** The repository the bench itself runs from (scripts/pi-eval/lib -> the repository root). */
+const BENCH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** Checks a task without an agent: the hidden tests must fail at the base and pass at the solution. */
 export async function calibrateOne(ctx, task) {

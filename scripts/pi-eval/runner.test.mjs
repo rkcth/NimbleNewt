@@ -13,6 +13,7 @@ import { symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { COMPLETION_RULES_PLACEHOLDER, loadCompletionRules, loadTaskset, renderPrompt } from "./lib/taskset.mjs";
 import { createHash } from "node:crypto";
+import { sandboxUsable } from "./lib/isolation.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "pi-eval-test-"));
@@ -50,6 +51,8 @@ before(() => {
 });
 after(() => rmSync(root, { recursive: true, force: true }));
 
+// The bench's process stopping as it works where the agent cannot be sandboxed (macOS, Windows, --allow-visible-home).
+const NO_SANDBOX = { bwrap: false, allowVisibleHome: true };
 const ctx = (mode, extra = {}) => ({
   set, repo, referenceDirs: [repo], depsFrom: repo, workRoot: join(root, "work"), resultsDir: join(root, "results"),
   agent: ["node", join(here, "stub-agent.mjs")], agentLabel: "stub", batchId: "t", benchCommit: "test",
@@ -145,7 +148,9 @@ test("a solution that passes the hidden tests but does not build is not a finish
 
 test("a process the agent left running in its checkout is stopped when the agent ends", { skip: process.platform !== "linux" }, async () => {
   const pidFile = join(root, "straggler.pid");
-  const r = await runOne(ctx("straggler", { agentEnv: { STUB_AGENT_MODE: "straggler", STUB_AGENT_PID_FILE: pidFile } }), set.tasks[0], "A", 1);
+  // Without the bubblewrap sandbox: inside it the agent has a process list of its own, whose end stops every straggler by
+  // itself (and the PID the stub writes is the sandbox's own). This checks the bench's own stopping, used where there is none.
+  const r = await runOne(ctx("straggler", { agentEnv: { STUB_AGENT_MODE: "straggler", STUB_AGENT_PID_FILE: pidFile }, ...NO_SANDBOX }), set.tasks[0], "A", 1);
   assert.ok(r.stragglersKilled >= 1, JSON.stringify(r));
   const pid = Number(readFileSync(pidFile, "utf8"));
   let alive = true;
@@ -192,7 +197,7 @@ test("a sibling checkout whose name starts like the run's own is foreign; a vari
 
 test("leftovers outside the checkout are stopped too: a server a test started in /tmp (it carries the run's mark) and its helper with an emptied environment", { skip: process.platform !== "linux" }, async () => {
   const pidFile = join(root, "outside.pid");
-  const r = await runOne(ctx("straggler-outside", { agentEnv: { STUB_AGENT_MODE: "straggler-outside", STUB_AGENT_PID_FILE: pidFile } }), set.tasks[0], "A", 1);
+  const r = await runOne(ctx("straggler-outside", { agentEnv: { STUB_AGENT_MODE: "straggler-outside", STUB_AGENT_PID_FILE: pidFile }, ...NO_SANDBOX }), set.tasks[0], "A", 1);
   const pids = readFileSync(pidFile, "utf8").trim().split(" ").map(Number);
   assert.equal(pids.length, 2);
   assert.ok(r.stragglersKilled >= 2, JSON.stringify(r));
@@ -300,7 +305,7 @@ test("acceptance tests that do not type-check against the agent's code score a d
 test("a control run: one repeat per task with another agent (--agent, --label) is recorded beside the first and compared per task", async () => {
   const s = accept();
   const results = join(root, "control-results");
-  const runCli = (label, mode) => execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", s.file, "--repo", repo, "--variants", "A", "--repeats", "1", "--agent", join(here, "stub-agent.mjs"), "--label", label, "--results", results, "--work-root", join(root, "control-work"), "--no-report"], { env: { ...process.env, STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, stdio: "pipe" });
+  const runCli = (label, mode) => execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", s.file, "--repo", repo, "--variants", "A", "--repeats", "1", "--agent", join(here, "stub-agent.mjs"), "--label", label, "--results", results, "--work-root", join(root, "control-work"), "--no-report", ...(sandboxUsable() ? [] : ["--allow-visible-home"])], { env: { ...process.env, STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, stdio: "pipe" });
   runCli("pi-stand-in", "first-turn");
   runCli("control-stand-in", "solve");
   const recs = readFileSync(join(results, "results.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -308,7 +313,7 @@ test("a control run: one repeat per task with another agent (--agent, --label) i
   assert.ok(recs.every((r) => r.agentPath.endsWith("stub-agent.mjs")));
   const out = execFileSync(process.execPath, [join(here, "compare.mjs"), "--results", results], { encoding: "utf8" });
   assert.match(out, /\| tiny\s+\| S\s+\| A\s+\| 0\/1 S\s+\| 1\/1 F\s+\|/);
-  assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 other; shipped wording \(informational\) 1\/1/);
+  assert.match(out, /control-stand-in: 1\/1 verified finish, 0 false done, 0 interface mismatch, 0 contaminated, 0 other; shipped wording \(informational\) 1\/1/);
 });
 
 test("W06: a variant whose prompt carries the completion rules gets the worker's words from the built pi-adapter, and the run records which text it was", async () => {

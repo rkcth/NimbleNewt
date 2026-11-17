@@ -26,14 +26,16 @@ export function compare(records) {
   const table = rows.map((c) => [c.taskId, c.size ?? "?", c.variant, ...agents.map((a) => {
     const rs = c.by.get(a) ?? [];
     if (rs.length === 0) return "-";
-    const f = rs.filter((r) => r.outcome === "verified-finish").length;
-    return `${f}/${rs.length} ${rs.map((r) => ABBR[r.outcome] ?? "?").join("")}`;
+    const f = rs.filter((r) => r.outcome === "verified-finish" && !r.contaminated).length;
+    return `${f}/${rs.length} ${rs.map((r) => (r.contaminated ? "C" : ABBR[r.outcome] ?? "?")).join("")}`;
   })]);
   const totals = agents.map((a) => {
     const rs = records.filter((r) => String(r.agent ?? "?") === a);
-    const n = (o) => rs.filter((r) => r.outcome === o).length;
+    // A contaminated run is counted apart, never as a finish (nor as any other outcome).
+    const n = (o) => rs.filter((r) => r.outcome === o && !r.contaminated).length;
+    const contaminated = rs.filter((r) => r.contaminated).length;
     const shipped = rs.filter((r) => r.shipped);
-    return { agent: a, runs: rs.length, finish: n("verified-finish"), wrong: n("wrong"), mismatch: n("interface-mismatch"), other: rs.length - n("verified-finish") - n("wrong") - n("interface-mismatch"), shippedPassed: shipped.filter((r) => r.shipped.passed).length, shippedRuns: shipped.length };
+    return { agent: a, runs: rs.length, finish: n("verified-finish"), wrong: n("wrong"), mismatch: n("interface-mismatch"), contaminated, other: rs.length - contaminated - n("verified-finish") - n("wrong") - n("interface-mismatch"), shippedPassed: shipped.filter((r) => r.shipped.passed).length, shippedRuns: shipped.length };
   });
   return { agents, head, table, totals };
 }
@@ -43,8 +45,8 @@ export function renderCompare(records) {
   const widths = head.map((h, i) => Math.max(h.length, ...table.map((r) => String(r[i]).length)));
   const fmt = (r) => `| ${r.map((x, i) => String(x).padEnd(widths[i])).join(" | ")} |`;
   const lines = [fmt(head), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...table.map(fmt), "",
-    "Cells: verified finishes / runs, then each run's outcome: F finish, W false done, I interface mismatch, S stopped early, L length, E empty, T timeout, X error, ? unclassified.", ""];
-  for (const t of totals) lines.push(`${t.agent}: ${t.finish}/${t.runs} verified finish, ${t.wrong} false done, ${t.mismatch} interface mismatch, ${t.other} other; shipped wording (informational) ${t.shippedRuns ? `${t.shippedPassed}/${t.shippedRuns}` : "-"}`);
+    "Cells: verified finishes / runs, then each run's outcome: F finish, W false done, I interface mismatch, S stopped early, L length, E empty, T timeout, X error, ? unclassified, C contaminated (never a finish).", ""];
+  for (const t of totals) lines.push(`${t.agent}: ${t.finish}/${t.runs} verified finish, ${t.wrong} false done, ${t.mismatch} interface mismatch, ${t.contaminated} contaminated, ${t.other} other; shipped wording (informational) ${t.shippedRuns ? `${t.shippedPassed}/${t.shippedRuns}` : "-"}`);
   return lines.join("\n");
 }
 

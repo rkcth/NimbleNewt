@@ -28,6 +28,13 @@
 //                        GET /stats and /v1/models before each run (key only in the Authorization header) and starts a
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
+//   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, /srv/ai,
+//                        the team's and test database's key folders and credential-like names and owner-only folders
+//                        in what stays readable, sockets and group-only files in the system's folders (/tmp, /run, /dev/shm
+//                        and /var/log are the agent's own; README "The agent's isolation")
+//   --allow-visible-home run the agent even where its owner's folders cannot be hidden (no usable bubblewrap: macOS,
+//                        Windows, a Linux without user namespaces); it still gets a fresh home, environment and git
+//                        settings, but can read the owner's files by their full path and reach the network
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -35,6 +42,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runBatch } from "./lib/batch.mjs";
 import { radianceGate } from "./lib/radiance-gate.mjs";
+import { sandboxUsable } from "./lib/isolation.mjs";
 import { appendJsonl, calibrateOne, killProcessesInSync, runOne } from "./lib/runner.mjs";
 import { renderReport } from "./lib/stats.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
@@ -48,7 +56,7 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument ${a}`);
     const [k, inline] = a.slice(2).split(/=(.*)/s);
-    if (["calibrate", "keep", "dry-run", "no-report", "help", "no-shipped", "no-radiance-gate"].includes(k)) { o.flags.add(k); continue; }
+    if (["calibrate", "keep", "dry-run", "no-report", "help", "no-shipped", "no-radiance-gate", "allow-visible-home"].includes(k)) { o.flags.add(k); continue; }
     const v = inline ?? argv[++i];
     if (v === undefined) throw new Error(`--${k} needs a value`);
     o[k] = v;
@@ -97,8 +105,10 @@ async function main() {
   await mkdir(workRoot, { recursive: true });
   const children = new Set();
   const activeDirs = new Set();
+  const isoDirs = new Set();
   const ctx = {
-    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs,
+    set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs, isoDirs,
+    allowVisibleHome: o.flags.has("allow-visible-home"), hide: o.hide ? o.hide.split(",").filter(Boolean).map((p) => resolve(p)) : [],
     testSlot: (o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT ?? "") ? [o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT] : null,
     keep: o.flags.has("keep"), skipShipped: o.flags.has("no-shipped"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
@@ -110,6 +120,8 @@ async function main() {
     // An interrupted batch leaves no checkout behind (each holds a copy of node_modules), unless --keep. Only directories
     // the runner made directly under the work root are removed (rm does not follow symlinks inside them).
     if (!ctx.keep) for (const d of activeDirs) { if (dirname(d) !== workRoot || !basename(d).startsWith("eval-")) continue; try { rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } }
+    // The agents' own homes and temporary folders always go (they held the agents' Pi configuration).
+    for (const d of isoDirs) { if (!basename(d).startsWith("pi-eval-iso-")) continue; try { rmSync(d, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } }
     process.exit(130);
   });
 
@@ -146,6 +158,7 @@ async function main() {
     for (const [t, v, r] of jobs) process.stdout.write(`${t.id} (${t.size}) variant ${v} repeat ${r}: base ${t.base.slice(0, 8)}, ${t.testFiles.length} hidden test file(s), limit ${ctx.timeoutMinutes ?? t.timeoutMinutes} min\n`);
     process.stdout.write(`${jobs.length} run(s), concurrency ${concurrency}, results ${resultsDir}, checkouts ${workRoot}, agent ${agentPath}\n`);
     process.stdout.write(`Radiance gate ${useGate ? `on (idle wait ${idleWaitMinutes} min)` : "off"}, token budget ${Number.isFinite(tokenBudget) ? tokenBudget : "none"}\n`);
+    process.stdout.write(`agent isolation: fresh home, scrubbed environment, git push refused; owner's folders ${sandboxUsable() ? "hidden, file system read-only, /tmp and /run private, no network but the model route (bubblewrap)" : ctx.allowVisibleHome ? "NOT hidden and network not cut off (--allow-visible-home)" : "cannot be hidden here: runs would be refused"}\n`);
     return 0;
   }
   const resultsFile = join(resultsDir, "results.jsonl");
