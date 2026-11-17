@@ -64,6 +64,8 @@ export class RemoteWorkerHost implements WorkerHost {
     this.ownerPolicy = options.ownerPolicy !== undefined;
     // A host whose port threw (the work may be half done) says so with `failed`: that is thrown here, as a local host's throw is, so the workspace service records `failed`, not a clean refusal.
     this.workspace = { run: async (call) => {
+      // Card H12o: the commit of an approved submission is not carried over the worker protocol yet; a remote host asked for a release would make a plain platform commit of whatever its checkout holds. Refused, nothing sent.
+      if (call.submission !== undefined) return { ok: false, reason: `${this.hostId} is a remote host, which does not commit an approved submission yet (only the local worker host does); nothing was sent and nothing was committed` };
       // A landing carries the owner's policy (card H12a): the host cannot read the controller's settings. Fail closed: nothing is sent when it cannot be read, and what a caller put in the request is never taken (only this reader's word).
       if (call.operation === "landing") {
         let policy: CarriedLanding | undefined;

@@ -43,6 +43,7 @@ import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
+import { releaseDeadline } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
@@ -294,7 +295,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
-  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
+  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
   providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
@@ -1389,7 +1390,8 @@ export class StatusService {
    */
   async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const release = this.#deps.release;
-    if (release === undefined || by.kind !== "owner") return undefined;
+    // An owner object limited to one task is not the owner for this view: the other owner-only views refuse it the same way (card X09b watch, second review).
+    if (release === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     if (request.candidateId !== undefined && (typeof request.candidateId !== "string" || request.candidateId.trim() === "" || request.candidateId.length > 120)) invalid("candidateId", "needs the candidate's ID (the rcn- ID release.submit returned)");
     const limit = request.limit ?? 5;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) invalid("limit", "must be a whole number from 1 to 10");
@@ -1398,7 +1400,21 @@ export class StatusService {
       const state = cell.state === "passed" ? cell.flaky ? `flaky pass (passed only after ${cell.earlierFailures.length} earlier failure${cell.earlierFailures.length === 1 ? "" : "s"})` : "pass" : cell.state === "failed" ? "fail" : cell.state === "missing" ? "not run" : cell.state === "timed_out" ? "timed out" : cell.state === "running" ? "running" : cell.state;
       return `${state} (${cell.attempts} attempt${cell.attempts === 1 ? "" : "s"})`;
     };
-    const attemptWords = (a: ReleaseAttemptBody & { id: string }): string => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quoted(a.hostId, 80)}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quoted(a.result.summary, 160)}`}${a.reason === undefined ? "" : `; reason: ${quoted(a.reason, 160)}`}`;
+    // An open attempt also says where it stands (card X09b, the outer watch): waiting for its host, or picked up and when the host was last heard, and when the controller ends it as timed out if no result
+    // comes (the same `releaseDeadline` its expiry uses). The heartbeat time is the host's own record, read once per host per view.
+    const heard = new Map<string, string | undefined>();
+    const lastHeard = async (hostId: string): Promise<string | undefined> => {
+      if (!heard.has(hostId)) heard.set(hostId, ((await this.#runner.get("host-record", hostId))?.body as unknown as { lastSeenAt?: string } | undefined)?.lastSeenAt);
+      return heard.get(hostId);
+    };
+    const openWords = async (a: ReleaseAttemptBody): Promise<string> => {
+      if (a.state !== "issued") return "";
+      const ends = `if no result comes it ends as timed out at ${shown(releaseDeadline(a), 30)}`;
+      if (a.pickedUpAt === undefined) return `; waiting for the host to pick it up; ${ends}`;
+      const h = await lastHeard(a.hostId);
+      return `; picked up ${shown(a.pickedUpAt, 30)}; ${h === undefined ? "the host has no heartbeat on record" : `the host was last heard ${shown(h, 30)}`}; ${ends}`;
+    };
+    const attemptWords = async (a: ReleaseAttemptBody & { id: string }): Promise<string> => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quoted(a.hostId, 80)}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quoted(a.result.summary, 160)}`}${a.reason === undefined ? "" : `; reason: ${quoted(a.reason, 160)}`}${await openWords(a)}`;
     const body: Line[] = [];
     let candidates: readonly CandidateRow[];
     let moreCandidates = false;
@@ -1450,7 +1466,11 @@ export class StatusService {
       const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: an approval shows these failures and accepting it means accepting them)" : ""}.`, c)];
       for (const cell of gate.cells) block.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
       // Newest first: what is running now, or the attempt that just ended, is what the owner is asking about.
-      for (const a of [...attempts].reverse()) block.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      for (const a of [...attempts].reverse()) {
+        // Only what fits is read further (an attempt line past the budget is counted, not built).
+        if (body.length + block.length >= budget) { lineDropped++; continue; }
+        block.push(line(`  attempt ${shown(a.id, 80)}: ${await attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      }
       for (const l of block) { if (body.length < budget) body.push(l); else lineDropped++; }
     }
     const lines: Line[] = [...body];
