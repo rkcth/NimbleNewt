@@ -26,6 +26,7 @@ The [current implementation plan](implementation-plan/README.md) is authoritativ
 | --- | --- |
 | This README | Product behavior and relationships between features. |
 | [Resume reconciliation](resume-reconciliation.md) | Dependency versions, change detection, targeted updates, stale evidence and race-safe continuation. |
+| [User guide](user-guide.md) | For the owner, in plain words: install, a whole first conversation, what the team may do on its own, what the sandbox protects, and how to stop and recover when the model is down (card D01). |
 | [Getting started](getting-started.md) | Step-by-step first run: from a clean install to a first working agent, what to decide, and which steps are not built yet (card U14). |
 | [Private web chat](private-web-chat.md) | Reaching the owner chat from a phone browser over a private network (Tailscale or any equivalent); binding, sessions, resume and revocation. |
 | [Operational contracts](operational-contracts.md) | Definitions, state/ownership rules, authority, durable operations, and recovery boundaries. |
