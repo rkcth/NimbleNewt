@@ -273,7 +273,7 @@ export interface ComposeInput {
   /** Card W10: the second agent that questions a done before it is recorded succeeded (the controller's routed, metered client). Absent: no done is questioned, and each report says so. */
   readonly interrogator?: ReportInterrogatorPort;
   /** Release-test jobs carried to the hosts the owner authorized (card X09b). */
-  readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost" | "expire">;
+  readonly release?: Pick<ReleaseService, "jobsFor" | "pickUp" | "reportFromHost" | "expire"> & Partial<Pick<ReleaseService, "silent">>;
   readonly storage: ControllerStorage; readonly epoch: number; readonly options: DispatchStartOptions;
   /**
    * The controller's tool execution service (card T06b), reached late: it is built over the dispatcher, after this function returns, so these are called only once it exists. `handle` answers the local host's bridge requests, `replaySafe`
@@ -499,7 +499,15 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
     ...(i.release === undefined ? [] : [{ name: "release.expire", run: async () => {
       // The owner is told once per attempt (the command ID is the attempt's) that a release test ended because nothing came back in time: it is never a pass and the platform can be tried again (card X09b finish).
       for (const e of (await i.release!.expire()).ended) {
-        try { await notifications.emitFromController({ commandId: `release-timed-out:${e.attemptId}`, kind: "maintenance", level: "notice", label: "A release test ran out of time", ref: { kind: "principal", id: "dispatcher" }, detail: `The release test ${e.attemptId} on ${e.hostId} (${e.cell.os} ${e.cell.arch}) sent no result in time and was ended as timed out. It does not count as passed; start the platform again to retry.` }); } catch { /* the attempt is ended either way and the release view shows it as timed out; the notice is not sent again (a failed notice, or a stop between the end and the notice, leaves only the view) */ }
+        // The detail is cut to the notice limit: a long host name used to push it past 200 characters, the notice was refused and the owner was told nothing (card X09b watch). The notice points at the attempt:
+        // notices are gathered by what they point at, and under the dispatcher's own name a release notice was folded into an unrelated one (another text, another level).
+        try { await notifications.emitFromController({ commandId: `release-timed-out:${e.attemptId}`, kind: "maintenance", level: "notice", label: "A release test ran out of time", ref: { kind: "release-attempt", id: e.attemptId }, detail: releaseNoticeText(`Release test ${e.attemptId} (${e.cell.os} ${e.cell.arch}) sent no result in time and ended as timed out, not passed; start it again to retry. Host: ${e.hostId}`) }); } catch { /* the attempt is ended either way and the release view shows it as timed out; the notice is not sent again (a failed notice, or a stop between the end and the notice, leaves only the view) */ }
+      }
+      // The outer watch (card X09b): a host that took a release test and then stopped sending heartbeats is told to the owner once per silence (the command ID carries the attempt and the moment the silence
+      // began, so a host that comes back and goes quiet again is told again, a repeated sweep is not; the silences of one test gather on one notice item, counted, with the latest text). Nothing is ended here: a reboot test silences its host on purpose, and the deadline still ends it.
+      for (const s of (await i.release!.silent?.()) ?? []) {
+        const key = createHash("sha256").update(`${s.attemptId}|${s.silentSince}`).digest("hex").slice(0, 24);
+        try { await notifications.emitFromController({ commandId: `release-host-silent:${s.attemptId}:${key}`, kind: "maintenance", level: "notice", label: "A release test host went quiet", ref: { kind: "release-silence", id: s.attemptId }, detail: releaseNoticeText(`Test ${s.attemptId} (${s.cell.os} ${s.cell.arch}) on ${s.hostId}: silent since ${s.silentSince.slice(0, 16).replace("T", " ")} UTC, times out at ${s.endsAt.slice(0, 16).replace("T", " ")} UTC with no result; you may cancel.`) }); } catch { /* told on the next sweep: the command ID is the same, so it is still told once */ }
       }
     } }]),
     ...(i.stops === undefined ? [] : [{ name: "stops.sweep", run: async (by: Principal) => { await i.stops!.sweep(recovering(by)); } }]), ...(i.sweeps ?? []).map((s) => ({ name: s.name, ...(s.apart === true ? { apart: true as const } : {}), run: async (by: Principal) => { await s.sweep(recovering(by)); } })), ...messageLoops(messages, () => activeAgents(storage)), ...(i.workspaceOps === undefined ? [] : workspaceLoops(i.workspaceOps)), ...budgetNoticeLoops(budgets, (n) => { const { purpose, text } = holderNotice(n); return messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); }), ...attendanceLoops(attendance), ...(i.wakeHost === undefined ? [] : wakeAttendLoops(i.wakeHost, wakeAttender(attendance, i.assignments, async (taskId) => { const c = await route({ commandId: `mwl-route:${taskId}`, taskId }); return "none" in c ? undefined : c.harness; }, () => live.dispatcher))), ...meetingLoops(meetings, projects), ...standupLoops(standups, meetings, projects, liveProjects), ...eventLoops(events), ...watchLoops(watches),
@@ -981,4 +989,13 @@ async function stoppedAncestor(storage: ControllerStorage, stops: Pick<StopServi
     at = parent;
   }
   return undefined;
+}
+
+/** A release notice's detail cut to the notice limit (200, `NOTIFICATION_LIMITS.detail`) by code point, so it is never refused for its length. The host's name is written last, so it is what a cut shortens (card X09b watch). */
+export function releaseNoticeText(text: string, max = 200): string {
+  if (text.length <= max) return text;
+  const points = [...text];
+  let out = "";
+  for (const p of points) { if (out.length + p.length > max - 1) break; out += p; }
+  return `${out}…`;
 }
