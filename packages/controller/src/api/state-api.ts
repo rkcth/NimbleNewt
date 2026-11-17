@@ -169,7 +169,7 @@ export interface StateApiDeps {
   /** When present, the owner can read the approval load, answer standing-rule proposals and the profile suggestion (cards A07b, A07c; U08). */
   readonly approvals?: ApprovalsFacade;
   /** The reads of the settings and administration pages (card U08). */
-  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox" | "compatibility">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change" | "setBestEffort" | "enforced">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;

@@ -476,6 +476,35 @@ export async function startController(options: StartOptions): Promise<Controller
  * The owner's inbox text for a maintenance request that waits on the owner: IDs and the kind only (the request's own text stays in the request, which only its readers see). For a protected request it names the
  * administrators who may decide it too, as many as fit in the inbox's detail limit, and how many more there are (card A09 follow-up T6, review).
  */
+/** The record kind of an administrator's notice, and the short code of the administrator that makes its record ID its own. */
+export const ADMIN_NOTICE_REF = "maintenance-admin";
+const adminCode = (administratorId: string): string => createHash("sha256").update(administratorId).digest("hex").slice(0, 8);
+
+/**
+ * The project an administrator's notice belongs to: the first, in order, of the projects in which the agent holds a live grant that is not a tool grant (a grant for every project names none). Undefined for an agent that is gone,
+ * not active, or works in no project (card A09 follow-up T6b).
+ */
+export async function administratorProject(principal: { id: string; kind: string; name: string; state?: string; grants: readonly unknown[] } | undefined, effective: (p: { id: string; kind: string; name: string; grants: never }) => Promise<{ grants: readonly { action: string; project: string; expiresAt?: string }[] }>): Promise<string | undefined> {
+  if (principal === undefined || principal.kind !== "agent" || principal.state !== "active") return undefined;
+  const now = new Date().toISOString();
+  const projects = (await effective(principal as never)).grants.filter((g) => g.project !== "*" && !g.action.startsWith("tool.") && (g.expiresAt === undefined || g.expiresAt > now)).map((g) => g.project).sort();
+  return projects[0];
+}
+
+/**
+ * The text of an administrator's own notice: IDs and the kind only, within the inbox's 200-unit limit (the cut never splits a surrogate pair), and neutral: it says who may decide, not what to decide (the request's
+ * own text stays in the request, which only its readers see).
+ */
+export function maintenanceAdminDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorId">): string {
+  const max = NOTIFICATION_LIMITS.detail;
+  const full = `${n.agentId} asked for a ${n.kind} change. ${n.administratorId ?? "An administrator"} may decide it (maintenance.get reads it, maintenance.decide records the verdict); the owner may too.`;
+  const text = full.length <= max ? full : `${n.agentId} asked for a ${n.kind} change; ${n.administratorId ?? "an administrator"} may decide it with maintenance.decide.`;
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 export function maintenanceOwnerDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorIds">): string {
   const max = NOTIFICATION_LIMITS.detail;
   const admins = n.administratorIds ?? [];
@@ -902,6 +931,51 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(options.adminSecrets === undefined ? {} : { secrets: { ...(options.adminSecrets.store.kind === undefined ? {} : { kind: options.adminSecrets.store.kind }), has: async (name: string) => (await options.adminSecrets!.store.resolve(name)) !== undefined, ...(options.adminSecrets.reserved === undefined ? {} : { reserved: options.adminSecrets.reserved }) } }),
       hosts: async (by) => { const hostsRead = HostService.withEpoch(storage, epoch, assignments, {}); const out = []; let afterId: string | undefined; for (let i = 0; i < 5; i++) { const page = await hostsRead.list(by, { limit: 100, ...(afterId === undefined ? {} : { afterId }) }); for (const h of page.items) out.push({ hostId: h.hostId, ...(h.capabilities === undefined ? {} : { os: h.capabilities.os }), freshness: h.freshness, identity: h.identity }); if (page.next === undefined) break; afterId = page.next; } return out; },
       ...(options.dispatch?.local === undefined ? {} : { localOs: facts.platform }),
+      // Compatibility and migration status (card U08): what each host's worker announced, which active agents hold a store (and a running attempt) where, and the migrations the guard knows. Plain reads.
+      compat: {
+        nodeVersion: facts.nodeVersion,
+        hostRuntimes: async (by) => {
+          const hostsRead = HostService.withEpoch(storage, epoch, assignments, {}); const out = []; let afterId: string | undefined;
+          for (let i = 0; i < 2; i++) {
+            const page = await hostsRead.list(by, { limit: 100, ...(afterId === undefined ? {} : { afterId }) });
+            for (const h of page.items) {
+              const ses = dispatch?.remote === undefined ? undefined : await dispatch.remote.session(dispatch.principal, h.hostId).catch(() => undefined);
+              out.push({ hostId: h.hostId, identity: h.identity, freshness: h.freshness, ...(dispatch?.inProcessHosts.includes(h.hostId) === true ? { inProcess: true } : {}), ...(h.capabilities === undefined ? {} : { os: h.capabilities.os }), ...(ses?.protocol === undefined ? {} : { protocol: ses.protocol }), ...(ses?.workerVersion === undefined ? {} : { workerVersion: ses.workerVersion }), ...(ses?.refusal === undefined ? {} : { refusal: { at: ses.refusal.at, reason: ses.refusal.reason } }) });
+            }
+            if (page.next === undefined) break;
+            afterId = page.next;
+          }
+          return out;
+        },
+        agentWork: async (by) => {
+          // The attempts running now come from the dispatcher (every host, the local one included; card U08d second review), not from a remote store record, which only a remote host keeps.
+          const running = new Map<string, string>();
+          if (dispatch !== undefined) {
+            for (const { attemptId } of (await dispatch.dispatcher.liveAttempts(dispatch.principal)).slice(0, 500)) {
+              const d = await dispatch.dispatcher.get(dispatch.principal, attemptId).catch(() => undefined);
+              if (d !== undefined && d.state !== "finished" && !running.has(d.agentId)) running.set(d.agentId, attemptId);
+            }
+          }
+          const out = []; let afterId: string | undefined;
+          for (let i = 0; i < 4; i++) {
+            const page = await agents.list(by, { state: "active", limit: 50, ...(afterId === undefined ? {} : { afterId }) });
+            for (const a of page.items) {
+              // The dispatcher and the remote store name an agent by its principal ID (`agent:<id>`); the agent record's ID has no prefix.
+              const key = a.id.startsWith("agent:") ? a.id : `agent:${a.id}`;
+              const store = dispatch?.remote === undefined ? undefined : await dispatch.remote.store(dispatch.principal, key).catch(() => undefined);
+              const attemptId = running.get(key);
+              running.delete(key);
+              out.push({ agentId: a.id, name: a.friendlyName, ...(store === undefined ? {} : { hostId: store.ownerHostId }), ...(attemptId === undefined ? {} : { attemptId }) });
+            }
+            if (page.next === undefined) break;
+            afterId = page.next;
+          }
+          // A running attempt whose agent is not among the active agent records read above (an enrolled name with no record, or past the pages read) is still interrupted by a restart.
+          for (const [agentId, attemptId] of running) out.push({ agentId, attemptId });
+          return out;
+        },
+        migration: async (by) => { const m = await migrationGuardRef!.status(by); return { schemaVersion: m.schemaVersion, latestKnown: m.latestKnown, migrations: m.migrations }; },
+      },
     });
     const status = StatusService.withEpoch(storage, epoch, { admin: adminViews, chatBudget: { view: (by) => chatSpend.view(by) }, meetingInquiries: async (v, n) => (floorLive === undefined ? { items: [], truncated: false } : floorLive.openInquiries(v, n)), meetingProcedure: async (v, motionId) => (procedureLive === undefined ? undefined : procedureLive.status(v, motionId)), meetingWaiting: async (v, recordId) => { const w = floorLive === undefined ? undefined : await floorLive.waiting(v, recordId); return w === undefined ? undefined : { waiting: w as unknown as Record<string, unknown> }; }, wipBackup, deskReads: MeetingDeskReadService.withEpoch(storage, epoch), wakes: async () => (wakeHost === undefined || options.meetingWake !== undefined ? undefined : wakeHost.list()), approvals, agents: { list: (by, q) => agents.list(by, q), coordinator: async (owner) => coordinator?.get(owner) }, critical: { holdsUp: () => critical.holdsUp(), list: (by) => critical.list(by) }, webAccess: () => webAccessPort, setup: setupReadiness, landing: () => configuration.installationSettings(Object.values(LANDING_SETTING_KEYS)), landingProjects: async () => { const lands = await branchSettings.landings(); const found = await configuration.projectSettings(Object.values(LANDING_SETTING_KEYS), lands.map((l) => l.projectId)); return { projects: found.projects.map((p) => { const branch = lands.find((l) => l.projectId === p.projectId)?.branch; return { ...p, ...(branch === undefined ? {} : { branch }) }; }), truncated: found.truncated }; }, environments, agentAccess: async (by, agentId) => ({ ...(accessLive.sites === undefined ? {} : { sites: await accessLive.sites.list(by, agentId) }), ...(accessLive.mounts === undefined ? {} : { mounts: (await accessLive.mounts.list(by, agentId)).map((m) => ({ resource: m.resource, mountPath: m.mountPath, requestId: m.requestId })) }) }), maintenance: { list: (by, q) => (maintenanceLive ?? unavailableMaintenance()).list(by, q), get: (by, id) => (maintenanceLive ?? unavailableMaintenance()).get(by, id) }, ...(options.transfer === undefined || transferTargets.length === 0 || stateDirectory === undefined ? {} : { databaseTransfer: { status: async () => (transferLive ?? ((): never => { throw new DomainError("unavailable", "the database transfer is not running"); })()).status(), settings: async () => (transferLive ?? ((): never => { throw new DomainError("unavailable", "the database transfer is not running"); })()).settings() } }), startSizes, jobs, assignments, waits, blockers: BlockerService.withEpoch(storage, epoch), contracts, pauses, revocations: { list: (by, query) => catalogService.revocations(by, query) }, reconnect: { get: (by) => reconnect.get(by), pending: (by, page) => reconnect.pending(by, page) }, catalogPolicy: { get: (by) => catalogPolicy.get(by) }, routes: { controls: () => cutoverNow().controls(), report: (by, q) => cutoverNow().report(by, q), healthStates: (limit) => cutoverNow().healthStates(limit), budgets: async () => Promise.all(Object.entries((await routing.get())?.routes ?? {}).map(async ([route, e]) => { const kind = options.dispatch?.cache?.endpoints[route]?.config.kind ?? await providerKind(storage, route).catch(() => undefined); return { route, ...(e.maxTokens === undefined ? {} : { maxTokens: e.maxTokens }), ...(e.reasoningTokens === undefined ? {} : { reasoningTokens: e.reasoningTokens }), ...(typeof kind === "string" ? { kind } : {}) }; })).then((all) => all.sort((x, y) => (x.route < y.route ? -1 : x.route > y.route ? 1 : 0))) }, retention: { status: (by) => retention.status(by), check: (by, ref) => retention.check(by, ref), settings: async (by) => { const g = await retentionSettings.get(by); return { revision: g.revision, settings: { ...g.settings }, effective: { ...g.effective } }; } }, stall, watch: watchService, eventSources: { get: (by) => eventSourceSettings.get(by) }, release: { gate: (by, candidateId) => releaseNow().gate(by, candidateId), attempts: (by, candidateId) => releaseNow().attempts(by, candidateId), gateAndAttempts: (by, candidateId) => releaseNow().gateAndAttempts(by, candidateId), candidates: (by, page) => releaseNow().candidates(by, page), status: async (by) => { if (activationLive === undefined) throw new DomainError("unavailable", "release staging is not set up on this controller"); return activationLive.status(by); } }, capacity: { limits: { get: (by) => capacityLimits.get(by) }, quotas: { quotas: (by) => capacityAdmission.quotas(by) }, swarm: { get: (by) => swarmLimits.get(by) } }, reviews, ownerQuestions: messages, agenda: meetings, meetings, standups: { recent: async (by, projectId, page) => (dispatch?.standups === undefined ? undefined : dispatch.standups.recent(by, projectId, page)), overview: async (by, projectId, page) => (dispatch?.standups === undefined ? undefined : dispatch.standups.overview(by, projectId, page)), briefs: async (by, occurrenceId) => (dispatch?.standups === undefined ? [] : dispatch.standups.briefs(by, occurrenceId)), ownerQuestions: async (by, projectId) => { if (dispatch?.standups === undefined) throw new DomainError("unavailable", "stand-ups are not running"); return dispatch.standups.ownerQuestions(by, projectId); } }, meetingDecisions: async (by, limit) => (recordsLive === undefined ? { items: [], truncated: false } : recordsLive.ownerPending(by, limit)), meetingQuestions: async (by, limit) => { const r = await meetings.openOwnerQuestions(by, limit); return { truncated: r.truncated, items: r.items.map((q) => ({ id: q.id, revision: q.revision, projectId: q.projectId, topic: q.topic, question: q.question, askedAt: q.askedAt })) }; }, heldResumes: async (by, limit) => (resumesLive === undefined ? { items: [], truncated: false } : resumesLive.held(by, limit)), decisionPatterns: async (by, query) => { if (recordsLive === undefined) throw new DomainError("unavailable", "meeting records are not running"); return recordsLive.learnedPatterns(by, query); }, decisionLog: async (by, query) => { if (recordsLive === undefined) throw new DomainError("unavailable", "meeting records are not running"); return recordsLive.decisionLog(by, query); }, shutdown: { readiness: async (by) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.readiness(by, { kind: "installation", id: "installation" }); } }, handoffs: { forTask: (by, taskId) => handoffs.forTask(by, taskId), marks: (by, q) => handoffs.marks(by, q), cutsForTask: (by, taskId) => handoffs.cutsForTask(by, taskId), archive: (by, q) => handoffs.archive(by, q) }, stops: { cleanupSpend: async (by, scope) => { if (stopsLive === undefined) throw new DomainError("unavailable", "stop is not ready"); return stopsLive.cleanupSpend(by, scope); } }, activity, replay, ...(checked === undefined ? {} : { verifyArtifact: async (id: string) => ({ ok: (await checked.verify(id)).ok }) }) });
     const branchSettings = ProtectedBranchService.withEpoch(storage, epoch);
@@ -1420,10 +1494,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
-      // An administrator's notice is not an inbox item of its own: the owner's inbox keeps one item per request (a second emit for the same request would fold into the owner's item), and an agent has
-      // no inbox outside a task, so the owner's item names the administrators who may decide it and each administrator finds it with maintenance.list. Card A09 follow-up T6, review.
-      if (n.to === "administrator") return;
+    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+      // An administrator's notice is an item of its own only when it is anchored in a project (card A09 follow-up T6b): the inbox keeps one item per kind, project and record, and an item without a project would fold into the owner's
+      // item for the request. Its record ID is the request's with a short code of the administrator, so each administrator has its own item, and it is closed when the request is decided or revoked. One without a project (the
+      // administrator works in none) stays only on the owner's item, and finds the request with maintenance.list.
+      if (n.to === "administrator") {
+        if (n.projectId === undefined || n.administratorId === undefined) return;
+        await notifications.emitFromController({ commandId: `mnt-adm-${n.maintenanceId}-${adminCode(n.administratorId)}`, kind: "maintenance", level: "notice", ref: { kind: ADMIN_NOTICE_REF, id: `${n.maintenanceId}-${adminCode(n.administratorId)}` }, projectId: n.projectId, detail: maintenanceAdminDetail(n) });
+        return;
+      }
       if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: maintenanceOwnerDetail(n) });
       // The supervisor who may decide it is named to the owner at the lower level (an agent has no inbox outside a task; it reads its reports' requests with maintenance.list), so the owner knows who was asked.
       else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, NOTIFICATION_LIMITS.detail) }); } });
