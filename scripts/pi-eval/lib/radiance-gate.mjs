@@ -12,7 +12,10 @@ import { join } from "node:path";
 
 /** Pi's Radiance provider: its OpenAI base URL and key. Throws (without the key) when there is none. */
 export function radianceConfig(home = homedir(), provider = "radiance") {
-  const models = JSON.parse(readFileSync(join(home, ".pi", "agent", "models.json"), "utf8"));
+  const file = join(home, ".pi", "agent", "models.json");
+  let models;
+  // A parse error's message quotes the text around the fault, which may be the key: only the path is reported.
+  try { models = JSON.parse(readFileSync(file, "utf8")); } catch (e) { throw new Error(`Pi's models.json (${file}) could not be read as JSON${e?.code ? ` (${e.code})` : ""}`); }
   const p = models?.providers?.[provider];
   if (!p || typeof p.apiKey !== "string" || p.apiKey.length === 0) throw new Error(`no ${provider} provider with an apiKey in Pi's models.json`);
   return { baseUrl: typeof p.baseUrl === "string" ? p.baseUrl : "http://127.0.0.1:8002/v1", apiKey: p.apiKey };
@@ -54,16 +57,21 @@ export async function readRadiance(cfg, opts = {}) {
  * never loaded: switching the server's model is not the bench's to do). An unreadable server is retried like a busy one.
  */
 export async function waitForIdle({ read, model, maxWaitMs = 30 * 60_000, pollMs = 60_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), log = () => {} }) {
+  if (typeof model !== "string" || model === "") throw new Error("the Radiance gate needs the pinned model's name");
   const t0 = now();
   let why = "not read";
   for (;;) {
     let reading;
     try { reading = await read(); } catch (e) { reading = null; why = `the server could not be read (${String(e?.message ?? e).slice(0, 200)})`; }
     if (reading) {
-      if (model && Array.isArray(reading.models) && !reading.models.includes(model)) return { ok: false, why: `the server does not serve ${model}; the bench never loads or switches a model`, reading, waitedMs: now() - t0 };
-      const idle = radianceIdle(reading.stats);
-      if (idle.ok) return { ok: true, why: idle.why, reading, waitedMs: now() - t0 };
-      why = idle.why;
+      // The served models must be read: a list the server did not give is not a confirmation (retried like a busy server).
+      if (!Array.isArray(reading.models)) why = "the server's model list (GET /v1/models) could not be read";
+      else if (!reading.models.includes(model)) return { ok: false, why: `the server does not serve ${model}; the bench never loads or switches a model`, reading, waitedMs: now() - t0 };
+      if (Array.isArray(reading.models)) {
+        const idle = radianceIdle(reading.stats);
+        if (idle.ok) return { ok: true, why: idle.why, reading, waitedMs: now() - t0 };
+        why = idle.why;
+      }
     }
     if (now() - t0 + pollMs > maxWaitMs) return { ok: false, why: `still not idle after ${Math.round((now() - t0) / 60000)} min: ${why}`, reading, waitedMs: now() - t0 };
     log(`Radiance busy (${why}); waiting ${Math.round(pollMs / 1000)} s`);
@@ -80,6 +88,7 @@ export function serverDelta(before, after) {
 
 /** The gate the batch loop calls before (and after) each run, built on Pi's config and the real server. */
 export function radianceGate({ model, maxWaitMs, pollMs, log, home, fetchImpl } = {}) {
+  if (typeof model !== "string" || model === "") throw new Error("the Radiance gate needs the pinned model's name");
   const cfg = radianceConfig(home);
   const read = () => readRadiance(cfg, { fetchImpl });
   return {

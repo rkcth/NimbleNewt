@@ -93,6 +93,22 @@ test("an agent that crashes is an error, and one that never ends is stopped at i
   assert.equal(r.timedOut, true);
 });
 
+test("the batch's gate is asked again right before the agent starts; a refusal starts no agent and marks the record", async () => {
+  const calls = [];
+  const r = await runOne(ctx("solve"), set.tasks[0], "A", 1, { beforeAgent: async () => { calls.push("asked"); return { ok: false, why: "running=1" }; } });
+  assert.deepEqual(calls, ["asked"]);
+  assert.equal(r.gateRefused, "running=1");
+  assert.equal(r.startedAt, null, "the agent never started");
+  assert.equal(existsSync(join(r.artifacts, "agent.jsonl")), false, "no agent log: the agent was not run");
+  assert.equal(existsSync(join(root, "work", `eval-${r.runId}`)), false, "the checkout is still removed");
+  // Cleared: the agent runs as usual, after the check.
+  let askedAt = null;
+  const ok = await runOne(ctx("solve"), set.tasks[0], "A", 1, { beforeAgent: async () => { askedAt = new Date().toISOString(); return { ok: true }; } });
+  assert.equal(ok.outcome, "verified-finish", ok.reason);
+  assert.ok(askedAt !== null && askedAt <= ok.startedAt, "the check comes before the agent starts");
+  assert.equal(ok.gateRefused, undefined);
+});
+
 test("an agent that makes the change and commits it is a verified finish: the hidden tests run on its work and pass", async () => {
   const r = await runOne(ctx("solve"), set.tasks[0], "A", 1);
   assert.equal(r.outcome, "verified-finish", r.reason);

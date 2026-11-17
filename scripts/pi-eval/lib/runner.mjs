@@ -276,9 +276,10 @@ async function changesOf(dir, base) {
 
 /**
  * One run of one task in one variant. Returns the result record (also appended to results.jsonl by the caller).
- * ctx: { set, repo, depsFrom, workRoot, resultsDir, agent, batchId, benchCommit, keep, log }
+ * ctx: { set, repo, depsFrom, workRoot, resultsDir, agent, batchId, benchCommit, keep, log }; beforeAgent (the batch's
+ * Radiance gate) is awaited right before the agent starts, and a refusal leaves record.gateRefused set, the agent unstarted.
  */
-export async function runOne(ctx, task, variantName, repeat) {
+export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {}) {
   const variant = ctx.set.variants[variantName];
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
   const runId = `${task.id}-${variantName}-r${repeat}-${stamp}`;
@@ -316,6 +317,12 @@ export async function runOne(ctx, task, variantName, repeat) {
     const promptFile = join(artifacts, "prompt.md");
     await writeFile(promptFile, prompt);
     const logFile = join(artifacts, "agent.jsonl");
+    // The shared-server gate, asked again right here: preparing, the setup build and a test-slot wait can take minutes,
+    // so the reading taken before them is not the one the agent starts on. A refusal starts nothing (runBatch stops).
+    if (beforeAgent) {
+      const g = await beforeAgent();
+      if (!g.ok) { record.gateRefused = String(g.why ?? "refused"); throw new Error(`the Radiance gate refused the agent start: ${record.gateRefused}`); }
+    }
     log(`agent started (limit ${task.timeoutMinutes} min)`);
     record.startedAt = new Date().toISOString();
     const t0 = Date.now();

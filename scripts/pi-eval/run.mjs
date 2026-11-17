@@ -23,12 +23,13 @@
 //   --idle-wait-minutes N  how long to wait for an idle Radiance before a run (default 30); past it the batch stops
 //   --test-slot CMD      a slot command (e.g. /tmp/nn-slot.sh) the bench's own builds and grading runs hold a slot of;
 //                        the agent's work never does (default PI_EVAL_TEST_SLOT, else none)
-//   --no-radiance-gate   skip the Radiance check. With the default Pi agent on the radiance provider the bench reads
+//   --no-radiance-gate   skip the Radiance check. With the task set on the radiance provider (any agent but the bench's
+//                        Claude control agent and stub, which never reach Radiance) the bench reads
 //                        GET /stats and /v1/models before each run (key only in the Authorization header) and starts a
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,13 @@ export function parseArgs(argv) {
     o[k] = v;
   }
   return o;
+}
+
+/** The bench's own agents that never send a request to Radiance: agents/ (the Claude control agent, its fake) and the stub. */
+export function offServerAgent(agentPath) {
+  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const a = real(agentPath);
+  return dirname(a) === real(join(here, "agents")) || a === real(join(here, "stub-agent.mjs"));
 }
 
 const defaultRoot = (envName, sub) => process.env[envName] || (existsSync("/srv/code/worktrees-pi") ? join("/srv/code/worktrees-pi", sub) : join(here, "..", "..", "..", "pi-eval", sub));
@@ -127,8 +135,10 @@ async function main() {
   for (const t of tasks) for (const v of variants) for (let r = 1; r <= repeats; r++) jobs.push([t, v, r]);
   const tokenBudget = o["token-budget"] === undefined ? Infinity : Number(o["token-budget"]);
   if (!(tokenBudget > 0)) throw new Error("--token-budget must be a positive number");
-  // The shared-server guard: on for the default Pi agent on Radiance (a control agent such as Claude does not use it).
-  const useGate = !o.flags.has("no-radiance-gate") && o.agent === undefined && set.agent.provider === "radiance";
+  // The shared-server guard: on whenever the task set routes to Radiance, for any agent (the default Pi agent named or not,
+  // or a wrapper of it), except the bench's own agents that never reach Radiance (the Claude control agent and its fake,
+  // the stand-in stub) or an explicit --no-radiance-gate.
+  const useGate = !o.flags.has("no-radiance-gate") && set.agent.provider === "radiance" && !offServerAgent(agentPath);
   if (useGate && concurrency !== 1) throw new Error("the Radiance gate runs one agent at a time: use --concurrency 1, or --no-radiance-gate on a server nobody else uses");
   const idleWaitMinutes = Number(o["idle-wait-minutes"] ?? 30);
   if (!(idleWaitMinutes >= 0)) throw new Error("--idle-wait-minutes must be 0 or more");
@@ -143,7 +153,7 @@ async function main() {
   const gate = useGate ? radianceGate({ model: set.agent.model, maxWaitMs: idleWaitMinutes * 60_000, log: ctx.log }) : null;
   const { records, stopped, spent } = await runBatch({
     jobs, concurrency, gate, tokenBudget, log: ctx.log,
-    runJob: (t, v, r) => runOne(ctx, t, v, r),
+    runJob: (t, v, r, opts) => runOne(ctx, t, v, r, opts),
     onRecord: (rec) => appendJsonl(resultsFile, rec),
   });
   if (stopped !== null) await appendJsonl(join(resultsDir, "batches.jsonl"), { batchId, stopped, spent, tokenBudget: Number.isFinite(tokenBudget) ? tokenBudget : null });
