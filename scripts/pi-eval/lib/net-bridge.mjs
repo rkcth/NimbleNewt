@@ -16,13 +16,20 @@ if (!socketPath || !Number.isInteger(port) || port <= 0 || port > 65_535 || dash
   process.exit(2);
 }
 
-const server = net.createServer((client) => {
-  const upstream = net.connect(socketPath);
-  const end = () => { client.destroy(); upstream.destroy(); };
-  client.on("error", end); upstream.on("error", end);
-  client.on("close", end); upstream.on("close", end);
+/** At most this many connections at once (the proxy itself takes 32); more are refused at once. */
+const BRIDGE_MAX_CONNECTIONS = 64;
+
+// Half-open both ways: a client that ends its side after the request (shutdown of writing) still gets the whole answer.
+// A side that closes lets the other finish writing what it holds, then closes it (destroySoon); an error closes both.
+const server = net.createServer({ allowHalfOpen: true }, (client) => {
+  const upstream = net.connect({ path: socketPath, allowHalfOpen: true });
+  const kill = () => { client.destroy(); upstream.destroy(); };
+  client.on("error", kill); upstream.on("error", kill);
+  client.on("close", () => upstream.destroySoon());
+  upstream.on("close", () => client.destroySoon());
   client.pipe(upstream); upstream.pipe(client);
 });
+server.maxConnections = BRIDGE_MAX_CONNECTIONS;
 server.on("error", (e) => { process.stderr.write(`net-bridge: the model route could not be opened on 127.0.0.1:${port} (${e.code ?? e.message})\n`); process.exit(1); });
 server.listen(port, "127.0.0.1", () => {
   const child = spawn(argv[0], argv.slice(1), { stdio: "inherit" });

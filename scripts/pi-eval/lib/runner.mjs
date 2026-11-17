@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
-import { PRIVATE_DIRS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
+import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
@@ -433,7 +433,9 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
     const own = [dir, iso.base, artifacts];
     // Credential-like files and owner-only folders in what stays readable (lib/isolation.mjs credentialPaths) are hidden too.
     const scan = hideable ? credentialPaths(readOnlyTrees.filter((p) => !listed.some((h) => p === h || p.startsWith(h + "/"))), { exclude: [...own, ...listed] }) : { paths: [], truncated: false };
-    const hidden = [...listed, ...scan.paths];
+    // Sockets and what only a supplementary group opens in the system's folders (a snap's service socket, adm's files).
+    const sys = hideable ? credentialPaths(SYSTEM_ROOTS, { exclude: [...own, ...listed, ...readOnlyTrees, ...PRIVATE_DIRS], byName: false, maxDepth: 6 }) : { paths: [], truncated: false };
+    const hidden = [...listed, ...scan.paths, ...sys.paths];
     const agentFiles = ctx.agent.filter((x) => typeof x === "string" && x !== "node" && existsSync(x)).map((x) => dirname(realpathSync(x)));
     const prefix = hideable ? [...bwrapPrefix({
       bwrap, hidden, readOnlyTrees,
@@ -446,6 +448,7 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
       ...iso, prefix,
       summary: {
         home: "fresh", ownerHomeHidden: hideable, hidden: listed, hiddenByName: scan.paths.length, ...(scan.truncated ? { hiddenByNameTruncated: true } : {}),
+        hiddenSystem: sys.paths, ...(sys.truncated ? { hiddenSystemTruncated: true } : {}),
         privateDirs: hideable ? PRIVATE_DIRS : [], readOnly: hideable ? ["/"] : [], ownProcessList: hideable,
         network: hideable ? "none (the model route only)" : "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true,
       },

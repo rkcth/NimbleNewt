@@ -108,6 +108,8 @@ sh("tmpScriptRead", `cat ${tmpScript}`);
 sh("tmpScriptWrite", `echo 'echo agent-was-here' > ${tmpScript}`);
 sh("shmRead", `cat ${process.env.INCIDENT_SHM ?? "/nonexistent"}`);
 sh("runListing", "ls -A /run /run/user /var/run/docker.sock");
+sh("varLog", "ls -A /var/log | wc -l");
+sh("isoModes", 'stat -c %a "$(dirname "$HOME")" "$(dirname "$HOME")/model.sock"');
 sh("writeOutside", `touch ${process.env.INCIDENT_OUTSIDE_DIR ?? "/nonexistent"}/written-by-agent`);
 const socketPath = process.env.INCIDENT_SOCKET;
 steps.socket = await new Promise((resolve) => {

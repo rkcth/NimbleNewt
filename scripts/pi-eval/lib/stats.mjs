@@ -90,6 +90,8 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
   const widths = cols.map((c, i) => Math.max(c.length, ...rows.map((r) => r[i].length)));
   const fmt = (r) => `| ${r.map((x, i) => x.padEnd(widths[i])).join(" | ")} |`;
   const dirty = records.filter((r) => r.contaminated);
+  // The informational lines below read the runs that count (a contaminated run is only listed apart).
+  const clean = records.filter((r) => !r.contaminated);
   const out = [`# ${title}`, "", `${records.length} run(s)${dirty.length > 0 ? `, ${dirty.length} of them contaminated and left out of the table and the gates (${dirty.map((r) => r.runId ?? "?").join(", ")})` : ""}`, "", fmt(cols), `|${widths.map((w) => "-".repeat(w + 2)).join("|")}|`, ...rows.map(fmt), "",
     "Repeats of one task are not independent samples: each interval treats every run as independent, so with few tasks per size it is narrower than the truth. A gate met on a handful of tasks is a first reading, not a proof.", ""];
   const variants = [...new Set([...groups.map((g) => g.variant), ...dirty.map((r) => String(r.variant ?? "?"))])];
@@ -99,14 +101,14 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
     allPass &&= r.pass;
     // The card's shipped test files, also run on each agent's work: they carry wording later review rounds settled on that
     // no prompt states, so they are shown for information and never gate.
-    const shipped = records.filter((x) => String(x.variant ?? "?") === v && x.shipped);
+    const shipped = clean.filter((x) => String(x.variant ?? "?") === v && x.shipped);
     const vDirty = dirty.filter((x) => String(x.variant ?? "?") === v);
     const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
-    const mism = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
+    const mism = clean.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
     if (vDirty.length > 0) info.push(`- contaminated (left out, never a finish): ${vDirty.length} run(s), ${vDirty.filter((x) => x.outcome === "verified-finish").length} of them otherwise a verified finish; kinds: ${[...new Set(vDirty.flatMap((x) => [...(x.credentialAttempts ?? []), ...(x.guardRefusals > 0 ? ["git refused"] : []), ...((x.foreignPaths ?? []).length > 0 ? ["another checkout"] : [])]))].join(", ") || "-"}`);
     if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes and in the false-done gate`);
     // A timeout whose acceptance tests pass at the limit: the work was done, the agent never ended (it is still a non-finish).
-    const timeouts = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "timeout");
+    const timeouts = clean.filter((x) => String(x.variant ?? "?") === v && x.outcome === "timeout");
     const lateDone = timeouts.filter((x) => x.hidden?.passed === true).length;
     if (timeouts.length > 0) info.push(`- timeouts whose acceptance tests pass at the limit (the work was done, the agent did not end): ${lateDone} of ${timeouts.length} (informational; still non-finishes)`);
     // Variant B's prompt changed with card W06 (a PLAN.md with a commit per step before; the W06 completion rules after,

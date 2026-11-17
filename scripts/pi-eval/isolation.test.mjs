@@ -4,10 +4,11 @@
 // fake keys. Only loopback and local folders are ever used: no request leaves the machine, none goes to Radiance.
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { homedir, tmpdir } from "node:os";
+import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -239,6 +240,9 @@ test("the incident, replayed under the bench's isolation: an empty home, every p
   assert.match(agentEntry.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
   const closed = await new Promise((res) => { const c = net.connect(join(seen[0], "model.sock")); c.on("connect", () => { c.destroy(); res("connected"); }); c.on("error", (e) => res(e.code)); });
   assert.equal(closed, "ENOENT", "the proxy stopped with the run");
+  assert.equal(s.isoModes.stdout, "700\n600\n", `the per-run folder and the proxy's socket are the user's only: ${JSON.stringify(s.isoModes)}`);
+  assert.equal(s.varLog.stdout.trim(), "0", `the system's logs are not the agent's: ${JSON.stringify(s.varLog)}`);
+  assert.ok(Array.isArray(r.isolation.hiddenSystem), JSON.stringify(r.isolation));
   // No network but the model route: the host's loopback services (the listener stands for the team database's port) are
   // out of reach; the host's /tmp, /run and /dev/shm are the agent's own; outside its folders nothing is writable.
   assert.equal(s.loopback?.connected, false, JSON.stringify(s.loopback));
@@ -445,7 +449,7 @@ test("the folders hidden and made read-only: the machine's key folders by defaul
   for (const p of ["/srv/ai", "/srv/code/team", "/srv/code/test-postgres"]) assert.ok(m.includes(p), p);
   const h = defaultHidden({ ownerHome: decoy, extra: [sharedSecrets] });
   assert.ok(h.includes(decoy) && h.includes(sharedSecrets));
-  assert.deepEqual(PRIVATE_DIRS, ["/tmp", "/var/tmp", "/run", "/dev/shm"]);
+  assert.deepEqual(PRIVATE_DIRS, ["/tmp", "/var/tmp", "/run", "/dev/shm", "/var/log"]);
   const own = join(shared, "own-checkout");
   mkdirSync(own, { recursive: true });
   const argv = bwrapPrefix({ hidden: [sharedSecrets], readOnlyTrees: [shared, join(decoy, "inside-hidden"), "/tmp", "/"], writable: [own], readable: [], readOnly: [] });
@@ -462,9 +466,19 @@ test("the folders hidden and made read-only: the machine's key folders by defaul
   assert.equal(argv.indexOf(join(decoy, "inside-hidden")), -1, "a read-only tree inside a hidden folder is not shown again");
   assert.equal(at("--ro-bind", "/tmp", "/tmp"), -1, "a tree that is a private folder does not bring the host's back");
   assert.equal(argv.at(-1), "--");
+  // A hidden place inside a folder bound back later (a program's install under the hidden home, a run's folder) is covered
+  // again after that bind: a later mount would show it otherwise.
+  const prog = join(decoy, "prog"), progSecret = join(prog, ".env"), progKeys = join(prog, "keys");
+  mkdirSync(progKeys, { recursive: true }); writeFileSync(progSecret, "x");
+  const a2 = bwrapPrefix({ hidden: [decoy, progSecret, progKeys], readable: [prog] });
+  const at2 = (...seq) => a2.findIndex((_, i) => seq.every((x, j) => a2[i + j] === x));
+  const progBack = at2("--ro-bind", prog, prog);
+  assert.ok(progBack > at2("--tmpfs", decoy), a2.join(" "));
+  assert.ok(a2.lastIndexOf(progSecret) > progBack && a2[a2.lastIndexOf(progSecret) - 2] === "--ro-bind" && a2[a2.lastIndexOf(progSecret) - 1] === "/dev/null", a2.join(" "));
+  assert.ok(a2.lastIndexOf(progKeys) > progBack && a2[a2.lastIndexOf(progKeys) - 1] === "--tmpfs", a2.join(" "));
 });
 
-test("credential-like places in the readable trees are found by name and by an owner-only mode; the run's own folders are not searched", { skip: process.platform === "win32" }, () => {
+test("credential-like places in the readable trees are found by name and by an owner-only mode; the run's own folders are not searched", { skip: process.platform === "win32" }, async () => {
   const t = join(root, "scan");
   const wt = join(t, "worktrees", "other");
   mkdirSync(join(wt, "packages", "a"), { recursive: true });
@@ -480,6 +494,25 @@ test("credential-like places in the readable trees are found by name and by an o
   assert.deepEqual(rel, ["private-vm", ...[".env", ".env.local", ".git-credentials", "gh-token", "packages/a/credentials.json", "packages/a/id_ed25519", "packages/a/server.pem"].map((f) => `worktrees/other/${f}`)].sort());
   assert.equal(truncated, false);
   assert.equal(credentialPaths([t], { limit: 2 }).truncated, true);
+  // A unix socket (a service any network namespace reaches) and what only a supplementary group may use are found, with
+  // the names left alone (byName off: the system's folders); a link is not followed.
+  const sys = join(t, "sys");
+  mkdirSync(join(sys, "svc"), { recursive: true });
+  const sock = join(sys, "svc", "daemon.sock");
+  const srv = net.createServer();
+  await new Promise((r) => srv.listen(sock, r));
+  try {
+    writeFileSync(join(sys, "group-only.conf"), "x", { mode: 0o640 }); chmodSync(join(sys, "group-only.conf"), 0o640);
+    writeFileSync(join(sys, "everyone.conf"), "x", { mode: 0o644 }); chmodSync(join(sys, "everyone.conf"), 0o644);
+    writeFileSync(join(sys, "server.pem"), "x", { mode: 0o644 }); chmodSync(join(sys, "server.pem"), 0o644);
+    symlinkSync(join(t, "worktrees"), join(sys, "loop-link"));
+    symlinkSync(sys, join(sys, "svc", "back-up"));
+    // As another user would see them: the files' group is one of "our" supplementary groups, the owner someone else.
+    const asOther = credentialPaths([sys], { byName: false, groups: [process.getgid()], uid: -2 }).paths.map((p) => p.slice(realpathSync(sys).length + 1)).sort();
+    assert.deepEqual(asOther, ["group-only.conf", "svc/daemon.sock"]);
+    // The owner's own files are its own (no group grants it more), and by name a key file is found.
+    assert.deepEqual(credentialPaths([sys], { groups: [process.getgid()] }).paths.map((p) => p.slice(realpathSync(sys).length + 1)).sort(), ["server.pem", "svc/daemon.sock"]);
+  } finally { srv.close(); }
 });
 
 test("a run whose isolation cannot be finished leaves nothing behind: no per-run folder, and no key in the error", async () => {
@@ -564,6 +597,11 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
         res.writeHead(401, { "content-type": "application/json", "x-echo": req.headers.authorization, "content-length": Buffer.byteLength(text) });
         res.write(text.slice(0, cut));
         setTimeout(() => res.end(text.slice(cut)), 20);
+      } else if (mode === "gzip") {
+        // A server that compresses although the proxy asked for none: the key would pass unseen in the compressed bytes.
+        seen.push(`accept-encoding ${req.headers["accept-encoding"]}`);
+        res.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" });
+        res.end(gzipSync(JSON.stringify({ got: req.headers.authorization })));
       } else if (mode === "cut") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write("data: {\"x\":1}\n\n");
@@ -578,6 +616,7 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
   const p = await startKeyProxy({ upstreamBaseUrl: `http://127.0.0.1:${echo.address().port}/v1`, apiKey: KEY, socketPath: join(sockDir, "m.sock"), maxBody: 1000 });
   try {
     assert.equal(p.baseUrl, null);
+    assert.equal(statSync(p.socketPath).mode & 0o777, 0o600, "the socket is its user's only");
     const call = (method, path, { body, headers = {} } = {}) => new Promise((res) => {
       const rq = http.request({ socketPath: p.socketPath, method, path, headers: { authorization: `Bearer ${p.token}`, ...headers } }, (r) => {
         let b = ""; r.on("data", (c) => { b += c; }); r.on("end", () => res({ status: r.statusCode, headers: r.headers, body: b })); r.on("error", (e) => res({ status: r.statusCode, body: b, error: e.code ?? "aborted" })); r.on("aborted", () => res({ status: r.statusCode, body: b, error: "aborted" }));
@@ -609,6 +648,20 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
     const chunked = await call("POST", "/v1/chat/completions", { body: "x".repeat(5000), headers: { "transfer-encoding": "chunked" } });
     assert.ok(chunked.status === 413 || chunked.error || /^size [0-9]+$/.test(chunked.body) && Number(chunked.body.slice(5)) <= 1000, JSON.stringify(chunked));
     assert.ok(seen.length <= before + 1, "at most the cut-off chunked request reached the server");
+    mode = "gzip";
+    const gz = await call("POST", "/v1/chat/completions", { body: "{}", headers: { "accept-encoding": "gzip" } });
+    assert.equal(gz.status, 502, JSON.stringify(gz));
+    assert.match(gz.body, /compressed answer/);
+    assert.equal(seen.at(-1), "accept-encoding identity", "the client's accept-encoding is not passed on");
+    // A client that half-closes after its request (ends its writing side) still gets the whole answer.
+    mode = "plain";
+    const half = await new Promise((res) => {
+      const c = net.connect(p.socketPath);
+      let b = "";
+      c.on("connect", () => { c.end(`POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\nauthorization: Bearer ${p.token}\r\ncontent-length: 3\r\n\r\nabc`); });
+      c.on("data", (d) => { b += d; }); c.on("close", () => res(b)); c.on("error", () => {});
+    });
+    assert.match(half, /^HTTP\/1\.1 200[\s\S]*size 3/, half);
     mode = "cut";
     const cut = await call("POST", "/v1/chat/completions", { body: "{}" });
     assert.doesNotMatch(cut.body, /could not be reached/, "nothing appended to a stream cut short");
@@ -622,7 +675,31 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
     echo.close(); echo.closeAllConnections?.();
     rmSync(sockDir, { recursive: true, force: true });
   }
-  // The filter on its own: every split of the key across two chunks.
+  // The filter on its own: every split of the key across two chunks; every split into three; one byte at a time; a key that
+  // overlaps itself; a long answer in many chunks (linear: the held tail is never longer than the key).
+  const through = async (secret, chunks) => {
+    const out = [];
+    const f = redactStream(secret, "[x]");
+    f.on("data", (c) => out.push(c));
+    const done = new Promise((r) => f.on("end", r));
+    for (const c of chunks) f.write(c);
+    f.end();
+    await done;
+    return Buffer.concat(out).toString();
+  };
+  const text = `a${KEY}b${KEY}${KEY}c`;
+  for (let i = 0; i <= text.length; i++) for (let j = i; j <= text.length; j++) assert.equal(await through(KEY, [text.slice(0, i), text.slice(i, j), text.slice(j)]), "a[x]b[x][x]c", `splits at ${i}, ${j}`);
+  assert.equal(await through(KEY, [...text]), "a[x]b[x][x]c", "one byte at a time");
+  for (const [secret, input, want] of [["aab", "aaab", "a[x]"], ["abab", "abababab", "[x][x]"], ["aa", "aaa", "[x]a"], ["xyz", "xy", "xy"], ["xyz", "xyxyz", "xy[x]"]]) {
+    for (let i = 0; i <= input.length; i++) assert.equal(await through(secret, [input.slice(0, i), input.slice(i)]), want, `${secret} in ${input} split at ${i}`);
+    assert.equal(await through(secret, [...input]), want, `${secret} in ${input} a byte at a time`);
+  }
+  const t0 = Date.now();
+  const many = Array.from({ length: 4096 }, (_, i) => (i % 64 === 0 ? `${"y".repeat(8000)}${KEY.slice(0, 7)}` : i % 64 === 1 ? `${KEY.slice(7)}${"z".repeat(8000)}` : "q".repeat(8192)));
+  const long = await through(KEY, many);
+  assert.equal(long.includes(KEY), false);
+  assert.equal(long.split("[x]").length - 1, 64);
+  assert.ok(Date.now() - t0 < 10_000, `32 MB through the filter took ${Date.now() - t0} ms`);
   for (let i = 0; i <= KEY.length; i++) {
     const out = [];
     const f = redactStream(KEY, "[x]");
@@ -665,6 +742,62 @@ test("the bridge: inside a network namespace of its own the agent reaches the pr
     await p.close();
     rmSync(sockDir, { recursive: true, force: true });
   }
+});
+
+test("the bridge on its own: a half-closed request still gets its answer, at most 64 connections, a missing socket or a reset leaves it running, and it ends with its agent", { skip: process.platform !== "linux" }, async () => {
+  const sockDir = mkdtempSync(join(tmpdir(), "brh-"));
+  const p = await startKeyProxy({ upstreamBaseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: MARKERS.key, socketPath: join(sockDir, "m.sock") });
+  const bridge = join(here, "lib", "net-bridge.mjs");
+  // (Outside a namespace here, on a free loopback port of the host's: the bridge itself is what is tested.)
+  const freePort = () => new Promise((r) => { const s = net.createServer(); s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => r(port)); }); });
+  const start = async (sock) => {
+    const port = await freePort();
+    const c = spawn(process.execPath, [bridge, sock, String(port), "--", "/bin/sleep", "60"], { stdio: "ignore" });
+    for (let i = 0; i < 100; i++) { if ((await new Promise((r) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.destroy(); r(true); }); s.on("error", () => r(false)); }))) break; await new Promise((r) => setTimeout(r, 50)); }
+    return { c, port };
+  };
+  const exited = (c) => new Promise((r) => (c.exitCode !== null || c.signalCode !== null ? r() : c.on("exit", r)));
+  const { c, port } = await start(p.socketPath);
+  try {
+    const request = (half) => new Promise((res) => {
+      const s = net.connect(port, "127.0.0.1");
+      let b = "";
+      const req = `GET /v1/models HTTP/1.1\r\nhost: x\r\nauthorization: Bearer ${p.token}\r\nconnection: close\r\n\r\n`;
+      s.on("connect", () => (half ? s.end(req) : s.write(req)));
+      s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => {});
+    });
+    assert.match(await request(false), /^HTTP\/1\.1 200[\s\S]*fake-model/);
+    assert.match(await request(true), /^HTTP\/1\.1 200[\s\S]*fake-model/, "a half-closed request gets the whole answer");
+    // 80 idle connections at once, to a socket that keeps every connection (the proxy itself takes 32): those over the
+    // bridge's cap are closed at once, the rest stay open until closed.
+    const holder = net.createServer((x) => { x.on("error", () => {}); });
+    await new Promise((r) => holder.listen(join(sockDir, "hold.sock"), r));
+    const h = await start(join(sockDir, "hold.sock"));
+    try {
+      const socks = await Promise.all(Array.from({ length: 80 }, () => new Promise((r) => { const s = net.connect(h.port, "127.0.0.1"); s.on("error", () => {}); s.on("close", () => { s.closedEarly = true; }); s.on("connect", () => r(s)); })));
+      await new Promise((r) => setTimeout(r, 500));
+      const kept = socks.filter((s) => !s.closedEarly).length;
+      assert.ok(kept >= 60 && kept <= 64, `${kept} connections kept open`);
+      for (const s of socks) s.destroy();
+    } finally { h.c.kill("SIGTERM"); await exited(h.c); holder.close(); }
+    // A reset mid-request, then a normal request: the bridge is still there.
+    await new Promise((r) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.write("GET /v1/mo"); s.resetAndDestroy(); r(); }); s.on("error", () => r()); });
+    assert.match(await request(false), /^HTTP\/1\.1 200/);
+    assert.equal(c.exitCode, null, "the bridge is still running");
+  } finally {
+    c.kill("SIGTERM");
+    await exited(c);
+  }
+  assert.equal(c.signalCode ?? c.exitCode, "SIGTERM", "it ends with its agent's signal");
+  // A missing proxy socket: the connection is closed, the bridge keeps running.
+  const m = await start(join(sockDir, "missing.sock"));
+  try {
+    const r = await new Promise((res) => { const s = net.connect(m.port, "127.0.0.1"); let b = ""; s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => res("error")); });
+    assert.equal(r, "");
+    assert.equal(m.c.exitCode, null);
+  } finally { m.c.kill("SIGTERM"); await exited(m.c); }
+  await p.close();
+  rmSync(sockDir, { recursive: true, force: true });
 });
 
 // The real Pi program in the isolated home, against the stand-in model server (never Radiance): it starts with only the

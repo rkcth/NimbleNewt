@@ -113,8 +113,11 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   `.pi/agent/models.json` (mode 0600) with that one provider entry, its key and any header fields left out.
 - **No model key.** The per-run Pi configuration points at a proxy the bench runs for the length of the run (a unix
   socket in the run's folder, reached through the sandbox's bridge; 127.0.0.1 and a random port without a sandbox;
-  closed with the run). Bodies over 64 MB answer 413, at most 32 connections, a fresh connection upstream per request,
-  and the key is cut out of every answer (headers and body) in case the model server echoes request headers. It forwards only `POST <api>/chat/completions` and `GET <api>/models`
+  closed with the run; the socket is mode 0600 in the run's 0700 folder). Bodies over 64 MB answer 413, at most 32
+  connections, a fresh connection upstream per request, answers asked for uncompressed (a compressed one answers 502),
+  and the key is cut out of every answer (headers and body) in case the model server echoes request headers. A client
+  that half-closes after its request still gets the answer. The bridge forwards only to that one socket, at most 64
+  connections at once. It forwards only `POST <api>/chat/completions` and `GET <api>/models`
   (the exact path, no query, redirects passed back and never followed), only when the request carries the run's own
   random token as its key (`pi-eval-local-proxy-<48 hex digits>`, in the per-run configuration), and puts the real key in
   the Authorization header instead; anything else answers 404 or 401 and is not forwarded. The key is read by the bench
@@ -150,11 +153,16 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   `credentials`, `credentials.json`, `secrets.json`, `*-token`, ...), every folder named `.ssh`, `.gnupg`, `.aws`,
   `secrets`, `credentials`, ..., and every folder only its owner may open (mode 0700), found by a walk five levels deep
   at each run's start (well under a second here; not into `node_modules`, `.git`, `dist`; the record says how many,
-  `hiddenByName`); `/tmp`, `/var/tmp`, `/run` and `/dev/shm` private (empty and its own: so no socket of the machine is
-  reachable, not the container engine's, ssh-agent's, gpg-agent's, the keyring's, D-Bus, tailscale or the database
-  servers', no other program's scratch file, no shared memory, and a script the owner runs later such as
-  `/tmp/nn-slot.sh` cannot be rewritten); a minimal `/dev` of its own; its own process list and `/proc`; no supplementary
-  groups (the `docker` group is gone inside); and **a network namespace of its own** with only a loopback device: the
+  `hiddenByName`); `/tmp`, `/var/tmp`, `/run`, `/dev/shm` and `/var/log` private (empty and its own: not the container
+  engine's socket, ssh-agent's, gpg-agent's, the keyring's, D-Bus, tailscale or the database servers', no other
+  program's scratch file, no shared memory, no system log, and a script the owner runs later such as `/tmp/nn-slot.sh`
+  cannot be rewritten); every unix socket and everything only one of the user's supplementary groups may read in the
+  system's folders (`/etc`, `/var`, `/opt`, `/srv`, `/mnt`, `/media`, `/usr/local`, `/boot`, six levels deep; here a
+  snap's root service socket under `/var/snap` and the `adm`/`dip` files in `/etc`; the record lists them,
+  `hiddenSystem`) and in the readable trees hidden too; a minimal `/dev` of its own; its own process list and `/proc`.
+  The user's supplementary groups (adm, docker, sudo, ...) show as `nogroup` inside but still open what they open (a user
+  namespace cannot drop them): that is why /var/log is private and group-only places are hidden; a place opened through
+  a group only by an ACL entry (not by its mode bits) outside `/var/log` would not be found. And **a network namespace of its own** with only a loopback device: the
   host's loopback services (the team's Paperclip database, whose login is the package's built-in one, Hermes, the
   model server itself), the tailnet, the internet and the host's abstract sockets are out of reach. The one way out is
   the model route: `lib/net-bridge.mjs` runs first inside the sandbox, listens on a loopback port there and forwards to
@@ -175,12 +183,13 @@ it with the owner's home, keys and network. Since then every agent the bench sta
 
 What the agent can still do, said plainly (in the sandbox): read what the user can read outside the hidden places
 (`/srv/code`, including the reference checkout and other worktrees holding merged solutions, which `contaminated`
-already looks for; system files such as `/etc`; Node's and Pi's installs); a credential kept under a name or in a
-folder the walk does not know, or deeper than five levels, would be readable too, so add such a place with `--hide`;
+already looks for; system files such as `/etc` that everyone may read; Node's and Pi's installs); a credential kept under
+a name or in a folder the walk does not know, or deeper than five levels (six in the system's folders), would be
+readable too, and so would a socket deeper than that, so add such a place with `--hide`;
 send model requests through the proxy (as it could with the key); run the real git by its full path past the wrapper
 (it then meets the run's settings and has no network); push into a repository inside its own folders. It cannot reach
-any network address but the model route, write outside its own folders, or see the host's `/tmp`, `/run` or
-`/dev/shm`. If the bench itself is killed with SIGKILL, the run's folder (its git settings and Pi configuration, never
+any network address but the model route, write outside its own folders, or see the host's `/tmp`, `/run`, `/dev/shm`
+or `/var/log`. If the bench itself is killed with SIGKILL, the run's folder (its git settings and Pi configuration, never
 the key) stays in the temporary folder. A `NODE_OPTIONS` naming a file in a hidden or private place stops the agent's
 Node from starting. Inside the sandbox the agent cannot start a nested bubblewrap (AppArmor here refuses nested user
 namespaces), so its own runs of the worker's and integration's real-sandbox tests skip (or fail under

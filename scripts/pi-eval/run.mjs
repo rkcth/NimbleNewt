@@ -30,7 +30,8 @@
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
 //   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, /srv/ai,
 //                        the team's and test database's key folders and credential-like names and owner-only folders
-//                        in what stays readable (/tmp, /run and /dev/shm are the agent's own; README "The agent's isolation")
+//                        in what stays readable, sockets and group-only files in the system's folders (/tmp, /run, /dev/shm
+//                        and /var/log are the agent's own; README "The agent's isolation")
 //   --allow-visible-home run the agent even where its owner's folders cannot be hidden (no usable bubblewrap: macOS,
 //                        Windows, a Linux without user namespaces); it still gets a fresh home, environment and git
 //                        settings, but can read the owner's files by their full path and reach the network

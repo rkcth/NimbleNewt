@@ -111,4 +111,18 @@ test("a contaminated run is never a verified finish: it is left out of the table
   assert.equal(c.totals[0].finish, 1);
   assert.equal(c.totals[0].contaminated, 1);
   assert.match(c.table[0].at(-1), /^1\/2 CF$/);
+  // Every outcome of a contaminated run is left out of the gates and of the informational lines: a false done, an
+  // interface mismatch, a timeout whose tests pass, a shipped-tests pass.
+  const dirtyKinds = [
+    { ...pushed, outcome: "wrong" }, { ...pushed, outcome: "interface-mismatch" }, { ...pushed, outcome: "timeout", hidden: { passed: true } },
+    { ...pushed, outcome: "stopped-early" }, { ...pushed, outcome: "unclassified" }, { ...pushed, size: "?" }, { ...pushed, shipped: { passed: true } },
+  ];
+  const mixed = renderReport([...good, ...dirtyKinds]);
+  assert.equal(mixed.pass, true, mixed.text);
+  assert.match(mixed.text, /false done 0\/30/);
+  assert.match(mixed.text, /unclassified non-finishes 0 gate = 0: ok/);
+  assert.doesNotMatch(mixed.text, /interface mismatch \(said done|timeouts whose acceptance tests pass|matches shipped wording/);
+  assert.match(mixed.text, /contaminated \(left out, never a finish\): 7 run\(s\)/);
+  const totals = compare(dirtyKinds.map((r) => ({ ...r, taskId: "t", agent: "pi" }))).totals[0];
+  assert.deepEqual([totals.finish, totals.wrong, totals.mismatch, totals.other, totals.contaminated], [0, 0, 0, 0, 7]);
 });

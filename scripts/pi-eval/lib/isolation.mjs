@@ -170,9 +170,14 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
     const headers = { ...req.headers };
     for (const h of ["host", "authorization", "proxy-authorization", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection"]) delete headers[h];
     headers.authorization = `Bearer ${apiKey}`;
+    // Answers uncompressed only: the key is cut out of the bytes as sent, which a compressed answer would hide.
+    headers["accept-encoding"] = "identity";
     let answered = false;
     const preq = mod.request({ protocol: up.protocol, hostname: up.hostname, port: up.port, method: req.method, path: url, headers, agent }, (pres) => {
       answered = true;
+      // A compressed answer (sent although identity was asked for) could carry the key unseen: it is not passed on.
+      const enc = String(pres.headers["content-encoding"] ?? "").trim().toLowerCase();
+      if (enc !== "" && enc !== "identity") { pres.resume(); res.writeHead(502, { "content-type": "text/plain", connection: "close" }); res.end("pi-eval proxy: the model server sent a compressed answer\n"); return; }
       const h = {};
       for (const [k, v] of Object.entries(pres.headers)) {
         if (k === "connection" || k === "keep-alive" || k === "content-length") continue; // the length changes if the key is cut out
@@ -197,6 +202,8 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
     req.pipe(preq);
   });
   server.maxConnections = maxConnections;
+  // A client that ends its side of the connection after its request (a half-close) still gets the answer.
+  server.httpAllowHalfOpen = true;
   server.headersTimeout = 30_000;
   // Longer than any client's own idle limit, so the client, not the proxy, closes an idle connection (no request is sent on
   // a connection the proxy is closing).
@@ -204,6 +211,8 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
   return new Promise((resolveP, reject) => {
     server.once("error", reject);
     const done = () => {
+      // The socket for this user only (its folder, the per-run one, is this user's only too).
+      if (socketPath) { try { chmodSync(socketPath, 0o600); } catch (e) { server.close(); reject(e); return; } }
       const port = socketPath ? null : server.address().port;
       resolveP({
         baseUrl: port === null ? null : `http://127.0.0.1:${port}${basePath}`, socketPath, basePath, token,
@@ -233,10 +242,18 @@ export function sandboxUsable(bwrap = "bwrap") {
  * Code driver, the database servers' sockets, the X server's, and scripts the owner runs later such as /tmp/nn-slot.sh,
  * which the agent could otherwise rewrite), /run (every system socket: the container engine's, whose group can mount the
  * owner's home in a container; the user's runtime folder with ssh-agent, keyring, gpg-agent and D-Bus; tailscale,
- * containerd, the system bus), and /dev/shm (other processes' shared memory, such as the database servers' buffers).
- * Anything of the run's own under them is bound back.
+ * containerd, the system bus), /dev/shm (other processes' shared memory, such as the database servers' buffers) and
+ * /var/log (the system's logs: the agent keeps its user's supplementary groups, see bwrapPrefix, and the adm group reads
+ * the system log, the login log and the journal). Anything of the run's own under them is bound back.
  */
-export const PRIVATE_DIRS = ["/tmp", "/var/tmp", "/run", "/dev/shm"];
+export const PRIVATE_DIRS = ["/tmp", "/var/tmp", "/run", "/dev/shm", "/var/log"];
+
+/**
+ * The system's folders searched at each run's start for unix sockets and for what only a supplementary group may read
+ * (credentialPaths with byName off): a socket outside /run (such as a snap's root service socket under /var/snap) is
+ * reachable from any network namespace, and the agent keeps its user's groups (adm, dip, docker, ...).
+ */
+export const SYSTEM_ROOTS = ["/etc", "/var", "/opt", "/srv", "/mnt", "/media", "/usr/local", "/boot"];
 
 /**
  * This machine's other places holding keys and logins, hidden where they exist: /srv/ai (model files, other projects'
@@ -261,17 +278,26 @@ const CREDENTIAL_FILE = /^(?:\.env(?:\.(?!(?:example|sample|template|dist)$)[\w.
 const CREDENTIAL_DIR = /^(?:\.ssh|\.gnupg|\.aws|\.kube|\.docker|\.secrets?|secrets?|credentials)$/i;
 const SCAN_SKIP = new Set(["node_modules", ".git", "dist", ".cache", ".pnpm-store"]);
 
+/** This process's supplementary groups (its own group left out): what a user namespace cannot drop. */
+export const supplementaryGroups = () => (typeof process.getgroups === "function" ? process.getgroups().filter((g) => g !== process.getgid()) : []);
+
 /**
  * Credential-like places inside the folders the agent can read (`roots`, the read-only trees): files named like keys or
- * logins (CREDENTIAL_FILE), folders named so (CREDENTIAL_DIR), and folders only their owner may open (mode 0700: the owner
- * marked them private). Down to `maxDepth` levels, not into node_modules, .git or dist, not into `exclude` (the run's own
- * folders), links not followed, at most `limit` paths (then `truncated`). The cost is a walk of the trees' upper levels
- * at each run's start (well under a second for /srv/code here); what it finds is hidden like the listed folders.
+ * logins (CREDENTIAL_FILE) and folders named so (CREDENTIAL_DIR) unless `byName` is false; folders of this user only it
+ * may open (mode 0700: the owner marked them private); unix sockets (a service reachable from any network namespace);
+ * and entries of another user that one of `groups` (the supplementary groups, which the sandbox keeps) may read or enter
+ * and others may not. Down to `maxDepth` levels, not into node_modules, .git or dist, not into `exclude` (the run's own folders),
+ * links not followed, at most `limit` paths (then `truncated`). The cost is a walk of the trees' upper levels at each
+ * run's start (well under a second for /srv/code and SYSTEM_ROOTS here); what it finds is hidden like the listed folders.
  */
-export function credentialPaths(roots, { exclude = [], maxDepth = 5, limit = 4000 } = {}) {
+export function credentialPaths(roots, { exclude = [], maxDepth = 5, limit = 4000, byName = true, groups = supplementaryGroups(), uid = typeof process.getuid === "function" ? process.getuid() : -1 } = {}) {
   const found = [];
   let truncated = false;
-  const ex = exclude.map((p) => real(p));
+  const ex = exclude.filter((p) => typeof p === "string").map((p) => real(p)).filter((p) => p !== sep);
+  const gs = new Set(groups);
+  // What a group grants beyond what everyone has (read or enter; writing is moot on a read-only file system, and a socket
+  // is hidden anyway), for an entry this user does not own.
+  const groupOnly = (st) => st.uid !== uid && gs.has(st.gid) && ((st.mode >> 3) & 5 & ~(st.mode & 5)) !== 0;
   const walk = (d, depth) => {
     let entries;
     try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
@@ -279,12 +305,15 @@ export function credentialPaths(roots, { exclude = [], maxDepth = 5, limit = 400
       if (found.length >= limit) { truncated = true; return; }
       const p = join(d, e.name);
       if (ex.some((x) => under(p, x))) continue;
+      if (e.isSymbolicLink()) continue;
+      if (e.isSocket()) { found.push(p); continue; }
+      let st;
+      try { st = statSync(p); } catch { continue; }
+      if (groupOnly(st)) { found.push(p); continue; }
       if (e.isDirectory()) {
-        let mode = 0o755;
-        try { mode = statSync(p).mode; } catch { continue; }
-        if ((mode & 0o077) === 0 || CREDENTIAL_DIR.test(e.name)) { found.push(p); continue; }
+        if (((st.mode & 0o077) === 0 && st.uid === uid) || (byName && CREDENTIAL_DIR.test(e.name))) { found.push(p); continue; }
         if (!SCAN_SKIP.has(e.name) && depth < maxDepth) walk(p, depth + 1);
-      } else if (!e.isSymbolicLink() && CREDENTIAL_FILE.test(e.name)) found.push(p);
+      } else if (byName && CREDENTIAL_FILE.test(e.name)) found.push(p);
     }
   };
   const top = [...new Set(roots.filter((r) => typeof r === "string" && existsSync(r)).map((r) => real(r)))];
@@ -305,12 +334,14 @@ export function installRoot(file) {
 /**
  * The bubblewrap command prefix. The whole file system read-only, a minimal /dev of its own, a process list and /proc of
  * its own, its own IPC, and its own network namespace (only a loopback device: no route to the host's loopback services,
- * the tailnet, the internet or the host's abstract unix sockets; the model is reached through the bridge, lib/net-bridge.mjs);
- * supplementary groups (docker, sudo, ...) are not kept in the namespace. Then the private folders (PRIVATE_DIRS) get an
+ * the tailnet, the internet or the host's abstract unix sockets; the model is reached through the bridge, lib/net-bridge.mjs).
+ * The user's supplementary groups (adm, docker, ...) are shown as nogroup inside but still count for file access (a user
+ * namespace cannot drop them): what they open is hidden instead (/var/log private, credentialPaths). Then the private folders (PRIVATE_DIRS) get an
  * empty tmpfs each, each hidden folder an empty one (a hidden file /dev/null), shortest path first; read-only trees under
  * a private folder are bound back read-only (one that is or holds a private folder is left out: it would bring back the
  * host's /tmp), unless inside a hidden folder; then the run's own folders bound back writable and the programs it needs
- * bound back read-only where they lie under a hidden or private folder; then the bench's own settings read-only.
+ * bound back read-only where they lie under a hidden or private folder, and a hidden place inside one of those covered
+ * again; then the bench's own settings read-only.
  */
 export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writable = [], readable = [], readOnly = [], privateDirs = PRIVATE_DIRS }) {
   const argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--unshare-ipc", "--unshare-net", "--proc", "/proc", "--die-with-parent"];
@@ -335,6 +366,13 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
     .filter(([p]) => existsSync(p))
     .sort((a, b) => a[0].length - b[0].length);
   for (const [p, how] of back) argv.push(how, p, p);
+  // A hidden place inside a folder bound back (a later mount shows what was covered under it) is covered again.
+  for (const h of hidden) {
+    if (!back.some(([p]) => h !== resolve(p) && h !== real(p) && (under(h, resolve(p)) || under(h, real(p))))) continue;
+    let isDir = true;
+    try { isDir = statSync(h).isDirectory(); } catch { continue; }
+    argv.push(...(isDir ? ["--tmpfs", h] : ["--ro-bind", "/dev/null", h]));
+  }
   for (const p of readOnly) if (existsSync(p)) argv.push("--ro-bind", p, p);
   argv.push("--");
   return argv;
