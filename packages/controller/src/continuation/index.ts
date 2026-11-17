@@ -4,3 +4,4 @@ export { controllerResumePorts } from "./resume-ports.js";
 export { RESUME_ROUNDS, ResumeSettingsService, type ResumeSettingsBody } from "./resume-settings.js";
 export { RESUME_REVIEW_LIMITS, ResumeReviewer, type ResumeReviewModel, type ResumeReviewRoutes, type ResumeReviewerOptions } from "./resume-reviewer.js";
 export { adapterCheckpointOf, continuationRecorder, durabilityOf, type CaptureOutcome, type CaptureSources, type CheckpointTaken } from "./host-capture.js";
+export { resumeObserver, type ResumeObserverDeps } from "./resume-observer.js";

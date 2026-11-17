@@ -9,7 +9,7 @@ import { FakeApplier, MAINTENANCE_LIMITS } from "../maintenance/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { PolicyService } from "../policy/index.js";
 import { startController } from "./index.js";
-import { maintenanceOwnerDetail } from "./start.js";
+import { administratorProject, maintenanceAdminDetail, maintenanceOwnerDetail } from "./start.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -466,4 +466,59 @@ test("the owner's maintenance text stays inside the inbox's detail limit with fi
   // An ID too long to name is counted, not cut in half.
   const long = maintenanceOwnerDetail({ agentId: id("r"), kind: "base", administratorIds: [`agent:${"x".repeat(150)}`] });
   assert.ok(long.length <= 200 && /may too: 1 \(maintenance\.settings\.get names them\)\.$/.test(long), long);
+});
+
+test("an administrator who works in a project gets its own notice anchored in that project, one per administrator, closed when the request is decided; one with no project gets none and the owner's item is unchanged (card A09 follow-up T6b)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-t6b-"));
+  const w = await boot(d, new FakeApplier());
+  const { c, call, cid } = w;
+  try {
+    const project = (await call(w.owner, "project.create", { name: "Garden" }, cid("p"))).result.id as string;
+    const other = (await call(w.owner, "project.create", { name: "Orchard" }, cid("p"))).result.id as string;
+    const ann = await w.agent("Ann");
+    const a1 = await w.agent("AdminOne"); const a2 = await w.agent("AdminTwo"); const a3 = await w.agent("AdminThree");
+    // a1 works in two projects (the first in order anchors), a2 in one by a grant for a tool only (that is no project), a3 in none.
+    await c.services.grants.grant(w.rob, { commandId: cid("g"), grantee: a1.principal, action: "task.read", project: other, source: "direct", basis: "test" });
+    await c.services.grants.grant(w.rob, { commandId: cid("g"), grantee: a1.principal, action: "task.read", project, source: "direct", basis: "test" });
+    await c.services.grants.grant(w.rob, { commandId: cid("g"), grantee: a2.principal, action: "tool.read", project, source: "direct", basis: "test" });
+    assert.ok((await call(w.owner, "maintenance.settings.set", { administrators: [a1.principal, a2.principal, a3.principal] }, cid("c"))).ok);
+    const inbox = async () => (await NotificationService.withEpoch(c.storage, c.epoch, {}).inbox(w.rob)).items.filter((i: any) => i.kind === "maintenance");
+    const asked = await call(ann.token, "maintenance.request", { kind: "base", spec: { change: "newer interpreter" }, reason: "needed", rollbackPlan: "undo it" }, "t6b-1");
+    assert.ok(asked.ok, JSON.stringify(asked));
+    const id = asked.result.maintenanceId as string;
+    const mine = (await inbox()).filter((i: any) => i.ref.id.startsWith(id));
+    const own: any[] = mine.filter((i: any) => i.ref.kind === "maintenance-admin");
+    assert.equal(own.length, 1, "only the administrator who works in a project has an item");
+    assert.equal(own[0].projectId, [project, other].sort()[0]);
+    assert.equal(own[0].level, "notice");
+    assert.ok(own[0].detail.includes(a1.principal) && own[0].detail.includes("base") && own[0].detail.length <= 200, own[0].detail);
+    const ownerItem: any = mine.find((i: any) => i.ref.kind === "maintenance");
+    assert.equal(ownerItem.projectId, undefined, "the owner's item has no project");
+    assert.equal(ownerItem.level, "needs-you");
+    // A replay adds nothing.
+    await call(ann.token, "maintenance.request", { kind: "base", spec: { change: "newer interpreter" }, reason: "needed", rollbackPlan: "undo it" }, "t6b-1");
+    assert.equal((await inbox()).filter((i: any) => i.ref.kind === "maintenance-admin").length, 1);
+    // Deciding closes it.
+    const digest = (await call(a1.token, "maintenance.get", { maintenanceId: id })).result.item.specDigest;
+    const decided = await call(a1.token, "maintenance.decide", { maintenanceId: id, verdict: "reject", specDigest: digest }, cid("d"));
+    assert.ok(decided.ok, JSON.stringify(decided));
+    assert.equal((await inbox()).filter((i: any) => i.ref.kind === "maintenance-admin").length, 0, "the administrator's item is closed");
+  } finally {
+    await c.close();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("the administrator's project is the first of its live non-tool grants, and the notice text stays within 200 units without splitting a character (card A09 follow-up T6b)", async () => {
+  const principal = { id: "agent:x", kind: "agent", name: "x", state: "active", grants: [] };
+  const eff = (grants: { action: string; project: string; expiresAt?: string }[]) => async () => ({ grants });
+  assert.equal(await administratorProject(principal, eff([{ action: "task.read", project: "proj-b" }, { action: "task.read", project: "proj-a" }, { action: "tool.x", project: "proj-0" }, { action: "task.read", project: "*" }, { action: "task.read", project: "proj-00", expiresAt: "2000-01-01T00:00:00.000Z" }])), "proj-a");
+  assert.equal(await administratorProject(principal, eff([{ action: "task.read", project: "*" }])), undefined);
+  assert.equal(await administratorProject({ ...principal, state: "disabled" }, eff([{ action: "task.read", project: "proj-a" }])), undefined);
+  assert.equal(await administratorProject(undefined, eff([])), undefined);
+  const long = maintenanceAdminDetail({ agentId: `agent:${"x".repeat(60)}`, kind: "base", administratorId: `agent:${"y".repeat(100)}` });
+  assert.ok(long.length <= 200, String(long.length));
+  const emoji = maintenanceAdminDetail({ agentId: "agent:a", kind: "base", administratorId: `agent:${"\u{1F600}".repeat(120)}` });
+  assert.ok(emoji.length <= 200);
+  assert.doesNotMatch(emoji, /[\ud800-\udbff]$/, "no half of a pair at the end");
 });
