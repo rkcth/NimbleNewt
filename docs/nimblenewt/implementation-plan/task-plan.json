@@ -1663,12 +1663,49 @@
       ],
       "deliverable": "Durable environment-maintenance requests issued through the bridge, change-class policy (skill draft allowed and recorded; extension or executable dependency via preapproved catalogue or supervisor review; broader access via scoped review; host policy, protected rules and shared base via owner or administrator), disposable trial and staged activation (README 327, 343-345, 367-374)",
       "acceptance_and_verification": "The request returns a maintenance ID before the requesting worker is replaced; stage, trial in a disposable environment, Suspend without release, checkpoint, reload or restart, validate and restore, keeping session and compaction state and prior Pause or Suspend intent; failed activation rolls back; unsupported safe restoration leaves the change pending; install scripts never run before exact-artifact approval and run inside the boundary; the reviewer sees exact package version, source, access, install behaviour and rollback plan; standing permission causes no redundant approval; skills and extensions cannot self-grant; a supervisor role alone cannot change the protected base; a review outage leaves the change pending while the approved environment keeps working",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "46266ac5",
+          "b4041953",
+          "ec466241",
+          "5a5a30c6",
+          "0645dd3b",
+          "1bfe88a3",
+          "e9bab098",
+          "cbea81a9",
+          "4b6e3e4b",
+          "2e1d2590",
+          "8cd22394",
+          "eec560a8",
+          "7a158c24",
+          "7654c0fa",
+          "57e68dd7",
+          "530226e4",
+          "addbece8",
+          "b61c5896",
+          "0b7057a1",
+          "a8e8e125",
+          "73234787",
+          "dc2ba5e4",
+          "5d472888",
+          "ec0ebd3c",
+          "cb7c586f",
+          "cac27bbf",
+          "1472b21b"
+        ],
+        "ci_runs": [
+          "43873584750"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Maintenance requests come through the tool bridge (maintenance.request and maintenance.status with the worker's own credential) and return a maintenance ID before the application that replaces the worker runs. Change classes: a skill draft is allowed and recorded; a package or extension is approved by the owner's preapproved catalogue (exact name, version, digest and script rule), a standing permission of exactly approve.maintenance.<kind> without install scripts (no redundant approval; judged again and fenced at the claim), or a supervisor the owner allowed; network and mount access by a scoped decision per request; host policy and the shared base only by the owner or an administrator the owner named (a supervisor role alone never decides them, and an administrator never decides for its own line of management). The environment applier tries the exact digest-verified artifact in a disposable trial, stages an inactive revision, records the prior Pause or Suspend intent, suspends without release (checkpoint), reloads the worker on the new revision, activates it, validates session and compaction state and gives the earlier intent back; a failed reload, activation or validation rolls back to the previous manifest; a suspension or host that cannot restore safely leaves the change approved and pending. Install scripts run only after approval of that exact digest and only inside the bubblewrap sandbox with no network (real-sandbox tests). The reviewer summary shows exact version, digest, source, access, install behaviour (with the scripts the host read from the artifact) and the requester's rollback plan, cleaned and labelled as claims. Specs are closed forms, so a skill or extension cannot carry a grant, and an agent cannot grant or derive a standing permission for itself. A review service that is stopped, crashes, is held or cannot read its gate leaves every change pending while approved changes stay in force. Left (limits): the concrete environment runtime exists only for the local Linux host (off by default, --local-host-environments); remote hosts, macOS and Windows have none, so approved package changes stay pending there; the local host starts a worker per attempt, so its restart hook is a no-op and the session/compaction check confirms only that the session was not touched (a long-lived worker's real session read-back is not exercised); approved host-policy and base requests are recorded and decided but no applier carries them out (they stay approved and pending, as the unsupported-restoration clause requires); network and mount application need the H12i relay and the Linux resource store; an administrator is told through the owner's inbox item only, and a pause placed on an administrator between the check and the claim is not fenced (follow-up T6b in progress). Exhaustive run 43873584750 (main ac1fa648, which contains every commit above) is green on all 18 cells."
+      }
     },
     {
       "id": "A10",
