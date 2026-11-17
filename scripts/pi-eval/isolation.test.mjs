@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { checkConfig, decide, localPath, splitAlias } from "./lib/git-guard.mjs";
-import { PRIVATE_DIRS, PROXY_KEY_PREFIX, PUSH_REFUSED, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
+import { PRIVATE_DIRS, PROXY_KEY_PREFIX, PUSH_REFUSED, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
 import { piBinOf, runOne } from "./lib/runner.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
 
@@ -450,6 +450,8 @@ test("the folders hidden and made read-only: the machine's key folders by defaul
   const h = defaultHidden({ ownerHome: decoy, extra: [sharedSecrets] });
   assert.ok(h.includes(decoy) && h.includes(sharedSecrets));
   assert.deepEqual(PRIVATE_DIRS, ["/tmp", "/var/tmp", "/run", "/dev/shm", "/var/log"]);
+  // The system's folders walked for sockets and group-only places at each run's start (a root left out would go unsearched).
+  assert.deepEqual(SYSTEM_ROOTS, ["/etc", "/var", "/opt", "/srv", "/mnt", "/media", "/usr/local", "/boot"]);
   const own = join(shared, "own-checkout");
   mkdirSync(own, { recursive: true });
   const argv = bwrapPrefix({ hidden: [sharedSecrets], readOnlyTrees: [shared, join(decoy, "inside-hidden"), "/tmp", "/"], writable: [own], readable: [], readOnly: [] });

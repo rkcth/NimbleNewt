@@ -185,7 +185,8 @@ What the agent can still do, said plainly (in the sandbox): read what the user c
 (`/srv/code`, including the reference checkout and other worktrees holding merged solutions, which `contaminated`
 already looks for; system files such as `/etc` that everyone may read; Node's and Pi's installs); a credential kept under
 a name or in a folder the walk does not know, or deeper than five levels (six in the system's folders), would be
-readable too, and so would a socket deeper than that, so add such a place with `--hide`;
+readable too, and so would a socket deeper than that or inside a folder the user may enter but not list (the walk
+cannot see into it), so add such a place with `--hide`;
 send model requests through the proxy (as it could with the key); run the real git by its full path past the wrapper
 (it then meets the run's settings and has no network); push into a repository inside its own folders. It cannot reach
 any network address but the model route, write outside its own folders, or see the host's `/tmp`, `/run`, `/dev/shm`
