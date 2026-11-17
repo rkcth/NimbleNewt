@@ -29,6 +29,7 @@ import { ApprovalLoadService, PolicyService, ProfileSuggestionService } from "..
 import { ReviewService } from "../review/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { CriticalPathService } from "../critical/index.js";
+import { AcceptanceService } from "../submissions/index.js";
 import { STATUS_KINDS, StatusService, type StatusDeps, type StatusOptions, type StatusRequest } from "./index.js";
 import type { Line } from "./index.js";
 import { RETENTION_LINES } from "./status.js";
@@ -59,7 +60,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]>; deliverables?: NonNullable<StatusDeps["deliverables"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -100,7 +101,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.approvals === undefined ? {} : { approvals: deps.approvals }), ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.deliverables === undefined ? {} : { deliverables: deps.deliverables }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -608,6 +609,110 @@ for (const backend of backends) {
     cited(none!.lines);
     await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "x" } as never));
     await refuses("invalid_command", () => c.status.ask(c.owner, { kind: "attention", projectId: c.project, kind2: 1 } as never));
+  });
+
+  suite("attention: a deliverable submitted or accepted against a contract whose work changed since is a stale artifact (contract_changed), filtered, paged, under the deliverable's read rule (card U13)", async (c) => {
+    const ann = await c.agent("ann", [{ action: "task.read", project: c.project }]);
+    const acceptance = AcceptanceService.withEpoch(c.storage, c.epoch, {
+      rolesOf: async () => [],
+      contractVersion: async (taskId) => (await c.contracts.get(c.owner, taskId))?.version ?? 0,
+      verifyArtifact: async (id) => { const r = await c.artifacts.verify(id); return { ok: r.ok, problems: r.problems.length }; },
+    }, options);
+    const status = c.rebuild({}, { deliverables: acceptance });
+    const t = await c.ready("guide task");
+    const other = await c.ready("other task");
+    const version = async (taskId: string): Promise<number> => (await c.contracts.get(c.owner, taskId))!.version;
+    const contract = async (taskId: string, fields: Record<string, unknown>) => c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId, expectedVersion: await version(taskId), ...fields } as never);
+    await contract(t, { acceptanceCriteria: ["covers the install steps"], expectedResult: "SECRET-LOOKING criteria text sk-live-0123456789abcdef" });
+    await contract(other, { acceptanceCriteria: ["x"] });
+    const art = await c.artifacts.publish({ commandId: cid("art"), actor: c.owner.id, name: "guide", projectId: c.project, taskId: t, files: [{ path: "g.txt", content: Buffer.from("guide") }] });
+    const artOther = await c.artifacts.publish({ commandId: cid("art"), actor: c.owner.id, name: "o", projectId: c.project, taskId: other, files: [{ path: "o.txt", content: Buffer.from("o") }] });
+    const deliver = async (title: string, opts: { scope?: string; accept?: boolean; submit?: boolean; taskId?: string; artifactId?: string } = {}): Promise<string> => {
+      const taskId = opts.taskId ?? t;
+      const d = await acceptance.draft(c.owner, { commandId: cid("d"), taskId, type: "document", title, responsibleAgent: ann.id, accessScope: opts.scope ?? "task", artifacts: [{ artifactId: opts.artifactId ?? art.id }] });
+      if (opts.submit === false) return d.id;
+      await acceptance.submit(c.owner, { commandId: cid("s"), id: d.id, expectedRevision: d.revision, contractVersion: await version(taskId) });
+      if (opts.accept !== false) { await acceptance.startReview(c.owner, { commandId: cid("r"), id: d.id, version: 1 }); await acceptance.accept(c.owner, { commandId: cid("a"), id: d.id, version: 1 }); }
+      return d.id;
+    };
+    const accepted = await deliver("Install guide");
+    const submitted = await deliver("Second guide", { accept: false });
+    const privateOne = await deliver("Private \u202e notes", { scope: "owner" });
+    const drafted = await deliver("Only a draft", { submit: false });
+    const onOther = await deliver("Other guide", { taskId: other, artifactId: artOther.id });
+    const view = (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = status) => s.attention(by, { projectId: c.project, kind: "stale_artifact", ...q } as never);
+    const stale = async (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = status) => (await view(q, by, s)).items.filter((i) => i.detail["reason"] === "contract_changed");
+    assert.deepEqual(await stale(), [], "nothing is stale while the contract is unchanged");
+    now += MIN;
+    await contract(t, { priority: 8 });
+    await contract(t, { budget: { maxAttempts: 3 } });
+    assert.deepEqual(await stale(), [], "a new priority or budget does not change what the work must deliver");
+    now += MIN;
+    const changedAt = at();
+    await contract(t, { acceptanceCriteria: ["covers the install steps", "covers upgrades"] });
+    now += MIN;
+    let items = await stale();
+    assert.deepEqual(items.map((i) => i.detail["deliverableId"]).sort(), [accepted, submitted, privateOne].sort(), "submitted and accepted deliverables are stale, a draft is not, another task's is not");
+    assert.ok(!items.some((i) => i.detail["deliverableId"] === drafted || i.detail["deliverableId"] === onOther));
+    const a = items.find((i) => i.detail["deliverableId"] === accepted)!;
+    assert.deepEqual({ ...a.detail }, { deliverableId: accepted, title: "\"Install guide\"", reason: "contract_changed", version: 1, state: "accepted", checkedAgainst: 1, contractVersion: 4, fields: ["acceptanceCriteria"] });
+    assert.equal(a.kind, "stale_artifact");
+    assert.equal(a.at, changedAt, "at is when the work first changed after the version it was checked against");
+    assert.equal(a.agentId, "ann");
+    assert.equal(a.taskId, t);
+    assert.deepEqual([a.cite.kind, a.cite.id], ["deliverable", accepted]);
+    assert.ok((a.cite.revision ?? 0) >= 1);
+    assert.equal(items.find((i) => i.detail["deliverableId"] === submitted)!.detail["state"], "submitted");
+    assert.match(items.find((i) => i.detail["deliverableId"] === privateOne)!.summary, /"Private \\u202e notes"/, "the title is quoted with its control character escaped");
+    for (const i of items) assert.ok(!JSON.stringify(i).includes("install steps") && !JSON.stringify(i).includes("sk-live"), "no contract text is shown, only field names");
+    // A later change keeps the first change time and names every changed field.
+    now += MIN;
+    await contract(t, { expectedResult: "the guide, revised" });
+    items = await stale();
+    const again = items.find((i) => i.detail["deliverableId"] === accepted)!;
+    assert.equal(again.at, changedAt);
+    assert.deepEqual(again.detail["fields"], ["expectedResult", "acceptanceCriteria"]);
+    assert.equal(again.detail["contractVersion"], 5);
+    // Filters: time on `at` (since exclusive, until inclusive), the responsible agent, the task, the task's state.
+    assert.equal((await stale({ since: changedAt })).length, 0);
+    assert.equal((await stale({ until: changedAt })).length, 3);
+    assert.equal((await stale({ until: new Date(Date.parse(changedAt) - 1).toISOString() })).length, 0);
+    assert.equal((await stale({ agentId: "ann" })).length, 3);
+    assert.equal((await stale({ agentId: ann.id })).length, 3);
+    assert.equal((await stale({ agentId: "bob" })).length, 0);
+    assert.equal((await stale({ taskId: other })).length, 0);
+    assert.equal((await stale({ taskId: t })).length, 3);
+    assert.equal((await stale({ state: "done" })).length, 0);
+    assert.equal((await stale({ state: "ready" })).length, 3);
+    // Paging: one item a page reaches each stale deliverable once, in ID order.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const page = await view({ limit: 1, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      for (const x of page.items) if (x.detail["reason"] === "contract_changed") seen.push(String(x.detail["deliverableId"]));
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    assert.deepEqual(seen, [accepted, submitted, privateOne].sort(), "every stale deliverable once, in ID order");
+    // Rights: the deliverable's own read rule. A task reader sees the task-scoped ones but not the owner-scoped one; the responsible agent sees its own; a stranger sees nothing.
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    assert.deepEqual((await stale({}, reader)).map((i) => i.detail["deliverableId"]).sort(), [accepted, submitted].sort());
+    assert.equal((await stale({}, ann)).length, 3);
+    const stranger = await c.agent("stranger", [{ action: "task.read", project: c.other }]);
+    assert.equal((await stale({}, stranger)).length, 0);
+    // Without the deliverable service, deliverables are never listed as stale.
+    assert.equal((await stale({}, c.owner, c.status)).length, 0);
+    // A new version replaces it: a draft is not stale, and one submitted against the contract now in force is not stale either.
+    const cur = (await acceptance.get(c.owner, accepted))!;
+    const nv = await acceptance.newVersion(c.owner, { commandId: cid("nv"), id: accepted, expectedRevision: Number(cur["revision"]), artifacts: [{ artifactId: art.id }] });
+    assert.ok(!(await stale()).some((i) => i.detail["deliverableId"] === accepted), "its newest version is a draft");
+    await acceptance.submit(c.owner, { commandId: cid("s"), id: accepted, expectedRevision: nv.revision, contractVersion: await version(t) });
+    assert.ok(!(await stale()).some((i) => i.detail["deliverableId"] === accepted), "submitted against the contract in force");
+    // The chat's `attention` kind tells it in a cited line, quoting the title and naming the changed parts in words.
+    const told = await status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "stale_artifact" });
+    cited(told!.lines);
+    assert.match(said(told!.lines), /Deliverable "Second guide" \(version 1, submitted\) on guide task was checked against contract version 1; the task's contract has since changed its expected result, its acceptance criteria \(now version 5\)/);
+    assert.ok(!said(told!.lines).includes("sk-live"));
   });
 
   suite("the tool calls of a task are listed with their state, revision and caller, filtered and paged; an unknown result is never confirmed (card U13)", async (c) => {
