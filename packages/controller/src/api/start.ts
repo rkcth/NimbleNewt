@@ -476,6 +476,35 @@ export async function startController(options: StartOptions): Promise<Controller
  * The owner's inbox text for a maintenance request that waits on the owner: IDs and the kind only (the request's own text stays in the request, which only its readers see). For a protected request it names the
  * administrators who may decide it too, as many as fit in the inbox's detail limit, and how many more there are (card A09 follow-up T6, review).
  */
+/** The record kind of an administrator's notice, and the short code of the administrator that makes its record ID its own. */
+export const ADMIN_NOTICE_REF = "maintenance-admin";
+const adminCode = (administratorId: string): string => createHash("sha256").update(administratorId).digest("hex").slice(0, 8);
+
+/**
+ * The project an administrator's notice belongs to: the first, in order, of the projects in which the agent holds a live grant that is not a tool grant (a grant for every project names none). Undefined for an agent that is gone,
+ * not active, or works in no project (card A09 follow-up T6b).
+ */
+export async function administratorProject(principal: { id: string; kind: string; name: string; state?: string; grants: readonly unknown[] } | undefined, effective: (p: { id: string; kind: string; name: string; grants: never }) => Promise<{ grants: readonly { action: string; project: string; expiresAt?: string }[] }>): Promise<string | undefined> {
+  if (principal === undefined || principal.kind !== "agent" || principal.state !== "active") return undefined;
+  const now = new Date().toISOString();
+  const projects = (await effective(principal as never)).grants.filter((g) => g.project !== "*" && !g.action.startsWith("tool.") && (g.expiresAt === undefined || g.expiresAt > now)).map((g) => g.project).sort();
+  return projects[0];
+}
+
+/**
+ * The text of an administrator's own notice: IDs and the kind only, within the inbox's 200-unit limit (the cut never splits a surrogate pair), and neutral: it says who may decide, not what to decide (the request's
+ * own text stays in the request, which only its readers see).
+ */
+export function maintenanceAdminDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorId">): string {
+  const max = NOTIFICATION_LIMITS.detail;
+  const full = `${n.agentId} asked for a ${n.kind} change. ${n.administratorId ?? "An administrator"} may decide it (maintenance.get reads it, maintenance.decide records the verdict); the owner may too.`;
+  const text = full.length <= max ? full : `${n.agentId} asked for a ${n.kind} change; ${n.administratorId ?? "an administrator"} may decide it with maintenance.decide.`;
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 export function maintenanceOwnerDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorIds">): string {
   const max = NOTIFICATION_LIMITS.detail;
   const admins = n.administratorIds ?? [];
@@ -1416,10 +1445,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
-      // An administrator's notice is not an inbox item of its own: the owner's inbox keeps one item per request (a second emit for the same request would fold into the owner's item), and an agent has
-      // no inbox outside a task, so the owner's item names the administrators who may decide it and each administrator finds it with maintenance.list. Card A09 follow-up T6, review.
-      if (n.to === "administrator") return;
+    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+      // An administrator's notice is an item of its own only when it is anchored in a project (card A09 follow-up T6b): the inbox keeps one item per kind, project and record, and an item without a project would fold into the owner's
+      // item for the request. Its record ID is the request's with a short code of the administrator, so each administrator has its own item, and it is closed when the request is decided or revoked. One without a project (the
+      // administrator works in none) stays only on the owner's item, and finds the request with maintenance.list.
+      if (n.to === "administrator") {
+        if (n.projectId === undefined || n.administratorId === undefined) return;
+        await notifications.emitFromController({ commandId: `mnt-adm-${n.maintenanceId}-${adminCode(n.administratorId)}`, kind: "maintenance", level: "notice", ref: { kind: ADMIN_NOTICE_REF, id: `${n.maintenanceId}-${adminCode(n.administratorId)}` }, projectId: n.projectId, detail: maintenanceAdminDetail(n) });
+        return;
+      }
       if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: maintenanceOwnerDetail(n) });
       // The supervisor who may decide it is named to the owner at the lower level (an agent has no inbox outside a task; it reads its reports' requests with maintenance.list), so the owner knows who was asked.
       else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, NOTIFICATION_LIMITS.detail) }); } });
