@@ -1304,6 +1304,8 @@ for (const backend of backends) {
       out["work.answer"] = await send("work.answer", { answers: ["x"] }, "w12");
       // Card H12p: nor is the agent's own refresh made (it rewrites files of the checkout).
       out["work.refresh"] = await send("work.refresh", {}, "w13");
+      // Card L04g: nor what its work relied on.
+      out["dependency.record"] = await send("dependency.record", { dependencies: [{ kind: "file", key: "a.md" }] }, "w14");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -1314,10 +1316,40 @@ for (const backend of backends) {
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
+  });
+
+  suite("dependency.record (card L04g): the agent's note of what its work relied on goes to resume.dependencies.note with its own credential, for the attempt's own task, keyed by the call; a named task is refused; the owner sees a step", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const seen: { token: unknown; raw: { op: string; commandId?: string; args: Record<string, unknown> } }[] = [];
+    const steps: string[] = [];
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (token: unknown, raw: unknown) => { seen.push({ token, raw: raw as never }); return { v: 1, op: "x", ok: true, result: { recorded: 1, entries: [{ kind: "file", key: "a.md", checkedBy: "controller" }] } } as never; } },
+      activity: async (step) => { steps.push(step.summary); },
+      isLocalHost: () => true,
+    });
+    const out: Record<string, BridgeResponse> = {};
+    let token = "";
+    c.worker.script = c.session(async (s) => {
+      token = s.token;
+      const send = (args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op: "dependency.record", callId, args });
+      out["ok"] = await send({ dependencies: [{ kind: "file", key: "a.md" }] }, "d1");
+      out["named"] = await send({ taskId: "task-aaaaaaaaaaaaaaaaaaaa", dependencies: [{ kind: "file", key: "a.md" }] }, "d2");
+    });
+    await c.tick();
+    assert.deepEqual(good(out["ok"]!), { recorded: 1, entries: [{ kind: "file", key: "a.md", checkedBy: "controller" }] });
+    assert.equal(bad(out["named"]!).code, "invalid_command", "the task is the attempt's own, never one the request names");
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.token, token, "with the worker's own credential");
+    assert.equal(seen[0]!.raw.op, "resume.dependencies.note");
+    assert.deepEqual(seen[0]!.raw.args, { taskId, dependencies: [{ kind: "file", key: "a.md" }] });
+    assert.match(String(seen[0]!.raw.commandId), /^bridge:/);
+    assert.ok(steps.some((x) => /recorded 1 input\(s\) its work relied on/.test(x)), steps.join("\n"));
   });
 
   suite("task.recall (card W13): the attempt and so the task come from the credential, a named task is refused, a call is a read that a pause does not stop, the cap refuses with a clear text, an answered call is answered again for free, and the owner sees a counts-only step", async (c) => {

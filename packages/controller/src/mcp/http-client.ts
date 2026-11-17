@@ -30,7 +30,7 @@ export const MCP_HTTP_LIMITS = { timeoutMs: 30_000, maxBytes: 4 * 1024 * 1024, e
 const OWN_HEADERS = /^(host|content-type|content-length|accept|connection|transfer-encoding|mcp-session-id|mcp-protocol-version)$/i;
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 
-type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
+export type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
 interface Answer { readonly status: number; readonly headers: IncomingMessage["headers"]; readonly message?: { readonly [key: string]: Json } }
 
 const unavailable = (target: RemoteTarget, why: string): DomainError => new DomainError("unavailable", `MCP server ${target.registryName}: ${redactText(why).slice(0, MCP_HTTP_LIMITS.errorText)}`);
@@ -198,6 +198,14 @@ export class RemoteMcpClient {
     const content = result["content"];
     if (!Array.isArray(content)) throw new DomainError("unavailable", "the MCP server's tool answer has no content list");
     return { content: content as readonly Json[], isError: result["isError"] === true, ...(result["structuredContent"] === undefined ? {} : { structuredContent: result["structuredContent"] }) };
+  }
+
+  /** Card L04g: reads one resource (`resources/read`); the `contents` list as the server gave it: data, never instructions. */
+  async readResource(serverId: string, uri: string): Promise<readonly Json[]> {
+    if (typeof uri !== "string" || uri.length === 0 || uri.length > 400) throw new DomainError("invalid_command", "uri: must be a resource URI", { field: "uri" });
+    const contents = (await this.request(serverId, "resources/read", { uri }))["contents"];
+    if (!Array.isArray(contents)) throw new DomainError("unavailable", "the MCP server's resource answer has no contents list");
+    return contents as readonly Json[];
   }
 
   /** The tools the server offers now (for the catalogue check): the first page only; a server that pages its list (`nextCursor`) is not followed further here. */

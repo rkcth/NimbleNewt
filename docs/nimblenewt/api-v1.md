@@ -4110,6 +4110,18 @@ Arguments:
 
 Result: `{ recorded }`.
 
+#### `resume.dependencies.note`
+
+The agent working a task (or the owner) names what the work relied on, and the controller looks and records it as it is now (card L04g): a file or folder is looked at in the task's checkout (on the host that holds it) and recorded with its hash or names; a search is made again and recorded with its digest; a desk record or decision is hashed; an external address or MCP resource is read once, only where the owner allowed a resume check to read it (resume.externalReads, then the task's own network grant or an approved remote MCP server that lists the resource). A hash, ETag or names you give must be what the controller finds. What the controller cannot look at is recorded only with what you saw (your word, said so in the answer), else that item is refused and nothing is recorded. The text the controller read is kept, redacted and bounded, so a later resume can show its reviewer what changed. Same right as `resume.dependencies.record`.
+
+Arguments:
+
+- `taskId`: the task
+- `dependencies`: [{ kind: file, directory, search, record, decision, external or mcp-resource, key, query?, hash?, etag?, members?, freshness?, server?, protocol? }], 1 to 20
+- `commandId`: required
+
+Result: `{ recorded, entries: [{ kind, key, checkedBy: controller or recorder, why? }] }`.
+
 #### `resume.sweep`
 
 Owner only: carries unfinished resume checks on after a restart.

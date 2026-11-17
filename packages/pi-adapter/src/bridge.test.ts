@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent and carrying no replay flag", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -203,4 +203,23 @@ test("task.recall: sent as the call it is; an older controller's 'not an operati
   const lost = String(await tool(broken).execute({}, { callId: "call_4" } as never));
   assert.match(lost, /^refused \(unavailable\): task\.recall could not be delivered/);
   assert.ok(!lost.includes("socket hang up"), "no internal error text reaches the model");
+});
+
+// Card L04g: a Pi agent records what its work relied on with the bridge tool dependency-record. The tool names no task (the controller takes the attempt's own); its answer is the controller's; an older
+// controller without the operation is answered in words.
+test("dependency.record: sent as the call it is, with no way to name a task; an older controller's 'not an operation of the bridge' is answered in words (card L04g)", async () => {
+  const tool = (b: ReturnType<typeof createBridge>) => b.tools.find((t) => t.name === bridgeToolName("dependency.record"))!;
+  assert.equal(bridgeToolName("dependency.record"), "nimblenewt__dependency-record");
+  const answered: BridgeRequest[] = [];
+  const current = createBridge({ send: async (r) => { answered.push(r); return { ok: true, result: { recorded: 1, entries: [{ kind: "file", key: "a.md", checkedBy: "controller" }] } }; } });
+  const text = await tool(current).execute({ dependencies: [{ kind: "file", key: "a.md" }] }, { callId: "call_1" } as never);
+  assert.deepEqual(answered.map((r) => [r.op, r.args]), [["dependency.record", { dependencies: [{ kind: "file", key: "a.md" }] }]]);
+  assert.match(String(text), /"checkedBy":"controller"/);
+  const props = Object.keys((tool(current).parameters as unknown as { properties: Record<string, unknown> }).properties);
+  assert.deepEqual(props, ["dependencies"], "no argument can name a task, a project or an agent");
+  assert.match(tool(current).description, /The controller looks and records it/);
+  const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
+  assert.match(String(await tool(old).execute({ dependencies: [] }, { callId: "call_2" } as never)), /^refused \(unknown_tool\): dependency\.record is not available on this controller; nothing was recorded/);
+  const refused = createBridge({ send: async () => ({ ok: false, code: "invalid_command", message: "dependencies[0].hash: is not what the file holds now" }) });
+  assert.match(String(await tool(refused).execute({ dependencies: [] }, { callId: "call_3" } as never)), /^refused \(invalid_command\): dependencies\[0\]\.hash/);
 });

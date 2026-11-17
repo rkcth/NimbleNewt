@@ -39,7 +39,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -191,7 +191,7 @@ export interface BuiltinTool {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
@@ -515,6 +515,7 @@ export class ToolExecutionService {
               case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
               case "turn.continue": return this.#turnContinue(context, args);
               case "task.recall": return await this.#recall(context, args);
+              case "dependency.record": return await this.#dependencyRecord(token, context, args);
             }
           };
           response = checked.admit !== undefined && ADMITTED.has(request.op as BridgeOperation) ? await this.#admitted(context, request, checked.admit, perform) : await perform();
@@ -743,6 +744,7 @@ export class ToolExecutionService {
       : op === "maintenance.request" && typeof result["maintenanceId"] === "string" ? { summary: `${c.agent.id} asked for an environment change, maintenance request ${id("maintenanceId")} (${id("status")}), through the bridge.`, refs: [{ kind: "maintenance", id: id("maintenanceId") }] }
       : op === "task.recall" ? { summary: `${c.agent.id} read its own task's records back with task.recall (${id("part")}; ${typeof result["chars"] === "number" ? result["chars"] : "?"} characters${result["found"] === false ? ", nothing found" : ""}).`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "turn.continue" ? { summary: `The turn of ${c.agent.id} was continued (nudge ${typeof result["n"] === "number" ? result["n"] : "?"} of ${typeof result["max"] === "number" ? result["max"] : "?"}): it had ended ${typeof result["endKind"] === "string" ? `as ${result["endKind"]}` : "early"}, without a tool call or work.end.`, refs: [{ kind: "task", id: c.taskId }] }
+      : op === "dependency.record" ? { summary: `${c.agent.id} recorded ${typeof result["recorded"] === "number" ? result["recorded"] : "?"} input(s) its work relied on through the bridge, so a resume is checked against them.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
@@ -806,6 +808,17 @@ export class ToolExecutionService {
     const reply = await this.#deps.recall.recall({ attemptId: c.attemptId, callId: c.callId, by: c.scoped }, args);
     if (!reply.ok) return refusal(reply.code, reply.message);
     return ok(reply.result as unknown as JsonObject);
+  }
+
+  /**
+   * Card L04g: the agent records what its work relied on (`resume.dependencies.note`), through the same door every client uses, with the worker's task credential: the task is the attempt's own, never one the request names, and asking
+   * again with the call ID records once. The controller looks at what it names and fills in what it saw, so a later resume of the task is checked against it.
+   */
+  async #dependencyRecord(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["dependencies"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op: "resume.dependencies.note", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { taskId: c.taskId, dependencies: args["dependencies"] ?? null } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
   /**

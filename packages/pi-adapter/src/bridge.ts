@@ -38,6 +38,7 @@ interface Spec { readonly op: string; readonly description: string; readonly par
 /** The operations and their declarations. Fixed text and fixed order: the declarations are part of every prompt's head, so they never change while the extension is loaded. */
 const SPECS: readonly Spec[] = [
   { op: "artifact.publish", description: "Publish output of this task that is not code (a research note, a document, a design description) as a named artifact of text files. It is recorded in the task's activity; publishing is not submitting.", parameters: obj({ name: text("a short label"), files: Type.Array(Type.Object({ path: text("a relative path, such as notes/summary.md"), text: text("the file's text") }, { additionalProperties: false })) }, ["name", "files"]) },
+  { op: "dependency.record", description: "Record what your work relied on: kind file, directory, search, record, decision, external or mcp-resource; key its path, ID, URL, URI or words. The controller looks and records it.", parameters: obj({ dependencies: Type.Array(obj({ kind: Type.String(), key: Type.String(), hash: Type.String(), server: Type.String() }, ["kind", "key"])) }, ["dependencies"]) },
   { op: "desk.read", description: "Read one record from your desk (or a shared record you may read) by its ID.", parameters: obj({ recordId: text("the desk record ID") }, ["recordId"]) },
   { op: "desk.write", description: "Write a record to your desk for this task. Use visibility shared and status accepted for work others should use, such as a script and its notes.", parameters: obj({ kind: text("note, plan, result or another desk kind"), title: text("a short title"), body: text("the text"), visibility: text("shared or private"), status: text("draft or accepted"), supersedes: text("an earlier record of yours this replaces"), sources: Type.Array(Type.String()) }, ["kind", "title", "body", "visibility"]) },
   { op: "job.cancel", description: "Stop a job of this task; force stops it at once.", parameters: obj({ jobId: text("job-..."), reason: text("why"), force: Type.Boolean() }, ["jobId"]) },
@@ -75,7 +76,9 @@ export const BRIDGE_REFUSED_PREFIX = "refused (";
 const render = (reply: BridgeReply): string => (reply.ok ? JSON.stringify(reply.result) : `${BRIDGE_REFUSED_PREFIX}${reply.code}): ${reply.message}`);
 /** A controller older than the tool answers that the operation is not one of the bridge's (card W13, version skew): the model is told the tool is not there, in words, and goes on. */
 const UNKNOWN_OP = /is not an operation of the bridge/;
-const renderFor = (op: string, reply: BridgeReply): string => (op === "task.recall" && !reply.ok && UNKNOWN_OP.test(reply.message) ? `${BRIDGE_REFUSED_PREFIX}unknown_tool): task.recall is not available on this controller; work from your notes and the task's own text` : render(reply));
+const renderFor = (op: string, reply: BridgeReply): string => (op === "task.recall" && !reply.ok && UNKNOWN_OP.test(reply.message) ? `${BRIDGE_REFUSED_PREFIX}unknown_tool): task.recall is not available on this controller; work from your notes and the task's own text`
+  // Card L04g: an older controller has no dependency.record; the model is told so in words and goes on (nothing was recorded).
+  : op === "dependency.record" && !reply.ok && UNKNOWN_OP.test(reply.message) ? `${BRIDGE_REFUSED_PREFIX}unknown_tool): dependency.record is not available on this controller; nothing was recorded, carry on with the work` : render(reply));
 
 /** One snapshot of the catalogue's declarations: what a request in flight was shown. Frozen. */
 export interface Declarations { readonly revision: string; readonly tools: readonly { readonly name: string; readonly kind: string; readonly version: string }[]; readonly complete: boolean }
@@ -162,6 +165,7 @@ export function createBridge(transport: BridgeTransport, options: { maxTools?: n
     execute: async (args: unknown, context: { readonly callId: string }) => {
       const callId = unique(context.callId);
       // A memory read that cannot be delivered (a controller that is gone or a wire that fails) is an answer in words, not a fault of the worker.
+      if (spec.op === "dependency.record") return renderFor(spec.op, await transport.send({ op: spec.op, callId, args: args as Record<string, unknown> }));
       if (spec.op === "task.recall") {
         try { return renderFor(spec.op, await transport.send({ op: spec.op, callId, args: args as Record<string, unknown> })); } catch { return `${BRIDGE_REFUSED_PREFIX}unavailable): task.recall could not be delivered to the controller; work from your notes and ask again later`; }
       }

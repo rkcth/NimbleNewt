@@ -216,6 +216,25 @@ export class McpService {
     return { url: server.remote.url, name: server.name, protocolRevision: server.protocolRevision };
   }
 
+  /**
+   * Card L04g: whether a resume check may read a resource a task recorded from a server, by the server's name as the dependency names it: the owner approved the server and has not revoked it, it is a remote one (the controller starts no
+   * local server for a check), the task's project is in its audience, the resource's URI is among the resources the owner allowed for it, and the server is still pinned to the protocol revision the read was made at. Answers the
+   * server's ID, or why not (said to the owner in the check's detail). Read fresh at every check; staff only.
+   */
+  async resumeReadable(by: Principal, read: { readonly server: string; readonly projectId: string; readonly uri: string; readonly protocol?: string }): Promise<{ readonly serverId: string; readonly protocol: string } | { readonly refused: string }> {
+    if (!(by.kind === "owner" || by.kind === "host" || by.kind === "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not ask which MCP resources a resume check may read`);
+    if (typeof read.server !== "string" || !NAME.test(read.server)) return { refused: "the dependency does not name a registered MCP server" };
+    const id = derivedId("mcs", read.server);
+    const server = (await this.#runner.get("mcp-server", id))?.body as unknown as ServerBody | undefined;
+    if (server === undefined) return { refused: `no MCP server named ${read.server} is registered` };
+    if (server.state !== "approved") return { refused: `MCP server ${read.server} is ${server.state}` };
+    if (server.mode !== "remote" || server.remote === undefined) return { refused: `MCP server ${read.server} is a local server, which a resume check does not start` };
+    if (!server.audience.includes(read.projectId)) return { refused: `the task's project is not in the audience of MCP server ${read.server}` };
+    if (!server.allowed.resources.includes(read.uri)) return { refused: `the owner has not allowed reading that resource from MCP server ${read.server}` };
+    if (read.protocol !== undefined && read.protocol !== server.protocolRevision) return { refused: `MCP server ${read.server} is pinned to protocol ${server.protocolRevision} now, not the ${String(read.protocol).slice(0, 20)} it was read with` };
+    return { serverId: id, protocol: server.protocolRevision };
+  }
+
   /** Whether a server is approved and not revoked, for a caller that starts a long-running operation on it (card T07). */
   async usable(serverId: string): Promise<boolean> {
     const server = (await this.#runner.get("mcp-server", clean(serverId, "serverId", SERVER_ID, "is not an MCP server ID")))?.body as unknown as ServerBody | undefined;

@@ -5,9 +5,10 @@ import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, type Tas
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { canRead, type DeskRecordBody } from "../context/desks.js";
 import { allows, inTaskScope } from "../security/access.js";
+import { redactText } from "../security/redact.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /** What a piece of work depended on (card C03). */
 export const DEPENDENCY_KINDS = ["file", "directory", "search", "record", "decision", "tool-version", "environment", "external", "mcp-resource", "negative"] as const;
@@ -62,15 +63,25 @@ export interface Observation {
   readonly members?: readonly string[];
   /** The oldest position in the event stream that can still be read; a search made before it can no longer be checked from events. */
   readonly cursorFloor?: number;
+  /** Why it could not be read now (card L04g: an external or MCP resource the owner has not allowed to be read, or one that did not answer). Said in the check's detail; the status stays `unknown`. */
+  readonly unread?: string;
 }
 export interface DependencyCheck { readonly id: string; readonly kind: DependencyKind; readonly key: string; readonly status: DependencyStatus; readonly detail: string }
 
-export const DEPENDENCY_LIMITS = { entries: 500, key: 300, members: 200, member: 200, observations: 500, /** Searches one check makes again (card L04d); the rest of a manifest's searches stay unknown. */ searches: 10 } as const;
+export const DEPENDENCY_LIMITS = { entries: 500, key: 300, members: 200, member: 200, observations: 500, /** Searches one check makes again (card L04d); the rest of a manifest's searches stay unknown. */ searches: 10, /** The longest text kept beside an entry for the resume reviewer (card L04g), in characters. */ text: 64 * 1024 } as const;
+const TEXT_KIND = "dependency-text";
+/** The text the controller read when it recorded an entry (card L04g): redacted, bounded, and only for the hash it was read with. */
+interface DependencyText { readonly taskId: string; readonly entryId: string; readonly hash: string; readonly text: string; readonly at: string }
 const HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const sha = (v: string): string => createHash("sha256").update(v).digest("hex");
+/** A reader's reason, as the check's detail carries it: one line, redacted, at most 200 characters. */
+const clipReason = (v: string): string => redactText(v.replace(/[\u0000-\u001f\u007f]/g, " ")).slice(0, 200);
 
 export type NewDependency = Omit<DependencyEntry, "id" | "observedAt">;
+
+/** The ID an entry of this kind and key gets in a manifest (a search's also from its project): recording the same again replaces it. */
+export const dependencyEntryId = (kind: string, key: string, projectId?: string): string => derivedId("dpm", `${kind}|${projectId ?? ""}|${key}`);
 
 /**
  * Dependency manifests (card C03): what a task read, wrote, searched and relied on, with enough to tell later whether it still holds. A file, a directory (and which names it held), a search (its scope and
@@ -110,8 +121,12 @@ export class DependencyService {
     return { kind: "search", key, scope: { projectId, query: query.query }, cursor: at.next, hash };
   }
 
-  /** Records dependencies of a task (the agent working it, or the owner). The same dependency again replaces its observation. */
-  async record(by: Principal, command: NoActor & { taskId: string; dependencies: readonly NewDependency[] }): Promise<{ recorded: number }> {
+  /**
+   * Records dependencies of a task (the agent working it, or the owner). The same dependency again replaces its observation.
+   * `texts` (card L04g; the controller's own callers only, never a request's words): for an entry, by its index in `dependencies`, the text the controller itself read when it took that entry's hash (already redacted and bounded,
+   * `DEPENDENCY_LIMITS.text` at most). It is kept beside the entry so that a later resume can show its reviewer what changed. A text for an entry with no hash, or a longer one, is not kept.
+   */
+  async record(by: Principal, command: NoActor & { taskId: string; dependencies: readonly NewDependency[] }, texts: readonly (string | undefined)[] = []): Promise<{ recorded: number }> {
     onlyKnown(command, ["commandId", "taskId", "dependencies"]);
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined;
@@ -132,11 +147,46 @@ export class DependencyService {
         for (const e of fresh) byId.set(e.id, e);
         if (byId.size > DEPENDENCY_LIMITS.entries) throw new DomainError("unavailable", `a task's manifest holds at most ${DEPENDENCY_LIMITS.entries} dependencies`);
         const body: ManifestBody = { taskId, projectId: task.projectId, entries: [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : 1)) };
-        return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { taskId, recorded: fresh.length }, contention: async () => new DomainError("stale_revision", "the manifest changed at the same moment; record again") };
+        // The texts the controller read for these entries (card L04g), one record per task and entry: a newer reading replaces the older one.
+        const kept: Change[] = [];
+        for (const [i, e] of fresh.entries()) {
+          const text = texts[i];
+          if (typeof text !== "string" || text.length > DEPENDENCY_LIMITS.text || e.hash === undefined) continue;
+          const tref: AggregateRef = { kind: TEXT_KIND, id: derivedId("dpt", `${taskId}|${e.id}`) };
+          const was = await this.#runner.get(tref.kind, tref.id);
+          const tbody: DependencyText = { taskId, entryId: e.id, hash: e.hash.replace(/^sha256:/, ""), text, at: now };
+          kept.push(was === undefined ? { type: "create", ref: tref, body: tbody as unknown as JsonObject } : { type: "update", ref: tref, expectedRevision: was.revision, body: tbody as unknown as JsonObject });
+        }
+        return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }, ...kept], detail: { taskId, recorded: fresh.length, ...(kept.length === 0 ? {} : { texts: kept.length }) }, contention: async () => new DomainError("stale_revision", "the manifest changed at the same moment; record again") };
       },
     }));
     void r;
     return { recorded: fresh.length };
+  }
+
+  /** Card L04g: the task's project when this caller may record its dependencies (the same right `record` checks), else nothing; asked before anything is looked at for a note. */
+  async mayRecord(by: Principal, taskId: string): Promise<string | undefined> {
+    const task = (await this.#runner.get("task", checkTaskId(taskId)))?.body as unknown as TaskBody | undefined;
+    return task !== undefined && allows(by, "attempt.work", task.projectId, { resource: { kind: "task", id: taskId } }) ? task.projectId : undefined;
+  }
+
+  /**
+   * Card L04g: the hash a `record` or `decision` dependency on this desk record is recorded with now (the sha-256 of its content), for a caller who may read it; `undefined` when there is no such record or the caller may not read it.
+   */
+  async recordHash(by: Principal, recordId: string): Promise<string | undefined> {
+    if (typeof recordId !== "string" || recordId.length < 1 || recordId.length > DEPENDENCY_LIMITS.key) return undefined;
+    const r = (await this.#runner.get("desk-record", recordId))?.body as unknown as DeskRecordBody | undefined;
+    return r === undefined || !canRead(by, r) ? undefined : sha(r.body);
+  }
+
+  /**
+   * The text the controller read for a recorded entry when it was recorded (card L04g), for the controller's own use (the resume reviewer's view of what changed): only while it is the text of the hash the entry holds now. Nothing
+   * when none was kept or the entry was recorded again since.
+   */
+  async textOf(taskId: string, entry: Pick<DependencyEntry, "id" | "hash">): Promise<string | undefined> {
+    if (entry.hash === undefined) return undefined;
+    const found = (await this.#runner.get(TEXT_KIND, derivedId("dpt", `${checkTaskId(taskId)}|${entry.id}`)))?.body as unknown as DependencyText | undefined;
+    return found !== undefined && found.entryId === entry.id && found.hash === entry.hash.replace(/^sha256:/, "") && typeof found.text === "string" ? found.text : undefined;
   }
 
   /** The manifest of a task, for those who may work on it, read the project's histories, or the owner. */
@@ -300,7 +350,7 @@ export class DependencyService {
     if (d.members !== undefined && (!Array.isArray(d.members) || d.members.length > DEPENDENCY_LIMITS.members || d.members.some((m) => typeof m !== "string" || m.length < 1 || m.length > DEPENDENCY_LIMITS.member))) invalid(`${field}.members`, `must be at most ${DEPENDENCY_LIMITS.members} names`);
     if (d.freshness !== undefined && !["conditional-read", "authoritative-query", "none"].includes(d.freshness)) invalid(`${field}.freshness`, "must be conditional-read, authoritative-query or none");
     return {
-      id: derivedId("dpm", `${d.kind}|${d.scope?.projectId ?? ""}|${d.key}`), kind: d.kind, key: d.key, observedAt: now,
+      id: dependencyEntryId(d.kind, d.key, d.scope?.projectId), kind: d.kind, key: d.key, observedAt: now,
       ...(d.hash === undefined ? {} : { hash: d.hash }), ...(d.etag === undefined ? {} : { etag: d.etag }), ...(d.scope === undefined ? {} : { scope: d.scope }), ...(d.cursor === undefined ? {} : { cursor: d.cursor }),
       ...(d.members === undefined ? {} : { members: [...d.members].sort() }), ...(d.freshness === undefined ? {} : { freshness: d.freshness }), ...(d.server === undefined ? {} : { server: d.server }), ...(d.protocol === undefined ? {} : { protocol: d.protocol }),
     };
@@ -363,6 +413,8 @@ export class DependencyService {
       case "external": case "mcp-resource": {
         if (e.freshness === "none") return ["freshness-uncertain", "this resource was recorded without a conditional read or an authoritative query, so whether it changed cannot be told"];
         if (o === undefined) return ["unknown", "it was not read again"];
+        // Card L04g: the reader says why it did not read (not allowed, no grant, no answer); the reason is shown, the status stays unknown.
+        if (o.exists === undefined && o.hash === undefined && o.etag === undefined) return ["unknown", typeof o.unread === "string" && o.unread.length > 0 ? `it was not read again: ${clipReason(o.unread)}` : "it was not read again"];
         if (o.exists === false) return ["deleted", "the resource is gone"];
         if (o.hash === undefined && o.etag === undefined) return ["unknown", "no hash or ETag was observed"];
         return same(o.hash, o.etag) ? ["unchanged", "the same hash or ETag"] : ["changed", "the hash or ETag differs"];

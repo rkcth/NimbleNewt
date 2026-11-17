@@ -120,6 +120,8 @@ export interface DependencyObserverOptions {
   fs?: ProbeFileSystem;
   /** Told of a fault that left something unobserved (an unreadable checkout, a file that could not be read); for the log, never the owner's text. Already redacted and cut. */
   onFault?: (detail: string) => void;
+  /** Card L04g: handed the bytes of each file it hashed, by entry ID, after every check above passed (so for the resume reviewer's view of what changed). A throw is ignored. */
+  keep?: (taskId: string, entryId: string, bytes: Uint8Array) => void;
 }
 
 /** Dependencies a probe can settle by looking: a file's content, a directory's members. */
@@ -246,6 +248,7 @@ function probeWith(options: DependencyObserverOptions, state: { hung: number }):
         if (got.where !== undefined && !within(base, got.where)) { fault(options, `${key} was opened outside the checkout`); continue; }
         read += got.bytes.byteLength;
         out[entry.id] = { exists: true, hash: createHash("sha256").update(got.bytes).digest("hex") };
+        try { options.keep?.(taskId, entry.id, got.bytes); } catch { /* keeping a text never changes what was observed */ }
       } catch (error) {
         if (error instanceof ProbeTimeout) { fault(options, `the probe of ${taskId} ran out of time at ${key}; the rest is left unobserved`); break; }
         if (missing(error)) out[entry.id] = { exists: false }; // taken away between the look and the read
