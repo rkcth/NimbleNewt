@@ -181,6 +181,9 @@ test("without the endpoint's state the call is observed: sent as Pi built it, an
 test("the answer is read from server-sent events or a plain body, whatever order the figures arrive in", () => {
   const sse = 'data: {"choices":[{"delta":{"content":"a"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":9},"timings":{"cache_n":3,"prompt_n":6}}\n\ndata: [DONE]\n\n';
   assert.deepEqual(responseBody(sse, true), { usage: { prompt_tokens: 9 }, timings: { cache_n: 3, prompt_n: 6 } });
+  // Radiance sends timings in both its finish event and its usage event (G10 capture); the last event's figures are the ones kept.
+  const twice = 'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"timings":{"cache_n":0,"prompt_n":1}}\n\ndata: {"choices":[],"usage":{"prompt_tokens":9},"timings":{"cache_n":3,"prompt_n":6}}\n\n';
+  assert.deepEqual(responseBody(twice, true), { usage: { prompt_tokens: 9 }, timings: { cache_n: 3, prompt_n: 6 } });
   const claude = 'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":40}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n';
   assert.deepEqual(responseBody(claude, true), { usage: { input_tokens: 5, cache_read_input_tokens: 40, output_tokens: 7 } });
   assert.deepEqual(responseBody('{"usage":{"a":1}}', false), { usage: { a: 1 } });
