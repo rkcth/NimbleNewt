@@ -263,6 +263,7 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     assert.deepEqual([rec?.state, rec?.outcome], ["done", "submitted"], JSON.stringify(rec));
     const sub = await call(c, one.token, "submission.get", { submissionId: rec!.submissionId });
     assert.deepEqual([sub.result.item.kind, sub.result.item.role, sub.result.item.base, sub.result.item.tree, sub.result.item.patchId, sub.result.item.taskId], ["code", "author", B, "b".repeat(40), "c".repeat(40), one.task]);
+    assert.equal(sub.result.item.attemptId, one.attempt, "the ending's submission names the attempt that ended (card Q01b)");
     assert.equal((await state(one.attempt)).state, "finished");
     await c.dispatch!.dispatcher.tick();
     assert.deepEqual(staged, [one.attempt], "staged and submitted once, however often the sweep runs");
