@@ -412,6 +412,34 @@ test("the folders hidden and made read-only: the machine's key folders and the c
   assert.equal(argv.at(-1), "--");
 });
 
+test("a run whose isolation cannot be finished leaves nothing behind: no per-run folder, and no key in the error", async () => {
+  const tmpRoot = join(root, "iso-tmp");
+  mkdirSync(tmpRoot, { recursive: true });
+  // The owner's Pi configuration cut short in the middle of the key: the parse error would quote it.
+  const broken = join(root, "broken-home");
+  mkdirSync(join(broken, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(broken, ".pi", "agent", "models.json"), `{"providers":{"fakeprov":{"baseUrl":"http://127.0.0.1:1/v1","apiKey":"${MARKERS.key}`);
+  const { prepareIsolation } = await import("./lib/isolation.mjs");
+  await assert.rejects(prepareIsolation({ checkoutDir: repo, artifactsDir: join(root, "iso-art"), ownerHome: broken, provider: "fakeprov", realGit: "/usr/bin/git", tmpRoot }), (e) => {
+    assert.match(e.message, /could not be read as JSON/);
+    noMarkers(e.message, "the error");
+    return true;
+  });
+  mkdirSync(join(root, "iso-art"), { recursive: true });
+  assert.deepEqual(readdirSync(tmpRoot), [], "the per-run folder is removed when its preparation fails");
+  // A failure after the folder exists (while the sandbox is described): it goes (the proxy is stopped by the same close()).
+  const { isolateAgent } = await import("./lib/runner.mjs");
+  const isoDirs = new Set(), seen = [];
+  const add = isoDirs.add.bind(isoDirs);
+  isoDirs.add = (d) => { seen.push(d); return add(d); };
+  const c = { set, repo, agent: ["node", join(here, "stub-agent.mjs")], ownerHome: decoy, sourceEnv: sourceEnv(), isoDirs, bwrap: false, allowVisibleHome: true };
+  Object.defineProperty(c, "referenceDirs", { get() { throw new Error("cannot be read"); } });
+  await assert.rejects(isolateAgent(c, { dir: repo, artifacts: join(root, "iso-art") }), /cannot be read/);
+  assert.equal(seen.length, 1);
+  assert.equal(existsSync(seen[0]), false, "the per-run folder is removed");
+  assert.equal(isoDirs.size, 0);
+});
+
 test("the environment an agent gets: an allowlist, and never a name that looks like a credential", () => {
   const e = scrubEnv({ PATH: "/bin", LANG: "C", HOME: "/home/o", SSH_AUTH_SOCK: "/s", GH_TOKEN: "t", GITHUB_TOKEN: "t", NPM_TOKEN: "t", AWS_ACCESS_KEY_ID: "a", GOOGLE_APPLICATION_CREDENTIALS: "/c", GIT_SSH_COMMAND: "ssh", GIT_CONFIG_GLOBAL: "/g", XDG_CONFIG_HOME: "/x", PI_EVAL_RUN_DIR: "/r", PI_EVAL_API_KEY: "k", STUB_AGENT_MODE: "solve", NIMBLENEWT_REQUIRE_SANDBOX: "1", NIMBLENEWT_DB_PASSWORD: "p", LC_ALL: "C", ANTHROPIC_API_KEY: "k", CLAUDE_CODE_MESSAGING_TOKEN: "t" });
   assert.deepEqual(Object.keys(e).sort(), ["LANG", "LC_ALL", "NIMBLENEWT_REQUIRE_SANDBOX", "PATH", "PI_EVAL_RUN_DIR", "STUB_AGENT_MODE"]);
