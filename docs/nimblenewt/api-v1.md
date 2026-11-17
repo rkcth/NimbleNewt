@@ -1742,16 +1742,16 @@ Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subjec
 
 #### `status.attention`
 
-What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
+What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old, or a versioned deliverable's newest version was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since: `reason` `contract_changed`, `at` when they first changed, or when the current contract version was stored if the first change is more than 20 versions back, which `detail.at` says: `first_change` or `current_version`; the deliverable cited). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project; deliverables: the right `deliverable.record.list` asks for); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
 
 Arguments:
 
 - `projectId` (optional): only this project
 - `taskId` (optional): only this task
-- `agentId` (optional): only this agent (the task's owner of record, or the caller of the tool)
+- `agentId` (optional): only this agent (the task's owner of record, the caller of the tool, the one who recorded the artifact, or the deliverable's responsible agent)
 - `state` (optional): only tasks in this state
 - `kind` (optional): `paused_assignee`, `unreachable_worker`, `uncertain_tool_result` or `stale_artifact`
-- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time)
+- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed)
 - `until` (optional): only items up to this UTC time
 - `limit` (optional): 1 to 100, default 50
 - `after` (optional): the `next` of the previous page
