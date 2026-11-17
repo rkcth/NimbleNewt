@@ -4,6 +4,7 @@ import { connect as netConnect, type Socket } from "node:net";
 import { connect as tlsConnect, type ConnectionOptions } from "node:tls";
 import { DomainError } from "../domain/errors.js";
 import type { NameResolver } from "../dispatch/network.js";
+import { keptSecretRefusal } from "../setup/reserved-secrets.js";
 import { cleanUntrusted } from "../security/clean.js";
 import { redactText } from "../security/redact.js";
 import type { JsonObject } from "../storage/types.js";
@@ -35,6 +36,8 @@ export interface WebFetchOptions {
   readonly resolve: NameResolver;
   /** Reads a secret by its NAME (the grant's `credential.ref`). Absent: a grant that states a credential cannot be used by the web tool (it is refused, never sent without). */
   readonly secret?: (name: string) => Promise<string | undefined> | string | undefined;
+  /** The names of the secrets the installation keeps for something else (task T4b): a grant naming one is refused before `secret` is asked, so a grant recorded before the rule, or an embedder's own `secret`, never sends it. Absent: only the owner's credential and the fixed names are refused. */
+  readonly kept?: () => readonly string[];
   /** Opens the socket to the checked address (default `net.connect`; a test points it at a loopback server). */
   readonly dial?: (address: string, port: number) => Socket;
   /** Extra TLS options (a private CA). */
@@ -80,6 +83,9 @@ export class WebFetch {
     const end = (outcome: "closed" | "failed", endedBy: "client" | "target" | "error", reason?: string): Promise<void> => o.grants.logClose(ctx.taskId, admitted.recordId, { outcome, endedBy, bytesToTarget: 0, bytesFromTarget: bytesFrom, ...(reason === undefined ? {} : { reason }) }).catch(() => undefined);
     try {
       if (admitted.grant.credential !== undefined) {
+        // Checked at every use (task T4b), whoever wrote the grant or supplied `secret`: the name, never a value, is in the message.
+        const why = keptSecretRefusal(admitted.grant.credential.ref, o.kept?.() ?? [], "a network destination");
+        if (why !== undefined) throw new NetworkRefused(`the grant sends the secret "${admitted.grant.credential.ref.slice(0, 64)}" to this destination, but ${why}; nothing is sent. The owner can revoke the grant and ask for it again naming another secret`);
         const secret = o.secret === undefined ? undefined : await o.secret(admitted.grant.credential.ref);
         if (typeof secret !== "string" || secret.length === 0) throw new NetworkRefused("the grant states a credential that could not be read, so nothing is sent");
         headers[admitted.grant.credential.header] = secret;

@@ -72,6 +72,8 @@ export function newSummary() {
     sawSession: false, sessionId: null, agentStart: false, agentEnd: false, settled: false, aborted: false,
     turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [],
     tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
+    // Model replies that carried no input and output token counts: their use is unknown (a budgeted batch stops on it).
+    usageMissing: 0,
     last: null, parseErrors: 0, events: 0,
     // The agent's own test runs: the counts of the last one that printed any, and how many ran.
     selfTestRuns: 0, lastSelfTest: null, pendingTests: new Set(),
@@ -109,6 +111,7 @@ export function addEvent(s, e) {
       s.assistantMessages++;
       const u = m.usage ?? {};
       for (const k of ["input", "output", "cacheRead", "reasoning"]) if (Number.isFinite(u[k])) s.tokens[k] += u[k];
+      if (!(Number.isFinite(u.input) && Number.isFinite(u.output))) s.usageMissing++;
       const visible = textOf(m.content, "text", "text");
       const thinking = textOf(m.content, "thinking", "thinking");
       const calls = Array.isArray(m.content) ? m.content.filter((c) => c && c.type === "toolCall").length : 0;

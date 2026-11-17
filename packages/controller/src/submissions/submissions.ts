@@ -8,7 +8,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import type { ControllerStorage, JsonObject } from "../storage/types.js";
+import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -57,6 +57,41 @@ export interface SubmissionBody {
   readonly evidence: readonly Evidence[];
   /** Only on a code submission, when the controller can judge it: whether a review is required of it. `required: false` always carries its reason, so a skipped review is on the record. */
   readonly review?: { readonly required: boolean; readonly reason?: typeof REVIEW_DISABLED_SINGLE_AGENT };
+}
+
+/** Whether a code submission is approved (card H12o, `SubmissionService.approvalOf`): the approved base and tree, and who approved it (a reviewer's principal, or `review_disabled_single_agent`). */
+export interface SubmissionApproval {
+  readonly submissionId: string;
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly base: string;
+  readonly tree: string;
+  readonly submittedBy: string;
+  readonly approved: boolean;
+  readonly approvedBy?: string;
+  /** The review submission that approved it, when a reviewer did. */
+  readonly reviewId?: string;
+  /** Why it is not approved. */
+  readonly reason?: string;
+}
+/** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
+interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string }[] }
+const VERDICTS = "submission-verdicts";
+const MAX_VERDICTS = 50;
+/**
+ * A review's write met another review of the same subject written at the same moment (card H12o review): both changed the subject's verdict list. Not a refusal: the command is built again from the
+ * list as it now is (`rebuildOnVerdictRace`), a few times, and only then answered `unavailable` (send it again).
+ */
+class VerdictRace extends DomainError {}
+const VERDICT_RACE_TRIES = 5;
+/** The service's runner, whose `command` builds a command again when its write lost a `VerdictRace`; everything else is the runner's own. */
+function rebuildOnVerdictRace(runner: CommandRunner): CommandRunner {
+  const command: CommandRunner["command"] = async (type, meta, prepare) => {
+    for (let tries = 1; ; tries++) {
+      try { return await runner.command(type, meta, prepare); } catch (error) { if (!(error instanceof VerdictRace) || tries >= VERDICT_RACE_TRIES) throw error; }
+    }
+  };
+  return new Proxy(runner, { get: (target, key) => { if (key === "command") return command; const value: unknown = Reflect.get(target, key, target); return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value; } });
 }
 
 /** The recorded reason a review is not required: the project has no agent besides the worker that could review. */
@@ -154,7 +189,7 @@ export class SubmissionService {
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
-    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
+    this.#runner = rebuildOnVerdictRace(runner); this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
   }
 
@@ -267,7 +302,7 @@ export class SubmissionService {
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { taskId, kind, role } };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body))], detail: { taskId, kind, role }, contention: () => this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -319,6 +354,44 @@ export class SubmissionService {
       if (chunk.length < pageSize) return { items };
     }
     return { items, ...(after === undefined ? {} : { next: this.#seal(by, taskId, after) }), scanLimited: true };
+  }
+
+  /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
+  async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
+    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "review") return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
+    return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
+  }
+
+  /**
+   * The verdicts on a submission, kept with it (card H12o): each review recorded about a code submission is added to the subject's verdict list in the same write as the review itself, so whether it is approved is read
+   * from one record, never by scanning every submission. At most `MAX_VERDICTS` reviews of one submission are kept; one more is refused (the work should be submitted again by then).
+   */
+  async #verdictChange(id: string, body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "review" || body.subject === undefined || body.verdict === undefined) return [];
+    const ref = { kind: VERDICTS, id: body.subject };
+    const current = await this.#runner.get(VERDICTS, body.subject);
+    const list = ((current?.body as unknown as VerdictsBody | undefined)?.reviews ?? []);
+    if (list.some((r) => r.id === id)) return [];
+    if (list.length >= MAX_VERDICTS) throw new DomainError("unavailable", `submission ${body.subject} already has ${MAX_VERDICTS} reviews; submit the work again for a new review`);
+    const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt }] };
+    return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
+
+  /**
+   * Whether a code submission is approved, for the controller's own callers (card H12o: the commit of an approved submission). It takes no caller and is not an API operation: whoever asks has been checked already (the
+   * workspace request needs `workspace.manage`). Approved means the NEWEST review of it says `approve` (a later `changes` or `reject` takes an approval back; a review of one's own work was refused when it was recorded),
+   * or the submission recorded that no review is required because no other agent of the project could review (`review_disabled_single_agent`). `undefined` when there is no such code submission.
+   */
+  async approvalOf(submissionId: string): Promise<SubmissionApproval | undefined> {
+    if (typeof submissionId !== "string" || !/^sbm-[a-z2-7]{20}$/.test(submissionId)) return undefined;
+    const found = (await this.#runner.get("submission", submissionId))?.body as unknown as SubmissionBody | undefined;
+    if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
+    const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
+    const newest = reviews[reviews.length - 1];
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, submittedBy: found.submittedBy };
+    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id } : { ...base, approved: false, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
+    if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
+    return { ...base, approved: false, reason: "no reviewer has approved it yet" };
   }
 
   async #subject(id: unknown, taskId: string): Promise<SubmissionBody & { id: string }> {

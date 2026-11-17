@@ -96,7 +96,16 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
     const shipped = records.filter((x) => String(x.variant ?? "?") === v && x.shipped);
     const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
     const mism = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
-    if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes, not as false done`);
+    if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes and in the false-done gate`);
+    // A timeout whose acceptance tests pass at the limit: the work was done, the agent never ended (it is still a non-finish).
+    const timeouts = records.filter((x) => String(x.variant ?? "?") === v && x.outcome === "timeout");
+    const lateDone = timeouts.filter((x) => x.hidden?.passed === true).length;
+    if (timeouts.length > 0) info.push(`- timeouts whose acceptance tests pass at the limit (the work was done, the agent did not end): ${lateDone} of ${timeouts.length} (informational; still non-finishes)`);
+    // Variant B's prompt changed with card W06 (a PLAN.md with a commit per step before; the W06 completion rules after,
+    // which a run records as completionRules). Rates over both are not one variant's.
+    const vb = records.filter((x) => String(x.variant ?? "?") === v && x.variant === "B");
+    const w06 = vb.filter((x) => x.completionRules !== undefined).length;
+    if (w06 > 0 && w06 < vb.length) info.push(`- WARNING: variant B mixes two prompts: ${vb.length - w06} run(s) before card W06 (PLAN.md, a commit per step) and ${w06} with the W06 completion rules; read them apart (report.mjs --batch)`);
     out.push(`## Variant ${v}`, ...r.lines.map((l) => `- ${l}`), ...info, `- ${r.pass ? "PASS" : `FAIL: ${r.failures.join("; ")}`}`, "");
   }
   out.push(variants.length === 0 ? "RESULT: no runs" : `RESULT: ${allPass ? "PASS" : "FAIL"} (${variants.map((v) => `${v} ${gatesFor(v, groups).pass ? "pass" : "fail"}`).join(", ")})`);

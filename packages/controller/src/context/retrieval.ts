@@ -156,6 +156,23 @@ export class RetrievalService {
   // ---- search ----------------------------------------------------------------------------------------------------------------
 
   async search(principal: Principal, query: { projectId: string; query: string; limit?: number; cursor?: string }): Promise<SearchResult> {
+    return await this.#search(principal, query);
+  }
+
+  /**
+   * A digest of what a search finds for this reader now (card L04d): the first `RETRIEVAL_LIMITS.hits` hits of `search` with no cursor, each by its link and a sha-256 of the text it matched in (title and
+   * body as separate fields, so no boundary between them can move, and a desk record's status, so a record superseded or accepted since counts as edited), and whether more lay beyond them. The same search by the same reader over unchanged records gives the same digest; a hit added, gone, reordered or edited changes it. What the reader may not read
+   * is not in it, exactly as it is not in the search. It is the `hash` a `search` dependency is recorded with and checked against.
+   */
+  async searchDigest(principal: Principal, query: { projectId: string; query: string }): Promise<{ hash: string; hits: number; more: boolean }> {
+    onlyKnown(query, ["projectId", "query"]);
+    const texts: string[] = [];
+    const found = await this.#search(principal, { projectId: query.projectId, query: query.query, limit: RETRIEVAL_LIMITS.hits }, texts);
+    const lines = found.hits.map((h, i) => [keyOf(h.source), texts[i]!]);
+    return { hash: `sha256:${sha256(JSON.stringify({ v: 1, hits: lines, more: found.next !== undefined }))}`, hits: found.hits.length, more: found.next !== undefined };
+  }
+
+  async #search(principal: Principal, query: { projectId: string; query: string; limit?: number; cursor?: string }, texts?: string[]): Promise<SearchResult> {
     onlyKnown(query, ["projectId", "query", "limit", "cursor"]);
     const projectId = checkProjectId(query.projectId);
     const wanted = terms(query.query);
@@ -167,11 +184,12 @@ export class RetrievalService {
     let last: string | undefined = after;
     let more = false;
 
-    const accept = (source: SourceRef, content: string, title?: string): "continue" | "stop" => {
+    const accept = (source: SourceRef, content: string, title?: string, status?: string): "continue" | "stop" => {
       scanned++;
       last = keyOf(source);
-      const { snippet, matched } = snippetOf(title === undefined ? content : `${title}\n${content}`, wanted);
-      if (matched > 0) hits.push({ source, projectId, ...(title === undefined ? {} : { title }), snippet, matched });
+      const whole = title === undefined ? content : `${title}\n${content}`;
+      const { snippet, matched } = snippetOf(whole, wanted);
+      if (matched > 0) { hits.push({ source, projectId, ...(title === undefined ? {} : { title }), snippet, matched }); texts?.push(sha256(JSON.stringify([status ?? null, title ?? null, content]))); }
       return hits.length >= limit || scanned >= RETRIEVAL_LIMITS.scan ? "stop" : "continue";
     };
 
@@ -181,7 +199,7 @@ export class RetrievalService {
     if (!deskDone) {
       for (let cursor = deskAfter; ;) {
         const page = await this.#desks.list(principal, { projectId, ...(cursor === undefined ? {} : { afterId: cursor }), limit: 100 });
-        for (const record of page.items) if (accept({ kind: "desk-record", id: record.id }, record.body, record.title) === "stop") { more = true; break; }
+        for (const record of page.items) if (accept({ kind: "desk-record", id: record.id }, record.body, record.title, record.status) === "stop") { more = true; break; }
         if (more) break;
         if (page.next === undefined) break;
         cursor = page.next;

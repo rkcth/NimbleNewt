@@ -356,3 +356,13 @@ test("W06 third review: an adversarial corpus of variant B final reports is read
     if (text !== "") assert.equal(classify({ summary: s, hidden: passed, changed: true, dirty: true }).outcome, "verified-finish", text);
   }
 });
+
+test("a model reply without input and output token counts is counted as missing usage, not as zero tokens", () => {
+  const reply = (usage) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "x" }], stopReason: "stop", ...(usage ? { usage } : {}) } });
+  const full = summarizeLogText([reply({ input: 10, output: 2 }), reply({ input: 5, output: 1 })].join("\n"));
+  assert.equal(full.usageMissing, 0);
+  assert.equal(full.tokens.input, 15);
+  const some = summarizeLogText([reply({ input: 10, output: 2 }), reply(null), reply({ input: 3 })].join("\n"));
+  assert.equal(some.usageMissing, 2, "no usage, and usage without output");
+  assert.equal(summarizeLogText("").usageMissing, 0);
+});

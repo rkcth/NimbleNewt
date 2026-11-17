@@ -287,6 +287,24 @@ export class NetworkGrantService {
     return { revoked };
   }
 
+  /**
+   * The grants that still count (asked for or granted) and state a credential, by the NAME of the secret (never a value), for the check that finds a grant recorded before the kept-secret rule (task T4b). Read only; every grant is
+   * looked at, and at most `limit` of those whose secret name passes `match` (default: all) are returned, so ordinary grants never crowd out the ones asked for.
+   */
+  async credentialUses(limit = 200, match: (ref: string) => boolean = () => true): Promise<{ readonly id: string; readonly taskId: string; readonly host: string; readonly port: number; readonly ref: string }[]> {
+    const out: { id: string; taskId: string; host: string; port: number; ref: string }[] = [];
+    for (let after: string | undefined; out.length < limit;) {
+      const page = await this.#runner.list(GRANT_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+      for (const p of page) {
+        after = p.id;
+        const b = p.body as unknown as GrantBody;
+        if ((b.state === "granted" || b.state === "requested") && b.credential !== undefined && out.length < limit && match(b.credential.ref)) out.push({ id: p.id, taskId: b.taskId, host: b.host, port: b.port, ref: b.credential.ref });
+      }
+      if (page.length < 1000) break;
+    }
+    return out;
+  }
+
   async #ofTask(taskId: string): Promise<GrantView[]> {
     const out: GrantView[] = [];
     for (let after: string | undefined; ;) {

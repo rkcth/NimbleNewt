@@ -366,6 +366,18 @@ export class WipBackupService {
     return [...names].sort();
   }
 
+  /** The projects whose backup names a push credential, with the NAME of the secret (never a value), for the check that finds a record made before the kept-secret rule (task T4b); at most `limit` of those whose name passes `match` (default: all). */
+  async credentialUses(limit = 200, match: (credential: string) => boolean = () => true): Promise<{ readonly projectId: string; readonly credential: string }[]> {
+    const out: { projectId: string; credential: string }[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 50 && out.length < limit; page++) {
+      const chunk = await this.#runner.list(SETTING, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of chunk) { after = a.id; const c = (a.body as unknown as WipSettingBody).credential; if (typeof c === "string" && out.length < limit && match(c)) out.push({ projectId: a.id, credential: c }); }
+      if (chunk.length < 200) break;
+    }
+    return out;
+  }
+
   /** Every enabled project's tasks are backed up when their interval has passed. One sweep runs at a time (a second ask gets the running one). Returns what was done, in counts. */
   sweep(by: Principal, options: WipSweepOptions): Promise<{ attempted: number; succeeded: number; failed: number; skipped: number }> {
     if (by.kind === "agent" || by.kind === "client") return Promise.reject(new DomainError("forbidden", `${by.id} may not run backups`));
