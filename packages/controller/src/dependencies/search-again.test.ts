@@ -88,12 +88,17 @@ for (const backend of backends) {
     await c.note(c.ann, "Seeds", "order tomato seeds");
     await rec(c, [await c.deps.searchDependency(c.ann, { projectId: c.a, query: "tomato" })]);
     // Ben's private scratch matches, but Ann may not read it: her search does not find it, so nothing changed for her.
-    await c.note(c.ben, "Tomato scratch", "tomato thoughts", { visibility: "private", status: "draft" });
+    const scratch = await c.note(c.ben, "Tomato scratch", "tomato thoughts", { visibility: "private", status: "draft" });
     assert.deepEqual(await status(c, c.owner), { tomato: "unchanged" }, "the owner, who reads everything, still gets the recorder's view");
+    // The same words searched by the owner are a different search: each is made again with its own recorder's rights, not shared between them.
+    await rec(c, [await c.deps.searchDependency(c.owner, { projectId: c.a, query: "tomato", key: "owner tomato" })], c.owner);
+    assert.deepEqual(await status(c, c.owner), { tomato: "unchanged", "owner tomato": "unchanged" }, "each found the same as it did for its own recorder");
+    await c.desks.revise(c.ben, { commandId: cid("rv"), recordId: scratch, expectedRevision: 1, body: "tomato thoughts, revised" });
+    assert.deepEqual(await status(c, c.owner), { tomato: "unchanged", "owner tomato": "changed" });
     // A recorder that is no longer active cannot be searched for: unknown, never unchanged.
     const got = await c.principals.get("agent:ann");
     await c.principals.disable(c.owner, { commandId: cid("d"), principalId: "agent:ann", expectedRevision: got!.revision });
-    const out = await c.deps.check(c.owner, c.task);
+    const out = (await c.deps.check(c.owner, c.task)).filter((r) => r.key === "tomato");
     assert.deepEqual(out.map((r) => [r.status, r.detail]), [["unknown", "the search could not be made again with the rights of whoever made it"]]);
   });
 
@@ -125,6 +130,47 @@ for (const backend of backends) {
     await rec(c, [{ kind: "search", key: "old", scope: { query: "beans" }, cursor: 1, hash: H("whatever") }], c.ann, c.plain);
     const out = Object.fromEntries((await c.deps.check(c.ann, c.task)).map((r) => [r.key, r.detail]));
     assert.match(out["old"]!, /recorded before the controller made searches again/);
+  });
+
+  suite("first review: who may ask what to record, a recorder's narrowed rights, a superseded hit, a task credential's search and the exact retention boundary", async (c) => {
+    // The answer carries the project's event position: only someone who could rely on a search of that project gets it, with one refusal for a project that does not exist.
+    const eve = await c.principals.authenticate((await c.principals.issueCredential(c.owner, (await c.principals.enroll(c.owner, { commandId: cid("e"), kind: "agent", name: "eve", grants: [] })).id)).token);
+    await refuses("forbidden", () => c.deps.searchDependency(eve, { projectId: c.a, query: "shed" }));
+    await refuses("forbidden", () => c.deps.searchDependency(eve, { projectId: "proj-aaaaaaaaaaaaaaaaaaaa", query: "shed" }));
+    const scoped: Principal = { ...c.ann, taskScope: { taskId: c.task, projectId: c.a } };
+    await refuses("forbidden", () => c.deps.searchDependency(scoped, { projectId: c.b, query: "shed" }), /may not record a search of that project/);
+    assert.equal((await c.deps.searchDependency(c.ann, { projectId: c.b, query: "shed" })).kind, "search", "ann herself reads project B");
+    // A right to work one task of the project (granted by a decision; built here as the grant service would load it) is enough, and only in that project.
+    const narrow: Principal = { ...eve, grants: [{ action: "attempt.work", project: c.a, resource: { kind: "task", id: c.task } }] as unknown as Principal["grants"] };
+    assert.equal((await c.deps.searchDependency(narrow, { projectId: c.a, query: "shed" })).kind, "search");
+    await refuses("forbidden", () => c.deps.searchDependency(narrow, { projectId: c.b, query: "shed" }));
+    assert.equal((await c.deps.searchDependency(c.owner, { projectId: c.b, query: "shed" })).kind, "search");
+
+    // A task credential's search is recorded under its agent and found unchanged while nothing changed.
+    await c.note(c.ben, "Hedge", "trim the hedge in spring");
+    const hedge = await c.deps.searchDependency(scoped, { projectId: c.a, query: "hedge" });
+    await rec(c, [hedge], scoped);
+    assert.equal((await c.deps.get(c.owner, c.task))!.entries.find((e) => e.key === "hedge")!.reader, "agent:ann");
+    assert.equal((await status(c, c.owner))["hedge"], "unchanged");
+    // Ann's right to read the project narrows: the note she found is no longer hers to find, so the results differ (never unchanged).
+    const got = await c.principals.get("agent:ann");
+    await c.principals.setGrants(c.owner, { commandId: cid("g"), principalId: "agent:ann", expectedRevision: got!.revision, grants: [{ action: "attempt.work", project: c.a }, { action: "desk.write", project: c.a }] });
+    assert.equal((await status(c, c.owner))["hedge"], "changed");
+
+    // A hit superseded by a record that does not match: the old one still matches word for word, but it is no longer current.
+    const owner = c.owner;
+    const old = await c.note(c.ben, "Pond", "clean the pond filter");
+    const pond = await c.deps.searchDependency(owner, { projectId: c.a, query: "pond filter" });
+    await rec(c, [pond], owner);
+    assert.equal((await status(c, owner))["pond filter"], "unchanged");
+    await c.note(c.ben, "Water feature", "replaced by a fountain", { supersedes: old });
+    assert.equal((await status(c, owner))["pond filter"], "changed", "a superseded hit is not the same result");
+
+    // Retention: cut exactly at the search's position keeps every event after it; one further is expired.
+    c.judge.floor = pond.cursor!;
+    assert.equal((await status(c, owner))["pond filter"], "changed", "not expired at the exact boundary");
+    c.judge.floor = pond.cursor! + 1;
+    assert.equal((await status(c, owner))["pond filter"], "cursor-expired");
   });
 
   suite("a search of another project stays the worker's to observe, and one check makes at most ten searches, the same one once", async (c) => {

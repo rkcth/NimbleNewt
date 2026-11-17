@@ -894,7 +894,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `resume.dependencies.search`
 
-What to record for a word search (the `search` query) you make of a project now: a `search` dependency with the query as its key, the project's event position and a digest of the first 50 hits as you may read them, ready for `resume.dependencies.record`. When a task of that project is resumed the controller makes the same search again with the rights its recorder has then and says whether it still finds the same (unchanged or changed), or `cursor-expired` once retention cut the project's events after it.
+What to record for a word search (the `search` query) you make of a project now: a `search` dependency with the query as its key, the project's event position and a digest of the first 50 hits as you may read them, ready for `resume.dependencies.record`. For the owner and for those who may work a task of the project or read its desk records or histories (a task credential only in its own project), else `forbidden`. When a task of that project is resumed the controller makes the same search again with the rights its recorder has then and says whether it still finds the same (unchanged or changed), or `cursor-expired` once retention cut the project's events after it.
 
 Arguments:
 

@@ -110,7 +110,7 @@ for (const store of stores) {
     } finally { await w.close(); }
   });
 
-  test(`${store.name}: a host's own observer does not take the search from the controller; a caller outside the project finds nothing in the digest`, async () => {
+  test(`${store.name}: a host's own observer does not take the search from the controller; a caller outside the project is refused`, async () => {
     const w = await begin(store, { resume: { observe: async () => ({}) } });
     try {
       await w.note("Pests", "slugs on the lettuce");
@@ -118,13 +118,14 @@ for (const store of stores) {
       assert.ok((await w.call(w.ann, "resume.dependencies.record", { taskId: w.task, dependencies: [dep] }, "d1")).ok);
       const check = (await w.start("r1")).result.item;
       assert.equal(check.delta.unchanged, 1, "judged by the controller even though the host's observer answered nothing");
-      // Someone with no rights in the project gets the digest of an empty search, and cannot record it for a task they do not work.
+      // Someone with no rights in the project is refused (the answer would tell the project's event position), and cannot record a search for a task they do not work.
       const rob = await w.c.services.principals.authenticate(w.owner);
       await w.c.services.principals.enroll(rob, { commandId: "e-eve", kind: "agent", name: "eve", grants: [] });
       const eve = (await w.c.services.principals.issueCredential(rob, "agent:eve")).token;
-      const hers = (await w.call(eve, "resume.dependencies.search", { projectId: w.project, query: "slugs" })).result.item;
-      assert.notEqual(hers.hash, dep.hash, "what eve may not read is not in her digest");
-      assert.equal((await w.call(eve, "resume.dependencies.record", { taskId: w.task, dependencies: [hers] }, "d2")).error.code, "forbidden");
+      const hers = await w.call(eve, "resume.dependencies.search", { projectId: w.project, query: "slugs" });
+      assert.equal(hers.error.code, "forbidden", JSON.stringify(hers));
+      assert.equal(JSON.stringify(hers).includes("slugs on"), false);
+      assert.equal((await w.call(eve, "resume.dependencies.record", { taskId: w.task, dependencies: [dep] }, "d2")).error.code, "forbidden");
     } finally { await w.close(); }
   });
 }
