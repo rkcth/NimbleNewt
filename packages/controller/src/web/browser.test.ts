@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { ScriptedInterpreter } from "../chat/index.js";
@@ -55,12 +55,55 @@ const until = async (what: string, f: () => Promise<boolean> | boolean, ms = 30_
   for (;;) { try { if (await f()) return; } catch (e) { last = e; } if (Date.now() > end) throw new Error(`timed out waiting for ${what}${last === undefined ? "" : `: ${String(last)}`}`); await new Promise((r) => setTimeout(r, 50)); }
 };
 
+const pause = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Waits for the process to end, up to `ms` (the exit event, not a fixed sleep); true when it has ended (or never started). */
+const ended = (p: ChildProcess, ms: number): Promise<boolean> => {
+  if (p.pid === undefined || p.exitCode !== null || p.signalCode !== null) return Promise.resolve(true);
+  return new Promise((ok) => {
+    const done = (): void => { clearTimeout(timer); ok(true); };
+    const timer = setTimeout(() => { p.off("exit", done); ok(p.exitCode !== null || p.signalCode !== null); }, ms);
+    p.once("exit", done);
+  });
+};
+
+/** Closes the browser so its helper processes stop writing into the profile: first politely over DevTools (Browser.close), then
+ * child.kill() (the platform default: SIGTERM on Linux and macOS, terminate on Windows), then a forced kill. Each step waits for the
+ * exit event, bounded. Returns a message when the browser is still running after all of that, otherwise undefined. */
+async function closeBrowser(proc: ChildProcess | undefined, cdp: Cdp | undefined): Promise<string | undefined> {
+  if (proc === undefined || await ended(proc, 0)) return undefined;
+  // The browser may drop the connection before it answers, so the reply is not awaited: the exit event is what counts.
+  if (cdp !== undefined && cdp.ws.readyState === WebSocket.OPEN) { try { cdp.send("Browser.close").catch(() => undefined); } catch { /* the connection went away */ } }
+  if (await ended(proc, 15_000)) return undefined;
+  proc.kill();
+  if (await ended(proc, 15_000)) return undefined;
+  proc.kill("SIGKILL"); // Node maps this to a forced termination on Windows as well.
+  return await ended(proc, 15_000) ? undefined : `the browser (pid ${proc.pid}) did not exit after Browser.close, kill() and a forced kill`;
+}
+
+/** Removes the folder. A helper process the browser started can still be finishing a write (ENOTEMPTY), or Windows can still hold a
+ * file lock (EBUSY, EPERM), for a moment after the main process ended: those three are retried with a growing wait, about 30 s in all.
+ * Any other error, or the same error after the deadline, is returned as a message. */
+async function removeFolder(dir: string): Promise<string | undefined> {
+  const end = Date.now() + 30_000;
+  for (let wait = 100; ; wait = Math.min(wait * 2, 2_000)) {
+    try { rmSync(dir, { recursive: true, force: true }); return undefined; } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (!(code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") || Date.now() + wait > end) return `${code ?? "error"}: ${(e as Error).message}`;
+    }
+    await pause(wait);
+  }
+}
+
+/** True when the folder is inside the OS temp folder, where the operating system clears leftovers. */
+const inTempFolder = (dir: string): boolean => { const r = relative(tmpdir(), dir); return r !== "" && !r.startsWith("..") && !isAbsolute(r); };
+
 const chrome = findBrowser();
 test("the real page in a real browser: strict policy, phone layout, sign-in, one delivery after offline, a second browser, a live update and revocation", { skip: chrome === undefined ? "no Chromium-family browser found (set NIMBLENEWT_CHROME)" : false, timeout: 240_000 }, async (t) => {
   const assets = await loadAssets();
   if (assets === undefined) { t.skip("the UI package is not built"); return; }
   const dir = mkdtempSync(join(tmpdir(), "nn-browser-"));
-  let proc: ChildProcess | undefined; let cdp: Cdp | undefined;
+  let proc: ChildProcess | undefined; let cdp: Cdp | undefined; let passed = false;
   const c = await startController({
     storage: { kind: "sqlite", path: join(dir, "n.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4,
     chat: { interpreter: new ScriptedInterpreter(() => []) }, webChat: { host: "127.0.0.1", network: "loopback", assets, limits: { eventsEveryMs: 100 } },
@@ -163,10 +206,38 @@ test("the real page in a real browser: strict policy, phone layout, sign-in, one
     await until("the gate again on the second", async () => (await b.eval<boolean>("!document.getElementById('gate').hidden")));
     assert.deepEqual(a.problems, [], "no script error or policy violation in the first browser");
     assert.deepEqual(b.problems, [], "no script error or policy violation in the second browser");
+    passed = true;
   } finally {
+    // The browser is closed and seen to exit BEFORE its profile is removed, so its helpers are not still writing into it. A cleanup
+    // problem never hides the test's own failure: it is thrown only when the body passed, and otherwise reported.
+    const stuck = await closeBrowser(proc, cdp);
     cdp?.close();
-    if (proc !== undefined && proc.exitCode === null) { proc.kill("SIGKILL"); await new Promise((r) => proc!.once("exit", r)); }
     await c.close();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    const left = stuck === undefined ? await removeFolder(dir) : `not removed because the browser is still running`;
+    const report = (m: string): void => { t.diagnostic(m); console.error(m); };
+    if (stuck !== undefined) { if (passed) throw new Error(`browser.test cleanup: ${stuck}`); report(`browser.test cleanup: ${stuck}`); }
+    if (left !== undefined) {
+      const m = `browser.test cleanup: the temporary folder ${dir} was left behind (${left})`;
+      if (passed && !inTempFolder(dir)) throw new Error(m);
+      report(inTempFolder(dir) ? `${m}; it is in the OS temp folder, so the test is not failed for it` : m);
+    }
   }
+});
+
+test("the browser test's cleanup helpers: the exit wait is bounded and true only once the process ended; a browser without DevTools is ended by kill(); a missing folder counts as removed", { timeout: 60_000 }, async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { stdio: "ignore" });
+  try {
+    assert.equal(await ended(child, 200), false, "a running process has not ended (the wait gave up after 200 ms)");
+    assert.equal(await closeBrowser(child, undefined), undefined, "kill() ends it and the exit is seen");
+    assert.equal(await ended(child, 0), true);
+  } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+  const quick = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(3), 100)"], { stdio: "ignore" });
+  assert.equal(await ended(quick, 30_000), true, "the exit event ends the wait");
+  assert.equal(quick.exitCode, 3);
+  assert.equal(await closeBrowser(undefined, undefined), undefined);
+  const gone = join(tmpdir(), `nn-browser-gone-${process.pid}-${Date.now()}`);
+  assert.equal(await removeFolder(gone), undefined);
+  assert.equal(inTempFolder(join(tmpdir(), "x")), true);
+  assert.equal(inTempFolder(tmpdir()), false, "the temp folder itself is not inside it");
+  assert.equal(inTempFolder(join(tmpdir(), "..", "elsewhere")), false);
 });
