@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, opendir, readlink, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, open, opendir, readlink, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { redactText } from "../security/redact.js";
 import { relativePath, scopeAllows } from "../projects/resources.js";
 import type { DependencyEntry, ManifestBody, Observation } from "./dependencies.js";
@@ -34,6 +34,11 @@ export interface ProbeFileSystem {
   readFile(path: string, maxBytes: number): Promise<ProbeRead>;
   /** Lists a directory at a path that has no link in it, reading at most `maxNames + 1` names. */
   readdir(path: string, maxNames: number): Promise<ProbeList>;
+  /**
+   * Whether something is at a path itself, a link included, without following it (L04e review): `false` when nothing is there (`ENOENT`, `ENOTDIR`). Used only when `realpath` says a path does not exist, to tell a file that is really gone
+   * from a link whose target is missing (which may point outside the checkout, so it is never reported as deleted). A file system without it reports a path `realpath` cannot find as deleted.
+   */
+  present?(path: string): Promise<boolean>;
 }
 
 const NO_FOLLOW = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
@@ -49,6 +54,9 @@ const descriptorPath = async (fd: number): Promise<string | undefined> => {
 /** This process's own file system, as a probe reads it. */
 export const nodeProbeFileSystem: ProbeFileSystem = {
   realpath: (path) => realpath(path),
+  async present(path) {
+    try { await lstat(path); return true; } catch (error) { if (missing(error)) return false; throw error; }
+  },
   async readFile(path, maxBytes) {
     // Looked at before it is opened: a pipe, a socket or a device is never opened at all.
     if (!(await stat(path)).isFile()) return { kind: "not-file" };
@@ -193,6 +201,17 @@ function probeWith(options: DependencyObserverOptions, state: { hung: number }):
     if (root === undefined || !isAbsolute(root)) return out; // nowhere to look: everything stays unknown
     let base: string;
     try { base = await timed(() => fileSystem.realpath(root)); } catch (error) { fault(options, error instanceof ProbeTimeout ? (state.hung > 0 ? `an earlier probe's read has not come back, so ${root} is not read again until it does` : `the checkout ${root} did not answer in time`) : `the checkout ${root} could not be read: ${messageOf(error)}`); return out; }
+    // A path `realpath` could not find: really gone only when the nearest part of it that is still there is that same path below the checkout, with no link in it, and is not the path itself (a link whose target is missing).
+    const goneInside = async (target: string): Promise<boolean> => {
+      const present = fileSystem.present;
+      if (present === undefined) return true;
+      for (let p = target; p === base || within(base, p); p = dirname(p)) {
+        if (!(await timed(() => present.call(fileSystem, p)))) { if (p === base) return false; continue; }
+        if (p === target) return false;
+        try { return (await timed(() => fileSystem.realpath(p))) === p; } catch (error) { if (missing(error)) return false; throw error; }
+      }
+      return false;
+    };
     let read = 0;
     for (const entry of wanted) {
       const key = relativePath(entry.key);
@@ -203,8 +222,11 @@ function probeWith(options: DependencyObserverOptions, state: { hung: number }):
       try {
         let real: string;
         try { real = await timed(() => fileSystem.realpath(target)); } catch (error) {
-          if (missing(error)) out[entry.id] = { exists: false }; // it is gone: the check says so
-          else throw error;
+          if (!missing(error)) throw error;
+          // It is gone, the check says so: but only when nothing on its way is a link. A link whose target is missing (or a folder link on the way to it) may point outside the checkout, and following it to say "deleted" would tell
+          // what is, or is not, on the disk outside (L04e review). Then it stays unobserved.
+          if (await goneInside(target)) out[entry.id] = { exists: false };
+          else fault(options, `${key} is missing through a link, which is not followed`);
           continue;
         }
         if (!within(base, real)) { fault(options, `${key} is a link to outside the checkout`); continue; }

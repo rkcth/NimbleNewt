@@ -12271,6 +12271,16 @@ ASSUMPTION: 8 s per request and 12 requests per check bound how long a silent ho
 - Not tried against a real model (the real-process tests use a scripted offline model by design). A reviewer that reads diffs, compaction lineage in production (C07q), pending effects and scratch records in host captures, and the reviewer's call not being cancellable by the dispatcher are unchanged from the L04d lists.
 - Windows/macOS: the real-process tests need bubblewrap (Linux); the link case of the remote test is skipped where links cannot be made.
 
+### L04e second review (clean-context, Claude agent, 2026-11-16)
+
+Merged origin/main (clean), rebuilt, API docs and package rules unchanged. Checked: only the owner and the dispatcher may ask a host to look (`#staff`); the host's error text stays in its own log; the request bounds (20 entries, 50 paths, keys of 1 to 300 characters, 12 requests, 8 s) and the host's 6 s look; one shared count of abandoned reads on the host; the remote turn's checkpoint taken only from the placement that reported; the four storage backends in the remote tests.
+
+Found and fixed:
+- **A missing file was followed through links.** A recorded file whose path ended in a link with a missing target, or ran through a folder link to outside the checkout, was reported `deleted`: `realpath` followed the link to say so, which also told the check (and so the resumed agent) whether something exists at a place outside its checkout. Now a missing path is `deleted` only when the nearest part of it that still exists is that same path inside the checkout with no link in it (`ProbeFileSystem.present`, an `lstat`); otherwise it stays unobserved (`unknown`). A file system without `present` (a test's fake, a host's own view) keeps the earlier rule. Applies to the local probe and to a remote host's look alike.
+- **Tests that could not fail.** No test checked that the controller drops what a host adds to its answer (any field beside `exists`, `hash`, `members`; a hash in the wrong form; members that are not names; an answer for an entry it did not ask about), or that a host that keeps putting entries off is asked a bounded number of times: `remote/responder-observe.test.ts` now does, with a stand-in host. The product local host's `resumeCheckout` wiring is asserted in `integration/a09b-local-environment.test.ts`.
+
+Mutations (built files, each restored and compared): host answers taken whole (fails the new answer test), the owner/dispatcher check removed (4 backends fail), the host's error text sent to the controller (fails), the no-progress guard removed (fails), an older checkpoint taken for a turn without one (4 backends fail), the project's paths not sent (4 backends fail), the link rule turned off (the new link test fails), a new count of abandoned reads per request (fails).
+
 ## T3 (Claude agent, Sonnet 5.5): P04 leftovers - the Suspend note for teams and tasks, provider outages narrowed to the routes an agent uses (2026-11-15)
 
 Built from the P04h "not done" list. Nothing here calls a model, touches the local AI server or a credential.

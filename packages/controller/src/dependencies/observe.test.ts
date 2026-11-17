@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -301,4 +301,33 @@ test("L04e review: a remote host's looks share one count of abandoned reads, so 
   assert.deepEqual(await look(scope, entries, () => root), {});
   assert.equal(calls, 2, "once the abandoned call came back, the next request reads again");
   release!();
+});
+
+test("L04e second review: a missing file is reported deleted only when no link is on its way; a link whose target is gone, or a folder link to outside, leaves it unobserved", async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-gone-")));
+  try {
+    const checkout = join(dir, "checkout"), outside = join(dir, "outside");
+    mkdirSync(join(checkout, "src"), { recursive: true }); mkdirSync(outside, { recursive: true });
+    try {
+      symlinkSync(join(outside, "absent.txt"), join(checkout, "src", "dangling.ts"));
+      symlinkSync(outside, join(checkout, "out"), "dir");
+      symlinkSync(join(checkout, "src"), join(checkout, "inner"), "dir");
+    } catch { t.skip("links cannot be made here"); return; }
+    const entries = [
+      { id: "gone", kind: "file" as const, key: "src/gone.ts" },
+      { id: "gone-dir", kind: "directory" as const, key: "nothing/here" },
+      { id: "dangling", kind: "file" as const, key: "src/dangling.ts" },
+      { id: "via-out", kind: "file" as const, key: "out/absent.txt" },
+      { id: "via-inner", kind: "file" as const, key: "inner/absent.txt" },
+    ];
+    const faults: string[] = [];
+    const seen = await entriesObserver({ onFault: (d) => faults.push(d) })({ taskId: "tsk-1", projectId: "prj-1" }, entries, () => checkout);
+    assert.deepEqual(seen, { "gone": { exists: false }, "gone-dir": { exists: false } }, "only the paths with no link on their way are reported deleted");
+    assert.match(faults.join(" "), /missing through a link/);
+    assert.equal(faults.join(" ").includes(outside), false, "the log does not name where the link points");
+    // A file system without `present` keeps the earlier rule (a fake in a test, a host's own view).
+    const { present: _p, ...plain } = nodeProbeFileSystem;
+    void _p;
+    assert.deepEqual(Object.keys(await entriesObserver({ fs: plain })({ taskId: "tsk-1", projectId: "prj-1" }, entries.slice(0, 1), () => checkout)), ["gone"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

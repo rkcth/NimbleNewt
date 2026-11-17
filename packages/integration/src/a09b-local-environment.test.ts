@@ -127,6 +127,7 @@ test("the local host builder wires the environment runtime into the controller's
       if ("problem" in plan) return;
       try {
         assert.equal(plan.start.maintenance?.environmentRuntime !== undefined, environments);
+        assert.equal(typeof (plan.start as { resumeCheckout?: unknown }).resumeCheckout, "function", "the resume check reads the checkout this host's worker keeps for a task (card L04e)");
         assert.equal(existsSync(hostEnvironmentsBase(dataDir)), environments, "the environments directory exists only when asked for, beside the data directory");
         assert.deepEqual(readdirSync(dataDir), [], "and nothing was made inside the data directory");
       } finally { await plan.close(); }
