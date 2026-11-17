@@ -42,6 +42,11 @@ export interface SubmissionBody {
   readonly tree?: string;
   readonly patchId?: string;
   readonly refreshRound?: number;
+  /**
+   * Code only, when the controller knows the task's attempts: the attempt this code was submitted from (card Q01b, "a submission record per attempt"). A task can have several attempts over time
+   * (a retry, a resume after a failure); this names which one made the tree. Records from before this field, or from a service built without the attempt port, have none.
+   */
+  readonly attemptId?: string;
   /** The submission a review, qa report or sign-off is about. */
   readonly subject?: string;
   readonly verdict?: "approve" | "changes" | "reject";
@@ -61,14 +66,14 @@ export const REVIEW_DISABLED_SINGLE_AGENT = "review_disabled_single_agent" as co
 export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }, by: Principal) => Promise<readonly string[]>;
 
 /** The task's current attempt, when it has one: who owns it (a principal ID) and its state. Only an active attempt, or one that has just succeeded (the attempt is ending with this submission), may submit code. */
-export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string } | undefined>;
+export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string; readonly attemptId?: string } | undefined>;
 
 /** The attempt port over the assignment service: the task's active attempt, owned by the agent principal `agent:<id>`-style owner ID the assignment names. */
 export const attemptOfAssignments = (assignments: AssignmentService): AttemptOf => async (taskId) => {
   const asg = await assignments.getAssignment(taskId);
   if (asg === undefined || asg.activeAttemptId === undefined) return undefined;
   const attempt = await assignments.getAttempt(asg.activeAttemptId);
-  return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state };
+  return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state, attemptId: asg.activeAttemptId };
 };
 
 export interface SubmissionOptions extends RunnerOptions {
@@ -135,7 +140,7 @@ const bad = (field: string, message: string): never => { throw new DomainError("
 
 /**
  * One record per submission attempt (card Q01b): its kind, the role it was made in, and the check evidence bound to the exact tree or artifact version. Nothing here lands, reviews or accepts anything:
- * the landing queue (P08..P10) and acceptance (Q01) read these records. Not done here: the state API operations, and the refresh-round numbering across attempts.
+ * the landing queue (P08..P10) and acceptance (Q01) read these records. A code submission names the attempt it came from when the attempt port is given.
  */
 export class SubmissionService {
   readonly #runner: CommandRunner;
@@ -221,9 +226,11 @@ export class SubmissionService {
     if ((by.taskScope !== undefined && (!inTaskScope(by, task.projectId) || by.taskScope.taskId !== taskId)) || !allows(by, "task.read", task.projectId, { resource: { kind: "task", id: taskId } })) return hidden();
 
     if (!(await this.#roles(by.id, { projectId: task.projectId, taskId }, by)).includes(role)) throw new DomainError("forbidden", `${by.id} does not hold the role ${role} in this project`);
+    let attemptId: string | undefined;
     if (kind === "code" && this.#attemptOf !== undefined) {
       const attempt = await this.#attemptOf(taskId);
       if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
+      attemptId = attempt.attemptId;
     }
 
     const evidence = this.#evidence(command.evidence);
@@ -242,9 +249,11 @@ export class SubmissionService {
     const id = derivedId("sbm", scopedCommandId(by.id, commandId));
     const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined
       : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
-    const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
+    const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, ...(attemptId === undefined ? {} : { attemptId }), evidence, ...(review === undefined ? {} : { review }) };
+    // Like the time, the attempt is what the controller observed, not what the agent asked: it is left out of the compared payload (as before this field existed), so a replay keeps the first record and its attempt.
+    const { attemptId: _observed, ...asked } = body;
     const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
-      payload: { ...(body as unknown as JsonObject), submittedAt: null },
+      payload: { ...(asked as unknown as JsonObject), submittedAt: null },
       build: async () => {
         const ref = { kind: "submission", id };
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }], detail: { taskId, kind, role } };

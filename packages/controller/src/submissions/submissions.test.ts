@@ -196,6 +196,33 @@ for (const backend of backends) {
     await gated.record(ann, { commandId: cid("s"), ...code, tree: T2 });
   });
 
+  suite("a code submission records the attempt it came from; a replay keeps the first attempt; non-code kinds name none (card Q01b, a record per attempt)", async (c) => {
+    const ann = await c.agent("ann", ["author", "docs"]);
+    const bob = await c.agent("bob", ["reviewer"]);
+    let attempt: { ownerId: string; state: string; attemptId?: string } = { ownerId: ann.id, state: "active", attemptId: "att-first" };
+    const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
+    const cmd = { commandId: cid("s"), taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    const first = await gated.record(ann, cmd);
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+    // the next attempt of the same task (a retry) submits again: its own record names its own attempt
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-second" };
+    const second = await gated.record(ann, { ...cmd, commandId: cid("s"), tree: T2 });
+    assert.equal((await gated.get(ann, second.id))?.attemptId, "att-second");
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first", "an earlier record keeps its attempt");
+    // a replay of the first command under the later attempt is the first record, unchanged (the attempt is observed, not part of the request)
+    const again = await gated.record(ann, cmd);
+    assert.deepEqual([again.id, again.replayed], [first.id, true]);
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+    // review and document records name no attempt: they are not made by the task's code attempt
+    const review = await gated.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: first.id, verdict: "approve" });
+    assert.equal((await c.rawBody(review.id) as SubmissionBody).attemptId, undefined);
+    const doc = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST });
+    assert.equal((await c.rawBody(doc.id) as SubmissionBody).attemptId, undefined);
+    // without the attempt port nothing is named (as before)
+    const plain = await c.svc.record(ann, { ...cmd, commandId: cid("s") });
+    assert.equal((await c.rawBody(plain.id) as SubmissionBody).attemptId, undefined);
+  });
+
   suite("formats are size-capped and checked: digests, evidence names, role, artifact ID", async (c) => {
     const ann = await c.agent("ann", ["author", "docs"]);
     const code = { taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
