@@ -16,6 +16,8 @@ export const GUIDES = [
   "docs/nimblenewt/api-guide.md", "docs/nimblenewt/architecture.md", "docs/nimblenewt/compatibility-and-support.md",
   "docs/nimblenewt/conversation-and-mcp-protocol.md", "docs/nimblenewt/durability-and-flush.md", "docs/nimblenewt/notices.md",
   "docs/nimblenewt/security-guide.md", "docs/nimblenewt/troubleshooting.md",
+  // Card D01: the owner's user guide is held to the same checks.
+  "docs/nimblenewt/user-guide.md",
 ];
 
 function walk(dir, keep, out = []) {
