@@ -456,7 +456,7 @@ export async function runMeeting({ scenario, variant, provider, providers = {}, 
     leaks: answeredDuringVote.flatMap((h) => promptLog.filter((p) => p.agent !== h.agent.id && p.agent !== undefined && ["ballot", "ballot-revision", "owner-answer", "objection-check"].includes(p.phase) && norm2(p.text).includes(norm2(h.text).slice(0, 50))).map((p) => ({ answerBy: h.agent.id, seenBy: p.agent, phase: p.phase }))),
     revisionsPerVoter: revisionCounts,
     voterRevisionTurnsOk: stats.inquiries.filter((i) => i.voteOpen).every((i) => i.revisions.length === i.castBefore.length && i.castBefore.every((id) => i.revisions.filter((rv) => rv.agent === id).length === 1)),
-    clockMs: { total: Date.now() - clock.startedMs, paused: clock.pausedMs, meeting: Date.now() - clock.startedMs - clock.pausedMs },
+    clockMs: (() => { const total = Math.max(0, Date.now() - clock.startedMs); const paused = Math.min(total, Math.max(0, clock.pausedMs)); return { total, paused, meeting: total - paused }; })(),
   };
   const ballots = finals();
   const yes = ballots.filter((b) => b.vote === "yes").length;
