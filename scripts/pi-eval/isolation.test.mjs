@@ -598,6 +598,14 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
     assert.equal(upstreamConnections - conns, 3, "one upstream connection per request");
     const before = seen.length;
     assert.equal((await call("POST", "/v1/chat/completions", { body: "x".repeat(2000) })).status, 413, "declared too large");
+    // A declared size over the cap is refused at once, before any of the body is sent (and nothing is forwarded).
+    const early = await new Promise((res) => {
+      const rq = http.request({ socketPath: p.socketPath, method: "POST", path: "/v1/chat/completions", headers: { authorization: `Bearer ${p.token}`, "content-length": "5000" } }, (r) => { r.resume(); res(r.statusCode); rq.destroy(); });
+      rq.on("error", () => {});
+      rq.flushHeaders();
+      setTimeout(() => { res("no answer before the body"); rq.destroy(); }, 3000);
+    });
+    assert.equal(early, 413);
     const chunked = await call("POST", "/v1/chat/completions", { body: "x".repeat(5000), headers: { "transfer-encoding": "chunked" } });
     assert.ok(chunked.status === 413 || chunked.error || /^size [0-9]+$/.test(chunked.body) && Number(chunked.body.slice(5)) <= 1000, JSON.stringify(chunked));
     assert.ok(seen.length <= before + 1, "at most the cut-off chunked request reached the server");
