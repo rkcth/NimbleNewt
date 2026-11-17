@@ -280,10 +280,12 @@ for (const backend of backends) {
 
   test(`${backend.name}: a crash between the order and its answer: the sweep finishes the ordering record once it is stale, with the same order key`, async () => {
     const r = await rig();
+    // The first run's host never answers (the process "dies" there). Its order waits on a real `orderMs` (two minutes) timer, so the run outlives the test unless the
+    // service is closed: the test closes it BEFORE the storage, as the controller's shutdown does. Left open, the timer fired after the storage was closed and the
+    // run's rejection ("the storage is closed") failed the whole file once the file ran longer than two minutes.
+    const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
+    const hung = hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
     try {
-      // The first run's host never answers (the process "dies" there).
-      const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
-      void hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
       // Waits for the run to reach the order (a fixed 100 ms was too short for a SQLite worker thread on a slow Windows runner).
       for (let i = 0; i < 200 && (await r.cleanup.get("att-1"))?.state !== "ordering"; i++) await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal((await r.cleanup.get("att-1"))?.state, "ordering");
@@ -299,7 +301,16 @@ for (const backend of backends) {
       assert.equal((await r.cleanup.get("att-1"))?.state, "removed");
       assert.equal(await r.cleanup.recover(), 0, "finished and reported: nothing more");
       assert.equal(r.s.orders.length, 1);
-    } finally { await r.store.close(); }
+      // Shutdown ends the hung run at once (its order is cancelled), while the storage is still open; it leaves the sweep's removal as it is.
+      const began = Date.now();
+      await hanging.close();
+      assert.ok(Date.now() - began < SCRATCH_LIMITS.orderMs / 4, "close() did not wait for the order's time limit");
+      assert.equal((await hung).state, "removed", "the hung run ended without an error and did not change the sweep's outcome");
+    } finally {
+      await hanging.close();
+      await hung.catch(() => undefined);
+      await r.store.close();
+    }
   });
 
   test(`${backend.name}: the sweep retries an unreported leftovers report and gives up after a bounded number of tries`, async () => {
