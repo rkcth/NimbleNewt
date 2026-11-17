@@ -101,6 +101,11 @@ export interface PlacementBody {
   readonly inputs: readonly string[];
   readonly outputs: readonly string[];
   readonly checkpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
+  /**
+   * The checkpoint the worker sent WITH the turn's result (card L04e): the one the turn left at its boundary, read back as the result's `checkpoint` (`resultCheckpoint`), with whatever the worker said about its own read-back check (`nn.durable`) in it. Absent when the
+   * worker sent none with the result (an older checkpoint of the placement is not this turn's).
+   */
+  readonly resultCheckpoint?: { readonly artifactId: string; readonly sequence: number; readonly digest: string; readonly at: string };
   /** The dispatch contract sent with the order (card H12a). Until the worker has confirmed this very digest (`launched`) no tool call of the attempt is decided; a refusal ends the run. Rebuilt for every placement. */
   readonly contract?: { readonly digest: string; readonly recipe?: { readonly revision: string; readonly reach: readonly string[]; readonly limits?: JsonObject }; readonly bestEffort: boolean; readonly limits?: JsonObject; readonly requires: readonly string[]; readonly launched?: { readonly at: string; readonly sessionId: string; readonly enforcement: readonly ContractEnforcement[]; /** The confirmation is kept but the owner's launch record is still to be written (a retry of the confirmation writes it). */ readonly recordPending?: true }; /** When the contract was last cleared for a new confirmation (a restart with a changed recipe): heartbeats are accepted for a bounded window from then. */ readonly reconfirmSince?: string; readonly refused?: readonly string[] };
   /** The latest report of the worker on the processes it holds for this placement (card L02e). Belongs to the placement it names and to no other: a new placement (a move, a restart, a re-offer) starts without one. */
@@ -272,6 +277,29 @@ function checkVerifyAsk(requestId: string, attemptId: string, scope: { readonly 
   });
   const evidence = request.evidence.map((e) => (typeof e === "string" && e.length >= 1 && e.length <= 500 && !e.includes("\0") ? e : invalid("verify.evidence", "each path must be 1 to 500 characters")));
   return { requestId, operation: "verify", taskId: scope.taskId, projectId: scope.projectId, reason: "check the work of an attempt that said it is done", quietAttempts: [], verify: { attemptId, checks, evidence, maxOutputBytes: request.maxOutputBytes } };
+}
+
+/** The most dependencies one `observe` request names, and the most project paths it carries. */
+export const OBSERVE_ASK = { entries: 20, paths: 50 } as const;
+
+/**
+ * The request that asks a host to look again at files and directories a task relied on (card L04e): every field checked and bounded, nothing else carried. A key is text an agent wrote: the host refuses anything that is not a safe
+ * relative path, but the request is held to a size and a shape here too.
+ */
+function checkObserveAsk(requestId: unknown, scope: { readonly taskId: string; readonly projectId: string }, entries: unknown, paths: unknown): WorkspaceAsk {
+  if (typeof requestId !== "string" || !/^wsr-[a-z2-7]{20}$/.test(requestId)) invalid("requestId", "is not a workspace request ID");
+  const name = /^[A-Za-z0-9._:-]{1,120}$/;
+  if (scope === null || typeof scope !== "object" || typeof scope.taskId !== "string" || !name.test(scope.taskId) || typeof scope.projectId !== "string" || !name.test(scope.projectId)) invalid("taskId", "or projectId is malformed");
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > OBSERVE_ASK.entries) invalid("observe.entries", `must name 1 to ${OBSERVE_ASK.entries} dependencies`);
+  const seen = new Set<string>();
+  const checked = (entries as unknown[]).map((e) => {
+    const o = e as { id?: unknown; kind?: unknown; key?: unknown } | null;
+    if (o === null || typeof o !== "object" || typeof o.id !== "string" || !name.test(o.id) || seen.has(o.id) || (o.kind !== "file" && o.kind !== "directory") || typeof o.key !== "string" || o.key.length < 1 || o.key.length > 300 || o.key.includes("\0")) return invalid("observe.entries", "each must be a different dependency of kind file or directory, with an ID and a key of 1 to 300 characters");
+    seen.add(o.id);
+    return { id: o.id, kind: o.kind as "file" | "directory", key: o.key };
+  });
+  if (paths !== undefined && (!Array.isArray(paths) || paths.length > OBSERVE_ASK.paths || paths.some((p) => typeof p !== "string" || p.length < 1 || p.length > 300 || p.includes("\0")))) invalid("observe.paths", `must be at most ${OBSERVE_ASK.paths} paths of 1 to 300 characters`);
+  return { requestId: requestId as string, operation: "observe", taskId: scope.taskId, projectId: scope.projectId, reason: "look again at the files a task relied on, before its attempt resumes", quietAttempts: [], observe: { entries: checked, ...(paths === undefined || (paths as string[]).length === 0 ? {} : { paths: [...(paths as string[])] }) } };
 }
 
 /** The request that carries a transfer of conversation stores (card K01i): only the two operations, the request ID and the transfer ID; nothing else rides it. */
@@ -627,6 +655,15 @@ export class RemoteWorkerService {
   async askVerify(by: Principal, hostId: string, requestId: string, attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     this.#staff(by);
     return this.#ask(hostIdOf(hostId), checkVerifyAsk(requestId, attemptId, scope, request), options);
+  }
+
+  /**
+   * Asks the host that holds a task's checkout to look again at files and directories the task relied on (card L04e), so a resumed attempt's dependencies are observed on that host's own disk. The same channel, limits and answer rules as a
+   * workspace request; it changes nothing on the host, and the answer carries what each one is now (`detail.observed`), never content. Only the owner and the dispatcher may ask.
+   */
+  async askObserve(by: Principal, hostId: string, requestId: string, scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[], paths: readonly string[] | undefined, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
+    this.#staff(by);
+    return this.#ask(hostIdOf(hostId), checkObserveAsk(requestId, scope, entries, paths), options);
   }
 
   /**
@@ -2052,11 +2089,11 @@ export class RemoteWorkerService {
       if (canonicalJson(b.result as unknown as JsonObject) === canonicalJson(result as unknown as JsonObject)) return b.result!;
       throw new DomainError("fenced", `attempt ${b.attemptId} already reported a different result`);
     }
-    if (command.result.checkpoint !== undefined) await this.#storeCheckpoint(b, { hostPrincipal: host.id, commandId: command.commandId, sequence: undefined, checkpoint: command.result.checkpoint, fixedId: `ckpt-done:${b.attemptId}:${b.placement}:${String(command.commandId).slice(0, 40)}`.slice(0, 120) });
+    const withResult = command.result.checkpoint === undefined ? undefined : await this.#storeCheckpoint(b, { hostPrincipal: host.id, commandId: command.commandId, sequence: undefined, checkpoint: command.result.checkpoint, fixedId: `ckpt-done:${b.attemptId}:${b.placement}:${String(command.commandId).slice(0, 40)}`.slice(0, 120) });
     const done = await this.#changePlacement(b.attemptId, async (current) => {
       const x = current?.body;
       if (x === undefined || x.hostId !== host.id || x.placement !== b.placement || x.state !== "accepted") throw new DomainError("fenced", `the placement of attempt ${b.attemptId} changed`);
-      return { next: { ...x, state: "completed", result }, extra: await this.#releaseStore(x) };
+      return { next: { ...x, state: "completed", result, ...(withResult === undefined ? {} : { resultCheckpoint: { artifactId: withResult.artifactId, sequence: withResult.sequence, digest: withResult.digest, at: this.#runner.now() } }) }, extra: await this.#releaseStore(x) };
     }, "complete", { actor: host.id });
     this.#wake(b.attemptId, done.body.placement, "", result);
     return result;
@@ -2121,6 +2158,17 @@ export class RemoteWorkerService {
     this.#staff(by);
     const b = (await this.#runner.get(PLACEMENT_KIND, attemptIdOf(attemptId)))?.body as unknown as PlacementBody | undefined;
     return b?.checkpoint === undefined ? undefined : { ...(await this.#readCheckpoint(b.checkpoint)), artifactId: b.checkpoint.artifactId, sequence: b.checkpoint.sequence, digest: b.checkpoint.digest };
+  }
+
+  /**
+   * The checkpoint a placement's worker sent with its turn's result (card L04e), read back verified: what a local host returns as the turn's `checkpoint`, with the worker's own read-back check (`nn.durable`) in it. Nothing when the worker sent none with
+   * the result, or the placement named is not the one that reported (an older checkpoint of the attempt is never taken for this turn's). Owner or dispatcher only.
+   */
+  async resultCheckpoint(by: Principal, attemptId: string, placement: number): Promise<JsonObject | undefined> {
+    this.#staff(by);
+    const b = (await this.#runner.get(PLACEMENT_KIND, attemptIdOf(attemptId)))?.body as unknown as PlacementBody | undefined;
+    if (b === undefined || b.placement !== placement || b.resultCheckpoint === undefined) return undefined;
+    return (await this.#readCheckpoint(b.resultCheckpoint)).checkpoint;
   }
 
   /** A stored file that no longer hashes to its record (card U11d, A08): told to the detectors, then refused as before. The key is the artifact only (no path, no content). */

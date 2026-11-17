@@ -142,6 +142,8 @@ export function localHostBuilder(setup) {
       tools,
       // This computer's host is the only one that can carry a backup or a restore (a remote worker host cannot over the worker protocol yet): a task that works elsewhere is refused with that reason.
       wipBackup: { port: wipHost, localHostId: LOCAL_HOST_ID },
+      // The checkout an agent of this computer really works in (card L04e): a resumed attempt's recorded files are read again there, not in the repository's own folder, which a task's uncommitted work never reaches. None made yet: the repository's folder.
+      resumeCheckout: async ({ taskId, projectId }) => { await refreshShared(); return workspaces.locate({ taskId, projectId })?.checkout; },
       ...(environments?.runtime === undefined ? {} : { maintenance: { environmentRuntime: environments.runtime, ...(environments.resources === undefined ? {} : { mountResources: environments.resources }) } }),
       dispatch: {
         local: {
