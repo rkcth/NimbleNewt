@@ -41,9 +41,14 @@ export interface Landed {
 }
 
 /** A submit the base of which is stale where the changed files overlap. The agent can refresh (H12p) and submit again, or end plainly. */
+/** The overlapping files as a refusal names them: the first ten, each cut to 200 characters (a path may be thousands long), so the text stays bounded. */
+export function shownFiles(files: readonly string[]): string {
+  return `${files.slice(0, 10).map((f) => (f.length > 200 ? `${f.slice(0, 200)}...` : f)).join(", ")}${files.length > 10 ? ", ..." : ""}`;
+}
+
 export class SubmitRefused extends DomainError {
   constructor(readonly head: string, readonly overlapping: readonly string[]) {
-    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${overlapping.slice(0, 10).join(", ")}${overlapping.length > 10 ? ", ..." : ""}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
+    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
     this.name = "SubmitRefused";
   }
 }
@@ -448,7 +453,7 @@ export class WorkEndService {
       if (l === undefined || overlap.length > 0) {
         const summary = l === undefined
           ? "submit_refused: the checkout's base could not be checked again after the calls settled; the attempt ended without a submission"
-          : `submit_refused: the landing branch moved to ${l.head} and changed ${overlap.length} of your files (${overlap.slice(0, 10).join(", ")}) while the ending was settling; the attempt ended without a submission`;
+          : `submit_refused: the landing branch moved to ${l.head} and changed ${overlap.length} of your files (${shownFiles(overlap)}) while the ending was settling; the attempt ended without a submission`;
         value = clean({ typed: "submit_refused" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_refused`, summary) });
       } else if (this.#deps.submit === undefined) {
         const summary = "submit_unavailable: this controller cannot stage and open a submission yet; the attempt ended without one";

@@ -63,4 +63,33 @@ for (const backend of backends) {
       await assert.rejects(dispatcherStage(() => undefined)({ attemptId: attempt } as never), (e: Error & { code?: string }) => e.code === "unavailable");
     } finally { await store.close(); }
   });
+
+  test(`${backend.name}: a host that does not answer within the bound gives no answer and a staging refused as unavailable; it is reported, not taken as "no overlap" (H12n first review)`, async () => {
+    const store = await backend.open();
+    let release!: () => void;
+    const never = new Promise<void>((ok) => { release = ok; });
+    try {
+      const errors: unknown[] = [];
+      const w = await buildWorld(store.storage, { options: { onError: (e) => { errors.push(e); }, submitHostMs: 50 } });
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("parser", ann);
+      const handle = () => ({ dispatcher: w.dispatcher, principal: w.dispatcherPrincipal });
+      const landing = dispatcherLanding(handle), stage = dispatcherStage(handle);
+      let checked = false;
+      w.worker.script = async ({ order }) => {
+        const ending = { attemptId: order.attemptId, taskId, projectId: w.project, agentId: "ann", live: true, generation: 1 } as never;
+        w.worker.submitView = async () => { await never; return { base: "a".repeat(40), head: "a".repeat(40), mine: [], landed: [] }; };
+        w.worker.stage = async () => { await never; return { base: "a".repeat(40), tree: "c".repeat(40), patchId: "d".repeat(40), files: ["x"] }; };
+        assert.equal(await landing(taskId, order.attemptId), undefined, "a late host is unknown, never an empty overlap");
+        await assert.rejects(stage(ending), (e: Error & { code?: string }) => e.code === "unavailable" && /did not answer within/.test(e.message));
+        checked = true;
+        return { status: "completed", text: "turn over", endKind: "normal" };
+      };
+      await w.heartbeatHost();
+      await w.dispatcher.tick();
+      await w.dispatcher.idle();
+      assert.equal(checked, true);
+      assert.ok(errors.some((e) => /did not answer within/.test(String((e as Error).message))), "the late host is reported");
+    } finally { release(); await store.close(); }
+  });
 }

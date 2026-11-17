@@ -535,9 +535,12 @@ export class GitBridge {
    * What a submit of the agent's work is checked against (card H12n), read only: the commit the checkout is based on (`refs/nn/base`), the shared repository's head now (the landing branch, as the author's refresh reads it, H12p),
    * the files the agent changed against the base as a submission would carry them (committed or not, not ignored: a throwaway index filled from the base and then with the checkout, as `doneState`), and the files the landing
    * branch changed between the base and its head (read in the shared repository; none when the head is the base). The checkout, its index and its refs are not touched. Too many files on either side refuses.
+   * The `base` returned is the commit the staging builds on (the checkout's own head, as `stage` reports it): the same as `refs/nn/base` unless the checkout holds a platform commit that has not landed yet (a release, H12o),
+   * whose files then count as the agent's (they are not on the landing branch). Reporting the head keeps it equal to what `stage` reports, which the submit compares (first review).
    */
   async submitView(options: { shared: string; gitDir: string; checkout: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] }> {
     const base = await this.#base(options.gitDir);
+    const tip = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
     const sharedGit = await this.#sharedGitDir(options.shared);
     const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
     const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
@@ -550,7 +553,7 @@ export class GitBridge {
     if (mine.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed in the checkout`);
     const landed = base === head ? [] : (await this.#run(["diff", "--name-only", "-z", "--no-renames", base, head], { gitDir: sharedGit })).stdout.split("\0").filter(Boolean);
     if (landed.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
-    return { base, head, mine: mine.sort(), landed: landed.sort() };
+    return { base: tip, head, mine: mine.sort(), landed: landed.sort() };
   }
 
   /**

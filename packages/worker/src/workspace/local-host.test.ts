@@ -378,3 +378,74 @@ test("submitView and stageWork: the base, the landing branch's head and the chan
     assert.notEqual(other.tree, staged.tree);
   } finally { await w.done(); }
 });
+
+test("submitView and stageWork run no filter, diff driver, hook or fsmonitor the agent's checkout names; names are taken literally; a nested repository or Git's own name refuses the staging (card H12n first review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    const marker = join(w.dir, "ran");
+    const touch = `touch ${JSON.stringify(marker)}; cat`;
+    const evil = `[core]\n\tfsmonitor = ${touch}\n\thooksPath = .git/hooks\n[filter "evil"]\n\tclean = ${touch}\n\tprocess = ${touch}\n[diff "evil"]\n\ttextconv = ${touch}\n\tcommand = ${touch}\n`;
+    await writeFile(join(made.checkout, ".gitattributes"), "* filter=evil diff=evil\n");
+    await writeFile(join(made.checkout, "-n"), "dash\n");
+    await writeFile(join(made.checkout, "--all"), "dashes\n");
+    await writeFile(join(made.checkout, "src", "[ab].ts"), "brackets\n");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    // The landing branch changes a file whose name a pattern would match: only the literal name counts.
+    await writeFile(join(w.shared, "src", "b.ts"), "export const b = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    const head = sh(w.shared, "rev-parse", "HEAD");
+    // A .git of its own at the top and a repository nested in a folder, each with commands in its configuration.
+    await mkdir(join(made.checkout, ".git", "hooks"), { recursive: true });
+    await writeFile(join(made.checkout, ".git", "config"), evil);
+    const nested = join(made.checkout, "vendor", "lib");
+    await mkdir(nested, { recursive: true });
+    sh(nested, "init", "-q", "-b", "main");
+    await writeFile(join(nested, "x.txt"), "x\n");
+    sh(nested, "add", "-A"); sh(nested, "commit", "-q", "-m", "x");
+    await writeFile(join(nested, ".git", "config"), evil);
+    await writeFile(join(nested, ".gitattributes"), "* filter=evil\n");
+    const view = await w.ws.submitView(scope);
+    assert.equal(existsSync(marker), false, "reading the view ran nothing the checkout names");
+    assert.deepEqual(view?.base, base);
+    assert.equal(view?.head, head);
+    assert.deepEqual(view?.landed, ["src/b.ts"]);
+    for (const f of ["-n", "--all", "src/[ab].ts", "src/a.ts", ".gitattributes"]) assert.ok(view?.mine.includes(f), `${f} is one of the agent's files, taken literally`);
+    assert.ok(!view?.mine.some((f) => f.startsWith(".git/") || f.startsWith("vendor/lib/")), "nothing inside Git's own data or a nested repository is listed as a file");
+    await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "protected_path", "Git's own name in the checkout refuses the staging whole");
+    assert.equal(existsSync(marker), false, "the refused staging ran nothing");
+    // Without Git's own names, the staging takes the odd names literally and runs nothing either.
+    await rm(join(made.checkout, ".git"), { recursive: true, force: true });
+    await rm(join(made.checkout, "vendor"), { recursive: true, force: true });
+    const staged = await w.ws.stageWork(scope);
+    assert.equal(existsSync(marker), false, "staging ran nothing the checkout names");
+    assert.deepEqual([...staged.files].sort(), ["--all", "-n", ".gitattributes", "src/[ab].ts", "src/a.ts"].sort());
+    assert.equal(staged.base, base);
+    assert.deepEqual((await readdir(made.gitDir)).filter((f) => f.startsWith("nn-index-")), [], "the throwaway index is removed");
+  } finally { await w.done(); }
+});
+
+test("a checkout holding a platform commit that has not landed (a release, H12o): the view's base is what the staging builds on, and that commit's files count as the agent's (card H12n first review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    const start = sh(w.shared, "rev-parse", "HEAD");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const released = await w.git.release({ gitDir: made.gitDir, checkout: made.checkout, requestId: "wsr-abcdefghijklmnopqrst", taskId: "tsk-one" });
+    assert.ok(released.commitId !== undefined);
+    // A later attempt of the same task adds work on top; the landing branch moves in a.ts meanwhile.
+    await writeFile(join(made.checkout, "src", "c.ts"), "export const c = 1;\n");
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 10;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    const view = (await w.ws.submitView(scope))!;
+    const staged = await w.ws.stageWork(scope);
+    assert.equal(view.base, released.commitId, "the base is the checkout's own head, which the staging builds on");
+    assert.equal(staged.base, view.base, "the view and the staging name the same base, so a submit is not refused as a moved checkout");
+    assert.notEqual(view.base, start);
+    assert.deepEqual(view.mine, ["src/a.ts", "src/c.ts"], "the release commit has not landed: its file is still the agent's");
+    assert.deepEqual(view.landed, ["src/a.ts"], "the landing branch's change since the checkout's start");
+  } finally { await w.done(); }
+});

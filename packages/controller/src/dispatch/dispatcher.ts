@@ -307,6 +307,8 @@ export interface AttemptDispatcherOptions extends RunnerOptions {
   readonly endHookMs?: number;
   /** How long the ended hook may run before it is cut off (default: `endHookMs`). */
   readonly endedHookMs?: number;
+  /** How long the host may take to say what a submit is checked against, or to stage it (card H12n). Default `SUBMIT_HOST_MS` (5 minutes). A host that is later gives no answer (unknown: the submit is refused). */
+  readonly submitHostMs?: number;
   /**
    * Card L04d follow-up: the resume check's model calls (the second agent that reviews what changed) run apart from the tick. The tick waits at most this long (default 250 ms, 0 = do not wait) for a check that
    * has just been started, so a quick one still proceeds in the same tick; a slower one is waited for by later ticks while the tick goes on with other attempts. The check's state is kept in the store, so a
@@ -1095,7 +1097,7 @@ export class DispatcherService {
     const b = (await this.#controlled(by, attemptId)).body;
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     if (host?.submitView === undefined) return undefined;
-    try { return await withinMs(host.submitView(attemptId, { taskId: b.taskId, projectId: b.projectId }), SUBMIT_HOST_MS); } catch (error) { this.#options.onError?.(error); return undefined; }
+    try { return await withinMs(host.submitView(attemptId, { taskId: b.taskId, projectId: b.projectId }), this.#options.submitHostMs ?? SUBMIT_HOST_MS); } catch (error) { this.#options.onError?.(error); return undefined; }
   }
 
   /**
@@ -1106,7 +1108,7 @@ export class DispatcherService {
     const b = (await this.#controlled(by, attemptId)).body;
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     if (host?.stage === undefined) throw new DomainError("unavailable", `the host this attempt runs on (${b.hostId ?? "none"}) cannot stage work for a submission`);
-    return withinMs(host.stage(attemptId, { taskId: b.taskId, projectId: b.projectId }), SUBMIT_HOST_MS);
+    return withinMs(host.stage(attemptId, { taskId: b.taskId, projectId: b.projectId }), this.#options.submitHostMs ?? SUBMIT_HOST_MS);
   }
 
   /**
