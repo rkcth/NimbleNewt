@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -10,7 +10,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { NewDependency } from "./dependencies.js";
 import { DependencyService } from "./index.js";
-import { checkoutDependencyObserver, locallyPlaced, nodeProbeFileSystem, resumeProbeEnabled, type ProbeFileSystem } from "./observe.js";
+import { checkoutDependencyObserver, entriesObserver, locallyPlaced, nodeProbeFileSystem, resumeProbeEnabled, type ProbeFileSystem } from "./observe.js";
 
 after(stopServer);
 
@@ -258,25 +258,76 @@ for (const backend of backends) {
   });
 }
 
-test("review: with remote hosts the probe is off unless asked for, and a task not placed on this machine is never located", async () => {
+test("review: the probe is on by default (a remote host answers for its own tasks), and a task not placed on this machine is never located here", async () => {
   assert.equal(resumeProbeEnabled(undefined, 0), true);
-  assert.equal(resumeProbeEnabled(undefined, 1), false, "remote hosts: the controller's disk is no evidence by default");
+  assert.equal(resumeProbeEnabled(undefined, 1), true, "remote hosts: a task placed on one is looked at by that host; the controller's disk is read only for tasks placed here");
+  assert.equal(resumeProbeEnabled(false, 1), false);
   assert.equal(resumeProbeEnabled(true, 1), true);
   assert.equal(resumeProbeEnabled({ maxEntries: 3 }, 2), true);
   assert.equal(resumeProbeEnabled(false, 0), false);
   const placed: Record<string, string> = { "tsk-local": "host:local", "tsk-remote": "host:far" };
   const located: string[] = [];
   const locate = locallyPlaced(new Set(["host:far"]), async (t) => placed[t], async (t) => { located.push(t); return "/srv/checkout"; });
-  assert.equal(await locate("tsk-local"), "/srv/checkout");
-  assert.equal(await locate("tsk-remote"), undefined);
-  assert.equal(await locate("tsk-never"), undefined, "never placed, with remote hosts: it may be about to go to one");
+  assert.equal(await locate("tsk-local", "p"), "/srv/checkout");
+  assert.equal(await locate("tsk-remote", "p"), undefined);
+  assert.equal(await locate("tsk-never", "p"), undefined, "never placed, with remote hosts: it may be about to go to one");
   assert.deepEqual(located, ["tsk-local"]);
   const alone = locallyPlaced(new Set(), async () => undefined, async () => "/srv/checkout");
-  assert.equal(await alone("tsk-never"), "/srv/checkout", "one machine: every task's checkout is here");
+  assert.equal(await alone("tsk-never", "p"), "/srv/checkout", "one machine: every task's checkout is here");
 });
 
 test("second review: a file whose size moved while it was read is not hashed from what was read", { skip: process.platform !== "linux" }, async () => {
   // A procfs file says it is empty and still has bytes: the same as a file that grew between the look and the read.
   const path = await real.realpath("/proc/self/status");
   await assert.rejects(() => real.readFile(path, 1024 * 1024), /moved while it was read/);
+});
+
+test("L04e review: a remote host's looks share one count of abandoned reads, so a hanging disk is not called again at every request until its call comes back", async () => {
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const hanging: ProbeFileSystem = {
+    realpath: (path) => { calls++; return new Promise<string>((ok) => { release = () => ok(path); }); },
+    readFile: async () => ({ kind: "not-file" }), readdir: async () => ({ kind: "not-directory" }),
+  };
+  const look = entriesObserver({ fs: hanging, timeoutMs: 20 });
+  const root = process.platform === "win32" ? "C:\\checkout" : "/checkout";
+  const scope = { taskId: "tsk-1", projectId: "prj-1" };
+  const entries = [{ id: "dpm-1", kind: "file" as const, key: "a.ts" }];
+  assert.deepEqual(await look(scope, entries, () => root), {}, "the hanging read is abandoned: unobserved");
+  assert.deepEqual(await look(scope, entries, () => root), {}, "a second request while it is still out: unobserved");
+  assert.equal(calls, 1, "the second request did not start another file-system call");
+  release!();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(await look(scope, entries, () => root), {});
+  assert.equal(calls, 2, "once the abandoned call came back, the next request reads again");
+  release!();
+});
+
+test("L04e second review: a missing file is reported deleted only when no link is on its way; a link whose target is gone, or a folder link to outside, leaves it unobserved", async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-gone-")));
+  try {
+    const checkout = join(dir, "checkout"), outside = join(dir, "outside");
+    mkdirSync(join(checkout, "src"), { recursive: true }); mkdirSync(outside, { recursive: true });
+    try {
+      symlinkSync(join(outside, "absent.txt"), join(checkout, "src", "dangling.ts"));
+      symlinkSync(outside, join(checkout, "out"), "dir");
+      symlinkSync(join(checkout, "src"), join(checkout, "inner"), "dir");
+    } catch { t.skip("links cannot be made here"); return; }
+    const entries = [
+      { id: "gone", kind: "file" as const, key: "src/gone.ts" },
+      { id: "gone-dir", kind: "directory" as const, key: "nothing/here" },
+      { id: "dangling", kind: "file" as const, key: "src/dangling.ts" },
+      { id: "via-out", kind: "file" as const, key: "out/absent.txt" },
+      { id: "via-inner", kind: "file" as const, key: "inner/absent.txt" },
+    ];
+    const faults: string[] = [];
+    const seen = await entriesObserver({ onFault: (d) => faults.push(d) })({ taskId: "tsk-1", projectId: "prj-1" }, entries, () => checkout);
+    assert.deepEqual(seen, { "gone": { exists: false }, "gone-dir": { exists: false } }, "only the paths with no link on their way are reported deleted");
+    assert.match(faults.join(" "), /missing through a link/);
+    assert.equal(faults.join(" ").includes(outside), false, "the log does not name where the link points");
+    // A file system without `present` keeps the earlier rule (a fake in a test, a host's own view).
+    const { present: _p, ...plain } = nodeProbeFileSystem;
+    void _p;
+    assert.deepEqual(Object.keys(await entriesObserver({ fs: plain })({ taskId: "tsk-1", projectId: "prj-1" }, entries.slice(0, 1), () => checkout)), ["gone"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

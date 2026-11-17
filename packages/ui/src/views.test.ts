@@ -328,6 +328,30 @@ test("settings show the value, whether it is the default, set by you, inherited 
   assert.match(text(view), /No setting matches/);
 });
 
+test("a value the setting refuses is shown on the page with the error that names the setting: Apply comes back refused and the chat says which setting and why, and a refusal at the door says the same (card U08)", async () => {
+  const sentence = "Set the setting grants.maxDays to 0 for the whole installation";
+  const done = { turnId: "t", replayed: false, text: sentence, reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "pedit-bad", preview: ["Set grants.maxDays to 0 for the whole installation."] }] };
+  const failure = { step: 0, code: "invalid_command", message: "set.grants.maxDays: must be a whole number from 1 to 36500" };
+  const page = boot({ "admin-settings": settingsFixture() }, [
+    (c) => (c.path === "/web/admin/setting" ? { status: 201, body: done } : undefined),
+    (c) => (c.path === "/web/proposals/pedit-bad/apply" ? { status: 200, body: { proposalId: "pedit-bad", applied: false, replayed: false, results: [], failure } } : undefined),
+  ]);
+  const view = await admin(page, "settings", "Settings");
+  const card = view.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  card.find((e) => e.tag === "input")[0]!.value = "0";
+  chip(card, "Change").click(); await settle();
+  const log = page.doc.byId.get("log")!;
+  log.buttons().find((b) => b.textContent === "Apply")!.click(); await settle();
+  assert.match(text(log), /Apply proposal: failed - set\.grants\.maxDays: must be a whole number from 1 to 36500/);
+  // A refusal the controller gives before anything is proposed (HTTP 400) is shown the same way: the error's own words, which name the setting.
+  const page2 = boot({ "admin-settings": settingsFixture() }, [(c) => (c.path === "/web/admin/setting" ? { status: 400, body: { error: { code: "invalid_command", message: "grants.nope is not a setting this system has" } } } : undefined)]);
+  const v2 = await admin(page2, "settings", "Settings");
+  const c2 = v2.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  c2.find((e) => e.tag === "input")[0]!.value = "3";
+  chip(c2, "Change").click(); await settle();
+  assert.match(text(page2.doc.byId.get("log")!), /grants\.nope is not a setting this system has/);
+});
+
 test("a setting is changed from the page as one outbox item under one key, the chat shows it first, and 'back to default' asks first (card U08)", async () => {
   const done = { turnId: "t", replayed: false, text: "Set the setting grants.maxDays to 12 for the whole installation", reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "pedit-aaaa", preview: ["Set grants.maxDays to 12 for the whole installation."] }] };
   const page = boot({ "admin-settings": settingsFixture() }, [(c) => (c.path === "/web/admin/setting" ? { status: 201, body: done } : undefined)], () => false);
@@ -478,7 +502,11 @@ test("agents and teams, policy, API access, operations and migration are drawn f
     "admin-policy": { readiness: { item: { items: [{ id: "profile", detail: "derived" }] } }, grants: { items: [{ grantee: "agent:ann", action: "approve.class.commit", project: "proj-1", state: "active", basis: H }] }, settings: { item: { items: settingsFixture().settings.item.items.slice(0, 1) } } },
     "admin-access": { web: { item: { settings: { host: "127.0.0.1", port: 8443, network: "loopback", tls: false, behindTlsProxy: true, publicHosts: ["newt.example.ts.net"], trustedProxy: { enabled: false } }, browsers: [{ label: H, createdAt: "2026-11-10", lastSeen: "2026-11-11" }] } }, local: { item: { enabled: true } } },
     "admin-operations": { lifecycle: { item: { intent: "paused", reason: H } }, workers: { item: { effective: { cpus: 2 } } }, capacity: { item: { x: 1 } } },
-    "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 4, rollbackPeriod: { days: 7, open: true, until: "2026-11-20" }, contract: { waiting: true, refusals: ["rollback period still open"] }, migrations: [{ version: 4, name: H, kind: "destructive", state: "deferred" }], upgrades: [{ at: "2026-11-01", from: 2, to: 3, additiveOnly: true }], testedPairs: [{ release: "1.4.0", schema: 3, at: "2026-11-02" }] } }, policy: { item: { rollbackPeriodDays: 7, probationMinutes: 60, maxReleaseFailures: 2, hostRetries: 3 } } },
+    "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 4, rollbackPeriod: { days: 7, open: true, until: "2026-11-20" }, contract: { waiting: true, refusals: ["rollback period still open"] }, migrations: [{ version: 4, name: H, kind: "destructive", state: "deferred" }], upgrades: [{ at: "2026-11-01", from: 2, to: 3, additiveOnly: true }], testedPairs: [{ release: "1.4.0", schema: 3, at: "2026-11-02" }] } }, policy: { item: { rollbackPeriodDays: 7, probationMinutes: 60, maxReleaseFailures: 2, hostRetries: 3 } },
+      compat: { item: { status: "attention", runtime: { node: { running: "22.19.0", minimum: "22.19.0", supported: true }, protocol: { min: 1, max: 2 } }, hosts: [
+        { hostId: "host:old", state: "older", protocol: 1, workerVersion: H, note: "It speaks worker protocol 1.", agents: ["Ann (agent:a1)", H], agentsMore: 3, operations: ["running a catalogue tool on the host (script run)"], operationsMore: 1 },
+        { hostId: "host:ok", state: "current", protocol: 2, note: "newest", agents: [], agentsMore: 0, operations: [], operationsMore: 0 }],
+        migration: { schemaVersion: 3, latestKnown: 4, note: "1 migration waits.", pending: [{ version: 4, name: "drop_b", kind: "destructive", state: "deferred" }], agents: ["Ann (agent:a1)"], agentsMore: 0, operations: ["attempt att-0 of Ann"], operationsMore: 0 }, problems: ["the hosts: unavailable"] } } },
   });
   const team = await admin(page, "team", "Agents and teams");
   assert.match(text(team), /<script>alert\(2\)<\/script>.*author, reviewer.*team-t.*active.*running/s); assert.match(text(team), /builders/);
@@ -493,6 +521,11 @@ test("agents and teams, policy, API access, operations and migration are drawn f
   const mig = await admin(page, "migration", "Migration");
   assert.match(text(mig), /schema 3; this version knows 4/); assert.match(text(mig), /Rollback period: 7 days, open until 2026-11-20/); assert.match(text(mig), /Destructive migrations are waiting for your approval/);
   assert.match(text(mig), /rollback period still open/); assert.match(text(mig), /Tested pairs/); assert.match(text(mig), /Rollout policy/); assert.match(text(mig), /Failures before going back: 2/);
+  assert.match(text(mig), /Something is not current/); assert.match(text(mig), /Node\.js 22\.19\.0 is running; this version needs 22\.19\.0 or newer: met\./); assert.match(text(mig), /worker protocol 1 to 2/);
+  assert.match(text(mig), /host:old.*older.*It speaks worker protocol 1/s); assert.match(text(mig), /Affected by host host:old/); assert.doesNotMatch(text(mig), /Affected by host host:ok/);
+  assert.match(text(mig), /Agents affected: Ann \(agent:a1\); .*alert\(2\).* and 3 more\./); assert.match(text(mig), /Operations affected: running a catalogue tool on the host \(script run\) and 1 more\./);
+  assert.match(text(mig), /Schema 3 of 4\. 1 migration waits\./); assert.match(text(mig), /Affected by the waiting migrations/); assert.match(text(mig), /Operations affected: attempt att-0 of Ann\./);
+  assert.match(text(mig), /Not read: the hosts: unavailable/);
   assert.deepEqual(page.doc.violations, []);
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   for (const tb of mig.find((e) => e.tag === "table")) assert.equal(tb.find((e) => e.tag === "caption").length, 1, "every table has a caption");

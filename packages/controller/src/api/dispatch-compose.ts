@@ -225,6 +225,8 @@ export interface DispatchHandle {
   readonly workerUrl?: string;
   /** The host an agent's live attempt runs on, if it has one (the review service judges a reviewer's host with it, card H05b). */
   readonly hostOfAgent: (agentId: string) => Promise<string | undefined>;
+  /** The hosts that run inside this controller (the local host and any the operator built in process, not remote workers): they speak this build's own worker protocol (card U08d, the compatibility status). */
+  readonly inProcessHosts: readonly string[];
   /** One page of the rest of a tool result that was cut to the window (card C07d), for someone who may work on the task; otherwise it reads like a missing spill. */
   readonly readSpill: (by: Principal, spillId: string, index: number, size?: number) => Promise<{ text: string; next?: number } | undefined>;
   /** The full text of an item cut when a task moved to a smaller route (card C07f), for someone who may work on the task. */
@@ -953,6 +955,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       readNoteArchive: (by, taskId, digest) => context.noteArchive(by, { taskId, digest }),
       readHandoffNote: (by, noteId) => context.readHandoff(by, noteId),
       principal,
+      inProcessHosts: workers.filter((w) => !(w instanceof RemoteWorkerHost)).map((w) => w.hostId),
       hostOfAgent: async (agentId) => { for (const attemptId of await dispatcher.liveAttemptsOf(principal, { agentId })) { const d = await dispatcher.get(principal, attemptId); const host = d?.state === "running" ? d.hostId : d?.pinnedHost; if (host !== undefined) return host; } return undefined; }, quiesce: new QuiesceCoordinator({ dispatcher, blockers, principal }),
       ...(mcpParts === undefined ? {} : { mcp: mcpParts }),
       ...(networkParts === undefined ? {} : { network: networkParts }),

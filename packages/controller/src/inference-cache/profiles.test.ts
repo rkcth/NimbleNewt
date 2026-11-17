@@ -120,7 +120,7 @@ test("Radiance: only the session label is sent, hits from cache_n and prompt_n w
   assert.deepEqual(p.neverCall, ["/reset_prefix_cache"]);
   assert.match(p.capabilities.retention.via, /host tier/);
   assert.match(profileFor({ kind: "radiance", model: "m" }).capabilities.retention.via, /no host tier/);
-  assert.deepEqual([p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.slotSaveRestore.level, p.capabilities.decoderResume.level], ["unsupported", "available", "unsupported", "unsupported"]);
+  assert.deepEqual([p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.slotSaveRestore.level, p.capabilities.decoderResume.level], ["unsupported", "qualified", "unsupported", "unsupported"]);
   assert.ok(p.tuning.some((t) => t.setting === "--checkpoint-slots"));
   assert.ok(p.caveats.some((c) => /ignored/.test(c)));
 });
@@ -233,17 +233,19 @@ test("Claude: hits from cache_read_input_tokens, with writes split by lifetime; 
   assert.deepEqual([p.capabilities.pin.level, p.capabilities.retention.control, p.capabilities.retention.maxMs, p.capabilities.prefixReuse], ["unsupported", "request", 3_600_000, "markers"]);
 });
 
-test("pin, fork and decoder resume are advertised separately, and nothing claims to be qualified or to resume a decoder", () => {
+test("pin, fork and decoder resume are advertised separately; only what G10 measured is qualified, and nothing claims to resume a decoder", () => {
   const all = BACKEND_KINDS.map((kind) => profileFor({ kind, model: "m", options: { slots: 2, slotSave: true, pinPrefix: true } }));
   for (const p of all) {
     assert.equal(p.capabilities.decoderResume.level, "unsupported", p.kind);
-    for (const s of [p.capabilities.pin, p.capabilities.fork, p.capabilities.slotSaveRestore]) assert.notEqual(s.level, "qualified", `${p.kind}: nothing is qualified before G10`);
+    // G10 measured Radiance's fork (a shared head read by a second conversation) on the owner's server; every other backend was not running and stays unqualified.
+    for (const [name, s] of [["pin", p.capabilities.pin], ["fork", p.capabilities.fork], ["slotSaveRestore", p.capabilities.slotSaveRestore]] as const) assert.equal(s.level === "qualified", p.kind === "radiance" && name === "fork", `${p.kind} ${name}: qualified only where G10 measured it`);
   }
+  assert.match(profileFor({ kind: "radiance", model: "m" }).capabilities.fork.via, /G10/);
   const by = Object.fromEntries(all.map((p) => [p.kind, [p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.slotSaveRestore.level]]));
   assert.deepEqual(by["llama-cpp"], ["available", "available", "available"]);
   assert.deepEqual(by["strata"], ["available", "available", "available"]);
   assert.deepEqual(by["vllm"], ["unsupported", "available", "unsupported"]);
-  assert.deepEqual(by["radiance"], ["unsupported", "available", "unsupported"]);
+  assert.deepEqual(by["radiance"], ["unsupported", "qualified", "unsupported"]);
   assert.deepEqual(by["claude"], ["unsupported", "available", "unsupported"]);
 });
 
