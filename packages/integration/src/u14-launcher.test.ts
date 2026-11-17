@@ -78,6 +78,7 @@ test("a first start makes the owner once with the credential in the secret store
       assert.match(greeting, /\[x\] A project/);
       // No approval profile has been chosen yet, so the walk-through asks that first (card U08); the first required step still open is the host.
       assert.match(greeting, /Next: How much should the team ask you before it acts\?.*Do you want to switch from strict to derived\?/);
+      assert.match(greeting, /\[ \] A host to run agents on \(needed\)/, "the host is still listed as the open required step");
     } finally { await b.close(); }
   } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

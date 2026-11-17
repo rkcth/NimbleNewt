@@ -25,6 +25,8 @@ export interface HostRuntimeInput {
   readonly workerVersion?: string;
   /** Set while the controller's latest word to this worker was a refusal (no common protocol), cleared when a connection succeeds. */
   readonly refusal?: { readonly at: string; readonly reason: string };
+  /** True for a host that runs inside this controller (the local host): it is this build's own worker and opens no remote session, so it speaks this version's protocol (card U08d second review). */
+  readonly inProcess?: boolean;
 }
 
 /** An active agent, where its conversation store lives and the attempt it is running now, when it is running one. */
@@ -97,6 +99,7 @@ export function compatibility(input: CompatInputs): CompatView {
       hosts.push({ ...base, state: "refused", note: `The controller turned this worker away on ${h.refusal.at}: ${redactText(h.refusal.reason).slice(0, COMPAT_LIMITS.note).replace(/[.!]?$/, ".")}`, ...affected(here, ["every attempt that would be placed on this host (nothing is placed on it until the worker is replaced or upgraded)"]) });
       continue;
     }
+    if (h.inProcess === true) { hosts.push({ ...base, protocol: WORKER_PROTOCOL.max, state: "current", note: "It runs inside this controller, the same build, so it speaks everything this version does.", ...affected([], []) }); continue; }
     if (h.protocol === undefined) { hosts.push({ ...base, state: "not connected", note: "No worker has connected from this host since the controller recorded it; its protocol is not known.", ...affected([], []) }); continue; }
     if (h.protocol < WORKER_PROTOCOL.max) {
       const missing = missingOperations(h.protocol);

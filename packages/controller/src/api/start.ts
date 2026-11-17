@@ -905,7 +905,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
             const page = await hostsRead.list(by, { limit: 100, ...(afterId === undefined ? {} : { afterId }) });
             for (const h of page.items) {
               const ses = dispatch?.remote === undefined ? undefined : await dispatch.remote.session(dispatch.principal, h.hostId).catch(() => undefined);
-              out.push({ hostId: h.hostId, identity: h.identity, freshness: h.freshness, ...(h.capabilities === undefined ? {} : { os: h.capabilities.os }), ...(ses?.protocol === undefined ? {} : { protocol: ses.protocol }), ...(ses?.workerVersion === undefined ? {} : { workerVersion: ses.workerVersion }), ...(ses?.refusal === undefined ? {} : { refusal: { at: ses.refusal.at, reason: ses.refusal.reason } }) });
+              out.push({ hostId: h.hostId, identity: h.identity, freshness: h.freshness, ...(dispatch?.inProcessHosts.includes(h.hostId) === true ? { inProcess: true } : {}), ...(h.capabilities === undefined ? {} : { os: h.capabilities.os }), ...(ses?.protocol === undefined ? {} : { protocol: ses.protocol }), ...(ses?.workerVersion === undefined ? {} : { workerVersion: ses.workerVersion }), ...(ses?.refusal === undefined ? {} : { refusal: { at: ses.refusal.at, reason: ses.refusal.reason } }) });
             }
             if (page.next === undefined) break;
             afterId = page.next;
@@ -913,16 +913,30 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           return out;
         },
         agentWork: async (by) => {
+          // The attempts running now come from the dispatcher (every host, the local one included; card U08d second review), not from a remote store record, which only a remote host keeps.
+          const running = new Map<string, string>();
+          if (dispatch !== undefined) {
+            for (const { attemptId } of (await dispatch.dispatcher.liveAttempts(dispatch.principal)).slice(0, 500)) {
+              const d = await dispatch.dispatcher.get(dispatch.principal, attemptId).catch(() => undefined);
+              if (d !== undefined && d.state !== "finished" && !running.has(d.agentId)) running.set(d.agentId, attemptId);
+            }
+          }
           const out = []; let afterId: string | undefined;
           for (let i = 0; i < 4; i++) {
             const page = await agents.list(by, { state: "active", limit: 50, ...(afterId === undefined ? {} : { afterId }) });
             for (const a of page.items) {
-              const store = dispatch?.remote === undefined ? undefined : await dispatch.remote.store(dispatch.principal, a.id).catch(() => undefined);
-              out.push({ agentId: a.id, name: a.friendlyName, ...(store === undefined ? {} : { hostId: store.ownerHostId }), ...(store?.liveAttempt === undefined ? {} : { attemptId: store.liveAttempt }) });
+              // The dispatcher and the remote store name an agent by its principal ID (`agent:<id>`); the agent record's ID has no prefix.
+              const key = a.id.startsWith("agent:") ? a.id : `agent:${a.id}`;
+              const store = dispatch?.remote === undefined ? undefined : await dispatch.remote.store(dispatch.principal, key).catch(() => undefined);
+              const attemptId = running.get(key);
+              running.delete(key);
+              out.push({ agentId: a.id, name: a.friendlyName, ...(store === undefined ? {} : { hostId: store.ownerHostId }), ...(attemptId === undefined ? {} : { attemptId }) });
             }
             if (page.next === undefined) break;
             afterId = page.next;
           }
+          // A running attempt whose agent is not among the active agent records read above (an enrolled name with no record, or past the pages read) is still interrupted by a restart.
+          for (const [agentId, attemptId] of running) out.push({ agentId, attemptId });
           return out;
         },
         migration: async (by) => { const m = await migrationGuardRef!.status(by); return { schemaVersion: m.schemaVersion, latestKnown: m.latestKnown, migrations: m.migrations }; },
