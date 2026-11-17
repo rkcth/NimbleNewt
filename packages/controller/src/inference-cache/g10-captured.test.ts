@@ -57,3 +57,22 @@ test("captured Radiance responses through the production CacheAdapter: cold, hit
   assert.deepEqual(seen.map((r) => r.body["session_id"]), ["nn-share0123456789", "nn-share0123456789", "nn-share0123456789"]);
   for (const r of seen) for (const ignored of ["cache_prompt", "id_slot", "prompt_cache_key"]) assert.equal(ignored in r.body, false, ignored);
 });
+
+test("a shared prefix under the measured 2,048-token step is not expected to be reused, so the captured cold answer under it is judged cold, not a miss", async () => {
+  const p = profile();
+  const ctx = { scopeKey: "nn-scope0123456789", shareKey: "nn-share0123456789" };
+  const request = { messages: [{ role: "user", content: "x" }] };
+  const under = p.prepare(request, { ...ctx, prefixTokens: 1_750 });
+  assert.equal(under.expects, "no");
+  assert.equal(under.body["session_id"], "nn-share0123456789", "the label is still sent");
+  assert.ok(under.skipped.some((s) => /1750 tokens\) is under the 2048-token minimum/.test(s)), under.skipped.join("; "));
+  for (const [prefixTokens, expects] of [[2_048, "yes"], [13_470, "yes"], [undefined, "yes"]] as const) assert.equal(p.prepare(request, { ...ctx, ...(prefixTokens === undefined ? {} : { prefixTokens }) }).expects, expects, String(prefixTokens));
+  // A non-hybrid model has no step; the endpoint option still overrides.
+  assert.equal(profileFor({ kind: "radiance", model: "m", options: { hybrid: false } }).prepare(request, { ...ctx, prefixTokens: 1_750 }).expects, "yes");
+  assert.equal(profileFor({ kind: "radiance", model: "m", options: { minPrefixTokens: 4096 } }).prepare(request, { ...ctx, prefixTokens: 3_000 }).expects, "no");
+  // Through the adapter with a reuse expected from an earlier call: zero cached under the step is cold; over it, a miss.
+  const replay: Transport = { send: async (): Promise<HttpResponse> => ({ status: 200, body: sse("cold.sse") }) };
+  const adapter = new CacheAdapter(p, replay);
+  assert.equal((await adapter.call({ ...request, stream: true }, { ...ctx, prefixTokens: 1_750 }, 2_048)).outcome, "cold");
+  assert.equal((await adapter.call({ ...request, stream: true }, { ...ctx, prefixTokens: 13_470 }, 2_048)).outcome, "miss");
+});

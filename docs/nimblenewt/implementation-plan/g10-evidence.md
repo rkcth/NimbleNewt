@@ -24,14 +24,14 @@ Each repeat uses a new random head of about 13,470 tokens (400 synthetic ledger 
 
 What this shows:
 
-1. **Reuse is real and large.** A reused head cut the time to the first token by 6 to 12 times in the same repeat (8.3 s to 1.3 s; 2.8 s to 0.4 s). All 21 answers were right, including every one served from cache, so the reused state gives the same context.
+1. **Reuse is real and large.** A reused head cut the time to the first token by 5 to 30 times against the cold step of the same repeat: 6.3 to 6.8 times in repeat 1 (8.3 s to about 1.2 s), 5.1 to 7.0 times in repeat 3 (2.8 s to 0.4 to 0.5 s), and 10 to 30 times in repeat 2, whose cold step (12.3 s) was slowed by other work on the machine. Hits took 0.4 to 1.3 s in every repeat. All 21 answers were right, including every one served from cache, so the reused state gives the same context.
 2. **Reuse is in steps of 2,048 tokens.** Every hit was exactly 12,288 tokens (six steps of 2,048), whatever the prompt length. The hybrid model can resume only from a saved linear-layer state, and this server saves one every 2,048 tokens (`/sessions` shows `resume_tokens` 12,288 and 5 or 6 snapshots per conversation). So up to 2,047 tokens are computed again on every turn, and a prompt under 2,048 tokens is never reused at all (Part B).
 3. **The hybrid caveat did not bite here.** C06 warned that `cache_n` might count attention blocks while every linear layer was re-run. The prompt time fell in proportion to the cached share every time, so the hits were real. The caveat stays in the profile because it is cheap and a different model or setting could still show it.
 4. **`session_id` is only a label.** The same head without it was reused just as well. This confirms the profile (session_id is not a cache key) and confirms that Radiance cannot keep projects apart (isolation `none`): any request with the same opening tokens reuses them.
 5. **A miss costs time only.** A head changed by one word got nothing from cache, the adapter judged it a miss, and the answer was still right, because every request carries its full context.
 6. **Switching costs nothing extra.** Going back to the first conversation after another one used the server took the same time as a plain repeat.
 7. **Kept for at least 90 seconds.** After 90 idle seconds the head was still reused. Between requests the conversations sat in the host-memory tier (`on_host` in `/sessions`) and were brought back.
-8. **The two hit fields agree.** Every response carried both `timings.cache_n`/`prompt_n` and `usage.prompt_tokens_details.cached_tokens`, with the same numbers, streamed or not.
+8. **The two hit fields agree.** Each of the eight responses kept from repeat 1 (seven streamed, one not) carried both `timings.cache_n`/`prompt_n` and `usage.prompt_tokens_details.cached_tokens`, with the same numbers. Repeats 2 and 3 recorded only the figures the profile read, not both fields.
 
 ## Part B: C06b's two-agent conversation on the real server
 
@@ -53,9 +53,9 @@ For comparison, the simulator figures recorded by C06b for Radiance were 1,719 a
 
 ## Memory (from `/sessions` and `/stats`)
 
-- **KV cache:** about 203 MB for a 13,500-token conversation, about 15.1 KB a token over both cards (7.5 KB a card, which matches C06's 7.32 KiB a token).
-- **Linear-state snapshots:** about 119 MB each (`snapshot_store.bytes_each`), one per 2,048 tokens, so about 714 MB for the same conversation, about four times its KV. The store holds 80 snapshots (about 9.5 GB, roughly 164,000 tokens of resumable positions across all conversations together). During the run the server evicted 41 snapshots for retention (`ckpt_evictions.retention` 0 to 41), which ones is not reported; the bench's own conversations still had 5 or 6 snapshots each when listed right after their steps.
-- **What this means:** on this model the snapshot store, not the KV pool (1.07 million tokens), is what limits how many long conversations stay resumable. A 200,000-token transcript needs about 98 snapshots, more than the store holds, so the card's "long shared transcript not dropped" needs a larger store or fewer, longer-spaced snapshots; that is a server setting for the owner, not a NimbleNewt change.
+- **KV cache:** about 203 MB for a 13,500-token conversation, about 15.1 KB a token as `/sessions` reports it (`bytes`). C06's figure is 7.32 KiB (7.5 KB) a token; the two agree if `bytes` counts both cards' halves, which is not recorded, so the host-tier size in the profile's tuning notes is left as it was.
+- **Linear-state snapshots:** about 119 MB each (`/sessions`: `snap_bytes` 713,957,664 for 6 snapshots), one per 2,048 tokens, so about 714 MB for the same conversation, about four times its KV. The store's size, 80 snapshots (about 9.5 GB, roughly 164,000 tokens of resumable positions across all conversations together), is not in the recorded JSON (the bench keeps only some `/stats` fields), so it is not checked against the raw data. During the run the server evicted 41 snapshots for retention (`ckpt_evictions.retention` 0 to 41), which ones is not reported; the bench's own conversations still had 5 or 6 snapshots each when listed right after their steps.
+- **What this means:** on this model the snapshot store, not the KV pool (1.07 million tokens), is what limits how many long conversations stay resumable. A 200,000-token transcript needs about 98 snapshots, more than a store of 80 holds, so the card's "long shared transcript not dropped" needs a larger store or fewer, longer-spaced snapshots; that is a server setting for the owner, not a NimbleNewt change.
 - **Time to first token** is in the table above. Cold prefill ran at about 1,600 to 4,900 tokens a second depending on load; a hit at about 900 to 3,000 tokens a second over the recomputed tail.
 
 ## Capability matrix (pinned versions)

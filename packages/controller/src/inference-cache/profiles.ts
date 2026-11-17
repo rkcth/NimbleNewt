@@ -161,6 +161,7 @@ function vllm(model: string, o: EndpointOptions): CacheProfile {
 // ---- Radiance ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function radiance(model: string, o: EndpointOptions): CacheProfile {
   const hybrid = o.hybrid !== false;
+  const min = o.minPrefixTokens ?? (hybrid ? 2048 : 1);
   const capabilities: CacheCapabilities = {
     prefixReuse: "automatic",
     retention: { control: "server", via: o.hostTier === true ? "VRAM blocks move to the host tier (--prefix-cache-mib) and are dropped after --prefix-cache-ttl idle seconds; not per request" : "VRAM blocks only, dropped by pool pressure or --prefix-cache-ttl; no host tier is configured" },
@@ -174,14 +175,14 @@ function radiance(model: string, o: EndpointOptions): CacheProfile {
   };
   return {
     // A hybrid model resumes only from a linear-state snapshot, written every 2,048 tokens (G10: every hit was a multiple of 2,048; prompts under 2,048 tokens were never reused).
-    kind: "radiance", label: "Radiance", model, wire: "openai-chat", capabilities, minPrefixTokens: o.minPrefixTokens ?? (hybrid ? 2048 : 1), defaultLifetimeMs: 3_600_000,
+    kind: "radiance", label: "Radiance", model, wire: "openai-chat", capabilities, minPrefixTokens: min, defaultLifetimeMs: 3_600_000,
     basis: "Radiance source (codeberg StillDeadcode/radiance, commit 123c439, 2026-10-22) and RADIANCE-R9700-SETUP-READ-ME; response shapes, reuse, the 2,048-token snapshot step and memory measured by G10 on Radiance 2.1.0 (2026-11-16)",
     hitFields: ["timings.cache_n", "timings.prompt_n", "usage.prompt_tokens_details.cached_tokens"],
     tuning: [
       { where: "request", setting: "session_id", why: "a label only (shown in /sessions); it does not select a cache entry" },
       { where: "server", setting: "--prefix-cache-mib", value: "at least one full conversation (about 1.43 GiB per 200K tokens on Flash-Next, 7.32 KiB a token)", why: "host tier for idle conversations; smaller than one conversation means the tail is prefilled again" },
       { where: "server", setting: "--prefix-cache-ttl", value: "3600", why: "seconds an unused conversation is kept; 0 keeps it until the memory is wanted" },
-      { where: "server", setting: "--checkpoint-slots", value: "auto", why: "linear-state snapshots of a hybrid model; without the snapshot under the next prompt nothing is reused. G10: one snapshot (about 119 MB on Flash-Next) per 2,048 tokens of each conversation, about four times the KV of those tokens; the store held 80, and older snapshots were evicted for retention while G10 ran" },
+      { where: "server", setting: "--checkpoint-slots", value: "auto", why: "linear-state snapshots of a hybrid model; without the snapshot under the next prompt nothing is reused. G10: one snapshot (about 119 MB on Flash-Next) per 2,048 tokens of each conversation, about four times the KV of those tokens; older snapshots were evicted for retention while G10 ran" },
       { where: "server", setting: "--max-num-seqs", value: "8 on Flash-Next", why: "each sequence holds recurrent state; the pool must hold the live sessions or the next turn re-prefills everything (the cache cliff)" },
     ],
     caveats: [
@@ -195,7 +196,10 @@ function radiance(model: string, o: EndpointOptions): CacheProfile {
       const body = copy(request); const applied: string[] = []; const skipped: string[] = [];
       if (ctx.plain === true) return prepared(body, applied, skipped, "no");
       body["session_id"] = safeKey(ctx.shareKey ?? ctx.scopeKey).slice(0, 128); applied.push("session_id");
-      return prepared(body, applied, skipped, "yes");
+      // A shared prefix under the minimum (on a hybrid model, under the first 2,048-token snapshot) is never reused, so a zero there is expected, not a miss (G10).
+      const small = ctx.prefixTokens !== undefined && ctx.prefixTokens < min;
+      if (small) skipped.push(`caching: the shared prefix (about ${ctx.prefixTokens} tokens) is under the ${min}-token minimum`);
+      return prepared(body, applied, skipped, small ? "no" : "yes");
     },
     read: (response) => readTimings(response, hybrid ? "hybrid model: a hit may not include the linear-state snapshot" : undefined),
     refusedCacheSetting: refusedBy(/\bsession_id\b/),
