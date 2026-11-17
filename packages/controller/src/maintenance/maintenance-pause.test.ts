@@ -259,6 +259,29 @@ for (const [index, backend] of backends.entries()) {
     });
   });
 
+  test(`a protected request decided while its administrators' notices are still being made has them closed after they are made, not left open (${backend.name})`, async () => {
+    await world(index, async (w) => {
+      const events: string[] = [];
+      const adm = await w.make("Admin"); const ann = await w.make("Ann");
+      let m: MaintenanceService | undefined;
+      // The owner decides the request as soon as the owner's notice arrives, before any administrator's notice is made.
+      m = w.on(w.storage, {
+        notify: async (x) => { events.push(`notify:${x.to}`); if (x.to === "owner") await m!.decide(w.owner, { commandId: cid("d"), maintenanceId: x.maintenanceId, verdict: "reject", specDigest: (await w.body(x.maintenanceId)).specDigest }); },
+        closed: async (id) => { events.push(`closed:${id}`); },
+      });
+      await m.change(w.owner, { commandId: cid("adm"), administrators: [adm.id] });
+      const r = await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "x" }, reason: "needed", rollbackPlan: "undo it" });
+      assert.equal((await w.body(r.maintenanceId)).status, "rejected");
+      assert.equal(events.at(-1), `closed:${r.maintenanceId}`, `the last thing done is the close, after the administrator's notice: ${events.join(", ")}`);
+      assert.ok(events.indexOf("notify:administrator") >= 0 && events.lastIndexOf(`closed:${r.maintenanceId}`) > events.indexOf("notify:administrator"));
+      // A request still waiting closes nothing.
+      const events2 = events.length;
+      m = w.on(w.storage, { notify: async (x) => { events.push(`notify:${x.to}`); }, closed: async (id) => { events.push(`closed:${id}`); } });
+      await m.request(ann.principal, { commandId: cid("r"), kind: "base", spec: { change: "y" }, reason: "needed", rollbackPlan: "undo it" });
+      assert.ok(!events.slice(events2).some((e) => e.startsWith("closed:")), "nothing closed while it waits");
+    });
+  });
+
   test(`the controller closes the administrators' notices of one request in every project they were raised in, and nothing else (${backend.name})`, async () => {
     await world(index, async (w) => {
       const svc = NotificationService.withEpoch(w.storage, (await ProjectService.open(w.storage, { holder: "c1", clock: () => "2026-11-16T10:00:00.000Z", pause: async () => undefined })).epoch, { clock: () => "2026-11-16T10:00:00.000Z" });

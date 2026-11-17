@@ -675,6 +675,8 @@ export class MaintenanceService {
     if (!result.replayed && standingUsed.length > 0) await recordGrantUse(this.#runner, "service:dispatcher", standingUsed, this.#runner.now()).catch(() => undefined);
     const a = await this.#runner.get(REQ, id);
     const status = (a?.body as unknown as MaintenanceBody | undefined)?.status ?? "pending";
+    // A request decided or withdrawn while its administrators' notices were still being made: that decision's close may have run before they existed, so they are closed here (T6b second review).
+    if (!result.replayed && admins.length > 0 && a !== undefined && status !== "pending") await this.#options.closed?.(id).catch(() => undefined);
     if (!result.replayed && status === "approved") this.background(this.drive(id));
     if (!result.replayed && status === "pending" && this.#options.inspector !== undefined && (kind === "package" || kind === "extension")) this.background(this.#queueInspect(id));
     return { maintenanceId: id, status, revision: result.revision, replayed: result.replayed };
