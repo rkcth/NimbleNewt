@@ -539,11 +539,13 @@ export class PolicyEditService {
   async #profile(owner: Principal, to: string): Promise<Built> {
     const now = (await this.#deps.policy.effective(owner))!;
     const summary = [`Switch the installation to the ${to} profile.`];
-    // A profile never chosen (revision 0) is strict by default: asking for strict then is an answer worth keeping (the first-run question is not asked again), so it is written, not skipped (card U08).
-    const unchosen = now.revisions.installation === 0 && to === "strict";
+    // A profile never chosen is strict by default: asking for strict then is an answer worth keeping (the first-run question is not asked again), so it is written, not skipped (card U08).
+    // "Never chosen" is read as setup readiness reads it: the installation record holds no profile. A record changed only in its cells or gate (revision above 0) still has none.
+    const record = to === "strict" && now.profile === "strict" ? await this.#deps.policy.get(owner, "installation") : undefined;
+    const unchosen = to === "strict" && now.profile === "strict" && typeof record?.profile !== "string";
     if (now.profile === to && !unchosen) return { summary, explanation: [`The installation is in the ${to} profile already.`], direction: "neutral", noop: true };
     if (unchosen) {
-      return { summary: ["Keep the installation in the strict profile, as your answer."], explanation: ["It is strict already; this records that you chose it, so the first-run question about the derived profile is not asked again. Nothing else changes, and either profile can be chosen later."], direction: "tighten", op: { kind: "policy", scope: "installation", profile: "strict" } };
+      return { summary: ["Keep the installation in the strict profile, as your answer."], explanation: ["It is strict already; this records that you chose it, so the first-run question about the derived profile is not asked again. Nothing else changes, and either profile can be chosen later."], direction: "tighten", op: { kind: "policy", scope: "installation", ...revisionField(now.revisions.installation), profile: "strict" } };
     }
     const preview = await this.#deps.policy.preview(owner, { scope: "installation", profile: to as never });
     const explanation = [...cellLines(preview.changes), "Cells you set yourself, your locks and the tools reserved for you stay as they are; a decision that always stays yours still does.", ...preview.notes.filter((n) => !/^the profile goes/.test(n))];

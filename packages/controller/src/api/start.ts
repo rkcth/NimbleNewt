@@ -901,7 +901,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         nodeVersion: facts.nodeVersion,
         hostRuntimes: async (by) => {
           const hostsRead = HostService.withEpoch(storage, epoch, assignments, {}); const out = []; let afterId: string | undefined;
-          for (let i = 0; i < 5; i++) {
+          for (let i = 0; i < 2; i++) {
             const page = await hostsRead.list(by, { limit: 100, ...(afterId === undefined ? {} : { afterId }) });
             for (const h of page.items) {
               const ses = dispatch?.remote === undefined ? undefined : await dispatch.remote.session(dispatch.principal, h.hostId).catch(() => undefined);

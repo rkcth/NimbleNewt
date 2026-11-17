@@ -1152,7 +1152,7 @@ export class StatusService {
 
   /** Compatibility and migration status (card U08): runtimes in use against what this version supports, what waits in the database, and the agents and operations each finding touches. At most 25 lines. */
   async compatibilityLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    if (this.#deps.admin === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const got = await this.#deps.admin.compatibility(by);
     const c = cite("hosts", "compatibility");
     const listed = (items: readonly string[], more: number, n: number, width: number, none: string): string => { const rest = Math.max(0, items.length - n) + more; return items.length === 0 ? none : `${items.slice(0, n).map((x) => shown(x, width)).join("; ")}${rest > 0 ? ` and ${rest} more` : ""}`; };

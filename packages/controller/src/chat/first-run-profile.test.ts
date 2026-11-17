@@ -149,4 +149,32 @@ for (const backend of backends) {
       assert.equal((await policy.get(w.owner, "installation"))!.revision, 1);
     } finally { await w.close(); }
   });
+
+  test(`${backend.name}: when the owner changed a cell before answering, "stay strict" is still recorded, so the setup does not ask the profile question forever (card U08 review)`, async () => {
+    const script: Record<string, unknown[]> = {};
+    const w = await openWorld(backend, script);
+    try {
+      const storage = w.world.storage, epoch = w.projects.epoch;
+      const configuration = ConfigurationService.withEpoch(storage, epoch, { ...options, routing: RoutingService.withEpoch(storage, epoch, options) });
+      const grants = GrantService.withEpoch(storage, epoch, options);
+      const policy = PolicyService.withEpoch(storage, epoch, grants, options);
+      const edits = PolicyEditService.withEpoch(storage, epoch, { policy, reviews: ReviewService.withEpoch(storage, epoch, options), grants, configuration, conversations: ConversationService.withEpoch(storage, epoch, options), interpreter: w.interpreter }, options);
+      const chat = w.chat({ policy, policyEdits: edits });
+      const item = async () => (await SetupReadinessService.withEpoch(storage, epoch).check(w.owner)).items.find((i) => i.id === "profile")!;
+      // A cell change first: the record exists (revision 1) but holds no profile, so setup still asks the profile question.
+      await policy.set(w.owner, { commandId: cid("gate"), scope: "installation", allCommandGate: true });
+      assert.deepEqual([(await policy.get(w.owner, "installation"))!.revision, (await policy.get(w.owner, "installation"))!.profile], [1, undefined]);
+      assert.equal((await item()).state, "default");
+      const no = "keep it strict";
+      script[no] = [pe({ type: "profile", to: "strict" }, "keep it strict")];
+      const p = await chat.submit(w.ownerToken, { messageId: cid("m"), text: no });
+      assert.equal(p.outcomes[0]!.status, "proposed", JSON.stringify(p.outcomes));
+      assert.match(JSON.stringify(p.outcomes), /Keep the installation in the strict profile/);
+      const done = await chat.applyProposal(w.ownerToken, { commandId: cid("ap"), proposalId: (p.outcomes[0] as any).proposalId } as never);
+      assert.equal((done as any).applied, true, JSON.stringify(done));
+      const rec = await policy.get(w.owner, "installation");
+      assert.deepEqual([rec!.profile, rec!.revision, rec!.allCommandGate], ["strict", 2, true], "the profile is recorded and the earlier gate change stays");
+      assert.equal((await item()).state, "done");
+    } finally { await w.close(); }
+  });
 }

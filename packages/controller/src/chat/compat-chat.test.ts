@@ -9,6 +9,7 @@ import { WaitService } from "../domain/waits.js";
 import { MigrationGuardService } from "../migration/index.js";
 import { WORKER_PROTOCOL } from "../remote/protocol.js";
 import { RoutingService } from "../routing/index.js";
+import { TaskCredentialService } from "../security/index.js";
 import { SetupProviderService } from "../setup/index.js";
 import { StatusService } from "../status/index.js";
 import type { Migration } from "../storage/migrations.js";
@@ -157,6 +158,21 @@ for (const backend of backends) {
       assert.equal((await as(w.ownerToken, "compatibility.status", { x: 1 })).error?.code, "invalid_command");
       const forAgent = await w.api.handle(ann.token, { v: 1, op: "status.ask", args: { request: { kind: "compatibility" } } } as never) as any;
       assert.doesNotMatch(JSON.stringify(forAgent), /host:old|host:refused/, "an agent is told nothing about the hosts");
+      // A viewer and a task credential are refused too, through the operation and through status.ask; an owner principal narrowed to one task is not the owner for this view.
+      const project = await w.project("Garden");
+      const task = await w.task(project, "Weed the beds");
+      await w.principals.enroll(w.owner, { commandId: cid("e"), kind: "client", name: "viewer", grants: [] } as never);
+      const viewer = (await w.principals.issueCredential(w.owner, "client:viewer")).token;
+      const scoped = (await TaskCredentialService.withEpoch(w.world.storage, w.projects.epoch, options).issue(w.owner, { commandId: cid("tc"), taskId: task, agentId: ann.principal.id })).token;
+      for (const [who, token] of [["viewer", viewer], ["task credential", scoped]] as const) {
+        const direct = await as(token, "compatibility.status", {});
+        assert.equal(direct.ok, false, `${who}: ${JSON.stringify(direct)}`);
+        assert.match(direct.error!.code, /^(forbidden|unauthorized|unauthenticated)$/, who);
+        assert.doesNotMatch(JSON.stringify(await w.api.handle(token, { v: 1, op: "status.ask", args: { request: { kind: "compatibility" } } } as never)), /host:old|host:refused|att-0/, who);
+      }
+      const narrowed = { ...w.owner, taskScope: { taskId: task, projectId: project } } as never;
+      assert.equal(await statusSvc!.ask(narrowed, { kind: "compatibility" }), undefined, "a narrowed owner principal gets nothing from the status kind");
+      await assert.rejects(adminSvc!.compatibility(narrowed), (e: { code?: string }) => e.code === "forbidden");
     } finally { await w.close(); }
   });
 }
