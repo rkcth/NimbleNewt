@@ -55,6 +55,25 @@ test("the gate refuses a busy server and a model that is not served, with GET re
   assert.equal(reading.idle, true);
 });
 
+test("a gate request that fails with the key in its error text is refused without the key (the message and the reason are scrubbed)", async () => {
+  const leaky: typeof globalThis.fetch = async () => { throw new Error(`connect failed for Bearer ${SECRET} at radiance.invalid`); };
+  const error = await new ServerGate({ root: key.baseUrl, key, fetch: leaky }).check().then(() => undefined, (e: unknown) => e);
+  assert.ok(error instanceof RadianceRefused);
+  assert.ok(!error.message.includes(SECRET) && !error.why.includes(SECRET) && !String(error.stack).includes(SECRET), "the key is in no part of the refusal");
+  assert.match(error.why, /<key>/);
+});
+
+test("a model call whose connection fails with the key in its error text is recorded without the key", async () => {
+  const server = fakeRadiance({ key: SECRET });
+  const leaky: typeof globalThis.fetch = async (input, init) => ((init?.method ?? "GET").toUpperCase() === "POST" ? Promise.reject(new Error(`socket closed; Bearer ${SECRET}`)) : server.fetch(input, init));
+  const calls: CallRecord[] = [];
+  const f = measuredFetch({ fetch: leaky, gate: new ServerGate({ root: key.baseUrl, key, fetch: server.fetch }), budget: new Budget(3, 256), key, phase: () => "p", calls });
+  await assert.rejects(f("http://radiance.invalid:8002/v1/chat/completions", { method: "POST", headers: key.header(), body: JSON.stringify({ messages: [], max_tokens: 10 }) }));
+  assert.equal(calls[0]?.ended, "error");
+  assert.match(calls[0]?.detail ?? "", /<key>/);
+  assert.equal(key.count(JSON.stringify(calls)), 0);
+});
+
 test("the budget refuses a call past the count or without a reply limit within the cap", () => {
   const b = new Budget(2, 256);
   b.take({ max_tokens: 256 });

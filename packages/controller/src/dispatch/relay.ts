@@ -262,7 +262,7 @@ export class ModelRelay {
           ...(watch ? { inputTokens: (tokens) => { try { attempt.onFirstUsage?.({ inputTokens: tokens, requestChars }); } catch { /* the call is not affected */ } } } : {}),
           ...(watching ? { monitor: { first: () => tell(() => call!.firstOutput()), progress: (bytes) => tell(() => call!.progress(bytes)), finished: (done) => tell(() => call!.finished(done)) }, progressMs: attempt.progressMs ?? 15_000 } : {}),
         };
-        return { status: response.status, statusText: response.statusText, headers: out, body: held(reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks)) };
+        return { status: response.status, statusText: response.statusText, headers: out, body: held(reporting(response.body as unknown as AsyncIterable<Uint8Array>, hooks, request.signal)) };
       },
     };
   }
@@ -347,12 +347,24 @@ interface ReplyHooks {
  * Passes the reply on unchanged and, when it has ended normally, tells the hooks the input size the provider reported in it, read from the first and the last bytes of the reply (a plain reply is small; a stream reports at its start
  * or its end). OpenAI-style `prompt_tokens` already includes cached tokens; Anthropic-style `input_tokens` leaves them out, so the cache read and creation counts are added. A reply that is cancelled part way, a number cut by the
  * edge of what is read, or no count at all, tells nothing about the size. The monitor (card V01b) is told when the first bytes arrive, at a bounded interval how many bytes have, and at the end (normal, failed or cancelled) the counts.
+ * A stream whose last event is its end marker and that this side then left (the reader cancelled, or this side aborted the call) counts as ended normally (card G09); a failure from the server's side does not.
  */
-async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): AsyncGenerator<Uint8Array> {
+async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
   const head: Buffer[] = []; let headBytes = 0; let tail = Buffer.alloc(0);
-  let bytes = 0; let lastProgress = Date.now(); let first = true; let ended = false;
+  let bytes = 0; let lastProgress = Date.now(); let first = true; let ended = false; let threw = false;
+  const counted = (): void => {
+    const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
+    const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };
+    // Cache creation is prefilled like any other input, so it is read work: it is in the total and not in the cached part.
+    const cached = most("cache_read_input_tokens");
+    const total = most("prompt_tokens") || most("input_tokens") + cached + most("cache_creation_input_tokens");
+    const output = most("completion_tokens") || most("output_tokens");
+    const cachedOpenAi = most("cached_tokens");
+    if (total >= 1) hooks.inputTokens?.(total);
+    hooks.monitor?.finished({ ok: true, ...(total >= 1 ? { inputTokens: total } : {}), ...(cached + cachedOpenAi >= 1 ? { cachedTokens: cached + cachedOpenAi } : {}), ...(output >= 1 ? { outputTokens: output } : {}) });
+  };
   try {
-    for await (const piece of body) {
+    try { for await (const piece of body) {
       if (headBytes < SCAN) { head.push(Buffer.from(piece.subarray(0, SCAN - headBytes))); headBytes += Math.min(piece.length, SCAN - headBytes); }
       tail = Buffer.concat([tail, piece.length > SCAN ? piece.subarray(-SCAN) : piece]).subarray(-SCAN);
       bytes += piece.length;
@@ -361,19 +373,19 @@ async function* reporting(body: AsyncIterable<Uint8Array>, hooks: ReplyHooks): A
         else if (Date.now() - lastProgress >= (hooks.progressMs ?? 15_000)) { lastProgress = Date.now(); hooks.monitor.progress(bytes); }
       }
       yield piece;
-    }
+    } } catch (error) { threw = true; throw error; }
     ended = true;
   } finally {
+    // Left after the end marker by this side (Pi's SDK cancels at `[DONE]`; the worker host then aborts the call): the reply was had whole, so it ended well and its counts are told (card G09: otherwise every call of a Pi
+    // worker was told failed, with no counts for the route's speed or the first call's size).
+    if (!ended && endMarked(tail) && (!threw || signal?.aborted === true)) counted();
     // Cancelled or failed part way: the monitor is told it did not end well.
-    if (!ended) hooks.monitor?.finished({ ok: false, ...(bytes > 0 ? { outputTokens: Math.ceil(bytes / 4) } : {}) });
+    else if (!ended) hooks.monitor?.finished({ ok: false, ...(bytes > 0 ? { outputTokens: Math.ceil(bytes / 4) } : {}) });
   }
-  const text = `${Buffer.concat(head).toString("utf8")}\u0001${tail.toString("utf8")}`;
-  const most = (name: string): number => { let best = 0; for (const m of text.matchAll(new RegExp(`"${name}"\\s*:\\s*(\\d{1,9})(?=[,}\\s])`, "g"))) best = Math.max(best, Number(m[1])); return best; };
-  // Cache creation is prefilled like any other input, so it is read work: it is in the total and not in the cached part.
-  const cached = most("cache_read_input_tokens");
-  const total = most("prompt_tokens") || most("input_tokens") + cached + most("cache_creation_input_tokens");
-  const output = most("completion_tokens") || most("output_tokens");
-  const cachedOpenAi = most("cached_tokens");
-  if (total >= 1) hooks.inputTokens?.(total);
-  hooks.monitor?.finished({ ok: true, ...(total >= 1 ? { inputTokens: total } : {}), ...(cached + cachedOpenAi >= 1 ? { cachedTokens: cached + cachedOpenAi } : {}), ...(output >= 1 ? { outputTokens: output } : {}) });
+  counted();
+}
+/** The stream's last event is its end marker: `data: [DONE]` (OpenAI style) or a `message_stop` event (Anthropic style). */
+function endMarked(tail: Buffer): boolean {
+  const last = tail.subarray(-512).toString("utf8").trimEnd();
+  return /(^|\n)data:[ \t]*\[DONE\]$/.test(last) || /(^|\n)data:[ \t]*\{[^\n]*"type"\s*:\s*"message_stop"[^\n]*\}$/.test(last);
 }

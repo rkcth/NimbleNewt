@@ -178,6 +178,49 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
   assert.equal(await text((await attempt.relay(req("http://relay.invalid/m0/chat/completions"))).body), `data: a\n\n${usage}`);
 });
 
+test("a stream this side leaves at its end marker (Pi's SDK cancels at [DONE], the host aborts the call) ended well: the monitor and the first call's count are told the counts; left before the end, or failed by the server after it, it did not (card G09)", async () => {
+  const usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":300}}}\n\n";
+  // The server keeps the connection open after its last event (Radiance closes it a moment later); `then` is what it does next: nothing, an error, or the end of the stream.
+  const open = (chunks: string[], then: "hang" | "error"): ((signal: AbortSignal) => Response) => (signal) => new Response(new ReadableStream({
+    async pull(c) {
+      const next = chunks.shift();
+      if (next !== undefined) { c.enqueue(new TextEncoder().encode(next)); return; }
+      await new Promise((r) => setTimeout(r, 20));
+      if (then === "error") c.error(new Error("connection reset by peer"));
+      // Like a real connection, this side's abort ends the body with an error.
+      else await new Promise((_, reject) => { if (signal.aborted) reject(new Error("This operation was aborted")); signal.addEventListener("abort", () => reject(new Error("This operation was aborted")), { once: true }); });
+    },
+  }, { highWaterMark: 0 }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  const watch = async (respond: (signal: AbortSignal) => Response, leave: "cancel" | "abort" | "read"): Promise<{ told: string[]; first: number[] }> => {
+    const ac = new AbortController();
+    const { relay } = setup({ respond: () => respond(ac.signal) });
+    const told: string[] = []; const first: number[] = [];
+    const attempt = relay.forAttempt({ route: "llama/local", progressMs: 1_000_000, onFirstUsage: (u) => { first.push(u.inputTokens); }, monitor: { started: () => ({ firstOutput: () => undefined, progress: () => undefined, finished: (d) => { told.push(`finished:${d.ok}:${d.inputTokens ?? "-"}:${d.cachedTokens ?? "-"}:${d.outputTokens ?? "-"}`); } }) } });
+    const res = await attempt.relay(req("http://relay.invalid/m0/chat/completions", { signal: ac.signal }));
+    const it = res.body![Symbol.asyncIterator]();
+    let seen = "";
+    while (!seen.includes("[DONE]") && !seen.includes("message_stop") && !seen.includes("data: b")) { const r = await it.next(); if (r.done === true) break; seen += Buffer.from(r.value).toString("utf8"); }
+    if (leave === "cancel") await it.return?.(undefined);
+    else if (leave === "abort") { const pending = it.next().catch(() => undefined); ac.abort(); await pending; }
+    else await it.next().catch(() => undefined);
+    return { told, first };
+  };
+  const done = ["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n", usage, "data: [DONE]\n\n"];
+  // The reader cancels at [DONE]: ended well, with the counts, and the first call's size is taken.
+  assert.deepEqual(await watch(open([...done], "hang"), "cancel"), { told: ["finished:true:900:300:40"], first: [900] });
+  // This side aborts the call after [DONE] (the worker host's way): the same.
+  assert.deepEqual(await watch(open([...done], "hang"), "abort"), { told: ["finished:true:900:300:40"], first: [900] });
+  // An Anthropic stream left after message_stop: the same.
+  const claude = ["event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":700}}}\n\n", "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":12}}\n\n", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"];
+  assert.deepEqual(await watch(open([...claude], "hang"), "cancel"), { told: ["finished:true:800:700:12"], first: [800] });
+  // Left before the end marker (the usage came, [DONE] did not): failed, and no size is taken.
+  const before = await watch(open(["data: a\n\n", usage, "data: b\n\n"], "hang"), "cancel");
+  assert.equal(before.told.length, 1); assert.match(before.told[0]!, /^finished:false:/); assert.deepEqual(before.first, []);
+  // The server fails the connection after [DONE] while this side still reads: still a failure.
+  const reset = await watch(open([...done], "error"), "read");
+  assert.equal(reset.told.length, 1); assert.match(reset.told[0]!, /^finished:false:/); assert.deepEqual(reset.first, []);
+});
+
 test("each call has its own monitor handle, so overlapping calls are never mixed up; keep-alive comments and pings are not output; cache creation is read work, cache reads are the cached part (card V01b)", async () => {
   // Two calls at once: the first is abandoned after the second began; each end is told to its own call.
   const bodies = [
