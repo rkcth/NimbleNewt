@@ -571,6 +571,8 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
       } else { res.writeHead(200); res.end(`size ${n}`); }
     });
   });
+  let upstreamConnections = 0;
+  echo.on("connection", () => { upstreamConnections++; });
   await new Promise((r) => echo.listen(0, "127.0.0.1", r));
   const sockDir = mkdtempSync(join(tmpdir(), "pxs-"));
   const p = await startKeyProxy({ upstreamBaseUrl: `http://127.0.0.1:${echo.address().port}/v1`, apiKey: KEY, socketPath: join(sockDir, "m.sock"), maxBody: 1000 });
@@ -590,6 +592,10 @@ test("the key proxy, more: on a unix socket; the key cut out of answers that ech
     assert.match(e.body, /key withheld by the pi-eval proxy/);
     mode = "plain";
     assert.equal((await call("POST", "/v1/chat/completions", { body: "x".repeat(900) })).body, "size 900");
+    // A fresh connection upstream for each request (none kept alive to be closed under the next request).
+    const conns = upstreamConnections;
+    for (let i = 0; i < 3; i++) assert.equal((await call("POST", "/v1/chat/completions", { body: "{}" })).status, 200);
+    assert.equal(upstreamConnections - conns, 3, "one upstream connection per request");
     const before = seen.length;
     assert.equal((await call("POST", "/v1/chat/completions", { body: "x".repeat(2000) })).status, 413, "declared too large");
     const chunked = await call("POST", "/v1/chat/completions", { body: "x".repeat(5000), headers: { "transfer-encoding": "chunked" } });

@@ -156,6 +156,10 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
   const basePath = up.pathname.replace(/\/+$/, "");
   const mod = up.protocol === "https:" ? https : http;
   const want = Buffer.from(`Bearer ${token}`);
+  // A fresh connection to the model server for every request: a kept-alive one that the server closes as the next request
+  // goes out answers that request with a connection reset (seen as a rare failure of the real-Pi test under load), and
+  // would end a measured run as an error.
+  const agent = new mod.Agent({ keepAlive: false });
   const server = http.createServer((req, res) => {
     const url = String(req.url ?? "");
     const refuse = (code, text) => { res.writeHead(code, { "content-type": "text/plain", connection: "close" }); res.end(`${text}\n`); req.resume(); };
@@ -167,7 +171,7 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
     for (const h of ["host", "authorization", "proxy-authorization", "connection", "keep-alive", "upgrade", "te", "trailer", "proxy-connection"]) delete headers[h];
     headers.authorization = `Bearer ${apiKey}`;
     let answered = false;
-    const preq = mod.request({ protocol: up.protocol, hostname: up.hostname, port: up.port, method: req.method, path: url, headers }, (pres) => {
+    const preq = mod.request({ protocol: up.protocol, hostname: up.hostname, port: up.port, method: req.method, path: url, headers, agent }, (pres) => {
       answered = true;
       const h = {};
       for (const [k, v] of Object.entries(pres.headers)) {
@@ -194,13 +198,16 @@ export function startKeyProxy({ upstreamBaseUrl, apiKey, token = PROXY_KEY_PREFI
   });
   server.maxConnections = maxConnections;
   server.headersTimeout = 30_000;
+  // Longer than any client's own idle limit, so the client, not the proxy, closes an idle connection (no request is sent on
+  // a connection the proxy is closing).
+  server.keepAliveTimeout = 65_000;
   return new Promise((resolveP, reject) => {
     server.once("error", reject);
     const done = () => {
       const port = socketPath ? null : server.address().port;
       resolveP({
         baseUrl: port === null ? null : `http://127.0.0.1:${port}${basePath}`, socketPath, basePath, token,
-        close: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }),
+        close: () => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); agent.destroy(); }),
       });
     };
     if (socketPath) server.listen(socketPath, done); else server.listen(0, "127.0.0.1", done);
