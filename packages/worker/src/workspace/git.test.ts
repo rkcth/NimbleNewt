@@ -47,17 +47,27 @@ test("a checkout holds exactly the committed bytes even when the base's attribut
     const shared = join(dir, "shared");
     await mkdir(join(shared, "src"), { recursive: true });
     sh(dir, "init", "-q", "-b", "main", shared);
-    // The base asks for CRLF in the working tree for every text file, an $Id$ expansion and a filter (which is not configured anywhere, so git would pass it through).
+    // The base asks for CRLF in the working tree for every text file, an $Id$ expansion, a filter and a UTF-16 working-tree encoding. The attributes are given in a nested
+    // `.gitattributes` too (first review), so neither position wins over the neutral file.
     await writeFile(join(shared, ".gitattributes"), "* text eol=crlf\nsrc/id.ts ident\nsrc/f.ts filter=nnmissing\n");
+    await mkdir(join(shared, "src", "deep"), { recursive: true });
+    await writeFile(join(shared, "src", "deep", ".gitattributes"), "*.txt working-tree-encoding=UTF-16LE\nn.ts text eol=crlf ident\n");
     await writeFile(join(shared, "src", "a.ts"), "export const a = 1;\nexport const b = 2;\n");
     await writeFile(join(shared, "src", "id.ts"), "// $Id$\nexport const id = 1;\n");
     await writeFile(join(shared, "src", "f.ts"), "export const f = 1;\n");
+    await writeFile(join(shared, "src", "deep", "n.ts"), "// $Id$\nexport const n = 1;\n");
+    await writeFile(join(shared, "src", "deep", "w.txt"), Buffer.from("plain words\n", "utf16le"));
     sh(shared, "-c", "core.safecrlf=false", "add", "-A"); sh(shared, "commit", "-q", "-m", "attributes");
     const git = await GitBridge.create({ scratch: join(dir, "scratch") });
     const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
     const commit = await git.head(shared);
+    // The filter is configured in the task's own git directory, made before the checkout (first review): a filter that ran would fail the checkout and every staging (`false`, required),
+    // so this fails unless the neutral file also unsets `filter` (an unconfigured filter alone is passed through by git and proves nothing).
+    sh(dir, "init", "-q", "--bare", gitDir);
+    for (const [key, value] of [["filter.nnmissing.smudge", "false"], ["filter.nnmissing.clean", "false"], ["filter.nnmissing.required", "true"]] as const) sh(dir, "--git-dir", gitDir, "config", key, value);
     await git.createCheckout({ shared, commit, gitDir, checkout });
-    for (const path of [".gitattributes", "src/a.ts", "src/id.ts", "src/f.ts"]) {
+    assert.equal(await readFile(join(checkout, "src", "deep", "w.txt"), "utf8"), "plain words\n", "no UTF-16 re-encoding was written");
+    for (const path of [".gitattributes", "src/a.ts", "src/id.ts", "src/f.ts", "src/deep/.gitattributes", "src/deep/n.ts", "src/deep/w.txt"]) {
       const committed = execFileSync("git", ["--git-dir", join(shared, ".git"), "cat-file", "blob", `${commit}:${path}`]);
       assert.ok((await readFile(join(checkout, path))).equals(committed), `${path} holds the committed bytes, not a converted copy`);
     }
@@ -74,6 +84,36 @@ test("a checkout holds exactly the committed bytes even when the base's attribut
     await writeFile(join(checkout, "src", "a.ts"), "export const a = 1;\r\nexport const b = 2;\r\n");
     assert.deepEqual((await git.submitView({ shared, gitDir, checkout })).mine, ["src/a.ts"], "a line-ending change the agent makes is its change");
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a checkout made before the neutral attribute file is read and refreshed neutrally by every call, not only by staging: refresh writes the committed bytes, changes and the diff stat agree with stage (first review of the H12n re-check follow-up)", { skip }, async () => {
+  const w = await world();
+  try {
+    // A checkout made by an older version has no neutral file in its git directory.
+    const neutral = join(w.gitDir, "info", "attributes");
+    await rm(neutral, { force: true });
+    // The landing branch then asks for CRLF and an $Id$ expansion, and changes a file: the refresh writes the new .gitattributes and that file.
+    await writeFile(join(w.shared, ".gitattributes"), "* text eol=crlf\nsrc/a.ts ident\n");
+    await writeFile(join(w.shared, "src", "a.ts"), "// $Id$\nexport const a = 2;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "attributes");
+    const next = await w.git.head(w.shared);
+    await w.git.refresh({ shared: w.shared, commit: next, gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(await readFile(join(w.checkout, "src", "a.ts"), "utf8"), "// $Id$\nexport const a = 2;\n", "the refresh wrote the committed bytes, not a converted copy");
+    assert.deepEqual((await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout })).files, [], "a refreshed checkout has nothing to submit");
+    // An agent's line-ending-only change, read without the file again (older checkout): `changes` and the diff stat see it, as the staging does.
+    await rm(neutral, { force: true });
+    await writeFile(join(w.checkout, "src", "b.ts"), "export const b = 1;\r\n");
+    assert.deepEqual((await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout })).map((c) => c.path), ["src/b.ts"], "changes sees the line-ending change");
+    await rm(neutral, { force: true });
+    assert.match(await w.git.diffStat({ gitDir: w.gitDir, checkout: w.checkout }), /^1 file changed/, "the diff stat counts it");
+    await rm(neutral, { force: true });
+    assert.deepEqual((await w.git.status({ gitDir: w.gitDir, checkout: w.checkout })).entries.map((e) => e.path), ["src/b.ts"], "status lists it");
+    assert.deepEqual((await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout })).files.map((f) => f.path), ["src/b.ts"], "and the staging carries it");
+    // A read of a git directory that is not there does not make one.
+    const missing = join(w.dir, "missing.git");
+    await assert.rejects(w.git.status({ gitDir: missing, checkout: w.checkout }));
+    assert.equal(existsSync(missing), false, "no directory was made for a missing git directory");
+  } finally { await w.done(); }
 });
 
 test("the agent's changes reach the shared workspace only through expected-version writes: modified, new and deleted files", { skip }, async () => {

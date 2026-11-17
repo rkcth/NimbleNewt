@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
@@ -168,6 +168,9 @@ export class GitBridge {
 
   /** The files that differ from the base, as git sees them: `??` for new files and `!!` for files an ignore rule matches count too (an ignore file is the agent's own and must not hide its work). */
   async status(options: { gitDir: string; checkout: string }): Promise<{ dirty: boolean; entries: { code: string; path: string }[] }> {
+    // Every read of a checkout uses the neutral attribute file (first review of the H12n re-check follow-up), not only the ones that stage: a checkout made before `createCheckout` wrote it would
+    // otherwise be read with the base's conversions here, in `refresh` (which writes files after this check), `changes` and `diffStat`, and disagree with `stage`.
+    await this.#neutralAttributes(options.gitDir);
     const out = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=traditional", "--no-renames"], { gitDir: options.gitDir, workTree: options.checkout })).stdout;
     const entries = out.split("\0").filter(Boolean).map((e) => ({ code: e.slice(0, 2), path: e.slice(3) }));
     return { dirty: entries.length > 0, entries };
@@ -364,6 +367,7 @@ export class GitBridge {
    */
   async changes(options: { gitDir: string; checkout: string }): Promise<{ path: string; op: "write" | "delete"; baseVersion: string; modeOnly: boolean }[]> {
     await this.#refuseGitData(options.checkout);
+    await this.#neutralAttributes(options.gitDir);
     const base = await this.#base(options.gitDir);
     // The net difference from the base, committed or not, ignored or not: a throwaway index is filled from the base and then with everything in the checkout.
     const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
@@ -403,6 +407,7 @@ export class GitBridge {
    * as git's one-line summary, and how many commits it is ahead of the base. Reads only: the checkout, its index and its refs are not touched.
    */
   async diffStat(options: { gitDir: string; checkout: string }): Promise<string> {
+    await this.#neutralAttributes(options.gitDir);
     const base = await this.#base(options.gitDir);
     const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
     let short: string;
@@ -719,6 +724,8 @@ export class GitBridge {
     const file = join(gitDir, "info", "attributes");
     const text = "* -filter -ident -text -working-tree-encoding\n";
     if (await readFile(file, "utf8").catch(() => undefined) === text) return;
+    // A git directory that is not there is not made here (a read of a missing checkout must not leave a directory behind): the git command that follows says it is missing.
+    if (!(await stat(gitDir).then((s) => s.isDirectory(), () => false))) return;
     await mkdir(join(gitDir, "info"), { recursive: true, mode: 0o700 });
     const temporary = `${file}.${randomBytes(6).toString("hex")}.tmp`;
     await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
