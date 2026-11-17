@@ -37,15 +37,65 @@ export const GAP_KEEP_DAYS = 180;
 const HEARTBEAT_EVERY_MS = 60_000;
 const GC_PER_TICK = 25;
 
+/** Model route, account and endpoint names, as the gap keys carry them: the canonical route (`model`), the account and the endpoint. */
+export interface RouteNames { readonly models: readonly string[]; readonly accounts: readonly string[]; readonly endpoints: readonly string[] }
+/**
+ * The names the answering agent's calls can go to (T3), and `known`: every name some route of the routing table reaches now. An outage of a name outside `known` (renamed or moved since the outage, or never mapped) cannot be judged
+ * against today's table and stays listed.
+ */
+export interface RouteUse extends RouteNames { readonly known?: RouteNames }
+
+type Target = (route: string) => { readonly canonical: string; readonly account: string; readonly endpoint: string };
+const namesOf = (routes: readonly string[], target: Target): RouteNames => {
+  const t = routes.map(target);
+  return { models: [...new Set(t.map((x) => x.canonical))], accounts: [...new Set(t.map((x) => x.account))], endpoints: [...new Set(t.map((x) => x.endpoint))] };
+};
+
+/**
+ * The routes a dispatched task can be sent on (T3 review): the dispatcher picks each attempt's route from the task's difficulty profile (`DifficultyService.resolve`: the profile's own `provider/model` first, then its routing
+ * profile's routes), and a task's difficulty can change, so every execution profile counts, mapped or not. `undefined` when no execution profiles are configured (nothing can be judged).
+ */
+export function dispatchRoutesOf(execution: { readonly profiles: Readonly<Record<string, { readonly provider?: string; readonly model?: string; readonly routingProfile?: string }>> } | undefined, profiles: Readonly<Record<string, readonly string[]>>): string[] | undefined {
+  if (execution === undefined) return undefined;
+  const out = new Set<string>();
+  for (const p of Object.values(execution.profiles)) {
+    if (p.provider !== undefined && p.model !== undefined) out.add(`${p.provider}/${p.model}`);
+    if (p.routingProfile !== undefined && Object.hasOwn(profiles, p.routingProfile)) for (const r of profiles[p.routingProfile]!) out.add(r);
+  }
+  return [...out];
+}
+
+/**
+ * What an agent's calls can reach (T3): the routes of its `defaultProfile` (the hosted coordinator's chat) together with `reach.dispatched`, every route a dispatched task can be sent on (`dispatchRoutesOf`: a responsibility's
+ * check runs as a dispatched task, whose route comes from the task's difficulty profile, not from the agent). Known only when the agent has a `defaultProfile` that the routing table holds and no permitted override (an
+ * override could send a call through another profile), and the dispatched routes are known; otherwise `undefined`, which keeps every provider outage listed (the safe direction: one too many is listed, none hidden).
+ * `reach.tableRoutes` (every route of the routing table) gives `known`.
+ */
+export function routeUseOf(agent: { readonly defaultProfile?: string; readonly permittedOverrides?: readonly string[] }, profiles: Readonly<Record<string, readonly string[]>>, target: Target, reach: { readonly dispatched: readonly string[] | undefined; readonly tableRoutes: readonly string[] }): RouteUse | undefined {
+  const profile = agent.defaultProfile;
+  if (profile === undefined || (agent.permittedOverrides ?? []).length > 0 || !Object.hasOwn(profiles, profile) || reach.dispatched === undefined) return undefined;
+  return { ...namesOf([...new Set([...profiles[profile]!, ...reach.dispatched])], target), known: namesOf([...new Set([...reach.tableRoutes, ...reach.dispatched, ...profiles[profile]!])], target) };
+}
+
+/** A provider outage (key `provider:<model|account|endpoint>:<name>`) touches a responsibility whose agent can reach that name; unknown routes, a name today's table does not reach, an unreadable key or a key cut at its limit stay listed. */
+function outageTouches(key: string, routes: RouteUse | undefined): boolean {
+  if (routes === undefined || key.length >= GAP_LIMITS.key) return true;
+  const m = /^provider:(model|account|endpoint):(.+)$/.exec(key);
+  if (m === null) return true;
+  const pick = (n: RouteNames): readonly string[] => (m[1] === "model" ? n.models : m[1] === "account" ? n.accounts : n.endpoints);
+  if (routes.known !== undefined && !pick(routes.known).includes(m[2]!)) return true;
+  return pick(routes).includes(m[2]!);
+}
+
 /**
  * Whether a gap is about this responsibility (card P04h). `controller-down` is about all. `provider-outage`: only a responsibility that has an answering agent (one with nobody is recorded as not taken without asking any model, so
- * a route being down changes nothing for it). `event-source-outage` and `events-missed` of a source (key `source:<name>`): only a responsibility that names that source (`<name>`, or `<name>:<kind>`) in its event sources; one with
+ * a route being down changes nothing for it) and, when the routes that agent uses are known (`routes`, T3), only an outage of one of them; unknown routes keep it listed. `event-source-outage` and `events-missed` of a source (key `source:<name>`): only a responsibility that names that source (`<name>`, or `<name>:<kind>`) in its event sources; one with
  * no event sources is not affected by an outage of an event source. A name without `:` may be an event kind (kinds never hold `:`, and a kind matches events of any source), so it is about every source's outage: listing a
  * gap too many is safe, hiding one is not. A key cut at its 160-character limit matches by its prefix. A gap kept by one responsibility's own look (key `events:<id>:...`, retention cut) is about that responsibility only. Any
  * other key stays about everything, because a gap that cannot be narrowed must not be hidden.
  */
-export function gapAppliesTo(gap: { readonly reason: GapReason; readonly key: string }, duty: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[] }): boolean {
-  if (gap.reason === "provider-outage") return duty.ownerId !== undefined;
+export function gapAppliesTo(gap: { readonly reason: GapReason; readonly key: string }, duty: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[]; readonly routes?: RouteUse }): boolean {
+  if (gap.reason === "provider-outage") return duty.ownerId !== undefined && outageTouches(gap.key, duty.routes);
   if (gap.reason === "event-source-outage" || gap.reason === "events-missed") {
     if (gap.key.startsWith("source:")) {
       const name = gap.key.slice("source:".length); const cut = gap.key.length >= 160;
@@ -68,8 +118,10 @@ const forbidden = (by: Principal, what: string): DomainError => new DomainError(
 
 export class CoverageGapService {
   readonly #runner: CommandRunner;
-  private constructor(runner: CommandRunner) { this.#runner = runner; }
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): CoverageGapService { return new CoverageGapService(new CommandRunner(storage, epoch, options)); }
+  readonly #routesOf: ((ownerId: string) => Promise<RouteUse | undefined>) | undefined;
+  private constructor(runner: CommandRunner, routesOf?: (ownerId: string) => Promise<RouteUse | undefined>) { this.#runner = runner; this.#routesOf = routesOf; }
+  /** `routesOf` (T3): the routes an answering agent's calls can reach (`routeUseOf`); absent, or answering `undefined` or failing, every provider outage stays listed for a responsibility with an agent. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { routesOf?: (ownerId: string) => Promise<RouteUse | undefined> } = {}): CoverageGapService { const { routesOf, ...rest } = options; return new CoverageGapService(new CommandRunner(storage, epoch, rest), routesOf); }
 
   /** Opens a gap for a thing that stopped being watched; a second open of the same key while one is open changes nothing. Returns whether this call opened one. Controller only (the owner or the controller's own service). */
   async open(by: Principal, command: { key: string; reason: GapReason; start: string; detail: string; scope?: string }): Promise<boolean> {
@@ -190,10 +242,15 @@ export class CoverageGapService {
   }
 
   /** Whether any gap of the installation or the project overlaps the time span (only those about the responsibility `about`, when given: `gapAppliesTo`): the check that "no recent observation" is explained by a gap, not by neglect. */
-  async covering(by: Principal, projectIdValue: string, from: string, to: string, about?: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[] }): Promise<{ id: string; reason: GapReason; start: string; end?: string }[]> {
+  async covering(by: Principal, projectIdValue: string, from: string, to: string, about?: { readonly id: string; readonly ownerId?: string; readonly eventSources: readonly string[]; readonly routes?: RouteUse }): Promise<{ id: string; reason: GapReason; start: string; end?: string }[]> {
     const listed = await this.list(by, projectIdValue, { limit: GAP_LIMITS.listed });
     const a = Date.parse(from); const b = Date.parse(to);
-    return (listed?.items ?? []).filter((g) => Date.parse(g.start) <= b && (g.end === undefined || Date.parse(g.end) >= a) && (about === undefined || gapAppliesTo(g, about))).map((g) => ({ id: g.id, reason: g.reason, start: g.start, ...(g.end === undefined ? {} : { end: g.end }) }));
+    const inTime = (listed?.items ?? []).filter((g) => Date.parse(g.start) <= b && (g.end === undefined || Date.parse(g.end) >= a));
+    // The agent's routes are read only when a provider outage is among the gaps and the caller did not bring them; a failed read leaves them unknown (every outage listed).
+    let known = about?.routes;
+    if (about !== undefined && known === undefined && about.ownerId !== undefined && this.#routesOf !== undefined && inTime.some((g) => g.reason === "provider-outage")) { try { known = await this.#routesOf(about.ownerId); } catch { known = undefined; } }
+    const duty = about === undefined ? undefined : { ...about, ...(known === undefined ? {} : { routes: known }) };
+    return inTime.filter((g) => duty === undefined || gapAppliesTo(g, duty)).map((g) => ({ id: g.id, reason: g.reason, start: g.start, ...(g.end === undefined ? {} : { end: g.end }) }));
   }
 
   async #gc(by: Principal, now: string): Promise<void> {
