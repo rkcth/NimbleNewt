@@ -70,24 +70,25 @@ const ended = (p: ChildProcess, ms: number): Promise<boolean> => {
 /** Closes the browser so its helper processes stop writing into the profile: first politely over DevTools (Browser.close), then
  * child.kill() (the platform default: SIGTERM on Linux and macOS, terminate on Windows), then a forced kill. Each step waits for the
  * exit event, bounded. Returns a message when the browser is still running after all of that, otherwise undefined. */
-async function closeBrowser(proc: ChildProcess | undefined, cdp: Cdp | undefined): Promise<string | undefined> {
+async function closeBrowser(proc: ChildProcess | undefined, cdp: Cdp | undefined, stepMs = 15_000): Promise<string | undefined> {
   if (proc === undefined || await ended(proc, 0)) return undefined;
   // The browser may drop the connection before it answers, so the reply is not awaited: the exit event is what counts.
-  if (cdp !== undefined && cdp.ws.readyState === WebSocket.OPEN) { try { cdp.send("Browser.close").catch(() => undefined); } catch { /* the connection went away */ } }
-  if (await ended(proc, 15_000)) return undefined;
+  let asked = false;
+  if (cdp !== undefined && cdp.ws.readyState === WebSocket.OPEN) { try { cdp.send("Browser.close").catch(() => undefined); asked = true; } catch { /* the connection went away */ } }
+  if (asked && await ended(proc, stepMs)) return undefined;
   proc.kill();
-  if (await ended(proc, 15_000)) return undefined;
+  if (await ended(proc, stepMs)) return undefined;
   proc.kill("SIGKILL"); // Node maps this to a forced termination on Windows as well.
-  return await ended(proc, 15_000) ? undefined : `the browser (pid ${proc.pid}) did not exit after Browser.close, kill() and a forced kill`;
+  return await ended(proc, stepMs) ? undefined : `the browser (pid ${proc.pid}) did not exit after Browser.close, kill() and a forced kill`;
 }
 
 /** Removes the folder. A helper process the browser started can still be finishing a write (ENOTEMPTY), or Windows can still hold a
  * file lock (EBUSY, EPERM), for a moment after the main process ended: those three are retried with a growing wait, about 30 s in all.
  * Any other error, or the same error after the deadline, is returned as a message. */
-async function removeFolder(dir: string): Promise<string | undefined> {
-  const end = Date.now() + 30_000;
+async function removeFolder(dir: string, budgetMs = 30_000, rm: (dir: string) => void = (d) => rmSync(d, { recursive: true, force: true })): Promise<string | undefined> {
+  const end = Date.now() + budgetMs;
   for (let wait = 100; ; wait = Math.min(wait * 2, 2_000)) {
-    try { rmSync(dir, { recursive: true, force: true }); return undefined; } catch (e) {
+    try { rm(dir); return undefined; } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (!(code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") || Date.now() + wait > end) return `${code ?? "error"}: ${(e as Error).message}`;
     }
@@ -107,7 +108,7 @@ test("the real page in a real browser: strict policy, phone layout, sign-in, one
   const c = await startController({
     storage: { kind: "sqlite", path: join(dir, "n.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4,
     chat: { interpreter: new ScriptedInterpreter(() => []) }, webChat: { host: "127.0.0.1", network: "loopback", assets, limits: { eventsEveryMs: 100 } },
-  });
+  }).catch(async (e: unknown) => { await removeFolder(dir); throw e; });
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const door = c.webChat!;
@@ -212,9 +213,11 @@ test("the real page in a real browser: strict policy, phone layout, sign-in, one
     // problem never hides the test's own failure: it is thrown only when the body passed, and otherwise reported.
     const stuck = await closeBrowser(proc, cdp);
     cdp?.close();
-    await c.close();
+    // A failing controller close is kept, not thrown here: the folder is still removed, and the body's own failure stays the one reported.
+    const closing = await c.close().then(() => undefined, (e: unknown) => e);
     const left = stuck === undefined ? await removeFolder(dir) : `not removed because the browser is still running`;
     const report = (m: string): void => { t.diagnostic(m); console.error(m); };
+    if (closing !== undefined) { if (passed) throw closing; report(`browser.test cleanup: the controller did not close: ${String(closing)}`); }
     if (stuck !== undefined) { if (passed) throw new Error(`browser.test cleanup: ${stuck}`); report(`browser.test cleanup: ${stuck}`); }
     if (left !== undefined) {
       const m = `browser.test cleanup: the temporary folder ${dir} was left behind (${left})`;
@@ -235,8 +238,28 @@ test("the browser test's cleanup helpers: the exit wait is bounded and true only
   assert.equal(await ended(quick, 30_000), true, "the exit event ends the wait");
   assert.equal(quick.exitCode, 3);
   assert.equal(await closeBrowser(undefined, undefined), undefined);
+  // A process that ignores the polite stop (SIGTERM on Linux and macOS) is ended by the forced kill; on Windows kill() already ends it.
+  const stubborn = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => undefined); console.log('ready'); setInterval(() => undefined, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    await new Promise<void>((ok, bad) => { stubborn.stdout!.once("data", () => ok()); stubborn.once("exit", () => bad(new Error("the stubborn child exited early"))); });
+    assert.equal(await closeBrowser(stubborn, undefined, 2_000), undefined, "the forced kill ends a process that ignores kill()");
+    assert.equal(await ended(stubborn, 0), true);
+    if (process.platform !== "win32") assert.equal(stubborn.signalCode, "SIGKILL", "it took the forced kill");
+  } finally { if (stubborn.exitCode === null && stubborn.signalCode === null) stubborn.kill("SIGKILL"); }
   const gone = join(tmpdir(), `nn-browser-gone-${process.pid}-${Date.now()}`);
   assert.equal(await removeFolder(gone), undefined);
+  const fail = (code: string): never => { throw Object.assign(new Error(`${code}: simulated`), { code }); };
+  for (const code of ["ENOTEMPTY", "EBUSY", "EPERM"]) {
+    let calls = 0;
+    assert.equal(await removeFolder("x", 30_000, () => { if (++calls < 3) fail(code); }), undefined, `${code} is retried until the removal works`);
+    assert.equal(calls, 3);
+  }
+  let tries = 0;
+  assert.match(await removeFolder("x", 30_000, () => { tries++; fail("EACCES"); }) ?? "", /^EACCES: /, "another error is not retried");
+  assert.equal(tries, 1);
+  tries = 0; const started = Date.now();
+  assert.match(await removeFolder("x", 500, () => { tries++; fail("ENOTEMPTY"); }) ?? "", /^ENOTEMPTY: /, "the retries stop at the bound");
+  assert.ok(tries >= 2 && Date.now() - started < 10_000, `bounded retries (${tries} tries)`);
   assert.equal(inTempFolder(join(tmpdir(), "x")), true);
   assert.equal(inTempFolder(tmpdir()), false, "the temp folder itself is not inside it");
   assert.equal(inTempFolder(join(tmpdir(), "..", "elsewhere")), false);

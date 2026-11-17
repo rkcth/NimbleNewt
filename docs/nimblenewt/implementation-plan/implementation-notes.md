@@ -12270,3 +12270,8 @@ ASSUMPTION: when the note fails, the lifecycle entry is written first and the no
 ASSUMPTION: a profile folder that cannot be removed within about 30 s does not fail a test whose body passed when the folder is inside the OS temp folder: it is a leftover the operating system clears, and failing on it would turn a cleanup race into a false test failure; it is still reported by name. Outside the temp folder it fails, so a leak elsewhere is not hidden.
 ASSUMPTION: a browser still running after `Browser.close`, `kill()` and a forced kill fails a test whose body passed, because a process that cannot be ended is a real problem, not a cleanup race.
 ASSUMPTION: the last-resort forced kill uses `kill("SIGKILL")`; Node supports that name on Windows too (it terminates the process), so it is not POSIX-only.
+
+**First review (Claude agent, Opus 5.5).**
+- Without a DevTools connection (the browser failed before it was connected) the close no longer waits 15 s for an exit that nothing asked for: it goes straight to `kill()`.
+- A failing controller close no longer skips the folder removal or replaces the body's own failure: it is thrown only when the body passed, otherwise reported. A controller that fails to start removes the temporary folder before the error is passed on.
+- The step wait and the removal budget are parameters (defaults 15 s and 30 s), and removal takes an optional remove function, so the helper test now also covers: a child that ignores SIGTERM is ended by the forced kill (signal checked on Linux and macOS); ENOTEMPTY, EBUSY and EPERM are each retried until removal works; another error (EACCES) is returned after one try; repeated ENOTEMPTY stops at the bound.
