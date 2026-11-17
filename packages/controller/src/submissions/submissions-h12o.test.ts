@@ -5,6 +5,7 @@ import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import { StorageError, type ControllerStorage } from "../storage/index.js";
 import { SubmissionService, type SubmissionOptions } from "./index.js";
 
 after(stopServer);
@@ -17,7 +18,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 };
 const T1 = "a".repeat(40), T2 = "b".repeat(40), BASE = "c".repeat(40), PATCH = "d".repeat(40);
 
-interface World { open(extra?: SubmissionOptions): SubmissionService; svc: SubmissionService; agent(name: string, roles: string[]): Promise<Principal>; task: string; raw(kind: string, id: string): Promise<unknown> }
+interface World { open(extra?: SubmissionOptions, storage?: ControllerStorage): SubmissionService; storage: ControllerStorage; svc: SubmissionService; agent(name: string, roles: string[]): Promise<Principal>; task: string; raw(kind: string, id: string): Promise<unknown> }
 
 for (const backend of backends) {
   const suite = (name: string, body: (c: World) => Promise<void>) =>
@@ -36,8 +37,8 @@ for (const backend of backends) {
           roles.set(p.id, held);
           return p;
         };
-        const open = (extra: SubmissionOptions = {}): SubmissionService => SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], { ...options, ...extra });
-        await body({ open, svc: open(), agent, task, raw: async (kind, id) => (await world.storage.getAggregate({ kind, id }))?.body });
+        const open = (extra: SubmissionOptions = {}, storage: ControllerStorage = world.storage): SubmissionService => SubmissionService.withEpoch(storage, projects.epoch, async (id) => roles.get(id) ?? [], { ...options, ...extra });
+        await body({ open, storage: world.storage, svc: open(), agent, task, raw: async (kind, id) => (await world.storage.getAggregate({ kind, id }))?.body });
       } finally { await world.close(); }
     });
 
@@ -99,4 +100,34 @@ for (const backend of backends) {
       for (const m of made) assert.ok(listed.includes(m.id), `review ${m.id} is in the verdict list`);
     }
   });
+
+  suite("a review whose verdict-list write keeps losing to other writes is built again a bounded number of times, then answered unavailable with nothing recorded; sent again later it is recorded once (H12o second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    // A storage on which every write of a verdict list loses a race (as if another review were written at the same moment each time).
+    let writes = 0;
+    const losing = new Proxy(c.storage, { get: (target, key) => {
+      if (key === "applyOperation") {
+        return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => {
+          if (input.changes.some((change) => change.ref.kind === "submission-verdicts")) { writes++; throw new StorageError("revision_conflict", "the verdict list changed meanwhile (test)"); }
+          return target.applyOperation(input);
+        };
+      }
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    } });
+    const review = { commandId: "h12o-bounded-1", taskId: c.task, kind: "review" as const, role: "reviewer", subject: code.id, verdict: "approve" as const };
+    await refuses("unavailable", () => c.open({}, losing).record(rev, review), /recorded at the same moment; send this one again/);
+    assert.equal(writes, 5, "the command was built and written again at most five times in all");
+    assert.equal(await c.raw("submission-verdicts", code.id), undefined, "nothing was recorded");
+    assert.equal((await c.svc.approvalOf(code.id))?.approved, false);
+    // Sent again once the race is over: recorded, and a repeat after that adds nothing.
+    const made = await c.svc.record(rev, review);
+    const again = await c.svc.record(rev, review);
+    assert.deepEqual([again.id, again.replayed], [made.id, true]);
+    assert.deepEqual(((await c.raw("submission-verdicts", code.id)) as { reviews: { id: string }[] }).reviews.map((r) => r.id), [made.id]);
+    assert.equal((await c.svc.approvalOf(code.id))?.approved, true);
+  });
+
 }

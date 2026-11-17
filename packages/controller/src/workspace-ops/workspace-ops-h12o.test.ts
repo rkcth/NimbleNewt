@@ -174,4 +174,32 @@ for (const backend of backends) {
       assert.equal(r.calls.length, 3, "the repeat asked no host");
     } finally { await r.store.close(); }
   });
+
+  test(`${backend.name}: two controllers releasing the same approved submission at the same moment write one commit record, and both requests are recorded done (H12o second review)`, async () => {
+    const r = await rig();
+    try {
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev" });
+      // The host holds both answers until both requests have asked it, then answers both at once (the second as the commit it found, as a real host does).
+      let go!: () => void;
+      const together = new Promise<void>((ok) => { go = ok; });
+      r.setAnswer(async (call) => { await together; return committed(call, { recovered: r.calls.indexOf(call) === 1 }); });
+      const one = r.service(), two = r.service();
+      // The second starts once the first is at the host (two starts at the very same moment: one is refused stale_revision on the task's open index, before anything is asked).
+      const a = one.request(r.owner, { commandId: "g1", operation: "release", taskId: r.task, reason: "x", submissionId: S1 });
+      while (r.calls.length < 1) await new Promise((ok) => setTimeout(ok, 5));
+      const b = two.request(r.owner, { commandId: "g2", operation: "release", taskId: r.task, reason: "x", submissionId: S1 });
+      while (r.calls.length < 2) await new Promise((ok) => setTimeout(ok, 5));
+      go();
+      const [x, y] = await Promise.all([a, b]);
+      assert.deepEqual([x.state, y.state], ["done", "done"], `${x.summary} / ${y.summary}`);
+      const made = await one.submissionCommit(S1);
+      assert.equal(made?.commitId, COMMIT);
+      assert.ok(made !== undefined && [x.id, y.id].includes(made.requestId), "the record names one of the two requests");
+      assert.deepEqual([(await r.recorded("g1"))?.body["state"], (await r.recorded("g2"))?.body["state"]], ["done", "done"]);
+      const again = await two.request(r.owner, { commandId: "g3", operation: "release", taskId: r.task, reason: "x", submissionId: S1 });
+      assert.deepEqual([again.detail?.["alreadyRecorded"], again.detail?.["commit"]], [true, COMMIT]);
+      assert.equal(r.calls.length, 2, "the third request asked no host");
+    } finally { await r.store.close(); }
+  });
+
 }
