@@ -87,7 +87,7 @@ test("a task that moves to a route nobody has measured: the real process is meas
     const questions: string[] = [];
     // Each is short enough that it is either whole or left out (a one-line reference), never cut to a head and a tail.
     for (let i = 0; i < 40; i++) {
-      const question = `Bed ${i}: ${"how much water does this bed need in a dry week, and at what time of day? ".repeat(7)}`.slice(0, 500);
+      const question = `Bed ${i}: ${"how much water does this bed need in a dry week, and at what time of day? ".repeat(7)}`.slice(0, 300);
       questions.push(question);
       assert.equal((await call("decision.ask", { taskId, topic: `bed-${i}`, question }, `q${i}`)).ok, true);
     }

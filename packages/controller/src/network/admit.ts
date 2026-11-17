@@ -27,7 +27,7 @@ export interface AdmitOptions {
   readonly resolve: NameResolver;
   /** The most connection records one attempt may write (default 1000): past it the connection is refused, because every connection is logged and the log is bounded. */
   readonly maxLogged?: number;
-  readonly via: "relay" | "web-tool";
+  readonly via: "relay" | "web-tool" | "resume-check";
 }
 
 /**

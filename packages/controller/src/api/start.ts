@@ -82,11 +82,11 @@ import { ChatService, ChatSpendService, CoordinatorService, GuardedModelCall, ag
 import { ContextBranchService } from "../branches/index.js";
 import { createMeetingGate } from "../jobs/meeting-gate.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
-import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
+import { McpService, RemoteMcpClient, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
-import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
-import { DependencyService, resumeProbeEnabled } from "../dependencies/index.js";
-import { resumeObserver } from "../continuation/resume-observer.js";
+import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type DeltaItem, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
+import { DependencyNotes, DependencyService, RESOURCE_READ_LIMITS, RecentTexts, changeViews, keptText, resourceReader, resumeObservation, resumeProbeEnabled, type ExternalRead, type McpRead } from "../dependencies/index.js";
+import { entriesLook, resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
@@ -1207,9 +1207,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       position: async (projectId) => { const at = await searchEvents.since(`project:${projectId}`, Number.MAX_SAFE_INTEGER, 1); return { next: at.head, floor: at.floor }; },
     } });
     // Hosts capture continuations and the agent records what its work relied on through the state API (card L04c). A host captures only for a live attempt it runs or is pinned to; with no dispatcher, none.
+    let dependencyNotes: DependencyNotes | undefined;
     const continuationOps: ContinuationOps = {
       capture: (by, command) => continuations.capture(by, command), latest: (by, taskId) => continuations.latest(by, taskId), history: (by, taskId, page) => continuations.history(by, taskId, page),
       record: (by, command) => contextDependencies.record(by, command), manifest: (by, taskId) => contextDependencies.get(by, taskId), searchDependency: (by, query) => contextDependencies.searchDependency(by, query),
+      // Card L04g: the agent names what it relied on and the controller looks and fills in (set below, once the look and the reader exist).
+      note: (by, command) => dependencyNotes!.note(by, command),
       hostHolds: async (hostId, taskId) => {
         if (dispatch === undefined) return false;
         for (const id of await dispatch.dispatcher.liveAttemptsOf(dispatch.principal, { taskId })) {
@@ -1227,19 +1230,55 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // What the recorded files and directories look like now (card L04e): a task placed on a remote host is looked at by that host on its own disk, one placed here is read from the checkout its worker works in (`resumeCheckout`), else the folder its
     // repository is bound at; the project's paths apply to either. Whatever cannot be looked at stays unobserved, so the check says `unknown`.
     const resumeProbeOn = resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) && options.resume?.observe === undefined;
-    const resumeObserve = !resumeProbeOn ? undefined : resumeObserver({
-      manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId),
-      placedHostOf: async (taskId) => {
+    // Card L04g: the texts this process's checks and notes read (a file hashed here, an external or MCP resource read), for the reviewer's view of what changed. Bounded and short-lived; content a remote host looked at never comes here.
+    const recentTexts = new RecentTexts();
+    const keepText = (taskId: string, entryId: string, bytes: Uint8Array): void => { recentTexts.set(taskId, entryId, keptText(bytes), createHash("sha256").update(bytes).digest("hex")); };
+    const lookDeps = {
+      manifest: async (taskId: string) => await contextDependencies.get(RESUME_READER, taskId),
+      placedHostOf: async (taskId: string) => {
         const placed = (await storage.getAggregate({ kind: "task-placement", id: taskId }))?.body as { hostId?: unknown } | undefined;
         return typeof placed?.hostId === "string" ? placed.hostId : undefined;
       },
       remoteHostIds,
-      binding: async (taskId) => await resources.checkoutLocation(taskId),
+      binding: async (taskId: string) => await resources.checkoutLocation(taskId),
       ...(options.resumeCheckout === undefined ? {} : { workerCheckout: options.resumeCheckout }),
       remote: () => (dispatch?.remote === undefined ? undefined : { remote: dispatch.remote, by: dispatch.principal }),
       ...(typeof options.resumeProbe === "object" ? { limits: options.resumeProbe, ...(options.resumeProbe.remoteWaitMs === undefined ? {} : { remoteWaitMs: Math.max(1, Math.min(60_000, Math.floor(options.resumeProbe.remoteWaitMs))) }) } : {}),
-      onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
+      onFault: (detail: string) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
+      keep: keepText,
+    };
+    // Card L04g: external and MCP resources a task recorded are read again only where the owner allowed it (resume.externalReads, then the task's own network grant or an approved remote MCP server that lists the resource).
+    // One bounded request per resource, through the web tool's guarded reader or the MCP connector's checked connection; whatever is not read is unknown with the reason.
+    let resumeMcpClient: RemoteMcpClient | undefined;
+    const readResources = resourceReader({
+      allowed: async () => (await configuration.installationValue("resume.externalReads")) === true,
+      get external(): ExternalRead | undefined { return dispatch?.network?.web; },
+      get mcp(): McpRead | undefined {
+        const parts = dispatch?.mcp;
+        if (parts === undefined) return undefined;
+        resumeMcpClient ??= new RemoteMcpClient(parts.connector, { ...(options.dispatch?.mcp?.transport ?? {}), maxBytes: RESOURCE_READ_LIMITS.bytes, timeoutMs: RESOURCE_READ_LIMITS.ms });
+        const client = resumeMcpClient;
+        return { readable: (read) => parts.service.resumeReadable(RESUME_READER, read), read: (serverId, uri) => client.readResource(serverId, uri) };
+      },
+      onFault: (detail) => { options.onInternalError?.(new Error(`the resume resource read: ${detail}`)); },
     });
+    dependencyNotes = new DependencyNotes({
+      dependencies: contextDependencies,
+      ...(resumeProbeOn ? { look: entriesLook(lookDeps), textAt: (taskId: string, entryId: string, hash: string) => recentTexts.at(taskId, entryId, hash) } : {}),
+      resources: async (manifest, attemptId, mode) => await readResources(manifest, attemptId, mode),
+    });
+    const resumeObserve = !resumeProbeOn ? undefined : resumeObserver(lookDeps);
+    // What a check observes (card L04g): the files and directories (this machine's probe, a remote host's look, or the host's own `resume.observe`, which wins for what it reports), and the external and MCP resources read again
+    // where the owner allowed it. The texts of the resources read are kept for the reviewer's view.
+    const filesObserve = options.resume?.observe ?? resumeObserve;
+    const observeAll = resumeObservation({ files: filesObserve, manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId), read: readResources, recent: recentTexts });
+    // The reviewer's view of each change (card L04g): a diff of the text kept at recording and the text read now, unless the owner turned it off (resume.reviewerSeesChanges).
+    const views = changeViews({ manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId), textOf: (taskId, entry) => contextDependencies.textOf(taskId, entry), recent: recentTexts });
+    const changeView = async (taskId: string, change: DeltaItem): Promise<{ readonly diff: string } | { readonly none: string } | undefined> => {
+      let on: unknown;
+      try { on = await configuration.installationValue("resume.reviewerSeesChanges"); } catch { return undefined; }
+      return on === false ? undefined : await views(taskId, change);
+    };
     // One bounded client over the host's raw reviewer client (card W10 wiring), shared by the resume reviewer and the second agent of a done, so the two share its slots.
     const boundedReviewer = options.reviewerModel === undefined ? undefined : new BoundedReviewerModel(options.reviewerModel);
     const resumeTask = async (taskId: string): Promise<{ title?: string; nextStep?: string } | undefined> => {
@@ -1253,6 +1292,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       routes: options.resumeReview.routes ?? chatRoutes(routing, { role: options.resumeReview.role ?? "safety-supervisor" }),
       ...(options.resumeReview.tellTask === false ? {} : { task: resumeTask }),
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the resume reviewer on ${route}: ${detail}`)); },
+      change: changeView,
     });
     // The shipped resume reviewer (card L04d wiring): with no explicit `resumeReview` or `resume.review`, the host's raw client (`reviewerModel`, what the launcher passes) is bounded, put behind the same routed,
     // metered client and asked only on the route the owner set (`resume.reviewerRoute`, read at every review). It fails closed: when it cannot run (no route, an unusable route, the cap, a model that does not
@@ -1262,6 +1302,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       : new ResumeReviewer(new GuardedModelCall(boundedReviewer, { spend: ChatSpendService.withEpoch(storage, epoch), onSpendFailure: (error) => options.onInternalError?.(error) }), {
         routes: shippedResumeRoutes, task: resumeTask,
         onFailure: (route, detail) => { options.onInternalError?.(new Error(`the resume reviewer on ${route}: ${detail}`)); },
+        change: changeView,
       });
     const shippedReview = shippedReviewer === undefined ? undefined : async (request: Parameters<ResumePorts["review"]>[0]): Promise<Awaited<ReturnType<ResumePorts["review"]>>> => {
       // The route is read first so an unset or unusable one is said as such, before anything is put together for a model.
@@ -1277,10 +1318,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the report interrogator on ${route}: ${detail}`)); },
     });
     const resumePorts: Partial<ResumePorts> = {
-      ...(resumeObserve === undefined ? {} : { observe: resumeObserve }),
       ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),
       ...(shippedReview === undefined ? {} : { review: shippedReview }),
       ...options.resume,
+      // The files part of `observeAll` is the host's own `resume.observe` when it gave one (card L04d), so the host's port still wins for what it reports.
+      observe: observeAll,
     };
     const resumes = ResumeCheckService.withEpoch(storage, epoch, { continuations, dependencies: contextDependencies, blockers: BlockerService.withEpoch(storage, epoch), ports: controllerResumePorts(storage, resumePorts),
       // The owner's decline releases the task while the held attempt is still its active one, and closes the dispatcher's notice that it is held (card L04c).

@@ -251,7 +251,7 @@ export interface DispatchHandle {
   /** The MCP service and the only way the host reaches a remote server (cards T03, H12g): the connector, and the client that speaks MCP over it to the checked address (card H12k); present when `mcp` was given. */
   readonly mcp?: { readonly service: McpService; readonly connector: RemoteMcpConnector; readonly client: RemoteMcpClient };
   /** The network relay and the web tool (card H12i), present when `network` and the grant service were given. The tool is a built-in of the bridge (`ToolExecutionDeps.builtins`). */
-  readonly network?: { readonly relay: NetworkRelay; readonly webTool: BuiltinTool };
+  readonly network?: { readonly relay: NetworkRelay; readonly webTool: BuiltinTool; /** The web tool's guarded reader itself: a resume check's one read of a recorded external resource goes through it (card L04g). */ readonly web: WebFetch };
 }
 
 export interface ComposeInput {
@@ -634,7 +634,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       name: WEB_FETCH_TOOL.name, version: WEB_FETCH_TOOL.version, purpose: WEB_FETCH_TOOL.purpose, input: WEB_FETCH_TOOL.input, output: WEB_FETCH_TOOL.output,
       run: async (call, input, signal) => ({ ...(await web.run({ taskId: call.taskId, projectId: call.projectId, attemptId: call.attemptId, ...(call.agent.id.startsWith("agent:") ? { agentId: call.agent.id } : {}) }, input, signal)) } as unknown as JsonObject),
     };
-    return { relay, webTool };
+    return { relay, webTool, web };
   })();
   // What the relay tells stall detection about every model call of an attempt (card V01b): reports are sent one after another so they arrive in order, and a failure of the report never reaches the call.
   const reporter = i.recovery?.stall.reportFromRelay?.bind(i.recovery.stall);

@@ -59,7 +59,7 @@ export interface ConnectionBody {
   /** The address the connection went to (the one that was checked). Absent for a refused connection. */
   readonly address?: string;
   readonly grantId?: string;
-  readonly via: "relay" | "web-tool";
+  readonly via: "relay" | "web-tool" | "resume-check";
   readonly outcome: "open" | "closed" | "refused" | "failed";
   readonly reason?: string;
   readonly bytesToTarget: number;
