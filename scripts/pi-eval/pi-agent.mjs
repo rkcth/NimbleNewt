@@ -5,7 +5,9 @@
 // from taskset.json), so no default or plugin can send the work to another provider. Same flags as
 // ~/.local/pi-cli/runcard.sh. PI_EVAL_SESSION_ID (variant D, once W04 exists) keeps a session instead of --no-session.
 // The Pi binary is PI_EVAL_PI_BIN, else ~/.local/pi-cli/node_modules/.bin/pi. It is started with this Node, not a
-// shell, so the launcher is the same on every platform. Nothing here reads or prints a credential.
+// shell, so the launcher is the same on every platform. Nothing here reads or prints a credential. The bench starts this
+// script isolated (lib/isolation.mjs): HOME is a fresh per-run folder, so the bench passes PI_EVAL_PI_BIN, resolved from
+// the real home, and Pi finds only the per-run configuration that reaches the model through the bench's key proxy.
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";

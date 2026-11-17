@@ -100,6 +100,69 @@ solution for the record (`--no-shipped` skips that part).
 node scripts/pi-eval/run.mjs --calibrate [--tasks id,id]
 ```
 
+## The agent's isolation (added 2026-11-17, after an agent tried to push)
+
+In batch `batch-20261117T064116` the agent of run `grant-proposals-B-r1-20261117T094724`, told "Do NOT push", added a
+GitHub remote to its throwaway checkout, ran `git push origin HEAD:main` twice (GitHub refused only because the checkout
+was behind), tried a dry-run push with the owner's deploy key, and listed `~/.git-credentials` and `~/.ssh`. The bench ran
+it with the owner's home, keys and network. Since then every agent the bench starts (`lib/isolation.mjs`) gets:
+
+- **A home of its own.** `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME`/`XDG_STATE_HOME` and
+  `TMPDIR` point into a fresh temporary folder (`<tmp>/pi-eval-iso-*`), removed at the end of the run whatever `--keep`
+  says (also on Ctrl-C). It holds only a `.gitconfig` and, when the owner's Pi configuration has the task set's provider,
+  `.pi/agent/models.json` (mode 0600) with that one provider entry, its key and any header fields left out.
+- **No model key.** The per-run Pi configuration points at a loopback proxy the bench runs for the length of the run,
+  which forwards requests under the API path to the model server and puts the key in the Authorization header. The key is
+  read by the bench from `~/.pi/agent/models.json` and is never written into the agent's home, printed or logged, so an
+  agent that prints its configuration prints no key. (The agent can still send model requests through the proxy.)
+- **An environment from an allowlist.** `PATH` (with the run's `bin` first), locale, terminal, `USER`/`LOGNAME`,
+  `NODE_OPTIONS`/`NODE_ENV`/`CI`, and names starting `PI_EVAL_`, `STUB_AGENT_`, `CLAUDE_AGENT_`, `FAKE_CLAUDE_`,
+  `NIMBLENEWT_`, `LC_` (on Windows also the system names); never a name containing KEY, TOKEN, SECRET, PASSW, CREDENTIAL,
+  COOKIE or PRIVATE. So no `SSH_AUTH_SOCK`, `GIT_*` of the operator, `GH_TOKEN`, `GITHUB_TOKEN`, `NPM_TOKEN`, `AWS_*`,
+  `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`. The bench's own settings for the agent (provider, model, run mark,
+  `--agent`'s mode variables) are added after.
+- **git that cannot push out.** `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` name the run's settings (the same text is
+  `~/.gitconfig`): `core.sshCommand=/bin/false`, every GitHub address form (https, http, `git@github.com:`, ssh, git)
+  rewritten (`insteadOf` and `pushInsteadOf`) to `http://127.0.0.1:9/pushing-is-disabled/`, `protocol.allow=never` with
+  `protocol.file.allow=always` (local folders still clone and fetch), an empty `credential.helper`, `push.default=nothing`,
+  and the bench's identity. A `git` wrapper first on `PATH` (`lib/git-guard.mjs`) refuses, with "pushing is disabled in
+  this environment": a push unless every destination is a local repository inside the run's own folders (its checkout or
+  its temporary folder, where NimbleNewt's own tests make bare repositories); `remote add`/`set-url` to an address that is
+  not a local folder; and a setting that would loosen the above, given with `-c`, `--config-env`, `GIT_CONFIG_PARAMETERS`
+  or `GIT_CONFIG_COUNT`, or written with `git config` in any scope. It runs the real git without `GIT_SSH`,
+  `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND` or askpass programs. Each refusal is logged (its kind only) to `git-guard.log` in
+  the run's artifacts.
+- **The owner's folders hidden (Linux, bubblewrap).** The agent runs under `bwrap`: the file system as it is, but the
+  owner's home folder, the runtime folder of sockets (`/run/user/<uid>`: ssh-agent, keyring, D-Bus) and `/srv/ai` are
+  empty folders (more with `--hide a,b`); the checkout, the run's temporary folder and its artifacts folder are bound
+  back writable, Node's install, Pi's install and the bench's scripts read-only; the run's git settings and wrapper are
+  read-only, so the agent cannot edit them; a process list and `/proc` of its own, so other processes' environments and
+  `/proc/<pid>/root` (a way around the hidden folders) are out of reach, and every process the agent left behind ends
+  with it. The network is shared: the model server is on the host's loopback address, and a network namespace would cut
+  that too. Where bubblewrap cannot run (macOS, Windows, a Linux without user namespaces) **no agent is started** unless
+  `--allow-visible-home` is given; then the agent still gets the fresh home, environment and git settings, but can read
+  the owner's files by their full path. `--dry-run` says which applies.
+- **Detection as well as blocking.** A run is flagged `contaminated` when its tool calls show a push, a remote added or
+  changed, or a path or socket of the owner's keys and logins (`~/.ssh`, `.git-credentials`, `id_rsa`/`id_ed25519` and
+  the like, `.netrc`, the gh token, `SSH_AUTH_SOCK`, Pi's own `.pi/agent`), or when the git wrapper refused anything.
+  Records carry `credentialAttempts` (the kinds seen), `guardRefusals` and `isolation` (what applied to the run). File
+  content the agent writes is not searched (code may talk about pushing).
+
+What the agent can still do, said plainly: reach the network (an upload of the checkout to a server that asks for no
+login would work; no credential of the owner is in its reach to push anywhere that needs one); read everything outside
+the hidden folders that the user can read (`/srv/code`, including the reference checkout and other worktrees holding
+merged solutions, which `contaminated` already looks for, and `/srv/code/test-postgres/credentials`, the synthetic test
+database's); run the real git by its full path past the wrapper (it then meets the run's git settings, which it can
+override on its own command line, but finds no key to use); send requests to the model through the proxy. Inside the
+sandbox the agent cannot start a nested bubblewrap (AppArmor here refuses nested user namespaces), so its own runs of
+the worker's and integration's real-sandbox tests skip (or fail under `NIMBLENEWT_REQUIRE_SANDBOX=1`); every current
+task's tests are controller tests, which use no real sandbox, and the bench's grading runs outside with its own
+environment.
+
+`isolation.test.mjs` tests it with a fake agent (`test-agents/incident-agent.mjs`) that repeats the incident and ways
+around it against a decoy home with planted fake keys, and with the real Pi program (when installed) against a stand-in
+model server on loopback: its shell tool runs the incident's commands inside the sandbox.
+
 ## A control run (another agent on the same tasks)
 
 To tell a hard task from a weak agent, run one repeat per task with another agent and compare. Any program works that
@@ -113,8 +176,9 @@ stream to these events is enough: that is `agents/claude-agent.mjs`.
 with the prompt on stdin, and converts each stream line to the Pi events above (a stream that ends without Claude's
 `result` has no `agent_end`, so it is not a finish; a `result` that is an error, such as the turn limit, ends on an
 `error` reply). `CLAUDE_AGENT_BIN` picks the CLI (default `claude` on PATH), `CLAUDE_AGENT_MODEL` adds `--model`.
-Claude's stderr goes to `claude-stderr.log` beside the log. It uses the Claude Code login of the user who runs it (no
-credential is read or passed) and the account's quota; it does not use Radiance. `claude-agent.test.mjs` tests it
+Claude's stderr goes to `claude-stderr.log` beside the log. It does not use Radiance. Since the isolation above it runs
+with a fresh home like every agent, so the Claude Code login of the user who runs it is NOT available to it and a real
+control run cannot log in; giving it a credential is a decision not yet taken (the bench passes none). `claude-agent.test.mjs` tests it
 against a fake CLI (`agents/fake-claude.mjs`) only; it has never been run against the real CLI, so check the first
 run's `agent.jsonl` by hand. One control repeat per task, then the comparison:
 
@@ -123,9 +187,9 @@ node scripts/pi-eval/run.mjs --agent scripts/pi-eval/agents/claude-agent.mjs --l
 node scripts/pi-eval/compare.mjs --results /srv/code/worktrees-pi/eval-results
 ```
 
-Run it from the repository root (the agent path is resolved from the current directory). The Claude run is not
-isolated any better than Pi's (see "Not done yet"): it runs as the same user, and Claude Code also loads that user's
-settings and memory, so read its log for paths outside the checkout before trusting a finish. Bash is allowed without
+Run it from the repository root (the agent path is resolved from the current directory). The Claude run is isolated like
+Pi's (above), which also means it runs as the same user outside the hidden folders, so read its log for paths outside the
+checkout before trusting a finish. Bash is allowed without
 a restriction (only Edit and Write are limited to the checkout by `acceptEdits`), so a Bash command can read and write
 anything that user can, including the reference checkouts and other worktrees; run it only when nothing else is working
 in them. A full control pass (9 tasks, one repeat) is up to 9 runs of 60 to 180 minutes on the account's quota.
@@ -149,7 +213,7 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
 - `results.jsonl`: one line per run: task, size, variant, repeat, base and solution commits, the bench's own commit, route
   (provider, model, thinking), start and end time, wall time, exit code, timeout, **outcome** and the reason, the end kind,
   the last stop reason and visible characters, turns, tool calls, tokens, nudges (0 until W04), PLAN.md progress, commits
-  ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout (contaminated).
+  ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout or tried to push or reach the owner's keys (contaminated; `credentialAttempts`, `guardRefusals` and `isolation` say more).
 - `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
   setup, the acceptance run (`hidden-setup.log`, `hidden-tests.log`), the shipped suites (`shipped-setup.log`,
   `shipped-tests.log`), the diff stat. The record's `hidden` is the acceptance result (with `interfaceMismatch` and
@@ -279,7 +343,8 @@ tests beside it; calibration's spec fit flagging an unstated regex until it is a
 outside the checkout (a marked server in /tmp and its unmarked helper) stopped; a control run with two stand-in agents
 recorded and compared (`specfit.test.mjs` tests the extraction itself); the Claude control wrapper against a fake CLI
 (`claude-agent.test.mjs`). These are not part of `npm test` (which runs
-`scripts/*.test.mjs` only).
+`scripts/*.test.mjs` only). Since 2026-11-17 also the agent's isolation (`isolation.test.mjs`, see "The agent's
+isolation"); its sandboxed cases are skipped where bubblewrap cannot run, unless `NIMBLENEWT_REQUIRE_SANDBOX=1`.
 
 ## Smoke run (2026-11-09)
 
@@ -317,12 +382,12 @@ capture, hidden tests copied in and run, classification and the report. One run 
   (`const MARK = "..."; ... assert.ok(x.includes(MARK))`) is read as the test's own fixture, so it is never flagged:
   check such constants by hand (on 2026-11-10 a search found each one to be a fixture input, a negative check, or text in the prompt or the base source). The CONTRACT blocks were written by reading each acceptance file;
   an interface mismatch in a new run still points at a gap there.
-- **Isolation is of the checkout, not the machine.** The agent's repository cannot reach the solution, but Pi runs as the
-  same user and can read any file that user can: the other worktrees under `/srv/code/worktrees-pi` (several hold these
-  very cards' merged solutions), the reference checkout, `~/.claude` transcripts, earlier runs' artifacts, and a
-  concurrent run's checkout after its hidden tests were copied in. A bubblewrap sandbox would close this, but the
-  agent's own test runs need bubblewrap and AppArmor here refuses nested user namespaces, so the controller's
-  sandboxed tests could not run inside one; a separate Unix user would need root. What exists is detection: a run is
+- **Isolation hides the owner's folders, not the rest of the machine.** Since 2026-11-17 (above, "The agent's
+  isolation") the owner's home, keys, sockets and `/srv/ai` are hidden and pushing out is refused, but Pi still runs as
+  the same user and can read what that user can elsewhere: the other worktrees under `/srv/code/worktrees-pi` (several
+  hold these very cards' merged solutions), the reference checkout, earlier runs' artifacts, and a concurrent run's
+  checkout after its hidden tests were copied in. Hiding those too is not done (they sit beside the bench's own folders
+  under `/srv/code`, which `--hide` could cover case by case). What exists for them is detection: a run is
   flagged `contaminated` (and `foreignPaths` lists up to 20) when a tool call's arguments name an absolute path under
   the reference checkout, any directory holding a checkout, the results, or the home directory (except Pi's install),
   or the solution's short SHA. It does not see a relative walk (`cat ../c07m/...`), a path built at run time, or a
