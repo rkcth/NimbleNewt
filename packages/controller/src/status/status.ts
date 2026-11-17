@@ -1380,7 +1380,8 @@ export class StatusService {
    */
   async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const release = this.#deps.release;
-    if (release === undefined || by.kind !== "owner") return undefined;
+    // An owner object limited to one task is not the owner for this view: the other owner-only views refuse it the same way (card X09b watch, second review).
+    if (release === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     if (request.candidateId !== undefined && (typeof request.candidateId !== "string" || request.candidateId.trim() === "" || request.candidateId.length > 120)) invalid("candidateId", "needs the candidate's ID (the rcn- ID release.submit returned)");
     const limit = request.limit ?? 5;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) invalid("limit", "must be a whole number from 1 to 10");

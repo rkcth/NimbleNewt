@@ -9,7 +9,8 @@ import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { NotificationService } from "../notifications/index.js";
 import { RemoteWorkerClient } from "../remote/index.js";
-import { RELEASE_LIMITS, releaseDeadline } from "../release/index.js";
+import { RELEASE_LIMITS, ReleaseService, releaseDeadline } from "../release/index.js";
+import { StatusService } from "../status/index.js";
 import { releaseNoticeText } from "./dispatch-compose.js";
 import { startController } from "./index.js";
 
@@ -52,7 +53,7 @@ async function rig(clock: () => string, dir?: string) {
     assert.ok(v.ok, JSON.stringify(v));
     return (v.result.item.lines as { text: string }[]).map((l) => l.text);
   };
-  return { c, d, call, host, inbox, view, stop: () => c.close(), close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
+  return { c, d, rob, call, host, inbox, view, stop: () => c.close(), close: async () => { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } };
 }
 const ownerTokens = new Map<string, string>();
 
@@ -86,6 +87,10 @@ test("a host that took a release test and went quiet is told to the owner once p
     assert.ok(line(lines).includes(`the host was last heard ${heardAt}`), line(lines));
     const ends = releaseDeadline({ issuedAt, pickedUpAt: pickedAt, limits: { timeoutSeconds: 3600, memoryMb: 1 } });
     assert.ok(line(lines).includes(`ends as timed out at ${ends}`), line(lines));
+    // The heartbeat time is the owner's alone: an owner object limited to one task reads the view exactly as a view that does not exist, as the other owner-only views do (second review).
+    const status = StatusService.withEpoch(w.c.storage, w.c.epoch, { release: ReleaseService.withEpoch(w.c.storage, w.c.epoch) } as never);
+    assert.ok((await status.releaseLines(w.rob, { candidateId }))?.lines.some((l) => l.text.includes(`the host was last heard ${heardAt}`)));
+    assert.equal(await status.releaseLines({ ...w.rob, taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" } }, { candidateId }), undefined);
 
     // Inside the quiet threshold: nothing said.
     now += RELEASE_LIMITS.silentSeconds * 1000 - MIN;
