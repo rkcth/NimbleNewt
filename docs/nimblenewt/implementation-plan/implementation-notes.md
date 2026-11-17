@@ -13013,7 +13013,7 @@ W01 stays planned. This section records what was added to the bench, the three b
 
 ## W01 follow-up w01iso: the bench agent cut off from the owner's keys and from pushing (Claude agent, 2026-11-17)
 
-Card W01 stays planned. Branch `card20-w01iso`. This answers the incident in the W01 section above (run `grant-proposals-B-r1-20261117T094724` added a GitHub remote, pushed twice, tried a dry-run push with the owner's deploy key and listed `~/.git-credentials` and `~/.ssh`). **No bench batch may be run until this has been reviewed.**
+Card W01 stays planned. Branch `card20-w01iso`. This answers the incident in the W01 section above (the B round-1 grant-proposals run of 2026-11-17 at 09:47:24 added a GitHub remote, pushed twice, tried a dry-run push with the owner's deploy key and listed `~/.git-credentials` and `~/.ssh`). **No bench batch may be run until this has been reviewed.**
 
 **What is done.** Every agent the bench starts (Pi, the stand-in, the Claude control) now runs isolated (`scripts/pi-eval/lib/isolation.mjs`, `lib/git-guard.mjs`, wired in `lib/runner.mjs`; README "The agent's isolation"):
 - **Its own empty home.** `HOME`, `USERPROFILE`, the four `XDG_*` folders and `TMPDIR` point into a fresh `<tmp>/pi-eval-iso-*` folder, deleted at the end of every run (also with `--keep`, also on Ctrl-C). It holds a `.gitconfig` and, when the owner's Pi configuration has the run's provider, a per-run `.pi/agent/models.json` (mode 0600) with that one provider entry.
