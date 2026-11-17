@@ -7,6 +7,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { CommandRunner } from "../domain/runner.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
 
 after(stopServer);
@@ -23,7 +24,7 @@ const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; plantOld(by: Principal, commandId: string, body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -42,7 +43,7 @@ for (const backend of backends) {
           return p;
         };
         const svc = SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], options);
-        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
+        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, plantOld: async (by, commandId, b) => { const scoped = scopedCommandId(by.id, commandId); const id = derivedId("sbm", scoped); /* exactly what record() stored before card Q01b's attemptId: the body, compared with the time left out */ await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: scoped, actor: by.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: { taskId: b.taskId, kind: b.kind, role: b.role } }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
       } finally { await world.close(); }
     });
 
@@ -230,6 +231,12 @@ for (const backend of backends) {
     const oldAgain = await gated.record(ann, old);
     assert.deepEqual([oldAgain.id, oldAgain.revision, oldAgain.replayed], [oldMade.id, oldMade.revision, true]);
     assert.equal((await c.rawBody(oldMade.id) as SubmissionBody).attemptId, undefined, "no backfill");
+    // the same with a record stored in the format written before this change (a frozen copy, so a change of the compared payload cannot hide in both sides)
+    const legacy = { ...cmd, commandId: cid("s"), tree: "f".repeat(40) };
+    const legacyId = await c.plantOld(ann, legacy.commandId, { taskId: c.task, projectId: c.projects.task, kind: "code", role: "author", submittedBy: ann.id, submittedAt: options.clock(), makesCommit: false, base: BASE, tree: legacy.tree, patchId: PATCH, refreshRound: 0, evidence: [] });
+    const legacyAgain = await gated.record(ann, legacy);
+    assert.deepEqual([legacyAgain.id, legacyAgain.replayed], [legacyId, true], "a record from before attemptId replays");
+    assert.equal((await gated.get(ann, legacyId))?.attemptId, undefined);
     // after the attempt has ended (or another agent's attempt took over), a repeat still answers with the first record; a new code submission is refused
     for (const later of [undefined, { ownerId: ann.id, state: "failed", attemptId: "att-second" }, { ownerId: bob.id, state: "active", attemptId: "att-third" }]) {
       attempt = later;
