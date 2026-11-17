@@ -73,10 +73,12 @@ started nothing and is not recorded. A busy or unreadable server is polled each 
 `--idle-wait-minutes` (default 30); past that, or when the model is not served, the batch stops starting runs (the
 bench never loads, unloads, switches or restarts a model). With the gate on, runs go one at a time, so the bench adds at
 most one request to the server at any moment (`--concurrency` above 1 is refused); `--no-radiance-gate` turns it off for
-a server nobody else uses. Each record carries `server` (the counters the agent started on and those after the run).
+a server nobody else uses. The gate cannot reserve the server: another client can start in the seconds between the
+second check and the agent's first request, so it keeps the bench from adding to a busy server, not others from joining.
+Each record carries `server` (the counters the agent started on and those after the run).
 `--token-budget N` stops starting runs once the batch's finished runs used N input+output tokens (cache reads not
 counted); a run already started is never cut short, and a run whose agent started but whose token use is unknown stops
-the batch too. `--test-slot CMD` (or `PI_EVAL_TEST_SLOT`) holds a slot of a machine-wide test-slot command (on this
+the batch too (a log with no model reply, or a reply without token counts, is unknown use, not 0 tokens). `--test-slot CMD` (or `PI_EVAL_TEST_SLOT`) holds a slot of a machine-wide test-slot command (on this
 machine `/tmp/nn-slot.sh`) for the bench's own setup build and grading suites only; the agent's own test runs are part
 of what is measured and never wait for it. Do not start `run.mjs` itself through that slot command while giving it
 `--test-slot`: it would hold one slot and wait for another (with a single slot, forever). A stopped batch is noted in

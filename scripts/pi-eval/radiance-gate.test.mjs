@@ -62,6 +62,18 @@ test("the key comes from Pi's config and goes only into the Authorization header
     // A failed GET names the path and status only.
     const bad = fakeFetch({});
     await assert.rejects(readRadiance(cfg, { fetchImpl: bad.fn }), (e) => /GET \/stats answered 404/.test(e.message) && !e.message.includes(KEY));
+    // A failed request names the path and the error's kind only: fetch's own refusal quotes a bad header value whole.
+    const quoting = async (url, init) => { throw new TypeError(`Headers.append: "${init.headers.authorization}" is an invalid header value.`); };
+    await assert.rejects(readRadiance(cfg, { fetchImpl: quoting }), (e) => /GET \/stats could not be sent \(TypeError\)/.test(e.message) && !e.message.includes(KEY));
+    const refused = async () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`connect ECONNREFUSED ${KEY}`), { code: "ECONNREFUSED" }) }); };
+    await assert.rejects(readRadiance(cfg, { fetchImpl: refused }), (e) => e.message === "GET /stats could not be sent (TypeError ECONNREFUSED)");
+    const notJson = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError(`Unexpected token in ${KEY}`); } });
+    await assert.rejects(readRadiance(cfg, { fetchImpl: notJson }), (e) => /GET \/stats did not answer JSON \(SyntaxError\)/.test(e.message) && !e.message.includes(KEY));
+    // A key a header cannot carry is refused before any request, without quoting it.
+    for (const bad of [`${KEY}\u0000x`, `${KEY}\n`, `${KEY} x`, `${KEY}\u00e9`]) {
+      writeFileSync(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { radiance: { baseUrl: "http://127.0.0.1:9/v1", apiKey: bad } } }));
+      assert.throws(() => radianceConfig(home), (e) => /character an HTTP header cannot carry/.test(e.message) && !e.message.includes(KEY.slice(0, 8)));
+    }
     // No provider, no key: refused, and the message does not hold one.
     writeFileSync(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { radiance: { baseUrl: "x" } } }));
     assert.throws(() => radianceConfig(home), /no radiance provider with an apiKey/);
@@ -217,6 +229,10 @@ test("with a budget, a run whose token use is unknown stops the batch (the budge
   const fine = await runBatch({ jobs: [job("a"), job("b")], tokenBudget: 1_000_000, runJob: async (t) => (t.id === "a" ? { runId: "a", startedAt: null, outcome: "error" } : { ...rec(t.id, 1, 1), startedAt: "s" }) });
   assert.equal(fine.stopped, null);
   assert.equal(fine.records.length, 2);
+  // The runner marks a log without a model reply, or with a reply lacking counts (its tokens read 0), as unknown use.
+  const zero = await runBatch({ jobs: [job("a"), job("b")], tokenBudget: 1_000_000, runJob: async (t) => ({ ...rec(t.id, 0, 0), startedAt: "s", tokensUnknown: true }) });
+  assert.equal(zero.records.length, 1);
+  assert.match(zero.stopped.reason, /token use of run a is unknown/);
   // Without a budget, unknown use is no reason to stop.
   assert.equal((await runBatch({ jobs: [job("a"), job("b")], runJob: async (t) => ({ runId: t.id, startedAt: "s" }) })).stopped, null);
 });

@@ -372,6 +372,8 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     Object.assign(record, verdict, {
       stopReason: summary.last?.stopReason ?? null, visibleChars: summary.last?.visibleChars ?? 0, lastText: summary.last?.visibleTail.slice(-300) ?? "",
       turns: summary.turns, toolCalls: summary.toolCalls, tokens: summary.tokens, sessionId: summary.sessionId, selfTest: summary.lastSelfTest,
+      // The log shows no model reply, or a reply without token counts: the run's token use is not known (0 is not a reading).
+      ...(summary.assistantMessages === 0 || summary.usageMissing > 0 ? { tokensUnknown: true } : {}),
       plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
     });
   } catch (e) {

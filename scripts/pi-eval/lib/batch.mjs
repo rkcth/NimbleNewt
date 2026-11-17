@@ -15,8 +15,11 @@ const kept = (x) => (x ? { at: x.at, stats: x.stats } : null);
 /** Input + output tokens of a record (cache reads left out). */
 export const spentTokens = (rec) => (Number(rec?.tokens?.input) || 0) + (Number(rec?.tokens?.output) || 0);
 
-/** A run whose agent started (startedAt set) without finite input and output token counts: its use is unknown. */
-const tokensUnknown = (rec) => rec?.startedAt != null && !(Number.isFinite(rec?.tokens?.input) && Number.isFinite(rec?.tokens?.output));
+/**
+ * A run whose agent started (startedAt set) without finite input and output token counts, or whose log the runner found
+ * without a model reply or with a reply lacking counts (record.tokensUnknown; its tokens then read 0): its use is unknown.
+ */
+const tokensUnknown = (rec) => rec?.startedAt != null && (rec.tokensUnknown === true || !(Number.isFinite(rec?.tokens?.input) && Number.isFinite(rec?.tokens?.output)));
 
 /**
  * jobs: [[task, variant, repeat], ...]; runJob(task, variant, repeat, { beforeAgent }) -> record; onRecord(record) is

@@ -18,6 +18,8 @@ export function radianceConfig(home = homedir(), provider = "radiance") {
   try { models = JSON.parse(readFileSync(file, "utf8")); } catch (e) { throw new Error(`Pi's models.json (${file}) could not be read as JSON${e?.code ? ` (${e.code})` : ""}`); }
   const p = models?.providers?.[provider];
   if (!p || typeof p.apiKey !== "string" || p.apiKey.length === 0) throw new Error(`no ${provider} provider with an apiKey in Pi's models.json`);
+  // A header carries printable ASCII only, and fetch's refusal of any other character quotes the whole header value.
+  if (!/^[\x21-\x7e]+$/.test(p.apiKey)) throw new Error(`the ${provider} apiKey in Pi's models.json holds a character an HTTP header cannot carry (a space, line break or non-ASCII)`);
   return { baseUrl: typeof p.baseUrl === "string" ? p.baseUrl : "http://127.0.0.1:8002/v1", apiKey: p.apiKey };
 }
 
@@ -37,9 +39,13 @@ export function radianceIdle(stats) {
 
 /** One GET, the key only in the Authorization header, redirects not followed, bounded in time. */
 async function getJson(url, apiKey, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
-  const res = await fetchImpl(url, { method: "GET", redirect: "manual", headers: { authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`GET ${new URL(url).pathname} answered ${res.status}`);
-  return res.json();
+  const path = new URL(url).pathname;
+  // A failure is reported by its kind and code only: fetch's own messages can quote the request's header values.
+  const failed = (what, e) => new Error(`GET ${path} ${what} (${[e?.name, e?.cause?.code ?? e?.code].filter((x) => typeof x === "string" && /^[\w.-]{1,40}$/.test(x)).join(" ") || "error"})`);
+  let res;
+  try { res = await fetchImpl(url, { method: "GET", redirect: "manual", headers: { authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) }); } catch (e) { throw failed("could not be sent", e); }
+  if (!res.ok) throw new Error(`GET ${path} answered ${res.status}`);
+  try { return await res.json(); } catch (e) { throw failed("did not answer JSON", e); }
 }
 
 /** Reads /stats and /v1/models once. */

@@ -87,7 +87,9 @@ test("an agent that says done without doing it is a false done", async () => {
 });
 
 test("an agent that crashes is an error, and one that never ends is stopped at its limit as a timeout", async () => {
-  assert.equal((await runOne(ctx("crash"), set.tasks[0], "A", 1)).outcome, "error");
+  const crashed = await runOne(ctx("crash"), set.tasks[0], "A", 1);
+  assert.equal(crashed.outcome, "error");
+  assert.equal(crashed.tokensUnknown, true, "a log without a model reply is no token reading: its 0 tokens are not counted as known");
   const r = await runOne(ctx("hang", { timeoutMinutes: 0.02 }), set.tasks[0], "A", 1);
   assert.equal(r.outcome, "timeout", r.reason);
   assert.equal(r.timedOut, true);
@@ -107,6 +109,7 @@ test("the batch's gate is asked again right before the agent starts; a refusal s
   assert.equal(ok.outcome, "verified-finish", ok.reason);
   assert.ok(askedAt !== null && askedAt <= ok.startedAt, "the check comes before the agent starts");
   assert.equal(ok.gateRefused, undefined);
+  assert.equal(ok.tokensUnknown, undefined, "every reply carried token counts");
 });
 
 test("an agent that makes the change and commits it is a verified finish: the hidden tests run on its work and pass", async () => {
