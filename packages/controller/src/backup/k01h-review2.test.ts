@@ -4,7 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SqliteStorage } from "../storage/index.js";
-import { BackupService, MaintenanceBarrier, StagedRestore, acquireDataLock, acquireDataLocks, applyPendingRestore, chooseKept, createBackup, type BackupInfo, type BackupKind, type PiStateSource } from "./index.js";
+import { BackupService, DataLockBusy, MaintenanceBarrier, StagedRestore, acquireDataLock, acquireDataLocks, applyPendingRestore, chooseKept, createBackup, type BackupInfo, type BackupKind, type PiStateSource } from "./index.js";
 import { applyAndCrashAfter, importSpecifier } from "./k01h-crash.js";
 import { lockIsLive, sameBoot, LOCK_FILE } from "./data-lock.js";
 import { runBackupCli } from "./cli.js";
@@ -476,4 +476,43 @@ test("the crash helper gives the child a file: URL to import, also for a Windows
   assert.match(importSpecifier("D:\\a\\b\\staged-restore.js", true), /^file:\/\/\/D:\/a\/b\/staged-restore\.js$/);
   assert.match(importSpecifier(join(tmpdir(), "x.js")), /^file:\/\//);
   assert.match(importSpecifier("/a/b/c.js", false), /^file:\/\/\/a\/b\/c\.js$/);
+});
+
+test("a release that waits for a rewrite still counts the lock as this process's until its file is gone: another start in this process is refused meanwhile (not a takeover whose record the rewrite then overwrites), and takes it afterwards (CI repair winflake, second review)", async () => {
+  const d = tmp();
+  const until = async (ok: () => boolean, what: string) => { const end = Date.now() + 10_000; while (!ok()) { if (Date.now() > end) assert.fail(what); await new Promise((r) => setTimeout(r, 5)); } };
+  try {
+    const waits: (() => void)[] = [];
+    let calls = 0;
+    const first = await acquireDataLock(d, { platform: "win32", heartbeatMs: 3_600_000, rename: async (from, to) => { calls += 1; if (calls === 1) throw Object.assign(new Error("EPERM: rename"), { code: "EPERM" }); renameSync(from, to); }, pause: () => new Promise<void>((r) => { waits.push(r); }) });
+    const firstNonce = (JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce;
+    const set = first.setStaleMinutes(null);
+    await until(() => waits.length === 1, "the rewrite waits after its first refusal");
+    const released = first.release();
+    // Same pid, same host: without the nonce among this process's held locks the record would be judged leaked by a failed start and taken over here.
+    await assert.rejects(acquireDataLock(d, { heartbeatMs: 3_600_000 }), (e: Error) => e instanceof DataLockBusy, "the releasing holder still holds it");
+    assert.equal((JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce, firstNonce);
+    waits[0]!();
+    await set; await released;
+    assert.equal(existsSync(join(d, LOCK_FILE)), false);
+    const second = await acquireDataLock(d, { heartbeatMs: 3_600_000 });
+    const secondNonce = (JSON.parse(readFileSync(join(d, LOCK_FILE), "utf8")) as { nonce: string }).nonce;
+    assert.notEqual(secondNonce, firstNonce);
+    assert.equal(await second.isHeld(), true);
+    await second.release();
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("refreshes that come due while a rewrite runs wait as ONE: the holder's chain does not grow with every tick of a slow rename (CI repair winflake, second review)", async () => {
+  const d = tmp();
+  try {
+    let counting = false, beats = 0;
+    // `now` is read once by each refresh that runs (and by the record, before the rename): counted from the end of the rename until a check queued behind the waiting refreshes has run.
+    const lock = await acquireDataLock(d, { heartbeatMs: 5, now: () => { if (counting) beats += 1; return new Date(); }, rename: async (from, to) => { await new Promise((r) => setTimeout(r, 150)); renameSync(from, to); counting = true; } });
+    await lock.setStaleMinutes(null);
+    assert.equal(await lock.isHeld(), true);
+    counting = false;
+    assert.ok(beats >= 1 && beats <= 3, `the refreshes due during a 150 ms rename ran once, not once per 5 ms tick (${beats})`);
+    await lock.release();
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

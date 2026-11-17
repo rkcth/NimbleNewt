@@ -697,7 +697,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The retention policy (card K06): the owner's chat settings over the installation defaults. Cached for a few seconds for the write guard; a change refreshes it and sets the reserve again.
     let retentionCache: { at: number; values: RetentionValues } | undefined;
     // The owner's `dataLockStaleMinutes` that could not be written into the lock file (on Windows a reader can keep the file busy for longer than the bounded retry): the lock keeps its previous setting, and this is said.
-    const lockSettingFailed = (error: unknown): void => print(`The data directory lock's stale time could not be written; the lock keeps its previous setting until the setting is changed again or the controller restarts: ${error instanceof Error ? error.message : String(error)}`);
+    const lockSettingFailed = (error: unknown): void => print(`The data directory lock's stale time could not be written; the lock keeps its previous setting until the setting is changed again or the lock is taken anew (a restart, or a lock that was lost and retaken): ${error instanceof Error ? error.message : String(error)}`);
     const retentionSettings: RetentionSettingsService = RetentionSettingsService.withEpoch(storage, epoch, {
       ...(options.retention?.defaults === undefined ? {} : { defaults: options.retention.defaults }),
       preUpgradeDays: async () => (await preUpgradeNeed())?.periodDays ?? null,

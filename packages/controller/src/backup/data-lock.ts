@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { hostname, platform, uptime } from "node:os";
 import { join, resolve } from "node:path";
 import { DomainError } from "../domain/errors.js";
-import { renameReplacing } from "../release/launcher.js";
+import { renameReplacing } from "../release/rename-replacing.js";
 import { canon } from "./canon.js";
 
 /**
@@ -239,7 +239,9 @@ export async function acquireDataLock(dataDirectory: string, arg?: (() => Date) 
           throw error;
         }
       }),
-      release: async () => { if (released) return; released = true; if (timer !== undefined) clearInterval(timer); heldHere.delete(nonce); await serial(async () => { if (await owns()) await rm(path, { force: true }); }); },
+      // The nonce stays among this process's held locks until the file is removed: while a rewrite still runs (and could put the record back) another start in this process sees a live holder and
+      // is refused, instead of judging its own pid's lock leaked, taking it over and having its record overwritten by the rewrite (second review).
+      release: async () => { if (released) return; released = true; if (timer !== undefined) clearInterval(timer); await serial(async () => { try { if (await owns()) await rm(path, { force: true }); } finally { heldHere.delete(nonce); } }); },
     };
   }
 }

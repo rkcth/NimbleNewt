@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { performance } from "node:perf_hooks";
 import { readHeartbeat } from "../release/heartbeat.js";
+import { renameReplacing, type RenameReplacingOptions } from "../release/rename-replacing.js";
 
 /**
  * The controller-down watchdog (card U11d). It runs OUTSIDE the controller (`scripts/nimblenewt-watchdog.mjs`, a process of its own that needs no database, no credential of the controller and no model), because a
@@ -52,16 +53,21 @@ export async function readWatchdogRecord(file: string, now: () => number = Date.
   } catch { return undefined; }
 }
 
-/** Writes a file by a temporary sibling and a rename, so a reader sees the old or the new text, never half of one. */
-async function writeAtomic(file: string, text: string): Promise<void> {
+/**
+ * Writes a file by a temporary sibling and a rename, so a reader sees the old or the new text, never half of one. The other process reads the file at any moment (the controller the watchdog's record,
+ * every look of the Urgent watch), and on Windows a rename over a file open at that moment is refused: it is tried again the launcher's way (`renameReplacing`, about half a second; elsewhere once).
+ * Without that a record written right after a tell could be lost and the same outage told again at the next look (CI repair winflake, second review).
+ */
+async function writeAtomic(file: string, text: string, io: RenameReplacingOptions = {}): Promise<void> {
   if (!isAbsolute(file)) throw new Error("the watchdog's files need absolute paths");
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
   const h = await open(tmp, "wx", 0o600);
   try { await h.writeFile(text); await h.sync().catch(() => undefined); } finally { await h.close(); }
-  try { await rename(tmp, file); } catch (error) { await unlink(tmp).catch(() => undefined); throw error; }
+  try { await renameReplacing(tmp, file, io); } catch (error) { await unlink(tmp).catch(() => undefined); throw error; }
 }
-export const writeWatchdogRecord = (file: string, record: WatchdogRecord): Promise<void> => writeAtomic(file, JSON.stringify(record));
+/** `io` is for tests (the rename, platform and pause of `renameReplacing`). */
+export const writeWatchdogRecord = (file: string, record: WatchdogRecord, io?: RenameReplacingOptions): Promise<void> => writeAtomic(file, JSON.stringify(record), io);
 
 export type Probe = () => Promise<"alive" | "down" | "unknown">;
 
