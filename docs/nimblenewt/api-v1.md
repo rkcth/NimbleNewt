@@ -892,6 +892,18 @@ Result: `{ items, next?, scanLimited? }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `resume.dependencies.search`
+
+What to record for a word search (the `search` query) you make of a project now: a `search` dependency with the query as its key, the project's event position and a digest of the first 50 hits as you may read them, ready for `resume.dependencies.record`. For the owner and for those who may work a task of the project or read its desk records or histories (a task credential only in its own project), else `forbidden`. When a task of that project is resumed the controller makes the same search again with the rights its recorder has then and says whether it still finds the same (unchanged or changed), or `cursor-expired` once retention cut the project's events after it.
+
+Arguments:
+
+- `projectId`: the project to search
+- `query`: words to look for
+- `key` (optional): the dependency's key (default: the query, on one line)
+
+Result: `{ item: { kind, key, scope, cursor, hash } }`.
+
 #### `resume.dependencies.get`
 
 What a task's work recorded that it relied on, for those who may work on it or read the project's histories (and the owner and services, and a host only for an attempt it runs or is pinned to), or `not_found`.
@@ -2429,6 +2441,16 @@ Arguments:
 - none
 
 Result: `{ item }`.
+
+#### `responsibility.probe.get`
+
+Owner only: the HTTP probe set for a responsibility (card P04i), if any: the address, the statuses that count as healthy (empty: any 2xx), how long to wait, who set it and when, and the revision to quote when changing it.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+
+Result: `{ item: { responsibilityId, revision, probe? } }`.
 
 #### `retention.settings.get`
 
@@ -6793,6 +6815,22 @@ Arguments:
 - `expectedRevision` (optional): the revision you read (0 when none was set yet)
 
 Result: `{ revision }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `responsibility.probe.set`
+
+Owner only: sets or clears the HTTP probe of a responsibility (card P04i). With a probe, each due check is taken by NimbleNewt itself, with no agent and no model: one GET from the machine the controller runs on to `url`, whatever host and port it names (this machine and private networks included: the owner's setting is the approval) (http or https; no user name, password or credential in it; redirects are not followed and the answer's body is not read), an expected status is `ok`, any other status, no answer within `timeoutSeconds` (1 to 30, default 10) or a failed connection is `failed` and is reported as an incident. The request never holds up the controller: the check stays owed (not observed) until the answer is in. `url` null clears the probe and the checks go to the answerable agent again. Setting replaces the whole probe. Refused on a retired responsibility. The history, incidents and check notes, which agents may read, never name the address: they say only what the owner's health address answered. This is the form the chat uses.
+
+Arguments:
+
+- `responsibilityId`: the responsibility
+- `url`: the http(s) address to ask, or null to clear
+- `expectStatus` (optional): list of 1 to 10 HTTP statuses that count as healthy (default any 2xx)
+- `timeoutSeconds` (optional): 1 to 30 (default 10)
+- `expectedRevision` (optional): the revision you read (0 when none was set yet)
+
+Result: `{ revision, shown? }`.
 
 Completion: finished when accepted (`completed: true`).
 

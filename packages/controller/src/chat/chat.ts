@@ -14,10 +14,11 @@ import { LIMITS as STORAGE_LIMITS, type AggregateRef, type Change, type Controll
 import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
+import { probeUrl } from "../projects/probes.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -730,6 +731,10 @@ export class ChatService {
       const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
+      // A probe's address is the reach the owner approves (card P04i): it must be written out whole in the owner's message, exactly as given; a part of a longer address or one in other letter case is not theirs.
+      // An address the probe would refuse is refused here, before it is shown: the proposal then always shows the whole address, as it would be asked (second review).
+      if (intent.op === "responsibility.probe.set" && typeof intent.args["url"] === "string") { const bad = probeUrlProblem(intent.args["url"]); if (bad !== undefined) { push({ i, kind: "refused", code: "invalid_command", message: `That address cannot be a health address, so the probe was not set: it ${bad}.` }); continue; } }
+      if (intent.op === "responsibility.probe.set" && typeof intent.args["url"] === "string" && !addressWritten(words, intent.args["url"])) { push({ i, kind: "refused", code: "unsupported_value", message: "That address is not written out in your message exactly as it would be asked, so the probe was not set. Write the whole address, for example https://web.example.com/health." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
@@ -1233,7 +1238,7 @@ export class ChatService {
       labels[String(args["itemId"])] = String(found["topic"]);
     }
     // Ongoing responsibilities (card P04): a responsibility is named by its title, a managed resource by its label, an incident by the responsibility's title and, when it has several, the words of its signature. Exactly one match, else the owner is asked.
-    if (intent.op === "responsibility.update" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
+    if (intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
       const pick = (what: string, field: string, words: string, items: { id: string; name: string }[]): { id: string } | ReturnType<typeof refuse> | { ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } => {
         const matches = items.filter((i) => words === "" || i.name.toLowerCase().includes(words));
         if (matches.length === 0) return refuse("not_found", words === "" ? `there is no ${what} in that project` : `no ${what} in that project is called ${quotedText(words, 80)}`);
@@ -1246,11 +1251,11 @@ export class ChatService {
         if (v !== undefined && typeof v !== "string") return refuse("invalid_command", `${key} must be text`);
         return v?.trim().toLowerCase();
       };
-      const dutyTitle = intent.op === "responsibility.update" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
+      const dutyTitle = intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
       const resourceLabel = intent.op.startsWith("lease.") ? words("resourceLabel") : undefined;
       const signature = intent.op === "incident.resolve" ? words("incidentSignature") : undefined;
       for (const w of [dutyTitle, resourceLabel, signature]) if (typeof w === "object") return w;
-      if (intent.op === "responsibility.update" && args["responsibilityId"] === undefined) {
+      if ((intent.op === "responsibility.update" || intent.op === "responsibility.probe.set") && args["responsibilityId"] === undefined) {
         const listed = await this.#plainItems(token, "responsibility.list", { projectId });
         const r = pick("responsibility", "responsibilityId", (dutyTitle as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["title"]) })));
         if (!("id" in r)) return r;
@@ -2866,4 +2871,9 @@ function decisionWordsMatch(words: string, text: string, all: boolean): boolean 
   // Whole words only ("art" is not "start"); a plural fits its singular and the other way round ("boxes" and "box", "builds" and "build").
   const has = (w: string): boolean => have.has(w) || (w.length > 3 && w.endsWith("s") && have.has(w.slice(0, -1))) || (w.length > 4 && w.endsWith("es") && have.has(w.slice(0, -2))) || (w.length > 2 && (have.has(`${w}s`) || have.has(`${w}es`)));
   return wanted.length === 0 || (all ? wanted.every(has) : wanted.some(has));
+}
+
+/** Why an address cannot be a probe's, in the words of the probe's own check (the field name left off), or `undefined` when it can. */
+function probeUrlProblem(url: string): string | undefined {
+  try { probeUrl(url); return undefined; } catch (e) { return e instanceof Error ? e.message.replace(/^url: /, "").slice(0, 200) : "is not usable"; }
 }
