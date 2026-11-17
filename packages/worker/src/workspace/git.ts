@@ -531,6 +531,56 @@ export class GitBridge {
     return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
   }
 
+  /**
+   * What a submit of the agent's work is checked against (card H12n), read only: the commit the checkout is based on (`refs/nn/base`), the shared repository's head now (the landing branch, as the author's refresh reads it, H12p),
+   * the files the agent changed against the base as a submission would carry them (committed or not, not ignored: a throwaway index filled from the base and then with the checkout, as `doneState`), and the files the landing
+   * branch changed between the base and its head (read in the shared repository; none when the head is the base). The checkout, its index and its refs are not touched. Too many files on either side refuses.
+   * The `base` returned is the commit the staging builds on (the checkout's own head, as `stage` reports it): the same as `refs/nn/base` unless the checkout holds a platform commit that has not landed yet (a release, H12o),
+   * whose files then count as the agent's (they are not on the landing branch). Reporting the head keeps it equal to what `stage` reports, which the submit compares (first review).
+   */
+  async submitView(options: { shared: string; gitDir: string; checkout: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] }> {
+    const base = await this.#base(options.gitDir);
+    const tip = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    const sharedGit = await this.#sharedGitDir(options.shared);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
+    // The same attribute neutralizing as `stage` (second review): without it a `text`, `eol`, `ident` or encoding attribute in the checkout converts a file back to the base's content here while `stage` carries
+    // it changed, so a file the submission carries would be missing from `mine` and its overlap with the landing branch unseen.
+    await this.#neutralAttributes(options.gitDir);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let mine: string[];
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      mine = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter(Boolean);
+    } finally { await rm(index, { force: true }); }
+    if (mine.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed in the checkout`);
+    const landed = base === head ? [] : (await this.#run(["diff", "--name-only", "-z", "--no-renames", base, head], { gitDir: sharedGit })).stdout.split("\0").filter(Boolean);
+    if (landed.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
+    return { base: tip, head, mine: mine.sort(), landed: landed.sort() };
+  }
+
+  /**
+   * The stable patch ID (`git patch-id --stable`) of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
+   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base.
+   */
+  async patchId(options: { gitDir: string; base: string }): Promise<string | undefined> {
+    if (!COMMIT.test(options.base)) throw new WorkspaceError("invalid_path", "a patch ID is taken against a full base commit");
+    const run = (args: readonly string[], input?: Buffer): Promise<Buffer> => new Promise((resolveRun, reject) => {
+      const child = execFile(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), ...args], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.output * 4, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, cwd: this.#empty }, (error, stdout, stderr) => {
+        if (error === null) return resolveRun(stdout as unknown as Buffer);
+        reject(new WorkspaceError("unavailable", `git ${String(args[0])} failed: ${String(stderr).replace(/\s+/g, " ").slice(0, 200)}`, { cause: error }));
+      });
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(input ?? Buffer.alloc(0));
+    });
+    const diff = await run(["diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base]);
+    if (diff.length === 0) return undefined;
+    const out = (await run(["patch-id", "--stable"], diff)).toString("utf8").trim();
+    const id = out.split(/\s+/)[0] ?? "";
+    if (!/^[0-9a-f]{40,64}$/.test(id)) throw new WorkspaceError("unavailable", "git patch-id gave no ID for the staged change");
+    return id;
+  }
+
   /** Refuses unless the file at `path` in the checkout, opened without following a link at any name and without blocking, is a plain file whose Git blob ID is `staged`. */
   async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<void> {
     const changed = (): WorkspaceError => new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed or was replaced by a link while it was being staged; nothing was committed`, { tamper: true });

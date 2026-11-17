@@ -73,6 +73,9 @@ export class ScriptedWorker implements WorkerHost {
   progress?: NonNullable<WorkerHost["progress"]>;
   /** How the host checks a done (card W05); absent: the host cannot check work. */
   verify?: NonNullable<WorkerHost["verify"]>;
+  /** What a submit is checked against, and the staging of the work (card H12n); absent: the host cannot say or stage. */
+  submitView?: NonNullable<WorkerHost["submitView"]>;
+  stage?: NonNullable<WorkerHost["stage"]>;
   constructor(readonly hostId: string, public script: WorkerScript, readonly resources = { cpus: 1, memoryMb: 1024 }, private readonly version = "worker-1.0.0") {}
   async start(order: WorkOrder): Promise<WorkerHandle> {
     if (this.failToStart !== undefined) throw this.failToStart;

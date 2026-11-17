@@ -5,6 +5,7 @@
 // Owner budget across runs on one route: --budget <file> --cap-tokens N [--cap-usd D --price-in P --price-cached C --price-out O (dollars per million)].
 // Mixed roster: --chair pi:gpt-6.1-sol [--members a1=pi:gpt-6-astra,...]; or:<model> is OpenRouter.
 // Scenario fields: absent (ids the chair may read), owner.afterRound1 / owner.duringVote (scripted owner inquiry), scriptedAsks.
+// Radiance: --provider radiance --model qwen3.8-flash-next-iq4r [--effort medium --fixed-max 6000] (idle check and server.json, see below).
 // Local server: --check-slots <base url of the server, e.g. http://127.0.0.1:8002> [--slots-needed N] refuses to start unless N slots are idle and empty.
 // Variant fields: deskRead, directQuestions, askNudge, tieProbe, allowTabling. See also checkpoint.mjs and analyze.mjs.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -31,13 +32,34 @@ if (args["check-slots"]) {
   if (!verdict.ok) process.exit(3);
 }
 
+// Radiance (--provider radiance --model <id>): the key comes from Pi's own config and goes only into the Authorization header. Before
+// anything else (no provider call, budget untouched) GET /stats must say nothing is in flight, running or waiting; the server's
+// /stats and /sessions are read again after the meeting and both readings go into server.json in the run directory.
+// The same check covers a radiance:<model> spec in a mixed roster (--chair / --members); specs.mjs also runs it (once per process)
+// before it builds any Radiance provider, so a route this test misses still cannot reach the server without it.
+let radiance;
+const radianceSpec = (s) => typeof s === "string" && /(^|[=,])radiance:/.test(s);
+// The generic OpenAI-compatible route (--provider openai --base-url ...) pointed at the Radiance address in Pi's config is the same
+// server, so it gets the same idle check and the same one-at-a-time calls.
+const { isRadianceAddress } = await import("./lib/radiance.mjs");
+const openaiToRadiance = kind === "openai" && isRadianceAddress(args["base-url"]);
+if (kind === "radiance" || openaiToRadiance || radianceSpec(args.chair) || radianceSpec(args.members)) {
+  const { radianceGate, readRadiance, RadianceRefused } = await import("./lib/radiance.mjs");
+  let g;
+  try { g = await radianceGate(); } catch (e) { if (!(e instanceof RadianceRefused)) throw e; console.log(e.message); process.exit(3); }
+  console.log(`Radiance check: idle (${g.why})`);
+  radiance = { cfg: g.cfg, before: g.before, readRadiance };
+}
+
 let provider;
 if (kind === "mixed") provider = undefined;
+else if (kind === "radiance") provider = await fromSpecLib(`radiance:${args.model}`, args);
 else if (kind === "pi") {
   const { piProvider } = await import("./lib/pi-provider.mjs");
   provider = await piProvider({ model: args.model ?? "gpt-6.1-sol", reasoningEffort: args.effort ?? "low", sessionId: args.session });
 } else if (kind === "openai") {
   provider = makeProvider({ kind: "openai", model: args.model, baseUrl: args["base-url"], envFile: args["env-file"], fixedMaxTokens: args["fixed-max"] ? Number(args["fixed-max"]) : undefined, noAuth: args["no-auth"] === "true", maxTokensParam: args["max-param"], extraBody: args["extra-body"] ? JSON.parse(args["extra-body"]) : undefined });
+  if (openaiToRadiance) { const { oneAtATime } = await import("./lib/radiance.mjs"); provider = oneAtATime(provider); }
 } else provider = makeProvider({ kind: "fake" });
 
 // Mixed roster: --chair pi:gpt-6.1-sol --members a1=pi:gpt-6-astra,a2=or:z-ai/glm-5.3-prime,a3=or:qwen/qwen3.8-max-prime
@@ -65,10 +87,17 @@ const saveBudget = () => { if (budgetFile) writeFileSync(budgetFile, JSON.string
 process.on("exit", saveBudget);
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-const outDir = join(here, "runs", `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);
+// --runs-dir <dir>: where the run directory is written (default prototypes/meeting/runs); the tests use a temporary folder so that a
+// stand-in run never lands among the real runs that radiance-report.mjs and analyze.mjs read.
+const outDir = join(args["runs-dir"] ?? join(here, "runs"), `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);
 const headroom = Number(args.headroom ?? (kind === "pi" || kind === "mixed" ? 800 : 0));
 let summary;
 try { summary = await runMeeting({ scenario, variant, provider, providers, ledger, outDir, headroom, log: args.quiet ? () => {} : (m) => console.log(m) }); } catch (e) { console.error(`RUN FAILED: ${e.message}`); process.exit(2); }
+if (radiance) {
+  const { serverDelta } = await import("./lib/radiance.mjs");
+  let after; try { after = await radiance.readRadiance(radiance.cfg.baseUrl, radiance.cfg.apiKey); } catch (e) { after = { error: e.message }; }
+  writeFileSync(join(outDir, "server.json"), JSON.stringify({ before: radiance.before, after, delta: serverDelta(radiance.before, after) }, null, 1));
+}
 console.log(`\nResult: ${JSON.stringify(summary.result)}\nCalls: ${summary.metrics.calls}  Tokens: ${ledger.tokens}  Cache hit ratio: ${(summary.metrics.cacheHitRatio * 100).toFixed(1)}%\nStance agreement with previous speaker (round 1): ${summary.metrics.round1StanceAgreementWithPrevious}\nOutput: ${outDir}`);
 // pi-ai keeps a pooled connection open after the last call; end the process once the outputs are written.
 process.exit(0);
