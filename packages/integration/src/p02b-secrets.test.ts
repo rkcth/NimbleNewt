@@ -39,7 +39,7 @@ test("the host builder gets the secret values in use (provider keys, the owner's
     assert.equal((await context!.secretValues()).find((s) => s.name === "garden-token")?.value, values.get("garden-token"));
     assert.equal(await context!.secret("garden-token"), values.get("garden-token"));
     assert.equal(await context!.secret("not-there"), undefined);
-    await assert.rejects(context!.secret(before.find((s) => s.name.startsWith("nimblenewt-owner"))!.name), /reserved for the owner's credential/);
+    await assert.rejects(context!.secret(before.find((s) => s.name.startsWith("nimblenewt-owner"))!.name), /cannot be a backup remote's credential: that is where the owner's credential is kept, which is never sent to a backup remote/);
     // A secret that is gone from the store is simply not in the list (the scan still checks credential shapes).
     values.delete("garden-token");
     assert.ok(!(await context!.secretValues()).some((s) => s.name === "garden-token"));

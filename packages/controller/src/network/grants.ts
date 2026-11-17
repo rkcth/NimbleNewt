@@ -9,6 +9,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { scanSecrets } from "../security/secret-scan.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { keptSecretRefusal } from "../setup/reserved-secrets.js";
 import { canonicalHost, canonicalPort, neverReachable } from "./destination.js";
 import type { AgentSiteAllowances } from "./agent-sites.js";
 
@@ -99,6 +100,8 @@ export interface NetworkGrantOptions extends RunnerOptions {
   readonly onEnded?: (grant: GrantView) => void;
   /** The sites an agent's environment holds through approved maintenance requests (card A09). When given, a connection of an attempt whose agent holds an approved site for the destination is allowed although the task has no grant of its own. */
   readonly agentSites?: AgentSiteAllowances;
+  /** The secret names the configuration keeps for something else (task T4: the database address, the transfer targets', a renamed backup signing key): a grant's credential may not name one. */
+  readonly kept?: () => readonly string[];
 }
 
 export class NetworkGrantService {
@@ -108,9 +111,10 @@ export class NetworkGrantService {
   readonly #listeners = new Set<(grant: GrantView) => void>();
 
   readonly #agentSites: AgentSiteAllowances | undefined;
+  readonly #kept: () => readonly string[];
 
   private constructor(runner: CommandRunner, options: NetworkGrantOptions) {
-    this.#runner = runner; this.#judge = options.judge; this.#onEnded = options.onEnded; this.#agentSites = options.agentSites;
+    this.#runner = runner; this.#judge = options.judge; this.#onEnded = options.onEnded; this.#agentSites = options.agentSites; this.#kept = options.kept ?? (() => []);
     // An allowance that a maintenance revoke ended closes the connections it allowed, the same way a revoked grant does.
     this.#agentSites?.onEnded((grant) => this.#told(grant));
   }
@@ -154,6 +158,9 @@ export class NetworkGrantService {
       if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner states a credential for a destination");
       if (c === null || typeof c !== "object" || typeof c.header !== "string" || !HEADER.test(c.header) || FORBIDDEN_HEADERS.has(c.header.toLowerCase())) return invalid("credential.header", "must be a header name that does not frame or route the request");
       if (typeof c.ref !== "string" || !SECRET_REF.test(c.ref) || keyLikeName(c.ref)) return invalid("credential.ref", "must be the NAME of a secret, never the secret");
+      // The value is sent to the granted destination in that header (task T4): never a secret the installation keeps for something else, in any letter case.
+      const why = keptSecretRefusal(c.ref, this.#kept(), "a network destination");
+      if (why !== undefined) return invalid("credential.ref", `${why}; name another secret`);
       credential = { header: c.header.toLowerCase(), ref: c.ref };
     }
     const task = await this.#task(taskId);
