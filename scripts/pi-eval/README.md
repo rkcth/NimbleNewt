@@ -333,8 +333,8 @@ descend from one that is seen, is missed; on other systems only the agent's own 
 read it; it reaches nothing more). Its `before_provider_request` handler (`lib/arg-clean.mjs`) replaces lone surrogates
 (U+D800..U+DFFF not part of a valid pair) with U+FFFD: in each tool call's `arguments` JSON text an unpaired `\uD800`-style
 escape becomes `\ufffd`, and a raw lone surrogate in any string or key of the request becomes U+FFFD (arguments text
-that is not valid JSON gets only the raw-surrogate rule). Pairs, however their halves are written, and every other byte
-stay; a request that needs nothing is passed on untouched; it never throws. Why: Pi 1.5.0's edit tool decodes an `edits`
+that is not valid JSON gets only the raw-surrogate rule). Pairs and every other byte stay (a pair written half
+escaped, half raw gets its raw half written as the escape: the same pair, and no lone surrogate in the body); a request that needs nothing is passed on untouched; it never throws. Why: Pi 1.5.0's edit tool decodes an `edits`
 argument sent as a JSON string into the stored call, and pi-ai re-sends it with `JSON.stringify` and no cleaning, so a
 model's `\ud800-\udfff` made Radiance refuse the history (`server-rejected-history`, W01 night batch). It writes its
 counts to `arg-clean.json` beside the log, which the runner copies into the record as `argClean` (`applied` when any

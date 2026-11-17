@@ -3,7 +3,7 @@ import { afterEach, test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { requestId } from "@nimblenewt/contracts";
-import { cleanJsonText, cleanPayload } from "./argument-clean.js";
+import { cleanJsonText, cleanPayload, wellFormed } from "./argument-clean.js";
 import { shapeModels } from "./cache-shaping.js";
 import { PiAdapter } from "./index.js";
 import { rig, wireBody, type WireApi } from "./testing/wire.js";
@@ -103,8 +103,17 @@ test("a request with nothing to clean is built exactly as pi-ai builds it withou
 });
 
 test("the cleaner, exact cases: a pair is kept however its halves are written; text that is not JSON is not read as escapes; keys are strings too; idempotent", () => {
-  // JSON decodes an escaped half next to a raw half to the pair, so these need nothing.
-  for (const s of [`{"a":"\\ud800${LONE_LOW}"}`, `{"a":"${LONE_HIGH}\\udfff"}`, '{"a":"\\uD800\\uDFFF"}']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  // JSON decodes an escaped half next to a raw half to the pair, but the raw half is a lone surrogate in the text itself (a
+  // string of the request body, refused there by a strict server): it is written as its escape, so the pair is kept.
+  for (const s of [`{"a":"\\ud800${LONE_LOW}"}`, `{"a":"${LONE_HIGH}\\udfff"}`]) {
+    const r = cleanJsonText(s);
+    assert.deepEqual(r, { text: '{"a":"\\ud800\\udfff"}', replaced: 1 }, s);
+    assert.equal(wellFormed(r.text), r.text, s);
+    assert.equal((JSON.parse(r.text) as { a: string }).a, "\u{103FF}");
+  }
+  assert.deepEqual(cleanJsonText('{"a":"\\uD800\\uDFFF"}'), { text: '{"a":"\\uD800\\uDFFF"}', replaced: 0 });
+  // A raw lone surrogate right after a backslash in text that is not JSON is still replaced (the scan skips that character).
+  assert.deepEqual(cleanJsonText(`x\\${LONE_LOW} not json`), { text: "x\\\ufffd not json", replaced: 1 });
   assert.deepEqual(cleanJsonText(`{"a":"\\ud800${LONE_HIGH}"}`), { text: '{"a":"\\ufffd�"}', replaced: 2 });
   // Not valid JSON: escapes are left as written, raw lone surrogates are replaced, nothing throws.
   for (const s of ['{"a":"\\ud800', "\\ud800 not json", '{"a":"\\ud800"} trailing']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);

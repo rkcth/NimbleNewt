@@ -55,7 +55,17 @@ test("the cleaner on JSON text: only lone surrogates change, escaped or raw; pai
 
 test("exact cases: a pair is kept however its halves are written; text that is not JSON is not read as escapes; keys are strings too; idempotent; linear on a megabyte", () => {
   const H = String.fromCharCode(0xd800); const L = String.fromCharCode(0xdfff);
-  for (const s of [`{"a":"\\ud800${L}"}`, `{"a":"${H}\\udfff"}`]) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
+  // A pair written half escaped, half raw decodes to the pair, but the raw half is a lone surrogate in the text itself, which
+  // travels as a string of the request body: the raw half is written as its escape, so the pair is kept and the text is valid.
+  for (const s of [`{"a":"\\ud800${L}"}`, `{"a":"${H}\\udfff"}`]) {
+    assert.equal(strictJson(s), false, "a strict server refuses the raw half in the body");
+    assert.deepEqual(cleanJsonText(s), { text: '{"a":"\\ud800\\udfff"}', replaced: 1 }, s);
+    assert.equal(JSON.parse(cleanJsonText(s).text).a, "\u{103FF}");
+    assert.equal(serverAccepts(toolCallPayload(s)), false, s);
+    assert.equal(serverAccepts(cleanPayload(toolCallPayload(s)).payload), true, s);
+  }
+  // A raw lone surrogate right after a backslash in text that is not JSON is still replaced (the scan skips that character).
+  assert.deepEqual(cleanJsonText(`x\\${L} not json`), { text: "x\\\ufffd not json", replaced: 1 });
   assert.deepEqual(cleanJsonText(`{"a":"\\ud800${H}"}`), { text: '{"a":"\\ufffd\ufffd"}', replaced: 2 });
   for (const s of ['{"a":"\\ud800', "\\ud800 not json", '{"a":"\\ud800"} trailing']) assert.deepEqual(cleanJsonText(s), { text: s, replaced: 0 }, s);
   assert.deepEqual(cleanJsonText(`{"a":"\\ud800 ${L}`), { text: '{"a":"\\ud800 \ufffd', replaced: 1 });
@@ -75,6 +85,47 @@ test("exact cases: a pair is kept however its halves are written; text that is n
     const r = cleanPayload({ ...toolCallPayload(s), other: s });
     assert.equal(r.arguments, 1);
     assert.ok(performance.now() - t0 < 3000, `${Math.round(performance.now() - t0)} ms`);
+  }
+});
+
+// The two copies of the cleaner (this bench's lib/arg-clean.mjs and the adapter's argument-clean.ts, built) must agree. A
+// seeded generator mixes escapes, raw surrogates, pairs in all forms, backslashes and broken JSON; on every input both give
+// the same result, the result is strict (text and decoded strings well-formed), cleaning again changes nothing, and input
+// that is already strict is never altered.
+test("property: the bench and adapter cleaners agree on random input; the result is strict, idempotent, and strict input is never altered", async () => {
+  const A = await import(new URL("../../packages/pi-adapter/dist/argument-clean.js", import.meta.url).href);
+  let seed = 20261117;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 2 ** 32; };
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const atoms = ["\\ud800", "\\udfff", "\\uDBFF", "\\uDC00", "\ud800", "\udc00", "\\\\", '\\"', "\\n", "\\u0000", "\\u00e9", "a", "é", "\u{1F600}", "\\ud83d\\ude00", "\\ud83d", "\ude00", "\\u12", "\\u", "\\", '"', " ", "\\u2028"];
+  const str = () => { let t = ""; const n = Math.floor(rnd() * 8); for (let i = 0; i < n; i++) t += pick(atoms); return t; };
+  const jsonText = () => {
+    const parts = []; const n = 1 + Math.floor(rnd() * 4);
+    for (let i = 0; i < n; i++) parts.push(`"k${i}${rnd() < 0.2 ? pick(atoms) : ""}":"${str()}"`);
+    let t = `{${parts.join(",")}}`;
+    if (rnd() < 0.15) t = t.slice(0, Math.floor(rnd() * t.length));
+    if (rnd() < 0.1) t = str();
+    return t;
+  };
+  const deepWell = (x) => typeof x === "string" ? wellFormed(x) === x : Array.isArray(x) ? x.every(deepWell) : x !== null && typeof x === "object" ? Object.entries(x).every(([k, v]) => wellFormed(k) === k && deepWell(v)) : true;
+  for (let it = 0; it < 20_000; it++) {
+    const s = jsonText();
+    const a = A.cleanJsonText(s); const b = cleanJsonText(s);
+    assert.deepEqual(a, b, JSON.stringify(s));
+    assert.deepEqual(cleanJsonText(b.text), { text: b.text, replaced: 0 }, JSON.stringify(s));
+    assert.equal(wellFormed(b.text), b.text, JSON.stringify(s));
+    let valid = true; try { JSON.parse(s); } catch { valid = false; }
+    if (valid) assert.equal(strictJson(b.text), true, JSON.stringify(s));
+    else assert.equal(b.text, wellFormed(s), JSON.stringify(s));
+    if (strictJson(s)) assert.equal(b.text, s, JSON.stringify(s));
+    const payload = { model: "m", messages: [{ role: "assistant", content: str(), tool_calls: [{ id: "c", type: "function", function: { name: "t", arguments: s } }] }], input: [{ type: "function_call", arguments: jsonText() }], [`k${str()}`]: { [str()]: [str(), 1e21, 0.1] } };
+    const before = JSON.stringify(payload);
+    const pa = A.cleanPayload(payload); const pb = cleanPayload(payload);
+    assert.equal(JSON.stringify(payload), before, "the input is not changed in place");
+    assert.equal(JSON.stringify(pa.payload), JSON.stringify(pb.payload), before);
+    assert.deepEqual([pa.strings, pa.arguments], [pb.strings, pb.arguments], before);
+    assert.equal(deepWell(pb.payload), true, before);
+    if (pb.strings === 0) assert.equal(pb.payload, payload, before);
   }
 });
 

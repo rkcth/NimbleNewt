@@ -9,7 +9,9 @@
 // changes only lone surrogates (U+D800..U+DFFF not part of a valid pair), into U+FFFD:
 //   - in the JSON text of every tool call's arguments (OpenAI chat `messages[].tool_calls[].function.arguments`, OpenAI
 //     responses `input[]` items of type `function_call`): an escape that is not half of a pair becomes `\ufffd`,
-//     a raw lone surrogate becomes U+FFFD; every other character, escape, pair and piece of formatting stays as it was;
+//     a raw lone surrogate becomes U+FFFD; a pair written half escaped, half raw has its raw half written as the escape (the same pair once decoded,
+//     and no lone surrogate left in the text, a string of the request body); every other character, escape, pair and
+//     piece of formatting stays as it was;
 //   - in every other string and every object key (Anthropic's `input` objects among them), and in an arguments text that is
 //     not valid JSON: a raw lone surrogate becomes U+FFFD.
 // It copies only along changed paths and returns the same object when nothing needs it. It never throws.
@@ -24,6 +26,9 @@ function escapeAt(s: string, i: number): number {
   return HEX4.test(h) ? Number.parseInt(h, 16) : -1;
 }
 
+/** The six-character JSON escape of a code unit (a surrogate: always four hex digits). */
+const hexEscape = (u: number): string => `\\u${u.toString(16).padStart(4, "0")}`;
+
 /** A string with every raw lone surrogate replaced by U+FFFD (pairs kept); the same string when there is none. */
 export function wellFormed(s: string): string {
   return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "�");
@@ -31,7 +36,8 @@ export function wellFormed(s: string): string {
 
 /**
  * JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD. `text` is the same string when `replaced` is 0.
- * A pair is kept however its halves are written (both escaped, both raw, or one of each: JSON decodes all four to the pair).
+ * A pair is kept however its halves are written; one written half escaped, half raw gets its raw half written as the escape
+ * (the same pair once decoded, and no lone surrogate in the text itself, which is sent as a string of the request body).
  * Text that is not valid JSON is not read as escapes: only its raw lone surrogates are replaced, as in any other string.
  */
 export function cleanJsonText(s: string): { text: string; replaced: number } {
@@ -44,17 +50,21 @@ export function cleanJsonText(s: string): { text: string; replaced: number } {
       const u = escapeAt(s, i);
       if (u === -1) { i += 2; continue; }
       if (isHigh(u) && isLow(escapeAt(s, i + 6))) { i += 12; continue; }
-      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { i += 7; continue; }
+      // An escaped high half before a raw low half: JSON decodes them to the pair, but the raw half alone in the text is a
+      // lone surrogate where the text itself is sent (a string of the request body), so it is written as its escape.
+      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { out += `${s.slice(last, i + 6)}${hexEscape(s.charCodeAt(i + 6))}`; i += 7; last = i; replaced++; continue; }
       if (isHigh(u) || isLow(u)) { out += `${s.slice(last, i)}\\ufffd`; i += 6; last = i; replaced++; continue; }
       i += 6;
       continue;
     }
     if (isHigh(c) && isLow(s.charCodeAt(i + 1))) { i += 2; continue; }
-    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { i += 7; continue; }
+    // A raw high half before an escaped low half: the raw half is written as its escape, as above.
+    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { out += `${s.slice(last, i)}${hexEscape(c)}${s.slice(i + 1, i + 7)}`; i += 7; last = i; replaced++; continue; }
     if (isHigh(c) || isLow(c)) { out += `${s.slice(last, i)}�`; i += 1; last = i; replaced++; continue; }
     i++;
   }
-  if (replaced === 0) return { text: s, replaced: 0 };
+  // The scan skips the character after any backslash, so a raw lone surrogate there (text that is not JSON) is caught here.
+  if (replaced === 0) { const w = wellFormed(s); return { text: w, replaced: w === s ? 0 : 1 }; }
   try { JSON.parse(s); } catch {
     const w = wellFormed(s);
     return { text: w, replaced: w === s ? 0 : 1 };

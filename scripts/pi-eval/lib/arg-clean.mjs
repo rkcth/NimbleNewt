@@ -9,8 +9,10 @@
 // surrogates (U+D800..U+DFFF not part of a valid pair), into U+FFFD:
 //   - in the JSON text of every tool call's arguments (OpenAI chat `messages[].tool_calls[].function.arguments` and
 //     OpenAI responses `input[]` items of type `function_call`): a `\uD800`-style escape that is not half of an escaped
-//     pair becomes the escape `\ufffd`, a raw lone surrogate becomes U+FFFD; every other character, escape, pair (both
-//     halves escaped, both raw, or one of each) and piece of formatting is left as it was;
+//     pair becomes the escape `\ufffd`, a raw lone surrogate becomes U+FFFD; a pair written half escaped, half raw
+//     has its raw half written as the escape (JSON decodes it to the same pair, and the raw half alone would be a lone
+//     surrogate in the request body that carries this text); every other character, escape, pair and piece of formatting
+//     is left as it was;
 //   - in every other string and every object key of the payload, and in an arguments text that is not valid JSON: a raw
 //     lone surrogate becomes U+FFFD (an escape-like text there is the author's own text and is left alone).
 // Nothing is changed in place: a changed payload is a copy along the changed paths only, so a payload that needs nothing
@@ -26,6 +28,9 @@ function escapeAt(s, i) {
   return HEX4.test(h) ? Number.parseInt(h, 16) : -1;
 }
 
+/** The six-character JSON escape of a code unit (a surrogate: always four hex digits). */
+const hexEscape = (u) => `\\u${u.toString(16).padStart(4, "0")}`;
+
 /** A string with every raw lone surrogate replaced by U+FFFD (pairs kept). */
 export function wellFormed(s) {
   if (typeof s.isWellFormed === "function") return s.isWellFormed() ? s : s.toWellFormed();
@@ -35,7 +40,8 @@ export function wellFormed(s) {
 /**
  * JSON text with every lone surrogate, escaped or raw, replaced by U+FFFD (an escape `\ufffd` for an escape, the
  * character for a raw one). Returns { text, replaced }; text is the same string when nothing was replaced. A pair is kept
- * however its halves are written (JSON decodes escaped, raw and mixed halves alike to the pair). Text that is not valid
+ * however its halves are written; one written half escaped, half raw gets its raw half written as the escape (the same
+ * pair once decoded, and no lone surrogate in the text itself, which is sent as a string of the request body). Text that is not valid
  * JSON is not read as escapes: only its raw lone surrogates are replaced, as in any other string.
  */
 export function cleanJsonText(s) {
@@ -48,17 +54,21 @@ export function cleanJsonText(s) {
       const u = escapeAt(s, i);
       if (u === -1) { i += 2; continue; } // any other escape, `\\` included: its second character is not looked at again
       if (isHigh(u) && isLow(escapeAt(s, i + 6))) { i += 12; continue; }
-      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { i += 7; continue; } // an escaped high half before a raw low half
+      // An escaped high half before a raw low half: JSON decodes them to the pair, but the raw half alone in the text is a
+      // lone surrogate where the text itself is sent (a string of the request body), so it is written as its escape.
+      if (isHigh(u) && isLow(s.charCodeAt(i + 6))) { out += `${s.slice(last, i + 6)}${hexEscape(s.charCodeAt(i + 6))}`; i += 7; last = i; replaced++; continue; }
       if (isHigh(u) || isLow(u)) { out += `${s.slice(last, i)}\\ufffd`; i += 6; last = i; replaced++; continue; }
       i += 6;
       continue;
     }
     if (isHigh(c) && isLow(s.charCodeAt(i + 1))) { i += 2; continue; }
-    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { i += 7; continue; } // a raw high half before an escaped low half
+    // A raw high half before an escaped low half: the raw half is written as its escape, as above.
+    if (isHigh(c) && isLow(escapeAt(s, i + 1))) { out += `${s.slice(last, i)}${hexEscape(c)}${s.slice(i + 1, i + 7)}`; i += 7; last = i; replaced++; continue; }
     if (isHigh(c) || isLow(c)) { out += `${s.slice(last, i)}�`; i += 1; last = i; replaced++; continue; }
     i++;
   }
-  if (replaced === 0) return { text: s, replaced: 0 };
+  // The scan skips the character after any backslash, so a raw lone surrogate there (text that is not JSON) is caught here.
+  if (replaced === 0) { const w = wellFormed(s); return { text: w, replaced: w === s ? 0 : 1 }; }
   try { JSON.parse(s); } catch {
     const w = wellFormed(s);
     return { text: w, replaced: w === s ? 0 : 1 };
@@ -135,8 +145,13 @@ export function cleanPayload(payload) {
   }
 }
 
-/** True when `text` is JSON whose every string (keys too) is well-formed Unicode: what a strict parser accepts. */
+/**
+ * True when `text` is JSON whose every string (keys too) is well-formed Unicode, and the text itself is well-formed too (it
+ * is sent as a string of the request body, where a raw lone surrogate is refused before the arguments are read): what a
+ * strict server accepts.
+ */
 export function strictJson(text) {
+  if (typeof text !== "string" || wellFormed(text) !== text) return false;
   let v;
   try { v = JSON.parse(text); } catch { return false; }
   const ok = (x) => {
