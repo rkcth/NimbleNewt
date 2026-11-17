@@ -116,6 +116,40 @@ test("a checkout made before the neutral attribute file is read and refreshed ne
   } finally { await w.done(); }
 });
 
+test("the neutral attribute file is made when the git directory has no info folder and replaces other content there; the staging commits the agent's own bytes, CRLF included, and the author's refresh keeps a line-ending-only change in a checkout without the file (second review of the H12n re-check follow-up)", { skip }, async () => {
+  const w = await world();
+  try {
+    // The base asks for line-ending normalization, so without the neutral file an agent's CRLF-only change would be cleaned back to the base's content.
+    await writeFile(join(w.shared, ".gitattributes"), "* text eol=crlf\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "attributes");
+    await w.git.refresh({ shared: w.shared, commit: await w.git.head(w.shared), gitDir: w.gitDir, checkout: w.checkout });
+    const info = join(w.gitDir, "info");
+    const crlf = "export const a = 1;\r\n";
+    await writeFile(join(w.checkout, "src", "a.ts"), crlf);
+    // A git directory without an info folder (git made without its templates): the file and its folder are made.
+    await rm(info, { recursive: true, force: true });
+    assert.deepEqual((await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout })).map((c) => c.path), ["src/a.ts"], "the info folder is made and the change is seen");
+    // Other content there (an older or foreign attribute file) is replaced, not kept.
+    await writeFile(join(info, "attributes"), "* text eol=crlf\n");
+    assert.deepEqual((await w.git.changes({ gitDir: w.gitDir, checkout: w.checkout })).map((c) => c.path), ["src/a.ts"], "a foreign attribute file is replaced");
+    // The staging, called with no read before it on a checkout without the file, commits exactly the agent's bytes.
+    await rm(join(info, "attributes"), { force: true });
+    const staged = await w.git.stage({ gitDir: w.gitDir, checkout: w.checkout });
+    assert.deepEqual(staged.files.map((f) => f.path), ["src/a.ts"]);
+    const blob = execFileSync("git", ["--git-dir", w.gitDir, "cat-file", "blob", `${staged.tree}:src/a.ts`], { env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null" } });
+    assert.ok(blob.equals(Buffer.from(crlf)), "the staged tree holds the agent's CRLF bytes, unconverted");
+    sh(w.dir, "--git-dir", w.gitDir, "read-tree", sh(w.dir, "--git-dir", w.gitDir, "rev-parse", "HEAD"));
+    // The author's refresh of a checkout without the file: the landing branch changes the same file, and the agent's CRLF-only change is the agent's work (merged or a conflict), never overwritten.
+    await rm(join(info, "attributes"), { force: true });
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 2;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landing");
+    const r = await w.git.reapply({ shared: w.shared, commit: await w.git.head(w.shared), gitDir: w.gitDir, checkout: w.checkout });
+    assert.equal(r.taken.includes("src/a.ts"), false, "the landing branch's version did not replace the agent's change");
+    assert.ok(r.merged.includes("src/a.ts") || r.conflicts.some((c) => c.path === "src/a.ts"), "the agent's change was merged or listed");
+    assert.notEqual(await readFile(join(w.checkout, "src", "a.ts"), "utf8"), "export const a = 2;\n", "the agent's file is not the landing branch's copy");
+  } finally { await w.done(); }
+});
+
 test("the agent's changes reach the shared workspace only through expected-version writes: modified, new and deleted files", { skip }, async () => {
   const w = await world();
   try {

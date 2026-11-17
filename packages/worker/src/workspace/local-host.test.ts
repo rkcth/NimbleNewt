@@ -465,6 +465,8 @@ test("the view lists a file the staging carries even when the checkout's attribu
     await writeFile(join(w.shared, "src", "a.ts"), "export const a = 10;\n");
     await writeFile(join(w.shared, "src", "id.ts"), "// $Id$ landed\n");
     sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    // A checkout made before createCheckout wrote the neutral file has none (second review of the H12n re-check follow-up): the view must write it itself, not rely on the checkout's making.
+    await rm(join(made.gitDir, "info", "attributes"), { force: true });
     const view = (await w.ws.submitView(scope))!;
     const staged = await w.ws.stageWork(scope);
     for (const f of staged.files) assert.ok(view.mine.includes(f), `${f} is carried by the staging, so the view lists it as the agent's`);
