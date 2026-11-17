@@ -655,26 +655,32 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
   let maintenanceStopped = false;
   let stopping: Promise<void> | undefined;
-  // `strict` (close()): a failure of the transport, the web chat, the backups or the storage is raised, as before. Not strict (a failed start): every step is tried and none hides the start-up error.
+  let remotePiFirst: ReturnType<typeof setTimeout> | undefined;
+  // Every step is tried in both uses, so one that fails never leaves a later one (a listener, the storage) open: the shutdown runs once, so a second close() could not finish it later.
+  // `strict` (close()): the first failure of the dispatcher's stop, the transport, the web chat, the backups or the storage is raised once every step has run. Not strict (a failed start): none is raised, so none hides the start-up error.
   // The scratch cleanup stops after the dispatcher's loops and before the storage closes, so none of its runs writes to a closed storage.
   const stopAll = (strict: boolean): Promise<void> => (stopping ??= (async () => {
-    const step = async (p: Promise<unknown> | undefined): Promise<void> => { if (strict) await p; else await p?.catch(() => undefined); };
+    let failed: { readonly error: unknown } | undefined;
+    const quiet = async (f: () => unknown): Promise<void> => { try { await f(); } catch { /* set aside, as before */ } };
+    const step = async (f: () => unknown): Promise<void> => { try { await f(); } catch (error) { if (strict) failed ??= { error }; } };
     try {
       maintenanceStopped = true;
       if (remotePiTimer !== undefined) clearInterval(remotePiTimer);
-      transferLive?.dispose();
+      if (remotePiFirst !== undefined) clearTimeout(remotePiFirst);
+      await quiet(() => transferLive?.dispose());
       if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer);
-      await maintenanceLive?.close().catch(() => undefined);
-      toolsLive?.dispose();
-      await jobRuns?.close().catch(() => undefined);
-      await step(dispatch?.driver.stop());
-      await scratchCleanupLive?.close().catch(() => undefined);
-      await dispatch?.closeWorkers().catch(() => undefined);
-      await step(transportLive?.close());
-      await step(webChatLive?.close());
-      await step(backupsLive?.finish());
-      await step(storage.close());
+      await quiet(() => maintenanceLive?.close());
+      await quiet(() => toolsLive?.dispose());
+      await quiet(() => jobRuns?.close());
+      await step(() => dispatch?.driver.stop());
+      await quiet(() => scratchCleanupLive?.close());
+      await quiet(() => dispatch?.closeWorkers());
+      await step(() => transportLive?.close());
+      await step(() => webChatLive?.close());
+      await step(() => backupsLive?.finish());
+      await step(() => storage.close());
     } finally { await heartbeat?.stop().catch(() => undefined); }
+    if (failed !== undefined) throw failed.error;
   })());
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
@@ -1640,7 +1646,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         const sweepRemotePi = (): void => { void remotePiRestore.sweep().catch((error: unknown) => { options.onInternalError?.(error); }); };
         remotePiTimer = setInterval(sweepRemotePi, options.backup?.restore?.remotePiEveryMs ?? 30_000);
         remotePiTimer.unref();
-        setTimeout(sweepRemotePi, 1000).unref();
+        remotePiFirst = setTimeout(sweepRemotePi, 1000);
+        remotePiFirst.unref();
       }
     }
     // Endings still open when the controller went down are completed once, from their first undone step (the tick's sweep does the same for what is left).
