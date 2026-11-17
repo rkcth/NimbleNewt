@@ -23,7 +23,7 @@ const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; rawBodyOf(kind: string, id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -42,7 +42,7 @@ for (const backend of backends) {
           return p;
         };
         const svc = SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], options);
-        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
+        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, rawBodyOf: async (kind, id) => (await world.storage.getAggregate({ kind, id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
       } finally { await world.close(); }
     });
 
@@ -402,5 +402,45 @@ for (const backend of backends) {
     failing = false; told.length = 0;
     await refuses("forbidden", () => svc.record(ann, { commandId: "u09b-4", taskId: c.task, kind: "qa", role: "author", subject: code.id, report: "x" }));
     assert.deepEqual(told, []);
+  });
+
+  suite("card H12o: a code submission is approved when its newest review approves it (or no other agent could review it); the verdicts are kept with it and bounded", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const ray = await c.agent("ray", ["reviewer"]);
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { reviewersAvailableIn: async () => ["agent:rev", "agent:ray"] });
+    const code = await svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
+    const first = await svc.approvalOf(code.id);
+    assert.deepEqual([first?.approved, first?.base, first?.tree, first?.taskId, first?.submittedBy], [false, BASE, T1, c.task, ann.id]);
+    assert.match(first?.reason ?? "", /no reviewer has approved/);
+    const ok = await svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" });
+    const approved = await svc.approvalOf(code.id);
+    assert.deepEqual([approved?.approved, approved?.approvedBy, approved?.reviewId], [true, rev.id, ok.id]);
+    // A repeat of the same review adds nothing; a later "changes" takes the approval back, a later approval gives it again.
+    await svc.record(rev, { commandId: "h12o-rev-1", taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "changes" });
+    await svc.record(rev, { commandId: "h12o-rev-1", taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "changes" });
+    const back = await svc.approvalOf(code.id);
+    assert.equal(back?.approved, false);
+    assert.match(back?.reason ?? "", /says changes/);
+    await svc.record(ray, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" });
+    assert.deepEqual([(await svc.approvalOf(code.id))?.approved, (await svc.approvalOf(code.id))?.approvedBy], [true, ray.id]);
+    const verdicts = (await c.rawBodyOf("submission-verdicts", code.id)) as { reviews: unknown[] };
+    assert.equal(verdicts.reviews.length, 3, "the repeated review was kept once");
+    // Not a code submission, an unknown ID or not an ID at all: nothing to approve.
+    assert.equal(await svc.approvalOf(ok.id), undefined);
+    assert.equal(await svc.approvalOf("sbm-aaaaaaaaaaaaaaaaaaaa"), undefined);
+    assert.equal(await svc.approvalOf("../x"), undefined);
+    // A one-agent project: no review is required, and that counts as approved, on the record as such.
+    const solo = c.open(async (id) => c.roles.get(id) ?? [], { reviewersAvailableIn: async () => [] });
+    const alone = await solo.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    assert.deepEqual([(await solo.approvalOf(alone.id))?.approved, (await solo.approvalOf(alone.id))?.approvedBy], [true, "review_disabled_single_agent"]);
+    // Where review is required (or the requirement was not judged) and nobody reviewed, it is not approved.
+    const plain = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    assert.equal((await c.svc.approvalOf(plain.id))?.approved, false);
+    // At most 50 reviews of one submission are kept; the 51st is refused and the verdict list is unchanged.
+    for (let i = 0; i < 47; i++) await svc.record(i % 2 === 0 ? rev : ray, { commandId: cid("many"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" });
+    await refuses("unavailable", () => svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "reject" }), /already has 50 reviews/);
+    assert.equal(((await c.rawBodyOf("submission-verdicts", code.id)) as { reviews: unknown[] }).reviews.length, 50);
+    assert.equal((await svc.approvalOf(code.id))?.approved, true);
   });
 }

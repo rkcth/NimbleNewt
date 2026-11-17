@@ -859,6 +859,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         return d === undefined ? undefined : { taskId: d.taskId, agentId: d.agentId, live: d.state !== "finished", ...(d.stopped === undefined ? {} : { stopped: true }) };
       },
       attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); }, tell: async (id, text) => (await dispatch?.attemptControl.tell(id, text)) ?? false, stop: async (id, reason) => { await dispatch?.attemptControl.stop(id, reason); } },
+      // Card H12o: a release may commit an approved submission; whether it is approved is the submissions' word (built below, reached only when a request is made).
+      approvalOf: (submissionId) => submissions.approvalOf(submissionId),
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
     // Card C09h: an artifact published for a task through the API (by the owner, or by an agent, including a local worker through its tool bridge) is an `artifact-version` step of the task's activity.
