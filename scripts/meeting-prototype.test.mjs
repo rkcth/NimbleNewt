@@ -434,7 +434,10 @@ globalThis.fetch = (url, { method = "GET", headers = {}, body } = {}) => new Pro
 `);
   return { server, seen, home, KEY, chat };
 }
-const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet", ...extra], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+// The children find Pi's config through os.homedir(), which reads HOME on Linux and macOS but USERPROFILE on Windows, so both point
+// at the fake home (Windows CI run 44041210187 read the runner's real, absent home when only HOME was set).
+const fakeHomeEnv = (home) => ({ ...process.env, HOME: home, USERPROFILE: home });
+const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet", ...extra], { timeout: 120000, env: fakeHomeEnv(home) }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
 
 test("Radiance runner: a busy server is refused before any chat request, with exit code 3 and the budget file untouched", async () => {
   const { server, seen, home } = await radianceStandIn({ in_flight: 0, running: 1, waiting: 0 });
@@ -477,7 +480,7 @@ test("Radiance runner: on an idle server the meeting runs, reasoning tokens are 
 });
 
 // Review of the third local batch: the idle check is on every route to Radiance, and calls to it go one at a time.
-const runProto = (home, script, argv) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL(`../prototypes/meeting/${script}`, import.meta.url)), ...argv], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+const runProto = (home, script, argv) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL(`../prototypes/meeting/${script}`, import.meta.url)), ...argv], { timeout: 120000, env: fakeHomeEnv(home) }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
 
 test("Radiance idle check on the other routes: checkpoint.mjs --spec radiance: and a mixed roster with a radiance: chair or member are refused on a busy server before any chat request", async () => {
   const { server, seen, home } = await radianceStandIn({ in_flight: 1, running: 0, waiting: 0 });
