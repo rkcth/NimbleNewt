@@ -3,9 +3,9 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL } from "../dispatch/model.js";
 import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
-import type { EndingAttempt, WorkEndDeps } from "./work-end.js";
+import type { EndingAttempt, Landed, WorkEndDeps } from "./work-end.js";
 
-type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "verifyDone" | "addNote" | "notesOf" | "answerQuestions" | "interrogateDone" | "recordReport">>;
+type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "submitView" | "stageWork" | "verifyDone" | "addNote" | "notesOf" | "answerQuestions" | "interrogateDone" | "recordReport">>;
 
 /**
  * The attempt port of the ending (card H12n) bound to the real dispatcher: the attempt's state, its freeze, the settling of calls in flight (with the calls that had to be cut, and whether each could have changed the checkout), and its end
@@ -81,6 +81,29 @@ export function stagedSubmit(deps: {
     const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
     const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId });
     return { submissionId: made.id };
+  };
+}
+
+/**
+ * The `landing` port of the ending bound to the attempt's host through the dispatcher (card H12n): the checkout's base, the landing branch's head and the changed files on both sides, as the host that holds the checkout reads them.
+ * `undefined` (the submit is refused as unavailable) when there is no dispatcher, the attempt is no longer live, or its host cannot say.
+ */
+export function dispatcherLanding(dispatch: () => { readonly dispatcher: Pick<Dispatcher, "submitView">; readonly principal: Principal } | undefined): (taskId: string, attemptId: string) => Promise<Landed | undefined> {
+  return async (_taskId, attemptId) => {
+    const h = dispatch();
+    if (h === undefined || h.dispatcher.submitView === undefined) return undefined;
+    const v = await h.dispatcher.submitView(h.principal, attemptId).catch(() => undefined);
+    return v === undefined ? undefined : { base: v.base, head: v.head, mine: [...v.mine], landed: [...v.landed] };
+  };
+}
+
+/** The `stage` function of `stagedSubmit` bound to the attempt's host through the dispatcher (card H12n). Without a dispatcher, or a host that cannot stage, it throws `unavailable` (the ending ends plainly with `release_failed`). */
+export function dispatcherStage(dispatch: () => { readonly dispatcher: Pick<Dispatcher, "stageWork">; readonly principal: Principal } | undefined): (attempt: EndingAttempt) => Promise<StagedWork> {
+  return async (attempt) => {
+    const h = dispatch();
+    if (h === undefined || h.dispatcher.stageWork === undefined) throw new DomainError("unavailable", "the dispatcher is not running, so the work cannot be staged now");
+    const s = await h.dispatcher.stageWork(h.principal, attempt.attemptId);
+    return { base: s.base, tree: s.tree, patchId: s.patchId, files: [...s.files] };
   };
 }
 

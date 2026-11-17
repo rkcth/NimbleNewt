@@ -147,9 +147,18 @@ test("through the chat alone an owner on a clean installation reads the setup wa
     const first = await say("I just installed this, where do I begin?");
     const text = first.reply.join("\n");
     assert.match(text, /Not ready for a first agent yet/);
-    assert.match(text, /Next to ask: What is your first project/);
+    // While no approval profile has been chosen the walk-through asks that first (card U08); staying strict is an answer, recorded so it is not asked again.
+    assert.match(text, /Next to ask: How much should the team ask you before it acts\?.*Do you want to switch from strict to derived\?/);
     assert.match(text, /Recommended:/);
     assert.match(text, /If you decline:/);
+    script["keep it strict"] = [{ kind: "policy_edit", change: { type: "profile", to: "strict" }, evidence: "keep it strict", basis: "owner" }];
+    const keep = (await say("keep it strict")).outcomes[0] as unknown as { status: string; proposalId?: string };
+    assert.equal(keep.status, "proposed", JSON.stringify(keep));
+    script["yes, keep strict"] = [{ kind: "apply_proposal", proposalId: keep.proposalId, evidence: "yes, keep strict", basis: "owner" }];
+    await say("yes, keep strict");
+    const second = (await say("I just installed this, where do I begin?")).reply.join("\n");
+    assert.match(second, /Approval profile: done/);
+    assert.match(second, /Next to ask: What is your first project/);
 
     // The project, on the owner's own forge, with its CI, is drawn up as a proposal; nothing exists yet.
     const words = "My project is called Lab and the repository is ssh://git.lab.example/lab.git on our own Gitea server with Jenkins";

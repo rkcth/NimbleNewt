@@ -1137,7 +1137,7 @@ export const APP_JS = String.raw`(function (root) {
   }
 
   function pageAdminMigration(box, parts) {
-    adminHead(box, 'migration', 'Migration', 'How the database schema stands, what waits for your approval, and how long you can go back to the earlier release. To allow a destructive migration or change the rollback period, tell the chat.');
+    adminHead(box, 'migration', 'Migration', 'How the database schema stands, whether the runtimes in use are supported and which agents and operations a finding touches, what waits for your approval, and how long you can go back to the earlier release. To allow a destructive migration or change the rollback period, tell the chat.');
     if (!failed(box, 'Migration', parts.migration)) {
       var m = itemOf(parts.migration) || {};
       var sec = region(box, 'Schema');
@@ -1153,6 +1153,34 @@ export const APP_JS = String.raw`(function (root) {
       if (ups.length) table(region(box, 'Upgrades on record'), 'Upgrades', ['When', 'From schema', 'To schema', 'Only additive'], ups.map(function (u) { return [clip(u.at, 40), String(u.from), String(u.to), u.additiveOnly ? 'yes' : 'no']; }));
       var pairs = list(m.testedPairs, 20).map(obj).filter(Boolean);
       if (pairs.length) table(region(box, 'Tested pairs: a release and the schema it really started on'), 'Tested pairs', ['Release', 'Schema', 'When'], pairs.map(function (x) { return [clip(x.release, 80), String(x.schema), clip(x.at, 40)]; }));
+    }
+    if (!failed(box, 'Compatibility', parts.compat)) {
+      var cp = itemOf(parts.compat) || {};
+      var cs = region(box, 'Compatibility: what is in use and what it touches');
+      cs.appendChild(el('div', 'card-line', cp.status === 'compatible' ? 'Everything in use is a runtime this version supports, and no migration waits.' : 'Something is not current. What it touches is listed below.'));
+      var rtm = obj(cp.runtime) || {}; var nd = obj(rtm.node); var pr = obj(rtm.protocol);
+      if (nd) cs.appendChild(el('div', 'card-line', 'Node.js ' + clip(nd.running, 30) + ' is running; this version needs ' + clip(nd.minimum, 30) + ' or newer' + (nd.supported === false ? ': NOT met.' : ': met.')));
+      if (pr) cs.appendChild(el('div', 'card-line', 'This controller speaks worker protocol ' + String(pr.min) + ' to ' + String(pr.max) + '.'));
+      var chs = list(cp.hosts, 100).map(obj).filter(Boolean);
+      var hsec = region(box, 'Hosts and their workers (' + chs.length + ')');
+      if (!chs.length) note(hsec, 'No host has announced itself.'); else table(hsec, 'Host compatibility', ['Host', 'State', 'Protocol', 'Worker', 'What it means'], chs.map(function (h) { return [clip(h.hostId, 80), clip(h.state, 20), isNum(h.protocol) ? String(h.protocol) : '-', clip(h.workerVersion || '-', 60), clip(h.note, 300)]; }));
+      var affectedBlock = function (parent, title, a) {
+        var ags = list(a.agents, 10).map(function (x) { return clip(x, 120); }); var ops = list(a.operations, 10).map(function (x) { return clip(x, 200); });
+        if (!ags.length && !ops.length) return;
+        var card = el('div', 'card'); card.appendChild(el('div', 'card-title', title));
+        card.appendChild(el('div', 'card-line', 'Agents affected: ' + (ags.length ? ags.join('; ') : 'none') + (isNum(a.agentsMore) && a.agentsMore > 0 ? ' and ' + a.agentsMore + ' more' : '') + '.'));
+        card.appendChild(el('div', 'card-line', 'Operations affected: ' + (ops.length ? ops.join('; ') : 'none') + (isNum(a.operationsMore) && a.operationsMore > 0 ? ' and ' + a.operationsMore + ' more' : '') + '.'));
+        parent.appendChild(card);
+      };
+      chs.filter(function (h) { return h.state === 'older' || h.state === 'refused'; }).forEach(function (h) { affectedBlock(hsec, 'Affected by host ' + clip(h.hostId, 80), h); });
+      var cm = obj(cp.migration);
+      if (cm) {
+        var msec = region(box, 'Waiting migrations');
+        msec.appendChild(el('div', 'card-line', 'Schema ' + String(cm.schemaVersion) + ' of ' + String(cm.latestKnown) + '. ' + clip(cm.note, 400)));
+        var pend = list(cm.pending, 50).map(obj).filter(Boolean);
+        if (pend.length) { table(msec, 'Waiting migrations', ['Version', 'Name', 'Kind', 'State'], pend.map(function (x) { return [String(x.version), clip(x.name, 80), clip(x.kind, 20), clip(x.state, 20)]; })); affectedBlock(msec, 'Affected by the waiting migrations', cm); }
+      }
+      list(cp.problems, 5).forEach(function (pb) { cs.appendChild(el('div', 'meta', 'Not read: ' + clip(pb, 300))); });
     }
     if (!failed(box, 'Policy', parts.policy)) {
       var p = itemOf(parts.policy) || {}; var eff = obj(p.effective) || obj(p.policy) || p;
