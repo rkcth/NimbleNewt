@@ -353,6 +353,14 @@ test("the git guard: what is refused and what is let through", () => {
     return "";
   };
   assert.match(decide([`--git-dir=${elsewhere}/.git`, "push", "origin"], { cwd: own, roots, env: {}, git: byDir }).refuse, new RegExp(PUSH_REFUSED));
+  const byFolder = (a, dir) => {
+    if (a[0] === "remote" && a.length === 1) return "origin";
+    if (a[1] === "get-url") return dir === elsewhere ? "https://github.com/rkcth/NimbleNewt.git" : join(tmp, "b.git");
+    return "";
+  };
+  assert.equal(decide(["push", "origin"], { cwd: own, roots, env: {}, git: byFolder }).refuse, null, "here origin is the run's own");
+  assert.match(decide(["-C", elsewhere, "push", "origin"], { cwd: own, roots, env: {}, git: byFolder }).refuse, new RegExp(PUSH_REFUSED), "-C names another repository");
+  assert.match(decide(["-C", "..", "-C", "elsewhere", "push", "origin"], { cwd: own, roots, env: {}, git: byFolder }).refuse, new RegExp(PUSH_REFUSED), "-C taken relative, one after another");
   assert.equal(localPath("git@github.com:a/b.git", own), null);
   assert.equal(localPath("https://x/y", own), null);
   assert.ok(localPath("../b.git", own));
