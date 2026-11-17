@@ -85,7 +85,7 @@ import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJo
 import { McpService, RemoteMcpClient, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type DeltaItem, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
-import { DependencyNotes, DependencyService, RESOURCE_READ_LIMITS, RecentTexts, changeViews, keptText, resourceReader, resumeProbeEnabled, type ExternalRead, type McpRead, type Observation } from "../dependencies/index.js";
+import { DependencyNotes, DependencyService, RESOURCE_READ_LIMITS, RecentTexts, changeViews, keptText, resourceReader, resumeObservation, resumeProbeEnabled, type ExternalRead, type McpRead } from "../dependencies/index.js";
 import { entriesLook, resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
@@ -1271,14 +1271,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // What a check observes (card L04g): the files and directories (this machine's probe, a remote host's look, or the host's own `resume.observe`, which wins for what it reports), and the external and MCP resources read again
     // where the owner allowed it. The texts of the resources read are kept for the reviewer's view.
     const filesObserve = options.resume?.observe ?? resumeObserve;
-    const observeAll = async (taskId: string): Promise<Readonly<Record<string, Observation>>> => {
-      const files = filesObserve === undefined ? {} : await filesObserve(taskId);
-      const manifest = await contextDependencies.get(RESUME_READER, taskId).catch(() => undefined);
-      if (manifest === undefined || !manifest.entries.some((e) => e.kind === "external" || e.kind === "mcp-resource")) return files;
-      const read = await readResources(manifest, "resume-check");
-      for (const e of manifest.entries) if (e.kind === "external" || e.kind === "mcp-resource") recentTexts.set(taskId, e.id, read.texts[e.id], read.observations[e.id]?.hash);
-      return { ...read.observations, ...files };
-    };
+    const observeAll = resumeObservation({ files: filesObserve, manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId), read: readResources, recent: recentTexts });
     // The reviewer's view of each change (card L04g): a diff of the text kept at recording and the text read now, unless the owner turned it off (resume.reviewerSeesChanges).
     const views = changeViews({ manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId), textOf: (taskId, entry) => contextDependencies.textOf(taskId, entry), recent: recentTexts });
     const changeView = async (taskId: string, change: DeltaItem): Promise<{ readonly diff: string } | { readonly none: string } | undefined> => {

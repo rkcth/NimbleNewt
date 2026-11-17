@@ -14,7 +14,7 @@ import { McpService, RemoteMcpClient, RemoteMcpConnector } from "../mcp/index.js
 import { NetworkGrantService, WebFetch } from "../network/index.js";
 import { PrincipalService } from "../security/index.js";
 import { selfSigned } from "../transport/testing/selfsigned.js";
-import { DependencyService, mcpContentsHash, resourceReader, type ManifestBody } from "./index.js";
+import { DependencyService, RecentTexts, changeViews, mcpContentsHash, resourceReader, resumeObservation, type ManifestBody, type Observation } from "./index.js";
 
 after(stopServer);
 const options = { clock: () => "2026-11-17T10:00:00.000Z", pause: async () => undefined };
@@ -294,4 +294,34 @@ test("a hostile answer is bounded: an endless stream, a drip, a header flood, a 
     }
     assert.ok(asked.length <= 5, "one request per resource");
   } finally { srv.close(); await world.close(); }
+});
+
+test("a check's observation keeps a text for the reviewer only while it is the text of the hash found now: a text an earlier look kept is dropped when the files were looked at elsewhere", async () => {
+  const h = (t: string): string => createHash("sha256").update(t).digest("hex");
+  const taskId = "task-l04gsecond";
+  const manifest: ManifestBody = { taskId, projectId: "proj-l04gsecond", entries: [
+    { id: "dpm-a", kind: "file", key: "src/a.ts", hash: h("v1\n"), observedAt: "2026-11-17T10:00:00.000Z" },
+    { id: "dpm-b", kind: "file", key: "src/b.ts", hash: h("b1\n"), observedAt: "2026-11-17T10:00:00.000Z" },
+    { id: "dpm-x", kind: "external", key: "https://example.com/p", hash: h("p1\n"), freshness: "none", observedAt: "2026-11-17T10:00:00.000Z" },
+  ] };
+  const recent = new RecentTexts();
+  // An earlier look on this machine read v2 of a.ts and b2 of b.ts; the task has since moved, and the files are now looked at on its host, which sends hashes only: a.ts is v3 there, b.ts still b2.
+  recent.set(taskId, "dpm-a", "v2\n", h("v2\n"));
+  recent.set(taskId, "dpm-b", "b2\n", h("b2\n"));
+  recent.set(taskId, "dpm-x", "p2\n", h("p2\n"));
+  const files: Record<string, Observation> = { "dpm-a": { exists: true, hash: h("v3\n") }, "dpm-b": { exists: true, hash: h("b2\n") } };
+  let reads = 0;
+  const observe = resumeObservation({ files: async () => files, manifest: async () => manifest, read: async () => { reads++; return { observations: {}, texts: {}, protocols: {} }; }, recent });
+  assert.deepEqual(await observe(taskId), files);
+  assert.equal(reads, 1, "the resources are read once per observation");
+  assert.equal(recent.get(taskId, "dpm-a"), undefined, "the text of v2 is not shown as a.ts now (its host found v3)");
+  assert.equal(recent.get(taskId, "dpm-b"), "b2\n", "the text of the hash found now stays");
+  assert.equal(recent.get(taskId, "dpm-x"), undefined, "a resource not read now keeps no text");
+  const views = changeViews({ manifest: async () => manifest, textOf: async (_t, e) => (e.id === "dpm-a" ? "v1\n" : e.id === "dpm-b" ? "b1\n" : undefined), recent });
+  assert.deepEqual(await views(taskId, { id: "dpm-a", kind: "file", status: "changed" }), { none: "the text now could not be read here (it is on a remote host, is not text, or is larger than the controller reads)" });
+  assert.match(JSON.stringify(await views(taskId, { id: "dpm-b", kind: "file", status: "changed" })), /-b1.*\+b2/);
+  // Without files observed and without the manifest nothing is read and nothing is kept.
+  const none = resumeObservation({ manifest: async () => undefined, read: async () => { reads++; return { observations: {}, texts: {}, protocols: {} }; }, recent });
+  assert.deepEqual(await none(taskId), {});
+  assert.equal(reads, 1);
 });

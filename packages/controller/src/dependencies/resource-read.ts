@@ -3,6 +3,7 @@ import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
 import type { JsonObject } from "../storage/types.js";
 import type { DependencyEntry, ManifestBody, Observation } from "./dependencies.js";
+import type { RecentTexts } from "./change-view.js";
 
 /**
  * What a resume check may spend reading a task's recorded external and MCP resources again (card L04g).
@@ -146,5 +147,39 @@ export function resourceReader(ports: ResourceReaderPorts): (manifest: ManifestB
     }));
     } finally { clearTimeout(timer); }
     return { observations, texts, protocols };
+  };
+}
+
+/** The kinds whose text a check may keep for the reviewer's view. */
+const TEXT_KINDS: ReadonlySet<string> = new Set(["file", "external", "mcp-resource"]);
+
+/**
+ * What a resume check observes (card L04g): the files and directories (`files`: this machine's probe, a remote host's look, or the host's own port, which wins for what it reports), and the external and MCP resources read again
+ * where the owner allowed it (`read`). The texts of the resources read are kept in `recent` for the reviewer's view, and afterwards a text kept for an entry stays only while it is the text of the hash this observation found for
+ * it: one kept by an earlier look (this machine's probe before the task moved to a remote host, an earlier check) is never shown as the text now.
+ */
+export function resumeObservation(deps: {
+  readonly files?: ((taskId: string) => Promise<Readonly<Record<string, Observation>>>) | undefined;
+  manifest(taskId: string): Promise<ManifestBody | undefined>;
+  readonly read: ReturnType<typeof resourceReader>;
+  readonly recent: RecentTexts;
+}): (taskId: string) => Promise<Readonly<Record<string, Observation>>> {
+  return async (taskId) => {
+    const files = deps.files === undefined ? {} : await deps.files(taskId);
+    const manifest = await deps.manifest(taskId).catch(() => undefined);
+    if (manifest === undefined) return files;
+    let all: Readonly<Record<string, Observation>> = files;
+    if (manifest.entries.some((e) => e.kind === "external" || e.kind === "mcp-resource")) {
+      const read = await deps.read(manifest, "resume-check");
+      for (const e of manifest.entries) if (e.kind === "external" || e.kind === "mcp-resource") deps.recent.set(taskId, e.id, read.texts[e.id], read.observations[e.id]?.hash);
+      all = { ...read.observations, ...files };
+    }
+    for (const e of manifest.entries) {
+      if (!TEXT_KINDS.has(e.kind)) continue;
+      const kept = deps.recent.read(taskId, e.id);
+      const now = all[e.id]?.hash?.replace(/^sha256:/, "");
+      if (kept !== undefined && (kept.hash === undefined || now === undefined || kept.hash !== now)) deps.recent.set(taskId, e.id, undefined);
+    }
+    return all;
   };
 }

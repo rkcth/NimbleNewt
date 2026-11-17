@@ -98,6 +98,10 @@ for (const backend of backends) {
       writeFileSync(join(dir, "guide.md"), "# Guide v2\n", "utf8");
       await note(ann, [{ kind: "file", key: "guide.md" }]);
       assert.equal(await deps.textOf(task, (await deps.get(owner, task))!.entries.find((e) => e.key === "guide.md")!), "# Guide v2\n");
+      // Recorded again by its hash alone (resume.dependencies.record, no text read): the text kept for the earlier hash is not given as the text of the new one.
+      await deps.record(ann, { commandId: cid("n-hash-only"), taskId: task, dependencies: [{ kind: "file", key: "guide.md", hash: H("# Guide v3\n") }] });
+      assert.equal(await deps.textOf(task, (await deps.get(owner, task))!.entries.find((e) => e.key === "guide.md")!), undefined, "an earlier text is never the text of a later hash");
+      await note(ann, [{ kind: "file", key: "guide.md" }]);
 
       // What the agent gives must be what the controller finds; a wrong hash refuses the whole note and records nothing of it.
       const count = (await deps.get(owner, task))!.entries.length;
@@ -106,6 +110,7 @@ for (const backend of backends) {
       await refuses("invalid_command", () => note(ann, [{ kind: "directory", key: "beds", members: ["south"] }]), /are not what the folder holds/);
       await refuses("invalid_command", () => note(ann, [{ kind: "file", key: "nothing-here.md" }]), /there is no nothing-here\.md/);
       await refuses("invalid_command", () => note(ann, [{ kind: "external", key: "https://docs.example.com/frost", hash: H("older") }]), /is not what the resource holds now/);
+      await refuses("invalid_command", () => note(ann, [{ kind: "external", key: "https://docs.example.com/frost", etag: "\"v0\"" }]), /is not the resource's ETag now/);
       // Outside the checkout the controller does not look: without a hash it is refused, with one it is the agent's word.
       await refuses("invalid_command", () => note(ann, [{ kind: "file", key: "../outside.txt" }]), /could not look at that file/);
       await refuses("invalid_command", () => note(ann, [{ kind: "external", key: "https://other.example.com/y" }]), /did not read it .*give its hash or ETag/);
