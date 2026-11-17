@@ -208,7 +208,7 @@ export class BackupSystem {
     this.#owner(owner, "add a backup target");
     const cfg = await this.#o.config.effective();
     const { commandId: _c, expectedRevision: _r, ...fields } = command; void _c; void _r;
-    const probe = buildTarget(fields, this.#now().toISOString(), owner.id, `${owner.id}:${command.commandId}`);
+    const probe = buildTarget(fields, this.#now().toISOString(), owner.id, `${owner.id}:${command.commandId}`, this.#o.config.keptSecrets());
     // The ID is made from the scoped command, so the same command again finds the target it made and does not test again.
     const again = cfg.targets.find((t) => t.name.toLowerCase() === probe.name.toLowerCase() && t.location === probe.location);
     let test: { ok: boolean; detail: string; warning?: string } | undefined;

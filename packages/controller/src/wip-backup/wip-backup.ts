@@ -5,6 +5,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import { findCredentialShapes } from "../security/credential-patterns.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { keptSecretRefusal } from "../setup/reserved-secrets.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
 import type { ProtectedBranchService } from "../policy/protected-branches.js";
 import type { GrantService } from "../security/grants.js";
@@ -133,17 +134,19 @@ export class WipBackupService {
   readonly #branches: Pick<ProtectedBranchService, "isProtected"> | undefined;
   readonly #grants: WipGrants | undefined;
   readonly #ensureGrantee: (() => Promise<unknown>) | undefined;
+  readonly #kept: () => readonly string[];
   #running: Promise<unknown> | undefined;
 
-  private constructor(runner: CommandRunner, branches: Pick<ProtectedBranchService, "isProtected"> | undefined, grants: WipGrants | undefined, ensureGrantee: (() => Promise<unknown>) | undefined) { this.#runner = runner; this.#branches = branches; this.#grants = grants; this.#ensureGrantee = ensureGrantee; }
+  private constructor(runner: CommandRunner, branches: Pick<ProtectedBranchService, "isProtected"> | undefined, grants: WipGrants | undefined, ensureGrantee: (() => Promise<unknown>) | undefined, kept: () => readonly string[]) { this.#runner = runner; this.#branches = branches; this.#grants = grants; this.#ensureGrantee = ensureGrantee; this.#kept = kept; }
 
   /**
    * `branches` is the controller's protected-branch rule (card A07f): a work-in-progress branch the owner protects is not pushed to. `grants` is the controller's grant service: with it, turning the backup on makes the standing approval
    * a real A07 grant (listed with the other standing rules, revoked the same way, and a push is covered only while that grant is active); `ensureGrantee` makes sure the principal that holds it exists. Without `grants` (unit tests of the schedule) the setting alone is the approval.
+   * `kept` gives the secret names the configuration keeps for something else (task T4), which the push credential may not name.
    */
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { branches?: Pick<ProtectedBranchService, "isProtected">; grants?: WipGrants; ensureGrantee?: () => Promise<unknown> } = {}): WipBackupService {
-    const { branches, grants, ensureGrantee, ...runner } = options;
-    return new WipBackupService(new CommandRunner(storage, epoch, runner), branches, grants, ensureGrantee);
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { branches?: Pick<ProtectedBranchService, "isProtected">; grants?: WipGrants; ensureGrantee?: () => Promise<unknown>; kept?: () => readonly string[] } = {}): WipBackupService {
+    const { branches, grants, ensureGrantee, kept, ...runner } = options;
+    return new WipBackupService(new CommandRunner(storage, epoch, runner), branches, grants, ensureGrantee, kept ?? (() => []));
   }
 
   /** The owner's view of one project: whether the backup is on, what the standing approval covers, and each task's last successful backup and last failure. */
@@ -177,6 +180,8 @@ export class WipBackupService {
     if (command.remote !== undefined) { const why = remoteProblem(command.remote); if (why !== undefined) invalid("remote", why); }
     if (command.everyMinutes !== undefined && (!Number.isSafeInteger(command.everyMinutes) || command.everyMinutes < WIP_LIMITS.minMinutes || command.everyMinutes > WIP_LIMITS.maxMinutes)) invalid("everyMinutes", `must be a whole number of minutes from ${WIP_LIMITS.minMinutes} to ${WIP_LIMITS.maxMinutes}`);
     if (command.credential !== undefined && command.credential !== null && (typeof command.credential !== "string" || !SECRET_NAME_OF.test(command.credential) || command.credential.includes("__") || redactText(command.credential) !== command.credential || findCredentialShapes(command.credential).length > 0)) invalid("credential", "must be the NAME of a secret in the host's secret store (letters, digits, dot, underscore or hyphen), never the secret itself");
+    // The value is handed to git for an https remote, so it reaches that remote (task T4): never a secret the installation keeps for something else, in any letter case.
+    if (typeof command.credential === "string") { const why = keptSecretRefusal(command.credential, this.#kept(), "a backup remote"); if (why !== undefined) invalid("credential", `${why}; name another secret`); }
     if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0)) invalid("expectedRevision", "must be a whole number");
     if (command.basis !== undefined && (typeof command.basis !== "string" || command.basis.length === 0 || command.basis.length > WIP_LIMITS.basis || redactText(command.basis) !== command.basis)) invalid("basis", `must be 1 to ${WIP_LIMITS.basis} characters with no credential in them`);
     if (command.enabled === undefined && command.remote === undefined && command.everyMinutes === undefined && command.credential === undefined) invalid("enabled", "say whether the backup is on, or change its remote, interval or the secret it uses");

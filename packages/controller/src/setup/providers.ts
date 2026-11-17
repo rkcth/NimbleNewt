@@ -7,6 +7,7 @@ import type { RoutingBody } from "../routing/index.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import { providerSecretRefusal } from "./reserved-secrets.js";
 import { BACKEND_KINDS } from "../inference-cache/profile.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
@@ -56,7 +57,7 @@ function checkEndpoint(value: unknown, field: string): string {
   return raw.replace(/\/+$/, "");
 }
 
-function checkSpec(raw: unknown, i: number): ProviderSpec {
+function checkSpec(raw: unknown, i: number, kept: readonly string[]): ProviderSpec {
   const at = `providers[${i}]`;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return invalid(at, "must be an object");
   const e = raw as Record<string, unknown>;
@@ -70,6 +71,8 @@ function checkSpec(raw: unknown, i: number): ProviderSpec {
     const c = text(e["credentialName"], `${at}.credentialName`, { min: 1, max: 64 });
     // A key pasted where its name belongs would be recorded in the clear: refuse anything that is not a plain secret name, or that the redactor recognises as a key.
     if (!SECRET_NAME.test(c) || redactText(c) !== c) invalid(`${at}.credentialName`, "must be the NAME of a secret in the secret store (letters, digits, '.', '_' or '-'); never the key itself");
+    const why = providerSecretRefusal(c, kept);
+    if (why !== undefined) invalid(`${at}.credentialName`, `${why}; name another secret for this provider's key`);
     credentialName = c;
   }
   let kind: string | undefined;
@@ -97,9 +100,11 @@ function checkSpec(raw: unknown, i: number): ProviderSpec {
 export class SetupProviderService {
   readonly #runner: CommandRunner;
   readonly #rules: ListRules | undefined;
-  private constructor(runner: CommandRunner, rules: ListRules | undefined) { this.#runner = runner; this.#rules = rules; }
+  readonly #kept: () => readonly string[];
+  private constructor(runner: CommandRunner, rules: ListRules | undefined, kept: () => readonly string[]) { this.#runner = runner; this.#rules = rules; this.#kept = kept; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}, rules?: ListRules): SetupProviderService { return new SetupProviderService(new CommandRunner(storage, epoch, options), rules); }
+  /** `kept` gives the secret names the configuration keeps for something else (the database address, the transfer targets', a renamed backup signing key); read at each add. The owner's credential and the fixed names are always refused. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}, rules?: ListRules, kept: () => readonly string[] = () => []): SetupProviderService { return new SetupProviderService(new CommandRunner(storage, epoch, options), rules, kept); }
 
   async add(owner: Principal, command: AddProviders): Promise<{ revision: number; replayed: boolean; providers: readonly string[]; routes: readonly string[] }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not edit the model providers; only the owner does`);
@@ -107,7 +112,7 @@ export class SetupProviderService {
     const r = await this.#runner.command("setup.providers.add", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "providers", "expectedRevision"]);
       if (!Array.isArray(command.providers) || command.providers.length < 1 || command.providers.length > 10) return invalid("providers", "must list 1 to 10 providers");
-      const specs = command.providers.map(checkSpec);
+      const specs = command.providers.map((p, i) => checkSpec(p, i, this.#kept()));
       if (new Set(specs.map((s) => s.name.toLowerCase())).size !== specs.length) invalid("providers", "names a provider twice");
       return {
         payload: { providers: specs as unknown as JsonObject[] },
