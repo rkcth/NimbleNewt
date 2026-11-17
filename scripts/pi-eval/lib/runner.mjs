@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
+import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
 
@@ -300,7 +301,8 @@ export async function runOne(ctx, task, variantName, repeat) {
     const leaked = await leakedHidden({ repo: ctx.repo, solution: task.solution, files: [...task.hiddenFiles, ...(task.acceptance?.support ?? [])], dir });
     if (leaked.length > 0) throw new Error(`hidden files already present at the base: ${leaked.join(", ")}`);
     if (task.setup) {
-      const s = await runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: { ...task.setup.env, ...mark }, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log"), onSpawn: (child) => ctx.children?.add(child) });
+      // The bench's own build holds a test slot when one is given (ctx.testSlot); the agent's work never does.
+      const s = await withSlot(ctx.testSlot, () => runCommand(expandArgv(task.setup.argv, { worktree: dir, worktreeUrl: pathToFileURL(dir).href }), { cwd: join(dir, ...(task.setup.cwd ?? ".").split("/")), env: { ...task.setup.env, ...mark }, timeoutMs: 20 * 60_000, outFile: join(artifacts, "setup.log"), onSpawn: (child) => ctx.children?.add(child) }), { log });
       record.setupExitCode = s.code;
     }
     const template = await readFile(variant.promptPath, "utf8");
@@ -335,22 +337,24 @@ export async function runOne(ctx, task, variantName, repeat) {
     await writeFile(join(artifacts, "diffstat.txt"), `${ch.fullStat}\n`);
     const onSpawn = (child) => ctx.children?.add(child);
     let hidden, shipped = null;
-    if (task.acceptance) {
-      // Scored: the acceptance suite alone (only what the prompt pins). Then, for information only, the card's shipped
-      // test files, which also carry wording later review rounds settled on.
-      log("copying the acceptance tests in and running them");
-      await copyAcceptance({ repo: ctx.repo, task, dir });
-      hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
-      killProcessesInSync(dir);
-      log("copying the shipped tests in and running them (informational)");
-      await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
-      const s = await runSuite({ task, suite: { hiddenFiles: task.hiddenFiles, testFiles: task.testFiles }, dir, artifacts, prefix: "shipped", onSpawn, env: mark });
-      shipped = { passed: s.passed, built: s.built, interfaceMismatch: s.interfaceMismatch, tests: s.tests, pass: s.pass, fail: s.fail };
-    } else {
-      log("copying the hidden tests in and running them");
-      await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
-      hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
-    }
+    await withSlot(ctx.testSlot, async () => {
+      if (task.acceptance) {
+        // Scored: the acceptance suite alone (only what the prompt pins). Then, for information only, the card's shipped
+        // test files, which also carry wording later review rounds settled on.
+        log("copying the acceptance tests in and running them");
+        await copyAcceptance({ repo: ctx.repo, task, dir });
+        hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
+        killProcessesInSync(dir);
+        log("copying the shipped tests in and running them (informational)");
+        await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+        const s = await runSuite({ task, suite: { hiddenFiles: task.hiddenFiles, testFiles: task.testFiles }, dir, artifacts, prefix: "shipped", onSpawn, env: mark });
+        shipped = { passed: s.passed, built: s.built, interfaceMismatch: s.interfaceMismatch, tests: s.tests, pass: s.pass, fail: s.fail };
+      } else {
+        log("copying the hidden tests in and running them");
+        await copyHidden({ repo: ctx.repo, solution: task.solution, files: task.hiddenFiles, dir });
+        hidden = await runHiddenTests({ task, dir, artifacts, onSpawn, env: mark });
+      }
+    }, { log });
     const marks = [...(ctx.referenceDirs ?? [ctx.repo]), task.solution.slice(0, 8), ctx.resultsDir].filter(Boolean);
     // Watched roots: the reference checkouts, the directory that holds them (sibling worktrees carry merged solutions),
     // the results, and the work root's siblings. The run's own checkout is never counted.
