@@ -35,16 +35,16 @@ if (args["check-slots"]) {
 // Radiance (--provider radiance --model <id>): the key comes from Pi's own config and goes only into the Authorization header. Before
 // anything else (no provider call, budget untouched) GET /stats must say nothing is in flight, running or waiting; the server's
 // /stats and /sessions are read again after the meeting and both readings go into server.json in the run directory.
+// The same check covers a radiance:<model> spec in a mixed roster (--chair / --members); specs.mjs also runs it (once per process)
+// before it builds any Radiance provider, so a route this test misses still cannot reach the server without it.
 let radiance;
-if (kind === "radiance") {
-  const { radianceConfig, readRadiance, radianceIdle } = await import("./lib/radiance.mjs");
-  const cfg = radianceConfig();
-  let before;
-  try { before = await readRadiance(cfg.baseUrl, cfg.apiKey); } catch (e) { console.log(`Radiance check: REFUSED (${e.message})`); process.exit(3); }
-  const idle = radianceIdle(before.stats);
-  console.log(`Radiance check: ${idle.ok ? "idle" : "REFUSED"} (${idle.why})`);
-  if (!idle.ok) process.exit(3);
-  radiance = { cfg, before, readRadiance };
+const radianceSpec = (s) => typeof s === "string" && /(^|[=,])radiance:/.test(s);
+if (kind === "radiance" || radianceSpec(args.chair) || radianceSpec(args.members)) {
+  const { radianceGate, readRadiance, RadianceRefused } = await import("./lib/radiance.mjs");
+  let g;
+  try { g = await radianceGate(); } catch (e) { if (!(e instanceof RadianceRefused)) throw e; console.log(e.message); process.exit(3); }
+  console.log(`Radiance check: idle (${g.why})`);
+  radiance = { cfg: g.cfg, before: g.before, readRadiance };
 }
 
 let provider;

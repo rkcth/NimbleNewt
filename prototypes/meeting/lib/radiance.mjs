@@ -48,6 +48,41 @@ export async function readRadiance(root, apiKey, { fetchImpl = fetch, timeoutMs 
   return { at: new Date().toISOString(), stats: statsOf(stats), sessions };
 }
 
+// The refusal of the idle check; run.mjs and checkpoint.mjs turn it into exit code 3 before anything else is sent or written.
+export class RadianceRefused extends Error {
+  constructor(why) { super(`Radiance check: REFUSED (${why})`); this.name = "RadianceRefused"; this.why = why; }
+}
+
+// The idle check, once per process, on every way of reaching Radiance: run.mjs --provider radiance, a radiance:<model> spec in a
+// mixed roster (--chair / --members), and checkpoint.mjs --spec radiance:<model>. specs.mjs awaits it before it builds a Radiance
+// provider, so no route can build one without it. The result (or the refusal) is kept, so the reading is taken only once.
+let gate;
+export function radianceGate({ read = readRadiance } = {}) {
+  gate ??= (async () => {
+    const cfg = radianceConfig();
+    let before;
+    try { before = await read(cfg.baseUrl, cfg.apiKey); } catch (e) { throw new RadianceRefused(e.message); }
+    const idle = radianceIdle(before.stats);
+    if (!idle.ok) throw new RadianceRefused(idle.why);
+    return { cfg, before, why: idle.why };
+  })();
+  return gate;
+}
+
+// One request at a time on the shared server: every call through any Radiance provider in this process waits until the previous one
+// has ended, whatever the variant's `parallel` says (the blind round and the ballots otherwise run up to 4 calls at once).
+let tail = Promise.resolve();
+export function oneAtATime(provider) {
+  return {
+    ...provider,
+    chat(req) {
+      const run = tail.then(() => provider.chat(req));
+      tail = run.catch(() => {});
+      return run;
+    },
+  };
+}
+
 // What one run did to the shared server, from a reading before and one after (other users' requests in between are included).
 export function serverDelta(before, after) {
   const n = (o, k) => (typeof o?.stats?.[k] === "number" ? o.stats[k] : NaN);

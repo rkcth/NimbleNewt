@@ -397,8 +397,9 @@ test("Radiance idle check: idle only when in_flight, running and waiting are all
   assert.equal(serverRoot("http://127.0.0.1:8002/v1/"), "http://127.0.0.1:8002");
 });
 
-async function radianceStandIn(statsBody) {
+async function radianceStandIn(statsBody, { delayMs = 0 } = {}) {
   const seen = [];
+  const chat = { inFlight: 0, maxInFlight: 0 };
   const KEY = "test-key-7f3a9c1e5b2d";
   const server = createServer((req, res) => {
     const chunks = [];
@@ -408,7 +409,9 @@ async function radianceStandIn(statsBody) {
       res.setHeader("content-type", "application/json");
       if (req.url === "/stats") return res.end(JSON.stringify({ ...statsBody, total_requests: seen.length, checkpoints_written: 3, ckpt_evictions: { retention: 0, store_full: 0 } }));
       if (req.url === "/sessions") return res.end(JSON.stringify({ sessions: [{ snapshots: 1, tokens: 2048 }] }));
-      if (req.url === "/v1/chat/completions") return res.end(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: 'STANCE: for\nSTATEMENT: fine as written\nTLDR: none\nVOTE: yes\nOBJECT: no\nRULING: proceed\nREASON: fine\n{"questions":[],"excerpts":[]}' } }], usage: { prompt_tokens: 3000, completion_tokens: 400, prompt_tokens_details: { cached_tokens: 2048 }, completion_tokens_details: { reasoning_tokens: 360 } } }));
+      if (req.url === "/v1/chat/completions") { chat.inFlight += 1; chat.maxInFlight = Math.max(chat.maxInFlight, chat.inFlight); }
+      const answer = (body) => setTimeout(() => { if (req.url === "/v1/chat/completions") chat.inFlight -= 1; res.end(body); }, req.url === "/v1/chat/completions" ? delayMs : 0);
+      if (req.url === "/v1/chat/completions") return answer(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: 'STANCE: for\nSTATEMENT: fine as written\nTLDR: none\nVOTE: yes\nOBJECT: no\nRULING: proceed\nREASON: fine\n{"questions":[],"excerpts":[]}' } }], usage: { prompt_tokens: 3000, completion_tokens: 400, prompt_tokens_details: { cached_tokens: 2048 }, completion_tokens_details: { reasoning_tokens: 360 } } }));
       res.statusCode = 404; res.end("{}");
     });
   });
@@ -429,7 +432,7 @@ globalThis.fetch = (url, { method = "GET", headers = {}, body } = {}) => new Pro
   req.end();
 });
 `);
-  return { server, seen, home, KEY };
+  return { server, seen, home, KEY, chat };
 }
 const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--quiet", ...extra], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
 
@@ -471,4 +474,51 @@ test("Radiance runner: on an idle server the meeting runs, reasoning tokens are 
     assert.equal(row.visibleMedian, 40);
     assert.equal(row.reasoningPctOfOutput, 90);
   } finally { server.close(); if (outDir) rmSync(outDir, { recursive: true, force: true }); }
+});
+
+// Review of the third local batch: the idle check is on every route to Radiance, and calls to it go one at a time.
+const runProto = (home, script, argv) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL(`../prototypes/meeting/${script}`, import.meta.url)), ...argv], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+
+test("Radiance idle check on the other routes: checkpoint.mjs --spec radiance: and a mixed roster with a radiance: chair or member are refused on a busy server before any chat request", async () => {
+  const { server, seen, home } = await radianceStandIn({ in_flight: 1, running: 0, waiting: 0 });
+  try {
+    const budget = join(home, "budget.json");
+    const runs = [
+      ["checkpoint.mjs", ["--spec", "radiance:m", "--budget", budget]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "radiance:m", "--budget", budget, "--quiet"]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "pi:none", "--members", "a1=radiance:m", "--budget", budget, "--quiet"]],
+    ];
+    for (const [script, argv] of runs) {
+      const { code, stdout, stderr } = await runProto(home, script, argv);
+      assert.equal(code, 3, `${script} ${argv.join(" ")}: ${stderr}`);
+      assert.match(stdout, /Radiance check: REFUSED .*in_flight=1/);
+    }
+    assert.equal(existsSync(budget), false);
+    assert.ok(seen.length >= 3 && seen.every((r) => r.method === "GET" && (r.url === "/stats" || r.url === "/sessions")), JSON.stringify(seen.map((r) => r.url)));
+  } finally { server.close(); }
+});
+
+test("Radiance calls go one at a time even when the variant asks for parallel calls (blind-first, parallel 4)", async () => {
+  const { server, seen, home, chat } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 }, { delayMs: 40 });
+  let outDir;
+  try {
+    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "radiance", "--model", "m", "--budget", join(home, "budget.json"), "--quiet"]);
+    assert.equal(code, 0, stderr);
+    outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
+    assert.ok(seen.filter((r) => r.url === "/v1/chat/completions").length > 3);
+    assert.equal(chat.maxInFlight, 1);
+  } finally { server.close(); if (outDir) rmSync(outDir, { recursive: true, force: true }); }
+});
+
+test("oneAtATime: a second call starts only after the first has ended, and a failed call does not stop the next one", async () => {
+  const { oneAtATime } = radianceLib;
+  let inFlight = 0, max = 0;
+  const order = [];
+  const inner = { name: "x", async chat({ id, fail }) { inFlight += 1; max = Math.max(max, inFlight); order.push(`start ${id}`); await new Promise((r) => setImmediate(r)); inFlight -= 1; order.push(`end ${id}`); if (fail) throw new Error("boom"); return { id }; } };
+  const p = oneAtATime(inner);
+  assert.equal(p.name, "x");
+  const results = await Promise.allSettled([p.chat({ id: 1 }), p.chat({ id: 2, fail: true }), p.chat({ id: 3 })]);
+  assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected", "fulfilled"]);
+  assert.equal(max, 1);
+  assert.deepEqual(order, ["start 1", "end 1", "start 2", "end 2", "start 3", "end 3"]);
 });
