@@ -29,6 +29,10 @@ const RECORD = "workspace-request";
 const OPEN = "workspace-open";
 /** One record per task: how many refresh rounds the author has made (card H12p), counted in the same write that records the finished request. */
 const ROUNDS = "workspace-rounds";
+/** One record per approved submission that was committed (card H12o). */
+const SUBMISSION_COMMIT = "submission-commit";
+const SUBMISSION_ID = /^sbm-[a-z2-7]{20}$/;
+const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const WORKSPACE_ID = /^wsr-[a-z2-7]{20}$/;
 /** A freeze set for this request says so in its reason (the quiesce writes the tag); recovery lifts only that one. */
 const frozenFor = (reason: string, requestId: string): boolean => /^(integration|landing|refresh|reapply|release|quarantine): the agent's work is being changed \(/.test(reason) && reason.endsWith(`(${requestId})`);
@@ -48,6 +52,8 @@ export interface WorkspaceCall {
    * host that cannot read the controller's settings. A local host reads the policy itself and ignores this.
    */
   readonly landing?: CarriedLanding;
+  /** A `release` of an approved submission only (card H12o): the submission and the base and tree that were approved. The host commits exactly that, once. */
+  readonly submission?: { readonly id: string; readonly base: string; readonly tree: string };
 }
 /** The owner's landing figures that travel to a remote host: the owner-set values only (branch, whether the commit permit is required, extra protected paths, whether the built-in protected list applies). */
 export interface CarriedLanding {
@@ -86,7 +92,11 @@ export interface WorkspaceRecordBody {
   readonly round?: number;
   /** The integrator lease a landing was made under (card P10), for the record. */
   readonly lease?: { readonly leaseId: string; readonly fence: number };
+  /** A `release` of an approved submission (card H12o): which submission, the base and tree that were approved, and who approved it (a reviewer, or `review_disabled_single_agent`). */
+  readonly submission?: { readonly id: string; readonly base: string; readonly tree: string; readonly approvedBy: string };
 }
+/** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
+export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
 export interface WorkspaceAnswer extends WorkspaceRecordBody { readonly id: string; readonly replayed: boolean }
 
 export interface WorkspaceDeps {
@@ -108,6 +118,11 @@ export interface WorkspaceDeps {
    * before the host is asked (a long quiesce may outlast the lease); it throws when the lease is not the caller's live hold on the landing branch. When absent (no lease service composed), landings are not gated here.
    */
   readonly landingLease?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<{ readonly leaseId: string; readonly fence: number } | void>;
+  /**
+   * Whether a code submission is approved (card H12o, `SubmissionService.approvalOf`). Needed for a `release` that names `submissionId`; without it such a release is `unavailable`. Asked when the request is made and again
+   * right before the host is asked (a review may say `changes` while the task is made quiet).
+   */
+  readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string } | undefined>;
 }
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -145,8 +160,8 @@ export class WorkspaceOpService {
    * Asks for the operation on a task's checkout. Answers with the recorded outcome (`done`, `refused`, `failed` or `uncertain`); it throws for a caller who may not ask, a malformed request, or a task that already has an
    * operation running (`unavailable`: ask again when it ends).
    */
-  async request(by: Principal, command: NoActor & { operation: WorkspaceOperation; taskId: string; reason: string; leaseId?: string; fence?: number }): Promise<WorkspaceAnswer> {
-    onlyKnown(command, ["commandId", "operation", "taskId", "reason", "leaseId", "fence"]);
+  async request(by: Principal, command: NoActor & { operation: WorkspaceOperation; taskId: string; reason: string; leaseId?: string; fence?: number; submissionId?: string }): Promise<WorkspaceAnswer> {
+    onlyKnown(command, ["commandId", "operation", "taskId", "reason", "leaseId", "fence", "submissionId"]);
     const operation = (WORKSPACE_OPERATIONS as readonly string[]).includes(command.operation) ? command.operation : invalid("operation", `must be one of ${WORKSPACE_OPERATIONS.join(", ")}`);
     if (operation === "reapply") invalid("operation", "reapply is the author's own refresh: the agent asks for it itself with work.refresh, while it works (to move a clean checkout to the shared head, ask for refresh)");
     const taskId = checkTaskId(command.taskId);
@@ -163,6 +178,12 @@ export class WorkspaceOpService {
     let leased: { leaseId: unknown; fence: unknown } | undefined = operation === "landing" && this.#deps.landingLease !== undefined ? { leaseId: command.leaseId, fence: command.fence } : undefined;
     if (leased !== undefined) { const shown = await this.#deps.landingLease!(by, { taskId, projectId, ...leased }); if (shown !== undefined) leased = { leaseId: shown.leaseId, fence: shown.fence }; }
     else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing is made under an integrator lease");
+    // A release may name an approved submission of the task (card H12o): checked before anything is recorded or frozen, and again right before the host is asked.
+    let submission: WorkspaceRecordBody["submission"];
+    if (command.submissionId !== undefined) {
+      if (operation !== "release") invalid("submissionId", "only a release commits a submission");
+      submission = await this.#approved(command.submissionId, taskId);
+    }
     // One operation per task: two would race on the same checkout and one's release would lift the other's freeze.
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
     this.#busy.set(taskId, id);
@@ -172,11 +193,12 @@ export class WorkspaceOpService {
       const intended = (await this.#deps.attempts?.live(taskId)) ?? [];
       let assignee: string | undefined;
       try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
-      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }) };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }) }, body: () => make, also: () => this.#openChange(taskId, id) });
+      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }) };
+      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }) }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
       const pinned = leased;
-      const outcome = await this.#run(id, started.body, pinned === undefined ? undefined : async () => { await this.#deps.landingLease!(by, { taskId, projectId, ...pinned }); });
+      const approvedNow = submission;
+      const outcome = await this.#run(id, started.body, pinned === undefined ? approvedNow === undefined ? undefined : async () => { await this.#stillApproved(approvedNow, taskId); } : async () => { await this.#deps.landingLease!(by, { taskId, projectId, ...pinned }); });
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
   }
@@ -239,6 +261,29 @@ export class WorkspaceOpService {
       const outcome = await this.#run(id, started.body);
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
+  }
+
+  /** The approved submission a release names (card H12o): a code submission of this very task whose newest review approves it. Anything else is refused before anything is recorded. */
+  async #approved(value: unknown, taskId: string): Promise<NonNullable<WorkspaceRecordBody["submission"]>> {
+    if (typeof value !== "string" || !SUBMISSION_ID.test(value)) return invalid("submissionId", "is not a submission ID");
+    if (this.#deps.approvalOf === undefined) throw new DomainError("unavailable", "submissions are not known to this controller, so an approved submission cannot be committed now");
+    const a = await this.#deps.approvalOf(value);
+    if (a === undefined || a.taskId !== taskId) throw new DomainError("not_found", `submission ${value} is not a code submission of task ${taskId}`);
+    if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
+    if (!OID.test(a.base) || !OID.test(a.tree)) throw new DomainError("invalid_command", `submission ${value} does not name a base commit and a tree`, { field: "submissionId" });
+    return { id: value, base: a.base, tree: a.tree, approvedBy: a.approvedBy.slice(0, 200) };
+  }
+
+  /** Right before the host is asked: the submission is still approved, for the same base and tree. */
+  async #stillApproved(s: NonNullable<WorkspaceRecordBody["submission"]>, taskId: string): Promise<void> {
+    const now = await this.#approved(s.id, taskId);
+    if (now.base !== s.base || now.tree !== s.tree) throw new DomainError("review_invalid", `submission ${s.id} changed`, { field: "submissionId" });
+  }
+
+  /** The commit made for an approved submission (card H12o), when one was recorded. It takes no caller, so it is not an API operation (the release's own record, `workspace.get`, names it to whoever may read that). */
+  async submissionCommit(submissionId: string): Promise<SubmissionCommitBody | undefined> {
+    if (typeof submissionId !== "string" || !SUBMISSION_ID.test(submissionId)) return undefined;
+    return (await this.#runner.get(SUBMISSION_COMMIT, submissionId))?.body as unknown as SubmissionCommitBody | undefined;
   }
 
   /** How many refresh rounds the task's author has made so far (card H12p). It takes no caller, so it is not an API operation: the code that builds the services passes it to the submission. */
@@ -363,6 +408,11 @@ export class WorkspaceOpService {
       // A freeze that could not be lifted stays in the record (and the open index), so recovery lifts it later and it is never left unseen.
       return clean({ ...rest, state, finishedAt: this.#runner.now(), ...(status.unreleased.length === 0 ? {} : { held: [...new Set(status.unreleased)] }), ...more });
     };
+    // An approved submission already committed (card H12o) is answered from its record: the host is not asked and nothing is made quiet, so asking again never makes a second commit.
+    if (body.operation === "release" && body.submission !== undefined) {
+      const made = await this.submissionCommit(body.submission.id);
+      if (made !== undefined) return done("done", { summary: `submission ${body.submission.id} was already committed as ${made.commitId.slice(0, 12)} (request ${made.requestId}); nothing was done`, detail: json({ committed: true, alreadyRecorded: true, commit: made.commitId, parent: made.parent, tree: made.tree, submission: made.submissionId, changed: false }) });
+    }
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
     if (port === undefined) return done("refused", { summary: "no host that can do this holds the checkout of that task, so nothing was done" });
@@ -390,9 +440,9 @@ export class WorkspaceOpService {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
         // The quiesce may have taken a while: the lease is shown once more right before the host writes anything, and a lease that is no longer the caller's live hold means nothing is asked of the host.
         if (stillLeased !== undefined) {
-          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
+          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
         }
-        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }) });
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
           const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
           changed = found.changed !== false;
@@ -414,7 +464,7 @@ export class WorkspaceOpService {
       }, async (attemptId) => {
         if (notLanded !== undefined && this.#deps.attempts?.tell !== undefined) { if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${notLanded} (request ${id}).`)) told.push(attemptId); return; }
         if (!changed || body.operation === "quarantine" || this.#deps.attempts?.tell === undefined) return;
-        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch (the landed files wait, uncommitted, to be committed by the integrator or owner)" : "was integrated into the shared workspace";
+        const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch (the landed files wait, uncommitted, to be committed by the integrator or owner)" : body.operation === "release" ? "was committed by the platform in the task's own history (your files did not change)" : "was integrated into the shared workspace";
         if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${what} (request ${id}).`)) told.push(attemptId);
       }, id, status);
       // A landing leaves its files uncommitted in the shared tree, and refuses while an earlier one's files wait there: somebody has to commit or clear them, so the owner is told (the integrator is whoever holds that role; the notice goes to the owner's inbox).
@@ -450,13 +500,27 @@ export class WorkspaceOpService {
       const round = counts ? ((counter?.body as unknown as { rounds?: number } | undefined)?.rounds ?? 0) + 1 : undefined;
       const final: WorkspaceRecordBody = round === undefined ? outcome : { ...outcome, round };
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
         return { ...final, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
       }
     }
     throw new DomainError("unavailable", "the outcome of the workspace operation could not be recorded; the request says uncertain");
+  }
+
+  /**
+   * The record of an approved submission's commit (card H12o), written with the release that made or found it: only when the host answered for this very submission with a commit whose parent and tree are the approved base and
+   * tree (a host that dropped the submission and made a plain release commit is not taken as having committed it). Written once: a record already there is left as it is.
+   */
+  async #commitChange(requestId: string, final: WorkspaceRecordBody): Promise<Change[]> {
+    const s = final.submission;
+    if (final.operation !== "release" || s === undefined || final.state !== "done") return [];
+    const d = (final.detail ?? {}) as { committed?: unknown; alreadyRecorded?: unknown; commit?: unknown; parent?: unknown; tree?: unknown; submission?: unknown; recovered?: unknown };
+    if (d.committed !== true || d.alreadyRecorded === true || d.submission !== s.id || typeof d.commit !== "string" || !OID.test(d.commit) || d.parent !== s.base || d.tree !== s.tree) return [];
+    if ((await this.#runner.get(SUBMISSION_COMMIT, s.id)) !== undefined) return [];
+    const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true };
+    return [{ type: "create", ref: { kind: SUBMISSION_COMMIT, id: s.id }, body: json(body) }];
   }
 
   /** The write of a task's refresh-round count: created at the first round, then updated against the revision that was read. */

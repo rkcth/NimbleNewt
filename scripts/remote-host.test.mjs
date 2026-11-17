@@ -24,9 +24,11 @@ function packages(scriptsOptions = {}) {
   class WorkspaceResponder { constructor(options) { seen.responderOptions = options; } handle() {} }
   class HostPoller { constructor(options) { seen.poller = options; } run() { return new Promise((resolve) => { seen.stopPoller = resolve; }); } }
   class PiStateHost { constructor(options) { seen.piStateOptions = options; } async answer() { return { ok: true, summary: "x" }; } }
-  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost };
+  // Card L04e: the look at a task's recorded files, here a stand-in that records what it was asked and where it was told to look.
+  const entriesObserver = (options) => { (seen.observerOptions ??= []).push(options); return async (scope, entries, locate) => { (seen.observed ??= []).push({ where: await locate(scope.taskId, scope.projectId), scope, entries }); return {}; }; };
+  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost, entriesObserver };
   class LocalConversationStores { constructor(options) { seen.storesOptions = options; this.source = { list: async () => [] }; this.final = () => undefined; } }
-  class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
+  class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } locate(call) { return call.taskId === "task-none" ? undefined : { checkout: `/host/work/${call.projectId}/${call.taskId}/checkout` }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
   const worker = {
     SandboxLauncher: { create: async () => ({ capacity: { available: true, backend: "bubblewrap" }, stop: async () => { seen.launcherStopped = true; } }) },
     GitBridge: { create: async () => ({}) },
@@ -219,6 +221,23 @@ test("the remote host keeps its agents' conversation stores in backups: the resp
     seen.stopPoller?.();
     await host.stop();
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("the remote host looks at a task's recorded files in the checkout it made for the task, under the paths the controller names; with no checkout there is nothing to look at (card L04e)", { skip: LINUX_ONLY }, async () => {
+  const { seen, load } = packages();
+  const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config());
+  try {
+    assert.equal(typeof seen.responderOptions.observe, "function", "the controller reaches the look over the workspace channel");
+    const scope = { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: "proj-aaaaaaaaaaaaaaaaaaaa" };
+    const entries = [{ id: "dpm-1", kind: "file", key: "src/a.ts" }];
+    assert.deepEqual(await seen.responderOptions.observe(scope, entries, ["src"]), {});
+    assert.deepEqual(seen.observed[0].where, { root: "/host/work/proj-aaaaaaaaaaaaaaaaaaaa/task-aaaaaaaaaaaaaaaaaaaa/checkout", paths: ["src"] });
+    assert.deepEqual(seen.observed[0].entries, entries);
+    await seen.responderOptions.observe({ taskId: "task-none", projectId: scope.projectId }, entries, []);
+    assert.equal(seen.observed[1].where, undefined, "no checkout of the task on this host: nowhere to look");
+    assert.equal(seen.observerOptions.length, 1, "one observer serves every look, so a read that hangs is counted across requests");
+    assert.ok(seen.observerOptions[0].timeoutMs < 8_000, "the host's look ends before the controller stops waiting for its answer");
+  } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
 });
 
 test("the remote host checks a done: its worker is given the check, and so is the responder; a check names only a real attempt ID (card H12a)", { skip: LINUX_ONLY }, async () => {

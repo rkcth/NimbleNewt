@@ -7,7 +7,9 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { CommandRunner } from "../domain/runner.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
+import { stagedSubmit } from "../work-end/index.js";
 
 after(stopServer);
 
@@ -23,7 +25,7 @@ const OWN = /^agent:/;
 const pass = (boundTo: string) => [{ check: "tests", result: "pass" as const, boundTo }];
 
 for (const backend of backends) {
-  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
+  const suite = (name: string, body: (c: { open(roles: (id: string, scope: { projectId: string; taskId: string }) => Promise<readonly string[]>, extra?: SubmissionOptions): SubmissionService; other: { task: string }; rawBody(id: string): Promise<unknown>; plant(body: SubmissionBody): Promise<string>; plantOld(by: Principal, commandId: string, body: SubmissionBody): Promise<string>; projects: { task: string; other: string }; svc: SubmissionService; roles: Map<string, string[]>; agent(name: string, roles: string[], granted?: boolean): Promise<Principal>; owner: Principal; task: string }) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const world = await backend.open();
       try {
@@ -42,7 +44,7 @@ for (const backend of backends) {
           return p;
         };
         const svc = SubmissionService.withEpoch(world.storage, projects.epoch, async (id) => roles.get(id) ?? [], options);
-        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
+        await body({ svc, roles, agent, owner, task, other: { task: task2 }, projects: { task: project, other: project2 }, plant: async (b) => { const id = derivedId("sbm", `plant-${cid("x")}`); await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null, plant: id }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: {} }; } })); return id; }, plantOld: async (by, commandId, b) => { const scoped = scopedCommandId(by.id, commandId); const id = derivedId("sbm", scoped); /* exactly what record() stored before card Q01b's attemptId: the body, compared with the time left out */ await new CommandRunner(world.storage, projects.epoch, options).command("submission.record", { commandId: scoped, actor: by.id }, async () => ({ payload: { ...(b as unknown as JsonObject), submittedAt: null }, build: async () => { const ref = { kind: "submission", id }; return { ref, creates: true, changes: [{ type: "create" as const, ref, body: b as unknown as JsonObject }], detail: { taskId: b.taskId, kind: b.kind, role: b.role } }; } })); return id; }, rawBody: async (id) => (await world.storage.getAggregate({ kind: "submission", id }))?.body, open: (r, extra = {}) => SubmissionService.withEpoch(world.storage, projects.epoch, r, { ...options, ...extra }) });
       } finally { await world.close(); }
     });
 
@@ -194,6 +196,114 @@ for (const backend of backends) {
     await gated.record(ann, { commandId: cid("s"), ...code });
     attempt = { ownerId: ann.id, state: "succeeded" };
     await gated.record(ann, { commandId: cid("s"), ...code, tree: T2 });
+  });
+
+  suite("a code submission records the attempt it came from; a replay keeps the first attempt; non-code kinds name none (card Q01b, a record per attempt)", async (c) => {
+    const ann = await c.agent("ann", ["author", "docs"]);
+    const bob = await c.agent("bob", ["reviewer"]);
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-first" };
+    const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
+    const cmd = { commandId: cid("s"), taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    // the attempt is the controller's observation: an agent naming one (its own or another task's) is refused, in every kind
+    await refuses("invalid_command", () => gated.record(ann, { ...cmd, commandId: cid("s"), attemptId: "att-other" } as never), /attemptId: is not a field/);
+    await refuses("invalid_command", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST, attemptId: "att-first" } as never), /attemptId: is not a field/);
+    const first = await gated.record(ann, cmd);
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+    // the next attempt of the same task (a retry) submits again: its own record names its own attempt
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-second" };
+    const second = await gated.record(ann, { ...cmd, commandId: cid("s"), tree: T2 });
+    assert.equal((await gated.get(ann, second.id))?.attemptId, "att-second");
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first", "an earlier record keeps its attempt");
+    // a replay of the first command under the later attempt is the first record, unchanged (the attempt is observed, not part of the request)
+    const again = await gated.record(ann, cmd);
+    assert.deepEqual([again.id, again.replayed], [first.id, true]);
+    assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+    // review and document records name no attempt: they are not made by the task's code attempt
+    const review = await gated.record(bob, { commandId: cid("s"), taskId: c.task, kind: "review", role: "reviewer", subject: first.id, verdict: "approve" });
+    assert.equal((await c.rawBody(review.id) as SubmissionBody).attemptId, undefined);
+    const doc = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "document", role: "docs", artifactDigest: DIGEST });
+    assert.equal((await c.rawBody(doc.id) as SubmissionBody).attemptId, undefined);
+    // without the attempt port nothing is named (as before)
+    const plain = await c.svc.record(ann, { ...cmd, commandId: cid("s") });
+    assert.equal((await c.rawBody(plain.id) as SubmissionBody).attemptId, undefined);
+    // a record from before this field (made without the attempt port, so the same compared payload as before) replays cleanly under the attempt port and gains no attempt
+    const old = { ...cmd, commandId: cid("s"), tree: T2 };
+    const oldMade = await c.svc.record(ann, old);
+    const oldAgain = await gated.record(ann, old);
+    assert.deepEqual([oldAgain.id, oldAgain.revision, oldAgain.replayed], [oldMade.id, oldMade.revision, true]);
+    assert.equal((await c.rawBody(oldMade.id) as SubmissionBody).attemptId, undefined, "no backfill");
+    // the same with a record stored in the format written before this change (a frozen copy, so a change of the compared payload cannot hide in both sides)
+    const legacy = { ...cmd, commandId: cid("s"), tree: "f".repeat(40) };
+    const legacyId = await c.plantOld(ann, legacy.commandId, { taskId: c.task, projectId: c.projects.task, kind: "code", role: "author", submittedBy: ann.id, submittedAt: options.clock(), makesCommit: false, base: BASE, tree: legacy.tree, patchId: PATCH, refreshRound: 0, evidence: [] });
+    const legacyAgain = await gated.record(ann, legacy);
+    assert.deepEqual([legacyAgain.id, legacyAgain.replayed], [legacyId, true], "a record from before attemptId replays");
+    assert.equal((await gated.get(ann, legacyId))?.attemptId, undefined);
+    // after the attempt has ended (or another agent's attempt took over), a repeat still answers with the first record; a new code submission is refused
+    for (const later of [undefined, { ownerId: ann.id, state: "failed", attemptId: "att-second" }, { ownerId: bob.id, state: "active", attemptId: "att-third" }]) {
+      attempt = later;
+      const repeat = await gated.record(ann, cmd);
+      assert.deepEqual([repeat.id, repeat.replayed], [first.id, true]);
+      assert.equal((await gated.get(ann, first.id))?.attemptId, "att-first");
+      await refuses("forbidden", () => gated.record(ann, { ...cmd, commandId: cid("s") }), /owns the task's current attempt/);
+    }
+    // the same command ID with a different request is still a conflict, not a replay
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-fourth" };
+    await refuses("command_conflict", () => gated.record(ann, { ...cmd, tree: T2 }));
+  });
+
+  suite("the ending's submission (work.end) is recorded only while its own attempt is the task's current one, and names that attempt (card Q01b second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    // the agent's earlier attempt ended (its lease ran out) and a newer attempt of the same agent took over; the earlier attempt's ending then resumes (after a restart) and reaches its submit step
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-new" };
+    const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
+    const staged: string[] = [];
+    const submit = stagedSubmit({ stage: async (a) => { staged.push(a.attemptId); return { base: BASE, tree: T1, patchId: PATCH, files: [] }; }, submissions: gated, principalOf: async () => ann });
+    const ending = (attemptId: string) => ({ attemptId, taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true, hostId: "h", generation: 1 }) as never;
+    await refuses("forbidden", () => submit(ending("att-old"), BASE, cid("end")), /no longer the task's current attempt/);
+    assert.deepEqual(staged, ["att-old"]);
+    // the current attempt's own ending is recorded under it
+    const key = cid("end");
+    const made = await submit(ending("att-new"), BASE, key);
+    assert.equal((await gated.get(ann, made.submissionId))?.attemptId, "att-new");
+    // its repeat after the attempt ended (or another took over) is the same record
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-later" };
+    assert.equal((await submit(ending("att-new"), BASE, key)).submissionId, made.submissionId);
+    assert.equal((await gated.get(ann, made.submissionId))?.attemptId, "att-new");
+    // the same check straight on the service: `from` must be the current attempt
+    await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-new" }), /no longer the task's current attempt/);
+    const direct = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-later" });
+    assert.equal((await gated.get(ann, direct.id))?.attemptId, "att-later");
+  });
+
+  suite("a repeat of a code submission is compared with what the controller observed when it was first made: a later refresh round or a change of reviewers does not turn it into a conflict (card Q01b second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    let rounds = 1;
+    let reviewers: string[] = [];
+    let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-1" };
+    const svc = c.open(async (id) => c.roles.get(id) ?? [], { refreshRounds: async () => rounds, reviewersAvailableIn: async () => reviewers, attemptOf: async () => attempt });
+    const cmd = { commandId: cid("s"), taskId: c.task, kind: "code" as const, role: "author", base: BASE, tree: T1, patchId: PATCH };
+    const first = await svc.record(ann, cmd);
+    const stored = await c.rawBody(first.id) as SubmissionBody;
+    assert.deepEqual([stored.refreshRound, stored.review, stored.attemptId], [1, { required: false, reason: "review_disabled_single_agent" }, "att-1"]);
+    // the attempt ended, a later attempt refreshed twice, and a reviewer joined
+    attempt = { ownerId: ann.id, state: "active", attemptId: "att-2" };
+    rounds = 3; reviewers = ["agent:rev"];
+    for (const again of [cmd, { ...cmd, refreshRound: 1 }]) {
+      const r = await svc.record(ann, again);
+      assert.deepEqual([r.id, r.revision, r.replayed], [first.id, first.revision, true], "the first record, unchanged");
+    }
+    assert.deepEqual(await c.rawBody(first.id), stored);
+    // a repeat that asks for something else is still a conflict; a new command counts today's round and reviewers
+    await refuses("command_conflict", () => svc.record(ann, { ...cmd, tree: T2 }));
+    const next = await svc.record(ann, { ...cmd, commandId: cid("s"), tree: T2 });
+    const nextBody = await c.rawBody(next.id) as SubmissionBody;
+    assert.deepEqual([nextBody.refreshRound, nextBody.review, nextBody.attemptId], [3, { required: true }, "att-2"]);
+    // another agent's same command ID is its own command: nothing of ann's record is used or shown
+    attempt = { ownerId: bob.id, state: "active", attemptId: "att-3" };
+    const bobs = await svc.record(bob, cmd);
+    assert.notEqual(bobs.id, first.id);
+    assert.deepEqual([(await c.rawBody(bobs.id) as SubmissionBody).refreshRound, (await c.rawBody(bobs.id) as SubmissionBody).submittedBy], [3, bob.id]);
   });
 
   suite("formats are size-capped and checked: digests, evidence names, role, artifact ID", async (c) => {

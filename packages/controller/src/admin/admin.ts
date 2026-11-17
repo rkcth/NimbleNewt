@@ -5,6 +5,7 @@ import { sandboxFor, type SandboxFacts } from "../environment/sandbox.js";
 import type { Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { ProviderEndpointBody } from "../setup/index.js";
+import { compatibility, type AgentWorkInput, type CompatView, type HostRuntimeInput, type PendingMigrationInput } from "./compat.js";
 
 /** The bounds of the administration reads: nothing here returns an unbounded list. */
 export const ADMIN_LIMITS = { settings: 300, providers: 50, models: 60, secrets: 100, hosts: 100, value: 1500 } as const;
@@ -24,6 +25,13 @@ export interface AdminDeps {
   readonly hosts: (by: Principal) => Promise<readonly { readonly hostId: string; readonly os?: string; readonly freshness: string; readonly identity: string }[]>;
   /** The operating system of this computer when the controller runs a worker host on it; absent when it does not. */
   readonly localOs?: string;
+  /** What the compatibility and migration status reads (card U08): the Node.js version running, what each host's worker last announced, where agents work, and the database migrations. Each is a plain read; absent: the status is unavailable. */
+  readonly compat?: {
+    readonly nodeVersion: string;
+    readonly hostRuntimes: (by: Principal) => Promise<readonly HostRuntimeInput[]>;
+    readonly agentWork: (by: Principal) => Promise<readonly AgentWorkInput[]>;
+    readonly migration: (by: Principal) => Promise<{ readonly schemaVersion: number; readonly latestKnown: number; readonly migrations: readonly PendingMigrationInput[] }>;
+  };
 }
 
 export type SettingState = "default" | "set" | "inherited" | "locked";
@@ -164,5 +172,21 @@ export class AdminViewService {
     const rows = hosts.slice(0, ADMIN_LIMITS.hosts).map((h) => ({ hostId: h.hostId, freshness: h.freshness, identity: h.identity, ...sandboxFor(h.os) }));
     const local = this.#d.localOs === undefined ? undefined : sandboxFor(this.#d.localOs);
     return { ...(local === undefined ? {} : { local }), hosts: rows, warn: (local?.warn ?? false) || rows.some((r) => r.warn), truncated: hosts.length > ADMIN_LIMITS.hosts };
+  }
+
+  /**
+   * Whether the runtimes in use are ones this version supports (Node.js, the worker protocol of each host) and what waits in the database, with the agents and operations each finding touches. A source that cannot be read
+   * is named in `problems` and leaves its part out; the rest still shows.
+   */
+  async compatibility(by: Principal): Promise<CompatView & { readonly problems: readonly string[] }> {
+    this.#owner(by, "read the compatibility status");
+    const c = this.#d.compat;
+    if (c === undefined) throw new DomainError("unavailable", "this controller does not read its compatibility status");
+    const problems: string[] = [];
+    const read = async <T>(what: string, run: () => Promise<T>, fallback: T): Promise<T> => { try { return await run(); } catch (e) { problems.push(`${what}: ${redactText(String((e as Error)?.message ?? e)).slice(0, 200)}`); return fallback; } };
+    const hosts = await read("the hosts", () => c.hostRuntimes(by), []);
+    const work = await read("the agents' work", () => c.agentWork(by), []);
+    const migration = await read("the migrations", () => c.migration(by), undefined);
+    return { ...compatibility({ node: c.nodeVersion, hosts, work, ...(migration === undefined ? {} : { migration }) }), problems };
   }
 }

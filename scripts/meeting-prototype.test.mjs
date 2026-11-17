@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -382,4 +382,179 @@ test("in digest mode the chair still reads the full text for its later calls, wh
   assert.match(casting.user, new RegExp(`STMT_${sc.agents[0].name} says`), "the chair reads the round 1 statements in full");
   const ballot = provider.prompts.find((p) => p.task === "ballot");
   assert.match(ballot.user, /DIGEST of #1 to #/, "members vote with the digest");
+});
+
+// Third local batch (Radiance): the idle check reads /stats, the key comes from Pi's config and goes only into the Authorization header.
+const radianceLib = await import(proto("lib/radiance.mjs"));
+test("Radiance idle check: idle only when in_flight, running and waiting are all stated as 0; the server delta and sessions add up", () => {
+  const { radianceIdle, sessionsOf, serverDelta, serverRoot } = radianceLib;
+  assert.equal(radianceIdle({ in_flight: 0, running: 0, waiting: 0 }).ok, true);
+  for (const s of [{ in_flight: 1, running: 0, waiting: 0 }, { in_flight: 0, running: 0, waiting: 2 }, { in_flight: 0, running: 0 }, { in_flight: "0", running: 0, waiting: 0 }, {}, null, undefined]) assert.equal(radianceIdle(s).ok, false, JSON.stringify(s));
+  assert.deepEqual(sessionsOf({ sessions: [{ snapshots: 2, tokens: 4000 }, { snapshots: 5, tokens: 12000 }, {}] }), { count: 3, snapshots: 7, tokens: 16000 });
+  assert.deepEqual(sessionsOf({}), { count: 0, snapshots: 0, tokens: 0 });
+  const d = serverDelta({ stats: { total_requests: 10, checkpoints_written: 5, ckpt_evictions: { retention: 1, store_full: 0 } }, sessions: { count: 4, snapshots: 9 } }, { stats: { total_requests: 30, checkpoints_written: 12, ckpt_evictions: { retention: 4, store_full: 0 } }, sessions: { count: 6, snapshots: 11 } });
+  assert.deepEqual(d, { requests: 20, checkpointsWritten: 7, evictionsRetention: 3, evictionsStoreFull: 0, sessionsBefore: 4, sessionsAfter: 6, snapshotsBefore: 9, snapshotsAfter: 11 });
+  assert.equal(serverRoot("http://127.0.0.1:8002/v1/"), "http://127.0.0.1:8002");
+});
+
+async function radianceStandIn(statsBody, { delayMs = 0 } = {}) {
+  const seen = [];
+  const chat = { inFlight: 0, maxInFlight: 0 };
+  const KEY = "test-key-7f3a9c1e5b2d";
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/stats") return res.end(JSON.stringify({ ...statsBody, total_requests: seen.length, checkpoints_written: 3, ckpt_evictions: { retention: 0, store_full: 0 } }));
+      if (req.url === "/sessions") return res.end(JSON.stringify({ sessions: [{ snapshots: 1, tokens: 2048 }] }));
+      if (req.url === "/v1/chat/completions") { chat.inFlight += 1; chat.maxInFlight = Math.max(chat.maxInFlight, chat.inFlight); }
+      const answer = (body) => setTimeout(() => { if (req.url === "/v1/chat/completions") chat.inFlight -= 1; res.end(body); }, req.url === "/v1/chat/completions" ? delayMs : 0);
+      if (req.url === "/v1/chat/completions") return answer(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: 'STANCE: for\nSTATEMENT: fine as written\nTLDR: none\nVOTE: yes\nOBJECT: no\nRULING: proceed\nREASON: fine\n{"questions":[],"excerpts":[]}' } }], usage: { prompt_tokens: 3000, completion_tokens: 400, prompt_tokens_details: { cached_tokens: 2048 }, completion_tokens_details: { reasoning_tokens: 360 } } }));
+      res.statusCode = 404; res.end("{}");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const home = mkdtempSync(join(tmpdir(), "nn-m00-home-")); dirs.push(home);
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(home, ".pi", "agent", "models.json"), JSON.stringify({ providers: { radiance: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: KEY } } }));
+  // The offline guard (when loaded) blocks fetch in the child runner, loopback included; this preload gives the child a fetch that
+  // reaches loopback addresses only, through node:http, so the tripwire still holds for anything else.
+  writeFileSync(join(home, "loopback-fetch.mjs"), `import { request } from "node:http";
+globalThis.fetch = (url, { method = "GET", headers = {}, body } = {}) => new Promise((resolve, reject) => {
+  const u = new URL(url);
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return reject(new Error("loopback only in this test"));
+  const req = request(u, { method, headers }, (res) => { const c = []; res.on("data", (d) => c.push(d)); res.on("end", () => { const t = Buffer.concat(c).toString(); resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: async () => JSON.parse(t), text: async () => t }); }); });
+  req.on("error", reject);
+  if (body) req.write(body);
+  req.end();
+});
+`);
+  return { server, seen, home, KEY, chat };
+}
+// The children find Pi's config through os.homedir(), which reads HOME on Linux and macOS but USERPROFILE on Windows, so both point
+// at the fake home (Windows CI run 44041210187 read the runner's real, absent home when only HOME was set).
+const fakeHomeEnv = (home) => ({ ...process.env, HOME: home, USERPROFILE: home });
+const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet", ...extra], { timeout: 120000, env: fakeHomeEnv(home) }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+
+test("Radiance runner: a busy server is refused before any chat request, with exit code 3 and the budget file untouched", async () => {
+  const { server, seen, home } = await radianceStandIn({ in_flight: 0, running: 1, waiting: 0 });
+  try {
+    const budget = join(home, "budget.json");
+    const { code, stdout } = await runRadiance(home, budget);
+    assert.equal(code, 3);
+    assert.match(stdout, /Radiance check: REFUSED .*running=1/);
+    assert.equal(existsSync(budget), false);
+    assert.ok(seen.every((r) => r.method === "GET" && (r.url === "/stats" || r.url === "/sessions")), JSON.stringify(seen.map((r) => r.url)));
+  } finally { server.close(); }
+});
+
+test("Radiance runner: on an idle server the meeting runs, reasoning tokens are recorded, server.json is written, and the key is only ever in the Authorization header", async () => {
+  const { server, seen, home, KEY } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 });
+  let outDir;
+  try {
+    const budget = join(home, "budget.json");
+    const { code, stdout, stderr } = await runRadiance(home, budget, ["--fixed-max", "777", "--effort", "low"]);
+    assert.equal(code, 0, stderr);
+    outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
+    const chats = seen.filter((r) => r.url === "/v1/chat/completions");
+    assert.ok(chats.length > 0);
+    for (const r of seen) assert.equal(r.auth, `Bearer ${KEY}`);
+    for (const r of chats) { const b = JSON.parse(r.body); assert.equal(b.max_tokens, 777); assert.equal(b.reasoning_effort, "low"); assert.equal(r.body.includes(KEY), false); }
+    const calls = readFileSync(join(outDir, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(calls.every((c) => c.usage.reasoning === 360 && c.usage.cached === 2048));
+    const srv = JSON.parse(readFileSync(join(outDir, "server.json"), "utf8"));
+    assert.equal(srv.delta.requests, chats.length + 2, "the after reading counts every request since the before reading");
+    const { readdirSync } = await import("node:fs");
+    for (const f of readdirSync(outDir)) assert.equal(readFileSync(join(outDir, f), "utf8").includes(KEY), false, f);
+    assert.equal(readFileSync(budget, "utf8").includes(KEY), false);
+    assert.equal(stdout.includes(KEY), false);
+    const { reportRun } = await import(proto("radiance-report.mjs"));
+    const row = reportRun(outDir);
+    assert.equal(row.reuseAllMultiplesOf2048, true);
+    assert.equal(row.visibleMedian, 40);
+    assert.equal(row.reasoningPctOfOutput, 90);
+  } finally { server.close(); if (outDir) rmSync(outDir, { recursive: true, force: true }); }
+});
+
+// Review of the third local batch: the idle check is on every route to Radiance, and calls to it go one at a time.
+const runProto = (home, script, argv) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL(`../prototypes/meeting/${script}`, import.meta.url)), ...argv], { timeout: 120000, env: fakeHomeEnv(home) }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+
+test("Radiance idle check on the other routes: checkpoint.mjs --spec radiance: and a mixed roster with a radiance: chair or member are refused on a busy server before any chat request", async () => {
+  const { server, seen, home } = await radianceStandIn({ in_flight: 1, running: 0, waiting: 0 });
+  try {
+    const budget = join(home, "budget.json");
+    const runs = [
+      ["checkpoint.mjs", ["--spec", "radiance:m", "--budget", budget]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "radiance:m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "pi:none", "--members", "a1=radiance:m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
+      // the generic OpenAI-compatible route pointed at the same server, with another spelling of the loopback host
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${server.address().port}/v1`, "--no-auth", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
+    ];
+    for (const [script, argv] of runs) {
+      const { code, stdout, stderr } = await runProto(home, script, argv);
+      assert.equal(code, 3, `${script} ${argv.join(" ")}: ${stderr}`);
+      assert.match(stdout, /Radiance check: REFUSED .*in_flight=1/);
+    }
+    assert.equal(existsSync(budget), false);
+    assert.ok(seen.length >= 3 && seen.every((r) => r.method === "GET" && (r.url === "/stats" || r.url === "/sessions")), JSON.stringify(seen.map((r) => r.url)));
+  } finally { server.close(); }
+});
+
+test("Radiance calls go one at a time even when the variant asks for parallel calls (blind-first, parallel 4)", async () => {
+  const { server, seen, home, chat } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 }, { delayMs: 40 });
+  let outDir;
+  try {
+    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "radiance", "--model", "m", "--budget", join(home, "budget.json"), "--runs-dir", join(home, "runs"), "--quiet"]);
+    assert.equal(code, 0, stderr);
+    outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
+    assert.ok(seen.filter((r) => r.url === "/v1/chat/completions").length > 3);
+    assert.equal(chat.maxInFlight, 1);
+  } finally { server.close(); if (outDir) rmSync(outDir, { recursive: true, force: true }); }
+});
+
+test("Radiance runs are written under --runs-dir, never among the real runs; the OpenAI route to the Radiance address is idle-checked and serialized; isRadianceAddress matches only that server", async () => {
+  const { isRadianceAddress } = radianceLib;
+  const { server, seen, home, chat } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 }, { delayMs: 40 });
+  const realRuns = fileURLToPath(new URL("../prototypes/meeting/runs/", import.meta.url));
+  const { readdirSync } = await import("node:fs");
+  const before = existsSync(realRuns) ? readdirSync(realRuns).length : 0;
+  try {
+    const port = server.address().port;
+    assert.equal(isRadianceAddress(`http://localhost:${port}/v1`, home), true);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port}`, home), true);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port + 1}/v1`, home), false);
+    // other spellings of this machine reach the same server (it listens on every interface); look-alike hosts do not
+    for (const h of ["127.0.0.2", "0.0.0.0", "[::1]", "[::]", "[::ffff:127.0.0.1]", "localhost.", "a.localhost", hostname()]) assert.equal(isRadianceAddress(`http://${h}:${port}/v1`, home), true, h);
+    for (const u of [`http://localhost.evil:${port}/v1`, `http://127.0.0.1.example.com:${port}/v1`, `http://127.0.0.1:${port}@example.com/v1`, `http://[::ffff:8.8.8.8]:${port}/v1`, `http://128.0.0.1:${port}/v1`, `http://localhostx:${port}/v1`]) assert.equal(isRadianceAddress(u, home), false, u);
+    assert.equal(isRadianceAddress("https://openrouter.ai/api/v1", home), false);
+    assert.equal(isRadianceAddress(undefined, home), false);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port}/v1`, join(home, "no-such-home")), false);
+    const runsDir = join(home, "runs");
+    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${port}/v1`, "--no-auth", "--runs-dir", runsDir, "--budget", join(home, "budget.json"), "--quiet"]);
+    assert.equal(code, 0, stderr);
+    assert.match(stdout, /Radiance check: idle/);
+    const outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
+    assert.equal(dirname(outDir), runsDir);
+    assert.ok(existsSync(join(outDir, "server.json")));
+    assert.equal(seen[0].url, "/stats", "the idle check comes before any chat request");
+    assert.ok(seen.filter((r) => r.url === "/v1/chat/completions").length > 3);
+    assert.equal(chat.maxInFlight, 1);
+    assert.equal(existsSync(realRuns) ? readdirSync(realRuns).length : 0, before, "nothing written among the real runs");
+  } finally { server.close(); }
+});
+
+test("oneAtATime: a second call starts only after the first has ended, and a failed call does not stop the next one", async () => {
+  const { oneAtATime } = radianceLib;
+  let inFlight = 0, max = 0;
+  const order = [];
+  const inner = { name: "x", async chat({ id, fail }) { inFlight += 1; max = Math.max(max, inFlight); order.push(`start ${id}`); await new Promise((r) => setImmediate(r)); inFlight -= 1; order.push(`end ${id}`); if (fail) throw new Error("boom"); return { id }; } };
+  const p = oneAtATime(inner);
+  assert.equal(p.name, "x");
+  const results = await Promise.allSettled([p.chat({ id: 1 }), p.chat({ id: 2, fail: true }), p.chat({ id: 3 })]);
+  assert.deepEqual(results.map((r) => r.status), ["fulfilled", "rejected", "fulfilled"]);
+  assert.equal(max, 1);
+  assert.deepEqual(order, ["start 1", "end 1", "start 2", "end 2", "start 3", "end 3"]);
 });

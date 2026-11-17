@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "./index.js";
 import { OPERATION_BY_NAME } from "./operations.js";
@@ -57,5 +58,42 @@ test("status.attention lists a paused assignee through the state API of the comp
     await assert.rejects(() => op.run(ctx, {}, undefined), (e: { code?: string }) => e.code === "forbidden");
     await assert.rejects(() => op.run(ctx, { taskId: tasks[1] }, undefined), (e: { code?: string }) => e.code === "not_found");
     assert.deepEqual(await op.run(ctx, { taskId: tasks[0] }, undefined), { observedAt: "x", items: [] });
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("status.attention and the chat's attention view name a deliverable accepted against a contract whose work changed since, through the composed controller (card U13)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-attn-dlv-"));
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, artifacts: { directory: join(d, "blobs") } });
+  try {
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const owner = await s.principals.authenticate(boot.token);
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    const task = (await s.projects.createTask({ commandId: "t1", actor: owner.id, projectId: project, title: "Write the guide" })).id;
+    const ann = await s.agents.create(owner, { commandId: "mk-ann", friendlyName: "Ann", roles: ["author"] });
+    const artifacts = ArtifactService.withEpoch(c.storage, c.epoch, await FileBlobStore.open({ directory: join(d, "blobs") }));
+    const art = (await artifacts.publish({ commandId: "a1", actor: owner.id, name: "guide", projectId: project, taskId: task, files: [{ path: "guide.txt", content: Buffer.from("the guide") }] })).id;
+    assert.equal((await call("contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["covers install"] }, "ct1")).ok, true);
+    const made = await call("deliverable.draft", { taskId: task, type: "document", title: "Install guide", responsibleAgent: `agent:${ann.id}`, artifacts: [{ artifactId: art }] }, "d1");
+    assert.equal(made.ok, true, JSON.stringify(made));
+    const id = made.result.id;
+    assert.equal((await call("deliverable.submit", { id, expectedRevision: made.result.revision, contractVersion: 1 }, "s1")).ok, true);
+    assert.equal((await call("deliverable.review.start", { id, version: 1 }, "r1")).ok, true);
+    assert.equal((await call("deliverable.accept", { id, version: 1 }, "a1")).ok, true);
+    const stale = async () => ((await call("status.attention", { projectId: project, kind: "stale_artifact" })).result.items as any[]).filter((i) => i.detail.reason === "contract_changed");
+    assert.deepEqual(await stale(), []);
+    assert.equal((await call("contract.set", { taskId: task, expectedVersion: 1, priority: 9 }, "ct2")).ok, true);
+    assert.deepEqual(await stale(), [], "a priority change leaves it as it is");
+    assert.equal((await call("contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["covers install", "covers upgrade"] }, "ct3")).ok, true);
+    const items = await stale();
+    assert.equal(items.length, 1);
+    assert.deepEqual([items[0].kind, items[0].taskId, items[0].agentId, items[0].cite.kind, items[0].cite.id], ["stale_artifact", task, ann.id, "deliverable", id]);
+    assert.deepEqual([items[0].detail.state, items[0].detail.checkedAgainst, items[0].detail.contractVersion, items[0].detail.fields], ["accepted", 1, 3, ["acceptanceCriteria"]]);
+    const told = await call("status.ask", { request: { kind: "attention", projectId: project, attentionKind: "stale_artifact" } });
+    assert.equal(told.ok, true, JSON.stringify(told));
+    const text = (told.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
+    assert.match(text, /Deliverable "Install guide" \(version 1, accepted\) on Write the guide was checked against contract version 1; the task's contract has since changed its acceptance criteria \(now version 3\)/);
+    assert.ok(!text.includes("covers upgrade"), "the contract's own words are not shown");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

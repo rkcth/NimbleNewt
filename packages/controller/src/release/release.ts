@@ -104,7 +104,20 @@ export interface HostJobs { readonly jobs: HostJob[]; readonly cancel: string[] 
 export interface HostJob { readonly attemptId: string; readonly payload: JobPayload; readonly pickedUpAt?: string }
 
 /** `attemptsPerCell`: attempts one agent may make per platform of a candidate. `cellEntries`: all attempts of a platform (the owner's included); agents stop at `agentEntries`, which leaves the owner room. */
-export const RELEASE_LIMITS = { jobs: 32, attemptsPerCell: 20, cellEntries: 500, agentEntries: 200, openPerHost: 200, cancelKeep: 32, cancelMs: 24 * 3600_000, graceSeconds: 600, defaultStartsPerHour: 12, startsPerHourMax: 100_000, qaAgentIds: 100, defaultTimeoutSeconds: 3600, defaultMemoryMb: 4096, cells: 20, targets: 20, artifacts: 100, locks: 100, summary: 500, timeoutSeconds: 24 * 3600, memoryMb: 1_000_000 } as const;
+export const RELEASE_LIMITS = { jobs: 32, attemptsPerCell: 20, cellEntries: 500, agentEntries: 200, openPerHost: 200, cancelKeep: 32, cancelMs: 24 * 3600_000, graceSeconds: 600, defaultStartsPerHour: 12, startsPerHourMax: 100_000, qaAgentIds: 100, defaultTimeoutSeconds: 3600, defaultMemoryMb: 4096, cells: 20, targets: 20, artifacts: 100, locks: 100, summary: 500, timeoutSeconds: 24 * 3600, memoryMb: 1_000_000, silentSeconds: 300 } as const;
+
+/**
+ * When the controller ends an open attempt as timed out if no result has come (card X09b): its time limit plus the grace, counted from the pick-up, or from the issue when the host never picked it up. `expire`
+ * and the owner's release view both read it from here, so what the owner is told and what the controller does cannot drift apart.
+ */
+export function releaseDeadline(attempt: Pick<AttemptBody, "issuedAt" | "pickedUpAt" | "limits">): string {
+  return new Date(Date.parse(attempt.pickedUpAt ?? attempt.issuedAt) + (attempt.limits.timeoutSeconds + RELEASE_LIMITS.graceSeconds) * 1000).toISOString();
+}
+/**
+ * A release test a host picked up whose host has not been heard from for `RELEASE_LIMITS.silentSeconds` (card X09b, the outer watch). `silentSince` is the later of the host's last heartbeat and the pick-up; it
+ * names the silence, so a host that comes back and goes quiet again is a new silence. `endsAt` is when the controller ends the attempt as timed out unless a result comes first.
+ */
+export interface SilentRelease { readonly attemptId: string; readonly hostId: string; readonly candidateId: string; readonly cell: Cell; readonly pickedUpAt: string; readonly lastHeardAt?: string; readonly silentSince: string; readonly endsAt: string }
 const OS = ["linux", "darwin", "win32"] as const;
 const ARCH = ["x64", "arm64"] as const;
 const SHA = /^[0-9a-f]{64}$/;
@@ -687,8 +700,39 @@ export class ReleaseService {
   }
 
   #overdue(attempt: AttemptBody): boolean {
-    const started = Date.parse(attempt.pickedUpAt ?? attempt.issuedAt);
-    return Date.parse(this.#runner.now()) > started + (attempt.limits.timeoutSeconds + RELEASE_LIMITS.graceSeconds) * 1000;
+    return Date.parse(this.#runner.now()) > Date.parse(releaseDeadline(attempt));
+  }
+
+  /**
+   * The outer watch over release hosts (card X09b): every open attempt a host picked up whose host has sent no heartbeat for `silentSeconds` (default `RELEASE_LIMITS.silentSeconds`). Nothing is ended or changed
+   * here: a reboot test silences its host on purpose, and the attempt still ends by `expire` at its deadline. The controller's loop tells the owner once per silence. Reads the host's own heartbeat record
+   * (`host-record`, written by the worker transport's session heartbeat), the per-host index and the attempts; never a list of all attempts.
+   */
+  async silent(silentSeconds: number = RELEASE_LIMITS.silentSeconds): Promise<SilentRelease[]> {
+    if (!Number.isInteger(silentSeconds) || silentSeconds < 1) throw new DomainError("invalid_command", "silentSeconds must be a whole number of seconds, at least 1", { field: "silentSeconds" });
+    const now = Date.parse(this.#runner.now());
+    const out: SilentRelease[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.#runner.list(HOST, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const h of page) {
+        const hostId = (h.body as unknown as HostAuthBody).hostId;
+        const idx = (await this.#runner.get(HOSTIDX, hostIdxId(hostId)))?.body as unknown as HostIndexBody | undefined;
+        if (idx === undefined || idx.open.length === 0) continue;
+        let heard: string | undefined;
+        let looked = false;
+        for (const id of idx.open) {
+          const a = (await this.#runner.get(ATTEMPT, id))?.body as unknown as AttemptBody | undefined;
+          if (a === undefined || a.state !== "issued" || a.pickedUpAt === undefined || a.hostId !== hostId) continue;
+          if (!looked) { heard = ((await this.#runner.get("host-record", hostId))?.body as unknown as { lastSeenAt?: string } | undefined)?.lastSeenAt; looked = true; }
+          const since = heard !== undefined && Date.parse(heard) > Date.parse(a.pickedUpAt) ? heard : a.pickedUpAt;
+          if (now - Date.parse(since) < silentSeconds * 1000) continue;
+          out.push({ attemptId: id, hostId, candidateId: a.candidateId, cell: a.cell, pickedUpAt: a.pickedUpAt, ...(heard === undefined ? {} : { lastHeardAt: heard }), silentSince: since, endsAt: releaseDeadline(a) });
+        }
+      }
+      if (page.length < 200) return out;
+      after = page[page.length - 1]!.id;
+    }
   }
 
   /** The host says it has the job and is starting it. A repeat changes nothing. Refused for an attempt that is not this host's, is no longer open, or whose host the owner no longer authorizes. */

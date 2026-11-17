@@ -328,6 +328,30 @@ test("settings show the value, whether it is the default, set by you, inherited 
   assert.match(text(view), /No setting matches/);
 });
 
+test("a value the setting refuses is shown on the page with the error that names the setting: Apply comes back refused and the chat says which setting and why, and a refusal at the door says the same (card U08)", async () => {
+  const sentence = "Set the setting grants.maxDays to 0 for the whole installation";
+  const done = { turnId: "t", replayed: false, text: sentence, reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "pedit-bad", preview: ["Set grants.maxDays to 0 for the whole installation."] }] };
+  const failure = { step: 0, code: "invalid_command", message: "set.grants.maxDays: must be a whole number from 1 to 36500" };
+  const page = boot({ "admin-settings": settingsFixture() }, [
+    (c) => (c.path === "/web/admin/setting" ? { status: 201, body: done } : undefined),
+    (c) => (c.path === "/web/proposals/pedit-bad/apply" ? { status: 200, body: { proposalId: "pedit-bad", applied: false, replayed: false, results: [], failure } } : undefined),
+  ]);
+  const view = await admin(page, "settings", "Settings");
+  const card = view.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  card.find((e) => e.tag === "input")[0]!.value = "0";
+  chip(card, "Change").click(); await settle();
+  const log = page.doc.byId.get("log")!;
+  log.buttons().find((b) => b.textContent === "Apply")!.click(); await settle();
+  assert.match(text(log), /Apply proposal: failed - set\.grants\.maxDays: must be a whole number from 1 to 36500/);
+  // A refusal the controller gives before anything is proposed (HTTP 400) is shown the same way: the error's own words, which name the setting.
+  const page2 = boot({ "admin-settings": settingsFixture() }, [(c) => (c.path === "/web/admin/setting" ? { status: 400, body: { error: { code: "invalid_command", message: "grants.nope is not a setting this system has" } } } : undefined)]);
+  const v2 = await admin(page2, "settings", "Settings");
+  const c2 = v2.find((e) => e.className === "card" && e.textContent.startsWith("grants.maxDays"))[0]!;
+  c2.find((e) => e.tag === "input")[0]!.value = "3";
+  chip(c2, "Change").click(); await settle();
+  assert.match(text(page2.doc.byId.get("log")!), /grants\.nope is not a setting this system has/);
+});
+
 test("a setting is changed from the page as one outbox item under one key, the chat shows it first, and 'back to default' asks first (card U08)", async () => {
   const done = { turnId: "t", replayed: false, text: "Set the setting grants.maxDays to 12 for the whole installation", reply: ["Proposal"], outcomes: [{ status: "proposed", proposalId: "pedit-aaaa", preview: ["Set grants.maxDays to 12 for the whole installation."] }] };
   const page = boot({ "admin-settings": settingsFixture() }, [(c) => (c.path === "/web/admin/setting" ? { status: 201, body: done } : undefined)], () => false);
@@ -478,7 +502,11 @@ test("agents and teams, policy, API access, operations and migration are drawn f
     "admin-policy": { readiness: { item: { items: [{ id: "profile", detail: "derived" }] } }, grants: { items: [{ grantee: "agent:ann", action: "approve.class.commit", project: "proj-1", state: "active", basis: H }] }, settings: { item: { items: settingsFixture().settings.item.items.slice(0, 1) } } },
     "admin-access": { web: { item: { settings: { host: "127.0.0.1", port: 8443, network: "loopback", tls: false, behindTlsProxy: true, publicHosts: ["newt.example.ts.net"], trustedProxy: { enabled: false } }, browsers: [{ label: H, createdAt: "2026-11-10", lastSeen: "2026-11-11" }] } }, local: { item: { enabled: true } } },
     "admin-operations": { lifecycle: { item: { intent: "paused", reason: H } }, workers: { item: { effective: { cpus: 2 } } }, capacity: { item: { x: 1 } } },
-    "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 4, rollbackPeriod: { days: 7, open: true, until: "2026-11-20" }, contract: { waiting: true, refusals: ["rollback period still open"] }, migrations: [{ version: 4, name: H, kind: "destructive", state: "deferred" }], upgrades: [{ at: "2026-11-01", from: 2, to: 3, additiveOnly: true }], testedPairs: [{ release: "1.4.0", schema: 3, at: "2026-11-02" }] } }, policy: { item: { rollbackPeriodDays: 7, probationMinutes: 60, maxReleaseFailures: 2, hostRetries: 3 } } },
+    "admin-migration": { migration: { item: { schemaVersion: 3, latestKnown: 4, rollbackPeriod: { days: 7, open: true, until: "2026-11-20" }, contract: { waiting: true, refusals: ["rollback period still open"] }, migrations: [{ version: 4, name: H, kind: "destructive", state: "deferred" }], upgrades: [{ at: "2026-11-01", from: 2, to: 3, additiveOnly: true }], testedPairs: [{ release: "1.4.0", schema: 3, at: "2026-11-02" }] } }, policy: { item: { rollbackPeriodDays: 7, probationMinutes: 60, maxReleaseFailures: 2, hostRetries: 3 } },
+      compat: { item: { status: "attention", runtime: { node: { running: "22.19.0", minimum: "22.19.0", supported: true }, protocol: { min: 1, max: 2 } }, hosts: [
+        { hostId: "host:old", state: "older", protocol: 1, workerVersion: H, note: "It speaks worker protocol 1.", agents: ["Ann (agent:a1)", H], agentsMore: 3, operations: ["running a catalogue tool on the host (script run)"], operationsMore: 1 },
+        { hostId: "host:ok", state: "current", protocol: 2, note: "newest", agents: [], agentsMore: 0, operations: [], operationsMore: 0 }],
+        migration: { schemaVersion: 3, latestKnown: 4, note: "1 migration waits.", pending: [{ version: 4, name: "drop_b", kind: "destructive", state: "deferred" }], agents: ["Ann (agent:a1)"], agentsMore: 0, operations: ["attempt att-0 of Ann"], operationsMore: 0 }, problems: ["the hosts: unavailable"] } } },
   });
   const team = await admin(page, "team", "Agents and teams");
   assert.match(text(team), /<script>alert\(2\)<\/script>.*author, reviewer.*team-t.*active.*running/s); assert.match(text(team), /builders/);
@@ -493,6 +521,11 @@ test("agents and teams, policy, API access, operations and migration are drawn f
   const mig = await admin(page, "migration", "Migration");
   assert.match(text(mig), /schema 3; this version knows 4/); assert.match(text(mig), /Rollback period: 7 days, open until 2026-11-20/); assert.match(text(mig), /Destructive migrations are waiting for your approval/);
   assert.match(text(mig), /rollback period still open/); assert.match(text(mig), /Tested pairs/); assert.match(text(mig), /Rollout policy/); assert.match(text(mig), /Failures before going back: 2/);
+  assert.match(text(mig), /Something is not current/); assert.match(text(mig), /Node\.js 22\.19\.0 is running; this version needs 22\.19\.0 or newer: met\./); assert.match(text(mig), /worker protocol 1 to 2/);
+  assert.match(text(mig), /host:old.*older.*It speaks worker protocol 1/s); assert.match(text(mig), /Affected by host host:old/); assert.doesNotMatch(text(mig), /Affected by host host:ok/);
+  assert.match(text(mig), /Agents affected: Ann \(agent:a1\); .*alert\(2\).* and 3 more\./); assert.match(text(mig), /Operations affected: running a catalogue tool on the host \(script run\) and 1 more\./);
+  assert.match(text(mig), /Schema 3 of 4\. 1 migration waits\./); assert.match(text(mig), /Affected by the waiting migrations/); assert.match(text(mig), /Operations affected: attempt att-0 of Ann\./);
+  assert.match(text(mig), /Not read: the hosts: unavailable/);
   assert.deepEqual(page.doc.violations, []);
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   for (const tb of mig.find((e) => e.tag === "table")) assert.equal(tb.find((e) => e.tag === "caption").length, 1, "every table has a caption");
@@ -589,7 +622,7 @@ test("a standing right is taken back from the page with the owner's reason, afte
   page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
   chip(form, "Take back").click(); await settle();
   assert.equal(asked.length, 1);
-  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Work that relies on it may stop`));
+  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Which running work relies on this right could not be checked just now\\. Work that relies on it may stop`));
   const posts = sent(page);
   assert.equal(posts.length, 1);
   assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/grant-revoke", { grantId: GRT, reason: "the project is finished" }]);
@@ -597,6 +630,57 @@ test("a standing right is taken back from the page with the owner's reason, afte
   assert.match(text(page.doc.byId.get("log")!), /Take back the right task\.update for agent:ann/);
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   assert.deepEqual(page.doc.violations, []);
+});
+
+// Follow-up to card T7: the running work that may rely on a right is shown on its take-back card and in the question asked before it is sent.
+const work = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: "ann", taskId: "task-" + String(i).padStart(20, "a"), title: i === 0 ? HOSTILE : "Chore " + i, projectId: "proj-1", attemptId: "att-" + i, attemptNumber: i + 1 }));
+const relyViews = (reliance: unknown) => { const v = ownerEditViews(); (v["admin-policy"] as Record<string, unknown>)["reliance"] = reliance; return v; };
+const takeBack = async (reliance: unknown) => {
+  const asked: string[] = [];
+  const page = boot(relyViews(reliance), [(c) => (c.path === "/web/admin/grant-revoke" ? { status: 201, body: queuedWith("Take back") } : undefined)], () => true);
+  const policy = await admin(page, "policy", "Policy");
+  const form = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: "))[0]!;
+  inputOf(form, "Why take back task.update for agent:ann in proj-1?").value = "all done";
+  page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
+  chip(form, "Take back").click(); await settle();
+  return { page, form, asked, shown: form.find((e) => e.className === "card-line").map((e) => e.textContent) };
+};
+
+test("the take-back card lists the running work that may rely on the right, ten at most with the rest counted, and the question repeats it (follow-up to card T7)", async () => {
+  const got = await takeBack({ items: [{ grantId: GRT, total: 12, complete: true, items: work(10) }, { grantId: "grt-" + "e".repeat(20), total: 0, complete: true, items: [] }] });
+  assert.equal(got.shown[0], "Running work that relies on it");
+  assert.equal(got.shown[1], "12 running tasks may rely on it:");
+  assert.equal(got.shown.filter((l) => /^".*" \(task task-a+\d, agent ann, attempt \d+\)$/.test(l)).length, 10);
+  assert.equal(got.shown[12], "2 more not listed.");
+  assert.match(got.shown[2]!, /^"/);
+  assert.equal(got.asked.length, 1);
+  assert.match(got.asked[0]!, /\? 12 running tasks may rely on it: "[^]*" \(task task-a+\d, agent ann, attempt 1\)[^]* Work that relies on it may stop/s);
+  assert.doesNotMatch(got.asked[0]!, /Chore 3/, "the question names the first few, the card the ten");
+  assert.equal(sent(got.page).length, 1);
+  assert.deepEqual(got.page.doc.violations, []);
+  assert.ok(![...got.page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)), "a title is only text");
+});
+
+test("the take-back card says so when nothing runs, when not every record could be read, when the right is not in the read and when the read failed (follow-up to card T7)", async () => {
+  const none = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, items: [] }] });
+  assert.deepEqual(none.shown.slice(0, 2), ["Running work that relies on it", "No running work relies on it."]);
+  assert.match(none.asked[0]!, /^Take back [^?]*\? Work that relies on it may stop/, "nothing is added to the question when nothing runs");
+  const part = await takeBack({ items: [{ grantId: GRT, total: 1, complete: false, items: work(1) }] });
+  assert.equal(part.shown[1], "1 or more running tasks may rely on it:");
+  const empty = await takeBack({ items: [{ grantId: GRT, total: 0, complete: false, items: [] }] });
+  assert.match(empty.shown[1]!, /^No running work relies on it, but not every record could be read, so some may not be listed\.$/);
+  const missing = await takeBack({ items: [] });
+  assert.match(missing.shown[1]!, /is not known/);
+  assert.match(missing.asked[0]!, /is not known/);
+  // T7b review: a right that gives nothing now (ended, lapsed, not started) is said so, and a title cut at an emoji never keeps half of it.
+  const off = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, inForce: false, items: [] }] });
+  assert.match(off.shown[1]!, /^It is not in force now \(it ended, lapsed or has not started\), so no running work relies on it now\.$/);
+  const cut = await takeBack({ items: [{ grantId: GRT, total: 1, complete: true, items: [{ ...work(1)[0]!, title: "x".repeat(56) + "\u{1F600}" + "y".repeat(20) }] }] });
+  assert.equal(cut.shown[2], '"' + "x".repeat(56) + '..." (task task-aaaaaaaaaaaaaaaaaaa0, agent ann, attempt 1)');
+  assert.ok(!/[\ud800-\udfff]/.test(cut.asked[0]!), "the question keeps no half of a character");
+  const bad = await takeBack({ error: { code: "unavailable", message: "no" } });
+  assert.match(bad.shown[1]!, /could not be checked just now/);
+  assert.match(bad.asked[0]!, /could not be checked just now/);
 });
 
 test("the edit forms keep nothing but what the owner typed in the outbox, and a hostile name or right is only text (card U08 follow-up)", async () => {
@@ -632,4 +716,30 @@ test("two agents with one name and one right held in two projects are told apart
   const takes = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: ")).map((c) => c.find((e) => e.tag === "h4")[0]!.textContent);
   assert.deepEqual(takes, ["Take back: task.update for agent:ann in proj-1", "Take back: task.update for agent:ann in every project"]);
   assert.deepEqual(page.doc.violations, []);
+});
+
+test("second review: the page's clip is unchanged for text without a pair and never keeps half of one, at every length and cut position and for every limit the page uses", () => {
+  // The page's own clip, taken from the script as served (the T7b change to it touches every clipped field on the page).
+  const lines = APP_JS.split("\n");
+  const src = ["UNSEEN = ", "function unseen(", "function clip("].map((k) => lines.find((l) => l.includes(k))!.trim()).join("\n");
+  const clip = runInNewContext(`${src}\nclip`) as (v: unknown, n: number) => string;
+  const before = (v: string, n: number) => (v.length > n ? v.slice(0, n - 3) + "..." : v);
+  const E = "\u{1F600}";
+  const half = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const limits = [...new Set((APP_JS.match(/clip\([^()]*, (\d+)\)/g) ?? []).map((m) => Number(/(\d+)\)$/.exec(m)![1])))];
+  assert.ok(limits.length >= 10 && limits.every((n) => n >= 4), `the limits the page uses: ${limits}`);
+  for (const n of limits) for (let len = 0; len <= n + 3; len++) {
+    const plain = "a".repeat(len);
+    assert.equal(clip(plain, n), before(plain, n), `plain ${len} at ${n}`);
+    for (let at = 0; at + 2 <= len; at++) {
+      const s = "a".repeat(at) + E + "a".repeat(len - at - 2);
+      const got = clip(s, n);
+      if (len <= n) assert.equal(got, s, "text that fits is kept whole");
+      else {
+        assert.ok(!half.test(got) && got.endsWith("...") && got.length <= n && got.length >= n - 4, `${n} ${len} ${at}: ${JSON.stringify(got)}`);
+        assert.equal(got, at + 2 <= n - 3 ? s.slice(0, n - 3) + "..." : s.slice(0, Math.min(at, n - 3)) + "...", "only an emoji that would be cut is left out");
+      }
+    }
+  }
+  assert.deepEqual([clip(null, 10), clip(undefined, 10), clip(0, 10), clip("", 10), clip("a", 10)], ["", "", "0", "", "a"]);
 });

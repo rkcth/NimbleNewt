@@ -214,4 +214,15 @@ for (const backend of backends) {
     assert.deepEqual(await ask(quiet), { ok: true, summary: "ran" }, "a busy attempt of another request does not hold this one");
     assert.deepEqual(ran, [quiet.requestId]);
   });
+
+  suite("a release of an approved submission is not carried to a remote host: refused before anything is listed for the host, by the host handle and by the request check (card H12o)", async (c) => {
+    const r1 = await c.host("r1");
+    const submission = { id: "sbm-aaaaaaaaaaaaaaaaaaaa", base: "b".repeat(40), tree: "e".repeat(40) };
+    const handle = new RemoteWorkerHost("host:r1", c.remote, c.dispatcherPrincipal, { resources: { cpus: 1, memoryMb: 1 }, requirements: () => ({}) as never, workspaceWaitMs: 200 });
+    const answer = await handle.workspace.run(call({ operation: "release", submission }));
+    assert.equal(answer.ok, false);
+    assert.match((answer as { reason: string }).reason, /remote host, which does not commit an approved submission yet.*nothing was sent and nothing was committed/);
+    await refuses("invalid_command", () => c.remote.askWorkspace(c.dispatcherPrincipal, "host:r1", call({ operation: "release", submission }), { waitMs: 100 }));
+    assert.deepEqual(await r1.client.workspaceRequests(), [], "nothing was listed for the host");
+  });
 }

@@ -57,7 +57,7 @@ export async function setupGreeting(controller: Pick<Controller, "api">, ownerTo
   const v = r.result.item;
   const mark = (s: string): string => (s === "done" ? "[x]" : s === "default" ? "[-]" : "[ ]");
   const lines = v.items.map((i) => `  ${mark(i.state)} ${i.label}${i.required && i.state !== "done" ? " (needed)" : ""}: ${i.detail}`);
-  const next = v.items.find((i) => i.id === v.next);
+  const next = askedFirst(v);
   return [
     v.ready ? "Everything a first agent needs is set up." : "Not everything a first agent needs is set up yet:",
     ...lines,
@@ -66,15 +66,18 @@ export async function setupGreeting(controller: Pick<Controller, "api">, ownerTo
   ].join("\n");
 }
 
+/** The step the walk-through puts to the owner now: the approval profile while nothing has been chosen (the question that explains the derived profile and asks whether to switch from strict), else the first required step still open. */
+const askedFirst = <T extends { id: string; state: string }>(v: { next?: string; items: T[] }): T | undefined => v.items.find((i) => i.id === "profile" && i.state === "default") ?? v.items.find((i) => i.id === v.next);
+
 interface SetupPosition { readonly key: string; readonly next?: { readonly question: string; readonly recommended: string } }
 
 /** Where the first run stands, from the readiness view alone: the first required step still open, or nothing when none is. Undefined when the view cannot be read (nothing is then said). */
 async function setupPosition(controller: Pick<Controller, "api">, ownerToken: string): Promise<SetupPosition | undefined> {
   try {
-    const r = await controller.api.handle(ownerToken, { v: 1, op: "setup.readiness", args: {} } as never) as { ok: boolean; result?: { item: { next?: string; items: { id: string; guide: { question: string; recommended: string } }[] } } };
+    const r = await controller.api.handle(ownerToken, { v: 1, op: "setup.readiness", args: {} } as never) as { ok: boolean; result?: { item: { next?: string; items: { id: string; state: string; guide: { question: string; recommended: string } }[] } } };
     if (!r.ok || r.result === undefined) return undefined;
     const v = r.result.item;
-    const next = v.items.find((i) => i.id === v.next);
-    return { key: v.next ?? "ready", ...(next === undefined ? {} : { next: { question: next.guide.question, recommended: next.guide.recommended } }) };
+    const next = askedFirst(v);
+    return { key: next?.id ?? v.next ?? "ready", ...(next === undefined ? {} : { next: { question: next.guide.question, recommended: next.guide.recommended } }) };
   } catch { return undefined; }
 }

@@ -162,14 +162,14 @@ export interface StateApiDeps {
   readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner" | "referencesFor">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
-  readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list"> & Partial<Pick<GrantService, "reliance">>;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept" | "pending">;
   /** When present, the owner can read the approval load, answer standing-rule proposals and the profile suggestion (cards A07b, A07c; U08). */
   readonly approvals?: ApprovalsFacade;
   /** The reads of the settings and administration pages (card U08). */
-  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox" | "compatibility">;
   readonly workerLimits?: Pick<WorkerLimitsSettingsService, "get" | "set" | "change" | "setBestEffort" | "enforced">;
   /** When present, the owner can read what is set up and what is missing before a first agent can work (card U14). */
   readonly setup?: Pick<SetupReadinessService, "check">;

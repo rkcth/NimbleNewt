@@ -263,6 +263,7 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     assert.deepEqual([rec?.state, rec?.outcome], ["done", "submitted"], JSON.stringify(rec));
     const sub = await call(c, one.token, "submission.get", { submissionId: rec!.submissionId });
     assert.deepEqual([sub.result.item.kind, sub.result.item.role, sub.result.item.base, sub.result.item.tree, sub.result.item.patchId, sub.result.item.taskId], ["code", "author", B, "b".repeat(40), "c".repeat(40), one.task]);
+    assert.equal(sub.result.item.attemptId, one.attempt, "the ending's submission names the attempt that ended (card Q01b)");
     assert.equal((await state(one.attempt)).state, "finished");
     await c.dispatch!.dispatcher.tick();
     assert.deepEqual(staged, [one.attempt], "staged and submitted once, however often the sweep runs");
@@ -280,6 +281,49 @@ test("work.end { submit: true } records one code submission tied to the attempt 
     const three = await attemptFor(c, owner, project, 3, ["author"]);
     await c.dispatch!.dispatcher.tick();
     assert.equal((await call(c, three.token, "work.end", { report: "the report", attemptId: three.attempt, submit: true }, "s3")).error.code, "invalid_command");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a checkout whose head moved between the check and the staging (a platform commit made meanwhile) is not submitted: the ending ends plainly with release_failed and a blocker, nothing is recorded (card H12n second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  const moved = "e".repeat(40);
+  const { c, boot, owner, project } = await world(d, {
+    landing: async () => ({ base: B, head: B, mine: ["beds.txt"], landed: [] }),
+    stage: async () => ({ base: moved, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt"] }),
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed, rec?.submissionId], ["ended", "release_failed", undefined], JSON.stringify(rec));
+    assert.ok(rec?.blocker !== undefined);
+    assert.match(JSON.stringify(rec), new RegExp(`based on ${moved}`));
+    const listed = await call(c, boot.token, "submission.list", { taskId: one.task });
+    assert.deepEqual(listed.result?.items, [], `no submission was recorded: ${JSON.stringify(listed)}`);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a checkout that cannot be read again after the calls settle is never taken as no overlap: the submit ends refused with a blocker and nothing is staged (card H12n second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  let known = true;
+  const staged: string[] = [];
+  const { c, owner, project } = await world(d, {
+    landing: async () => (known ? { base: B, head: B, mine: ["beds.txt"], landed: [] } : undefined),
+    stage: async (a) => { staged.push(a.attemptId); return { base: B, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt"] }; },
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).ok);
+    known = false;
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed, rec?.submissionId], ["ended", "submit_refused", undefined], JSON.stringify(rec));
+    assert.ok(rec?.blocker !== undefined);
+    assert.match(JSON.stringify(rec), /could not be checked again/);
+    assert.deepEqual(staged, [], "nothing was staged");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

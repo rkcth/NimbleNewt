@@ -49,6 +49,30 @@ export const permitLedgerPath = (gitDir: string): string => join(gitDir, "nn-per
 
 /** Where the commits the release operation made are listed (host side, in the checkout's git directory). They are not permit commits: `unpermitted` does not read this file. */
 export const releaseLedgerPath = (gitDir: string): string => join(gitDir, "nn-release-ledger");
+/** The approved submission a release commits (card H12o): its ID and the base commit and tree that were submitted and approved. */
+export interface ApprovedSubmission { readonly id: string; readonly base: string; readonly tree: string }
+const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+/** Whether a value is an `ApprovedSubmission` of the controller's form (exactly those three fields). */
+export const isApprovedSubmission = (value: unknown): value is ApprovedSubmission => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const o = value as Record<string, unknown>;
+  return Object.keys(o).every((k) => k === "id" || k === "base" || k === "tree") && typeof o["id"] === "string" && /^sbm-[a-z2-7]{20}$/.test(o["id"]) && typeof o["base"] === "string" && OID.test(o["base"]) && typeof o["tree"] === "string" && OID.test(o["tree"]);
+};
+/** How much of the end of the release ledger is read to find a submission's earlier commit (its newest lines; a line is under 200 bytes). */
+const RELEASE_LEDGER_READ = 256 * 1024;
+/** The last `max` bytes of a file as text (from the first whole line), or "" when it cannot be read. */
+async function readTail(path: string, max: number): Promise<string> {
+  let handle;
+  try { handle = await open(path, constants.O_RDONLY | NOFOLLOW); } catch { return ""; }
+  try {
+    const size = (await handle.stat()).size;
+    const length = Math.min(size, max);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    const text = buffer.toString("utf8");
+    return size > max ? text.slice(text.indexOf("\n") + 1) : text;
+  } catch { return ""; } finally { await handle.close(); }
+}
 /** Who a release commit is by: the platform, never the agent. */
 export const RELEASE_IDENTITY = { name: "NimbleNewt release", email: "release@nimblenewt.invalid" } as const;
 
@@ -531,6 +555,56 @@ export class GitBridge {
     return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
   }
 
+  /**
+   * What a submit of the agent's work is checked against (card H12n), read only: the commit the checkout is based on (`refs/nn/base`), the shared repository's head now (the landing branch, as the author's refresh reads it, H12p),
+   * the files the agent changed against the base as a submission would carry them (committed or not, not ignored: a throwaway index filled from the base and then with the checkout, as `doneState`), and the files the landing
+   * branch changed between the base and its head (read in the shared repository; none when the head is the base). The checkout, its index and its refs are not touched. Too many files on either side refuses.
+   * The `base` returned is the commit the staging builds on (the checkout's own head, as `stage` reports it): the same as `refs/nn/base` unless the checkout holds a platform commit that has not landed yet (a release, H12o),
+   * whose files then count as the agent's (they are not on the landing branch). Reporting the head keeps it equal to what `stage` reports, which the submit compares (first review).
+   */
+  async submitView(options: { shared: string; gitDir: string; checkout: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] }> {
+    const base = await this.#base(options.gitDir);
+    const tip = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    const sharedGit = await this.#sharedGitDir(options.shared);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
+    // The same attribute neutralizing as `stage` (second review): without it a `text`, `eol`, `ident` or encoding attribute in the checkout converts a file back to the base's content here while `stage` carries
+    // it changed, so a file the submission carries would be missing from `mine` and its overlap with the landing branch unseen.
+    await this.#neutralAttributes(options.gitDir);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let mine: string[];
+    try {
+      await this.#run(["read-tree", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      mine = (await this.#run(["diff", "--cached", "--name-only", "-z", "--no-renames", base], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.split("\0").filter(Boolean);
+    } finally { await rm(index, { force: true }); }
+    if (mine.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed in the checkout`);
+    const landed = base === head ? [] : (await this.#run(["diff", "--name-only", "-z", "--no-renames", base, head], { gitDir: sharedGit })).stdout.split("\0").filter(Boolean);
+    if (landed.length > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed on the landing branch`);
+    return { base: tip, head, mine: mine.sort(), landed: landed.sort() };
+  }
+
+  /**
+   * The stable patch ID (`git patch-id --stable`) of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
+   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base.
+   */
+  async patchId(options: { gitDir: string; base: string }): Promise<string | undefined> {
+    if (!COMMIT.test(options.base)) throw new WorkspaceError("invalid_path", "a patch ID is taken against a full base commit");
+    const run = (args: readonly string[], input?: Buffer): Promise<Buffer> => new Promise((resolveRun, reject) => {
+      const child = execFile(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), ...args], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.output * 4, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, cwd: this.#empty }, (error, stdout, stderr) => {
+        if (error === null) return resolveRun(stdout as unknown as Buffer);
+        reject(new WorkspaceError("unavailable", `git ${String(args[0])} failed: ${String(stderr).replace(/\s+/g, " ").slice(0, 200)}`, { cause: error }));
+      });
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(input ?? Buffer.alloc(0));
+    });
+    const diff = await run(["diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base]);
+    if (diff.length === 0) return undefined;
+    const out = (await run(["patch-id", "--stable"], diff)).toString("utf8").trim();
+    const id = out.split(/\s+/)[0] ?? "";
+    if (!/^[0-9a-f]{40,64}$/.test(id)) throw new WorkspaceError("unavailable", "git patch-id gave no ID for the staged change");
+    return id;
+  }
+
   /** Refuses unless the file at `path` in the checkout, opened without following a link at any name and without blocking, is a plain file whose Git blob ID is `staged`. */
   async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<void> {
     const changed = (): WorkspaceError => new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed or was replaced by a link while it was being staged; nothing was committed`, { tamper: true });
@@ -582,19 +656,57 @@ export class GitBridge {
    * that unsets `filter`, `ident`, `text` and the working-tree encoding for every path. A Git-named entry, a link or a submodule anywhere refuses the whole commit (`stage`). The head moves from the head it was staged on
    * to the new commit only (a compare-and-swap), and the commit is listed in the release ledger before the head moves. Nothing to commit is not an error: it answers `commitId: undefined`.
    */
-  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string; submission?: ApprovedSubmission }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[]; recovered?: boolean }> {
     if (!/^wsr-[a-z2-7]{20}$/.test(options.requestId)) throw new WorkspaceError("invalid_path", "a release names a request ID of the controller's form");
     if (!/^[A-Za-z0-9._:-]{1,120}$/.test(options.taskId) || (options.attemptId !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(options.attemptId))) throw new WorkspaceError("invalid_path", "a release names a plain task and attempt");
+    const submission = options.submission;
+    if (submission !== undefined && !isApprovedSubmission(submission)) throw new WorkspaceError("invalid_path", "a release of a submission names a submission ID and a full base commit and tree");
+    // Card H12o: a submission's commit is made once. One this checkout already made (listed in the release ledger against the submission, still in the head's history, with the approved parent and tree) is the
+    // answer, whatever happened after it (a controller that stopped before it recorded the commit, a retry under another request ID, more work written on top since).
+    if (submission !== undefined) {
+      const earlier = await this.#releasedFor(options.gitDir, submission);
+      if (earlier !== undefined) return { commitId: earlier.commitId, parent: submission.base, tree: submission.tree, files: earlier.files, ignored: [], recovered: true };
+    }
     const staged = await this.stage(options);
+    if (submission !== undefined) {
+      // Only the approved tree on the approved base is committed: anything else is other work, which needs its own submission and approval.
+      const changed = [staged.base !== submission.base ? "the commit it is based on" : "", staged.tree !== submission.tree ? "its files" : ""].filter(Boolean);
+      if (changed.length > 0) throw new WorkspaceError("stale", `the checkout no longer holds the approved work of submission ${submission.id}: ${changed.join(" and ")} changed since it was submitted; nothing was committed (a new submission and a new approval are needed)`);
+      if (staged.files.length === 0) throw new WorkspaceError("stale", `submission ${submission.id} holds no change from the commit it is based on; nothing was committed`);
+    }
     if (staged.files.length === 0) return { parent: staged.base, tree: staged.tree, files: [], ignored: staged.ignored };
-    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`])];
-    const message = `Work of task ${options.taskId}${options.attemptId === undefined ? "" : ` (attempt ${options.attemptId})`}\n\nCommitted by NimbleNewt after the agent reported the work done; ${staged.files.length} file(s). Not a reviewed commit.\n\n${trailers.join("\n")}\n`;
+    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`]), ...(submission === undefined ? [] : [`NimbleNewt-Submission: ${submission.id}`])];
+    const message = submission === undefined
+      ? `Work of task ${options.taskId}${options.attemptId === undefined ? "" : ` (attempt ${options.attemptId})`}\n\nCommitted by NimbleNewt after the agent reported the work done; ${staged.files.length} file(s). Not a reviewed commit.\n\n${trailers.join("\n")}\n`
+      : `Approved submission ${submission.id} of task ${options.taskId}\n\nCommitted by NimbleNewt after the submission was approved; ${staged.files.length} file(s), exactly the submitted tree on the submitted base. Not a review-gate permit commit.\n\n${trailers.join("\n")}\n`;
     const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
     const commitId = (await this.#run(["commit-tree", staged.tree, "-p", staged.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
     if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
-    await appendFile(releaseLedgerPath(options.gitDir), `${commitId} ${options.requestId} ${options.attemptId ?? "-"}\n`, { mode: 0o600 });
+    // The ledger line names the submission (a fourth field), so a later release of the same submission finds this commit instead of making another.
+    await appendFile(releaseLedgerPath(options.gitDir), `${commitId} ${options.requestId} ${options.attemptId ?? "-"}${submission === undefined ? "" : ` ${submission.id}`}\n`, { mode: 0o600 });
     await this.#run(["update-ref", "HEAD", commitId, staged.base], { gitDir: options.gitDir });
-    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored };
+    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored, ...(submission === undefined ? {} : { recovered: false }) };
+  }
+
+  /**
+   * The commit an earlier release made for this submission, if one counts (card H12o): listed in the host-side release ledger against the submission (only the host's `release` writes there; the agent cannot), still in the
+   * history of the checkout's head (a commit listed but never reached, a crash between the ledger line and the head move, counts for nothing), with exactly the approved parent and tree and the submission's trailer. The
+   * ledger is read from its end, at most `RELEASE_LEDGER_READ` bytes (its newest lines), and at most 20 listed commits are looked at.
+   */
+  async #releasedFor(gitDir: string, submission: ApprovedSubmission): Promise<{ commitId: string; files: { path: string; op: "write" | "delete" }[] } | undefined> {
+    const text = await readTail(releaseLedgerPath(gitDir), RELEASE_LEDGER_READ);
+    const listed = text.split("\n").map((l) => l.split(" ")).filter((p) => p.length === 4 && p[3] === submission.id && OID.test(p[0]!)).map((p) => p[0]!).reverse();
+    for (const commitId of [...new Set(listed)].slice(0, 20)) {
+      const reached = await this.#run(["merge-base", "--is-ancestor", commitId, "HEAD"], { gitDir }).then(() => true, () => false);
+      if (!reached) continue;
+      const [parents = "", tree = "", ...body] = (await this.#run(["log", "-1", "--format=%P%n%T%n%B", commitId], { gitDir })).stdout.split("\n");
+      if (parents.trim() !== submission.base || tree.trim() !== submission.tree || !body.includes(`NimbleNewt-Submission: ${submission.id}`)) continue;
+      const diff = (await this.#run(["diff-tree", "-r", "--no-renames", "--name-status", "-z", submission.base, commitId], { gitDir })).stdout.split("\0").filter(Boolean);
+      const files: { path: string; op: "write" | "delete" }[] = [];
+      for (let i = 0; i + 1 < diff.length; i += 2) files.push({ path: diff[i + 1]!, op: diff[i] === "D" ? "delete" : "write" });
+      return { commitId, files };
+    }
+    return undefined;
   }
 
   /** Writes the repository's own attribute file (it outranks every attribute file in the checkout): no path may name a filter, an ident expansion, a line-ending conversion or a re-encoding. Replaced atomically, only when it differs. */

@@ -16,6 +16,8 @@ import type { WebBrowser, WebSettings } from "../web/index.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import { relianceOf } from "../security/reliance.js";
+import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
 import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
@@ -35,11 +37,13 @@ import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js
 import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
+import type { StaleDeliverable } from "../submissions/acceptance.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
+import { releaseDeadline } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
@@ -140,16 +144,20 @@ export type AttentionKind = "paused_assignee" | "unreachable_worker" | "uncertai
 export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "unreachable_worker", "uncertain_tool_result", "stale_artifact"];
 /**
  * When an artifact counts as stale (card U13, ASSUMPTION): (1) `superseded`, a newer artifact with the same name was recorded on the same task, so anyone still pointing at this one has an old version; or (2) `aged`, the newest
- * artifact of a task that is still open (not done or cancelled) was recorded more than this many days ago and nothing newer followed, so the deliverable may no longer match the work. No file is read: the records are enough.
+ * artifact of a task that is still open (not done or cancelled) was recorded more than this many days ago and nothing newer followed, so the deliverable may no longer match the work; or (3) `contract_changed`, a versioned
+ * deliverable (card Q01) whose newest version is submitted, under review or accepted was checked against a task contract version whose work fields (expected result, acceptance criteria, required evidence, checks) have
+ * changed since (`at` is when they first changed; the deliverable service decides which deliverables the caller may read). No file is read: the records are enough.
  */
 export const STALE_ARTIFACT_DAYS = 7;
+/** The contract's work fields in the owner's words, for the `contract_changed` line. */
+const CONTRACT_FIELD_WORDS: Readonly<Record<string, string>> = { expectedResult: "its expected result", acceptanceCriteria: "its acceptance criteria", requiredEvidence: "the evidence it requires", checks: "its checks" };
 export interface AttentionItem {
   readonly kind: AttentionKind;
   readonly taskId: string;
   readonly projectId: string;
   readonly title: string;
   readonly taskState: TaskState;
-  /** The task's owner of record (paused_assignee, unreachable_worker) or the caller of the tool (uncertain_tool_result). */
+  /** The task's owner of record (paused_assignee, unreachable_worker), the caller of the tool (uncertain_tool_result), or the one who recorded the artifact or the deliverable's responsible agent (stale_artifact). */
   readonly agentId?: string;
   /** When it started or was last seen: the pause time (the task's last change when the gate has none), the last sign of work, or the call time. */
   readonly at?: string;
@@ -290,17 +298,19 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
-  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time, whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
+  release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
   providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
   secrets: { keys: [], about: "owner only (card U08): the names of the secrets the installation uses and whether each is set; never a value. A secret is entered write-only on the web page's Secrets form or put in the host's secret store, never typed in chat" },
   kept_secret_uses: { keys: [], about: "owner only (task T4b): records made before the rule that a secret the installation keeps for something else (the owner's credential, the database address, a transfer target's address, the backup signing key) is never sent to another party: each network grant, backup target or work-in-progress backup that still names one, by the secret's NAME, never a value; none of them sends anything, and the answer says what to change" },
   sandbox: { keys: [], about: "owner only (card U08): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox on Windows) and a warning where the boundary is weaker, as macOS Seatbelt's is" },
+  compatibility: { keys: [], about: "owner only (card U08): whether the runtimes in use are ones this version supports (the Node.js version, and the worker protocol each host's worker announced: current, older, refused or never connected), what database migrations wait, and for each finding the agents and operations it touches (a short list with the number of the rest)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
   chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the reviewing agents (the resume reviewer and the second agent that questions a done) may use (the chat itself is never stopped by it), who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
+  grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -309,7 +319,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
-  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, or the newest one of a task still open is over a week old), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
+  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
   critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
@@ -388,7 +398,9 @@ export type StatusRequest =
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
   | { readonly kind: "kept_secret_uses" }
+  | { readonly kind: "compatibility" }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
   | { readonly kind: "wakes" }
@@ -569,7 +581,7 @@ export interface StatusDeps {
   /** The optional work-in-progress backup (card P02b). Absent: the view is not offered. */
   readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly credential?: string; readonly approvalHeld?: boolean; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string; readonly grantId?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
   /** The reads of the settings and administration pages (card U08); owner only. */
-  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox" | "compatibility">;
   /** Records that still name a secret the installation keeps for something else (task T4b). Absent: the view is not offered. */
   readonly keptSecretUses?: { find(): Promise<readonly KeptSecretUse[]> };
   readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
@@ -678,6 +690,11 @@ export interface StatusDeps {
   readonly ownerQuestions?: { ownerQuestions(owner: Principal, page?: { afterId?: string; limit?: number }): Promise<{ items: readonly { inquiryId: string; asker: string; question: string; askedAt: string; revision: number; task: { id: string; title: string; projectName: string }; wait?: { summary: string; nextAction: string; deadline?: string } }[]; next?: string }> };
   /** Checks an artifact against its files (card S06). Absent: artifacts are listed as `not_checked`, never as verified. */
   readonly verifyArtifact?: (artifactId: string) => Promise<{ readonly ok: boolean }>;
+  /**
+   * The versioned deliverables of a task (card Q01) that the caller may read and that stand on a task contract changed since in what it asks for (card U13's `contract_changed` stale artifact). The service applies its own
+   * read rule; `reads` is the number of records it read, counted against the attention scan. Absent: deliverables are never listed as stale.
+   */
+  readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -918,7 +935,9 @@ export class StatusService {
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
       case "kept_secret_uses": { onlyKnown(request, ["kind"]); return this.keptSecretUseLines(by); }
+      case "compatibility": { onlyKnown(request, ["kind"]); return this.compatibilityLines(by); }
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
+      case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1066,12 +1085,13 @@ export class StatusService {
     const r = await this.#deps.setup.check(by);
     const c = cite("setup", "readiness");
     const mark = (state: string): string => (state === "done" ? "done" : state === "default" ? "default (nothing chosen, works as it is)" : state === "optional" ? "optional, not yet" : "OPEN");
-    const open = r.items.find((i) => i.state === "missing" || (i.state === "optional" && i.id === "task"));
+    // The approval profile is asked first while nothing has been chosen (card U08): the question explains the derived profile, recommends it for testing and development and asks whether to switch from strict.
+    const open = r.items.find((i) => i.state === "missing" || (i.id === "profile" && i.state === "default") || (i.state === "optional" && i.id === "task"));
     const lines: Line[] = [
       line(r.ready ? "Everything a first agent needs is set up." : `Not ready for a first agent yet: the first required step still open is ${shown(r.items.find((i) => i.id === r.next)?.label ?? "", 80)}.`, c),
       ...r.items.map((i) => line(`${shown(i.label, 80)}: ${mark(i.state)}${i.required ? " (needed)" : ""}. ${shown(i.detail, 240)}`, c)),
     ];
-    if (open !== undefined) lines.push(line(`Next to ask: ${shown(open.guide.question, 700)} Recommended: ${shown(open.guide.recommended, 200)} If you decline: ${shown(open.guide.ifDeclined, 250)} Ask the owner this one question; apply nothing until they answer, and every answer can be changed later by chat.`, c));
+    if (open !== undefined) lines.push(line(`Next to ask: ${shown(open.guide.question, 700)} Recommended: ${shown(open.guide.recommended, 200)} If you decline: ${shown(open.guide.ifDeclined, 250)} Ask the owner this one question; apply nothing until they answer, and every answer can be changed later by chat.${open.id === "profile" ? " The answer is a policy_edit profile change to derived or to strict (strict is recorded too, so the question is not asked again), the same change the web page's buttons make." : ""}`, c));
     return { observedAt: this.#runner.now(), lines };
   }
 
@@ -1184,6 +1204,32 @@ export class StatusService {
       ...got.hosts.slice(0, 30).map((h) => row(`Host ${shown(h.hostId, 60)} (${h.freshness})`, h)),
       line(got.warn ? "Take the weaker boundary into account where you choose or review where work runs; Linux's bubblewrap is the strongest." : "Every host listed uses a strong boundary.", c),
     ] };
+  }
+
+  /** Compatibility and migration status (card U08): runtimes in use against what this version supports, what waits in the database, and the agents and operations each finding touches. At most 25 lines. */
+  async compatibilityLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    const got = await this.#deps.admin.compatibility(by);
+    const c = cite("hosts", "compatibility");
+    const listed = (items: readonly string[], more: number, n: number, width: number, none: string): string => { const rest = Math.max(0, items.length - n) + more; return items.length === 0 ? none : `${items.slice(0, n).map((x) => shown(x, width)).join("; ")}${rest > 0 ? ` and ${rest} more` : ""}`; };
+    const who = (a: { agents: readonly string[]; agentsMore: number }): string => listed(a.agents, a.agentsMore, 5, 80, "no agent");
+    const what = (a: { operations: readonly string[]; operationsMore: number }): string => listed(a.operations, a.operationsMore, 3, 120, "no operation");
+    const lines: Line[] = [
+      line(got.status === "compatible" ? "Everything in use is a runtime this version supports, and no migration waits." : "Something is not current: see below.", c),
+      line(`Node.js ${shown(got.runtime.node.running, 30)} is running${got.runtime.node.supported ? `, which this version supports (${shown(got.runtime.node.minimum, 30)} or newer)` : `: this version needs ${shown(got.runtime.node.minimum, 30)} or newer`}. This controller speaks worker protocol ${got.runtime.protocol.min} to ${got.runtime.protocol.max}.`, c),
+    ];
+    const shownHosts = got.hosts.slice(0, 12);
+    if (shownHosts.length === 0) lines.push(line("No host has announced itself.", c));
+    for (const h of shownHosts) lines.push(line(`Host ${shown(h.hostId, 60)}: ${h.state}${h.protocol === undefined ? "" : `, protocol ${h.protocol}`}${h.workerVersion === undefined ? "" : `, worker ${shown(h.workerVersion, 60)}`}. ${shown(h.note, 300)}${h.state === "older" || h.state === "refused" ? ` Affected: ${who(h)}; ${what(h)}.` : ""}`, c));
+    if (got.hosts.length > shownHosts.length || got.truncated) lines.push(line(`${Math.max(1, got.hosts.length - shownHosts.length)} more host(s) are not shown.`, c));
+    if (got.migration !== undefined) {
+      const m = got.migration;
+      lines.push(line(`Database schema ${m.schemaVersion} of ${m.latestKnown}. ${shown(m.note, 300)}`, c));
+      for (const p of m.pending.slice(0, 5)) lines.push(line(`Migration ${p.version} ${shown(p.name, 80)} (${shown(p.kind, 20)}) is ${shown(p.state, 20)}.`, c));
+      if (m.pending.length > 0) lines.push(line(`It would touch: ${who(m)}; ${what(m)}.`, c));
+    }
+    for (const p of got.problems.slice(0, 3)) lines.push(line(`Not read: ${shown(p, 240)}`, c));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */
@@ -1366,7 +1412,8 @@ export class StatusService {
    */
   async releaseLines(by: Principal, request: { candidateId?: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const release = this.#deps.release;
-    if (release === undefined || by.kind !== "owner") return undefined;
+    // An owner object limited to one task is not the owner for this view: the other owner-only views refuse it the same way (card X09b watch, second review).
+    if (release === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     if (request.candidateId !== undefined && (typeof request.candidateId !== "string" || request.candidateId.trim() === "" || request.candidateId.length > 120)) invalid("candidateId", "needs the candidate's ID (the rcn- ID release.submit returned)");
     const limit = request.limit ?? 5;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) invalid("limit", "must be a whole number from 1 to 10");
@@ -1375,7 +1422,21 @@ export class StatusService {
       const state = cell.state === "passed" ? cell.flaky ? `flaky pass (passed only after ${cell.earlierFailures.length} earlier failure${cell.earlierFailures.length === 1 ? "" : "s"})` : "pass" : cell.state === "failed" ? "fail" : cell.state === "missing" ? "not run" : cell.state === "timed_out" ? "timed out" : cell.state === "running" ? "running" : cell.state;
       return `${state} (${cell.attempts} attempt${cell.attempts === 1 ? "" : "s"})`;
     };
-    const attemptWords = (a: ReleaseAttemptBody & { id: string }): string => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quoted(a.hostId, 80)}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quoted(a.result.summary, 160)}`}${a.reason === undefined ? "" : `; reason: ${quoted(a.reason, 160)}`}`;
+    // An open attempt also says where it stands (card X09b, the outer watch): waiting for its host, or picked up and when the host was last heard, and when the controller ends it as timed out if no result
+    // comes (the same `releaseDeadline` its expiry uses). The heartbeat time is the host's own record, read once per host per view.
+    const heard = new Map<string, string | undefined>();
+    const lastHeard = async (hostId: string): Promise<string | undefined> => {
+      if (!heard.has(hostId)) heard.set(hostId, ((await this.#runner.get("host-record", hostId))?.body as unknown as { lastSeenAt?: string } | undefined)?.lastSeenAt);
+      return heard.get(hostId);
+    };
+    const openWords = async (a: ReleaseAttemptBody): Promise<string> => {
+      if (a.state !== "issued") return "";
+      const ends = `if no result comes it ends as timed out at ${shown(releaseDeadline(a), 30)}`;
+      if (a.pickedUpAt === undefined) return `; waiting for the host to pick it up; ${ends}`;
+      const h = await lastHeard(a.hostId);
+      return `; picked up ${shown(a.pickedUpAt, 30)}; ${h === undefined ? "the host has no heartbeat on record" : `the host was last heard ${shown(h, 30)}`}; ${ends}`;
+    };
+    const attemptWords = async (a: ReleaseAttemptBody & { id: string }): Promise<string> => `${a.state === "issued" ? "issued, still open" : a.state === "timed_out" ? "timed out" : a.state} on ${platform(a.cell)}, host ${quoted(a.hostId, 80)}, started ${shown(a.issuedAt, 30)}${a.endedAt === undefined ? "" : `, ended ${shown(a.endedAt, 30)}`}${a.result === undefined ? "" : `, the host said ${quoted(a.result.summary, 160)}`}${a.reason === undefined ? "" : `; reason: ${quoted(a.reason, 160)}`}${await openWords(a)}`;
     const body: Line[] = [];
     let candidates: readonly CandidateRow[];
     let moreCandidates = false;
@@ -1427,7 +1488,11 @@ export class StatusService {
       const block: Line[] = [line(`Candidate ${shown(candidate.candidateId, 120)}: ${gate.approved ? "approved" : "not approved"}; ${gate.ready ? "every platform passed" : "not ready yet"}${gate.needsAcknowledgement ? "; a platform passed only after earlier failures (flaky: an approval shows these failures and accepting it means accepting them)" : ""}.`, c)];
       for (const cell of gate.cells) block.push(line(`  ${platform(cell.cell)}: ${gateWords(cell)}`, c));
       // Newest first: what is running now, or the attempt that just ended, is what the owner is asking about.
-      for (const a of [...attempts].reverse()) block.push(line(`  attempt ${shown(a.id, 80)}: ${attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      for (const a of [...attempts].reverse()) {
+        // Only what fits is read further (an attempt line past the budget is counted, not built).
+        if (body.length + block.length >= budget) { lineDropped++; continue; }
+        block.push(line(`  attempt ${shown(a.id, 80)}: ${await attemptWords(a)}`, c, cite("release-attempt", a.id)));
+      }
       for (const l of block) { if (body.length < budget) body.push(l); else lineDropped++; }
     }
     const lines: Line[] = [...body];
@@ -1651,6 +1716,28 @@ export class StatusService {
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
+  /**
+   * The running work that relies on a standing right (follow-up to card T7), for the owner before a right is taken back: one right (grantId) in full, or every active right that has running work, one line each.
+   * Owner only; read only from the grant, assignment, attempt and task records. At most 12 lines.
+   */
+  async grantRelianceLines(by: Principal, grantId?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if (grantId !== undefined && !(typeof grantId === "string" && /^grt-[a-z2-7]{20}$/.test(grantId))) invalid("grantId", "must be a right's ID (grt-...)");
+    const got = await relianceOf(this.#runner, grantId === undefined ? {} : { grantId });
+    if (got === undefined) return undefined;
+    const lines: Line[] = [];
+    if (grantId !== undefined) {
+      const r = got.items[0]!;
+      const c = cite("grant", r.grantId, r.revision);
+      return { observedAt: this.#runner.now(), lines: relianceLines(r).map((text) => line(text, c)) };
+    }
+    const busy = got.items.filter((r) => r.total > 0);
+    lines.push(line(relianceSummary(got.items, got.more), cite("grants", "active")));
+    for (const r of busy.slice(0, 10)) lines.push(line(relianceHead(r, 2), cite("grant", r.grantId, r.revision)));
+    if (busy.length > 10) lines.push(line(`${busy.length - 10} more rights with running work are not listed; ask about one by its ID.`, cite("grants", "active")));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async catalogPolicyLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.catalogPolicy === undefined || by.kind !== "owner") return undefined;
     let p;
@@ -2713,9 +2800,9 @@ export class StatusService {
    * Read only, and what the caller may not read reads as missing: each kind rests on the same right as its neighbour (pauses and workers on the right to read the task's assignment, tool calls on the tool-history right),
    * so an item the caller could not see in `task`, `overview` or `tools` is never listed here and never matched by a filter. Only the owner may leave the project and task out.
    *
-   * Paging walks the tasks in ID order and each task's items in a fixed order (paused, unreachable, then calls in ID order). The cursor names the last item handed out, so it stays valid when other items appear or disappear
-   * between pages and nothing is skipped or repeated. The scan is bounded: when its budget runs out before the page is full, `scanLimited` is set and `next` continues from the last task that was fully read.
-   * Not included (their data has no service yet): stale artifacts.
+   * Paging walks the tasks in ID order and each task's items in a fixed order (paused, unreachable, calls in ID order, stale artifacts in ID order, then stale deliverables in ID order). The cursor names the last item handed
+   * out, so it stays valid when other items appear or disappear between pages and nothing is skipped or repeated. The scan is bounded: when its budget runs out before the page is full, `scanLimited` is set and `next` continues
+   * from the last task that was fully read. Stale artifacts (`STALE_ARTIFACT_DAYS`) include versioned deliverables whose contract changed since they were checked (`deps.deliverables`).
    */
   async attention(by: Principal, query: { projectId?: string; taskId?: string; agentId?: string; state?: string; kind?: string; since?: string; until?: string; afterId?: string; limit?: number } = {}): Promise<Attention> {
     onlyKnown(query, ["projectId", "taskId", "agentId", "state", "kind", "since", "until", "afterId", "limit"]);
@@ -2833,6 +2920,20 @@ export class StatusService {
           const maker = art.createdBy.replace(/^agent:/, "");
           if (agent !== undefined && maker !== agent) continue;
           push(3, art.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), at, summary: newer === undefined ? `Artifact ${shown(art.name)} on ${base.title} was recorded ${plainDuration(nowMs - Date.parse(art.createdAt))} ago and nothing newer followed while the task is still open.` : `Artifact ${shown(art.name)} on ${base.title} has been replaced by a newer version.`, detail: { artifactId: art.id, name: shown(art.name, 120), reason: newer === undefined ? "aged" : "superseded", recordedAt: art.createdAt, ...(newer === undefined ? {} : { supersededBy: newer.id }) }, cite: cite("artifact", art.id, art.revision) });
+          if (found.length > limit) return;
+        }
+      }
+      // Versioned deliverables judged against a contract whose work has changed since (`contract_changed`). The deliverable service applies its own read rule (the one `deliverable.record.list` uses).
+      if (want("stale_artifact") && this.#deps.deliverables !== undefined && (floor === undefined || floor.rank <= 4)) {
+        const stale = await this.#deps.deliverables.contractStale(by, taskId);
+        examined += stale.reads;
+        for (const d of [...stale.items].sort((x, y) => (x.id < y.id ? -1 : 1))) {
+          if (floor !== undefined && floor.rank === 4 && d.id <= floor.id) continue;
+          if (!inRange(d.changedAt)) continue;
+          const maker = d.responsibleAgent.replace(/^agent:/, "");
+          if (agent !== undefined && maker !== agent) continue;
+          const fields = d.fields.map((f) => CONTRACT_FIELD_WORDS[f] ?? "its work").join(", ");
+          push(4, d.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), ...(d.changedAt === undefined ? {} : { at: d.changedAt }), summary: `Deliverable ${quoted(d.title, 120)} (version ${d.version}, ${d.state}) on ${base.title} was checked against contract version ${d.checkedAgainst}; the task's contract has since changed ${fields} (now version ${d.contractVersion}), so it may no longer be what the task asks for.${d.firstChangeBeyond === undefined ? "" : ` Its first change is more than ${d.firstChangeBeyond} contract versions back, so the time given is when the current version was stored; the work changed earlier.`}`, detail: { deliverableId: d.id, title: quoted(d.title, 120), reason: "contract_changed", version: d.version, state: d.state, checkedAgainst: d.checkedAgainst, contractVersion: d.contractVersion, fields: [...d.fields], at: d.firstChangeBeyond === undefined ? "first_change" : "current_version" }, cite: cite("deliverable", d.id, d.revision) });
           if (found.length > limit) return;
         }
       }

@@ -280,10 +280,13 @@ for (const backend of backends) {
 
   test(`${backend.name}: a crash between the order and its answer: the sweep finishes the ordering record once it is stale, with the same order key`, async () => {
     const r = await rig();
+    // The first run's host never answers (the process "dies" there). Its order waits on a real `orderMs` (two minutes) timer, so the run outlives the test unless the
+    // service is closed: the test closes it BEFORE the storage, as the controller's shutdown does. Left open, the timer fired after the storage was closed and the
+    // run's rejection ("the storage is closed") failed the whole file once the file ran longer than two minutes.
+    const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
+    const hung = hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
+    let storeClosed = false;
     try {
-      // The first run's host never answers (the process "dies" there).
-      const hanging = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: () => new Promise<never>(() => undefined), report: async () => undefined }, { clock: r.w.clock.now });
-      void hanging.run({ attemptId: "att-1", taskId: "t", projectId: r.w.project, agentId: "agent:ann" }, []);
       // Waits for the run to reach the order (a fixed 100 ms was too short for a SQLite worker thread on a slow Windows runner).
       for (let i = 0; i < 200 && (await r.cleanup.get("att-1"))?.state !== "ordering"; i++) await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal((await r.cleanup.get("att-1"))?.state, "ordering");
@@ -299,7 +302,19 @@ for (const backend of backends) {
       assert.equal((await r.cleanup.get("att-1"))?.state, "removed");
       assert.equal(await r.cleanup.recover(), 0, "finished and reported: nothing more");
       assert.equal(r.s.orders.length, 1);
-    } finally { await r.store.close(); }
+      // Shutdown ends the hung run at once (its order is cancelled) and close() returns only once the run is done; the storage is then closed straight away, as the
+      // controller's shutdown does, so a run still writing after close() returned would fail with "the storage is closed". The sweep's removal is left as it is.
+      const began = Date.now();
+      await hanging.close();
+      assert.ok(Date.now() - began < SCRATCH_LIMITS.orderMs / 4, "close() cancels the hung order at once instead of waiting for its time limit");
+      storeClosed = true;
+      await r.store.close();
+      assert.equal((await hung).state, "removed", "the hung run ended before close() returned, without an error, and did not change the sweep's outcome");
+    } finally {
+      await hanging.close();
+      await hung.catch(() => undefined);
+      if (!storeClosed) await r.store.close();
+    }
   });
 
   test(`${backend.name}: the sweep retries an unreported leftovers report and gives up after a bounded number of tries`, async () => {
@@ -541,6 +556,31 @@ for (const backend of backends) {
       } finally { await w.store.close(); }
       void ordered;
     } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: shutdown during an order gives up its lease (nothing decided), so the next controller can send the order at once`, async () => {
+    const r = await rig();
+    let svc: ScratchCleanupService | undefined;
+    let run: ReturnType<ScratchCleanupService["run"]> | undefined;
+    try {
+      let seen: AbortSignal | undefined;
+      svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: (_o, signal) => { seen = signal; return new Promise<never>(() => undefined); }, report: async () => undefined }, { clock: r.w.clock.now });
+      run = svc.run(plain(r), []);
+      for (let i = 0; i < 400 && seen === undefined; i++) await new Promise((resolve) => setTimeout(resolve, 25)); // the state, not a fixed time
+      assert.ok(seen !== undefined, "the order went out");
+      assert.notEqual((await svc.get("att-1"))?.lease, undefined, "the order is claimed while it is out");
+      await svc.close();
+      assert.ok(seen.aborted, "the order was told to stop");
+      assert.equal((await run).state, "ordering", "nothing was decided");
+      const after = await svc.get("att-1");
+      assert.equal(after?.state, "ordering");
+      assert.equal(after?.lease, undefined, "the lease was given up at shutdown");
+      assert.equal(after?.retries ?? 0, 0, "no retry was used up");
+    } finally {
+      await svc?.close();
+      await run?.catch(() => undefined);
+      await r.store.close();
+    }
   });
 
   test(`${backend.name}: A5: a removal the host reports is recorded even when another run has already closed the cleanup as kept`, async () => {

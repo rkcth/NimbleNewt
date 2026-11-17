@@ -64,6 +64,8 @@ export class RemoteWorkerHost implements WorkerHost {
     this.ownerPolicy = options.ownerPolicy !== undefined;
     // A host whose port threw (the work may be half done) says so with `failed`: that is thrown here, as a local host's throw is, so the workspace service records `failed`, not a clean refusal.
     this.workspace = { run: async (call) => {
+      // Card H12o: the commit of an approved submission is not carried over the worker protocol yet; a remote host asked for a release would make a plain platform commit of whatever its checkout holds. Refused, nothing sent.
+      if (call.submission !== undefined) return { ok: false, reason: `${this.hostId} is a remote host, which does not commit an approved submission yet (only the local worker host does); nothing was sent and nothing was committed` };
       // A landing carries the owner's policy (card H12a): the host cannot read the controller's settings. Fail closed: nothing is sent when it cannot be read, and what a caller put in the request is never taken (only this reader's word).
       if (call.operation === "landing") {
         let policy: CarriedLanding | undefined;
@@ -261,7 +263,17 @@ export class RemoteWorkerHandle implements WorkerHandle {
   constructor(private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number, private readonly options: RemoteWorkerHostOptions) {}
   /** The placement's one stored result: a new primary that takes it again charges its figures under the same key (card H09b). */
   get resultKey(): string { return `result:${this.attemptId}:${this.placement}`; }
-  run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
+  /**
+   * The turn's result, with the checkpoint the worker sent with it (card L04e): as a local host's result carries its checkpoint, a remote turn's does too, so the dispatcher captures the turn's continuation with the worker's own read-back check
+   * (`nn.durable`) in it, and a resume can use it. A result without one (a failed or cancelled turn, a worker that sent none, a checkpoint that cannot be read back) is returned as it was: never an older checkpoint in its place.
+   */
+  async run(_gateway: ToolGateway): Promise<WorkerTurnResult> {
+    void _gateway;
+    const result = await this.remote.waitForResult(this.by, this.attemptId, this.placement) as WorkerTurnResult;
+    if (result.status !== "completed" || result.checkpoint !== undefined) return result;
+    const checkpoint = await this.remote.resultCheckpoint(this.by, this.attemptId, this.placement).catch(() => undefined);
+    return checkpoint === undefined ? result : { ...result, checkpoint };
+  }
   /** The handle acts only while its own placement holds the attempt: after a move, an old handle controls nothing. */
   async #current(): Promise<void> {
     const p = await this.remote.placement(this.by, this.attemptId);
