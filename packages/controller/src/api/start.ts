@@ -85,7 +85,8 @@ import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJo
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
-import { DependencyService, checkoutDependencyObserver, locallyPlaced, resumeProbeEnabled } from "../dependencies/index.js";
+import { DependencyService, resumeProbeEnabled } from "../dependencies/index.js";
+import { resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
@@ -152,14 +153,19 @@ export interface StartOptions {
    */
   readonly reportInterrogation?: { readonly model: ResumeReviewModel & Pick<ModelCall, "completeDetailed">; readonly routes?: ResumeReviewRoutes; readonly role?: string };
   /**
+   * Where the worker of this machine keeps a task's checkout (card L04e): the folder an agent really worked in, so the resume check reads the files the task relied on there rather than in the repository's own folder (which a task's uncommitted
+   * work never reaches). Asked for a task placed on this machine; `undefined` (no checkout made yet, or no worker here) falls back to the folder the task's repository is bound at. It is a folder, never read outside by the probe.
+   */
+  readonly resumeCheckout?: (task: { readonly taskId: string; readonly projectId: string }) => string | undefined | Promise<string | undefined>;
+  /**
    * Whether a checked resume may look at the task's own checkout to see how its recorded files and directories are now (card L04d),
    * instead of leaving every one of them `unknown`. Default: yes. `false` turns the reading off, `{ maxEntries, maxBytes }` bounds it
    * tighter. A probe reads nothing outside the checkout the task's records name, and reports only what it really read. An explicit
-   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`) the default is off: the resumed attempt's host is
-   * chosen after the check, and this machine's disk says nothing about another's. Given explicitly there, a task last placed on a
-   * remote host (or never placed) is still not probed, so its files stay `unknown` unless the host's own `resume.observe` answers.
+   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`), a task last placed on a remote host is looked at by
+   * that host on its own disk (the `observe` workspace request, answered by a host that was started with an observer); one that does
+   * not answer, and a task never placed there, leave the files `unknown`. A task placed on this machine is read here.
    */
-  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number };
+  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number; /** How long a remote host may take to answer a look at a task's files, in ms (default 8000); a host that does not answer leaves them unknown. */ readonly remoteWaitMs?: number };
   /**
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
@@ -470,6 +476,35 @@ export async function startController(options: StartOptions): Promise<Controller
  * The owner's inbox text for a maintenance request that waits on the owner: IDs and the kind only (the request's own text stays in the request, which only its readers see). For a protected request it names the
  * administrators who may decide it too, as many as fit in the inbox's detail limit, and how many more there are (card A09 follow-up T6, review).
  */
+/** The record kind of an administrator's notice, and the short code of the administrator that makes its record ID its own. */
+export const ADMIN_NOTICE_REF = "maintenance-admin";
+const adminCode = (administratorId: string): string => createHash("sha256").update(administratorId).digest("hex").slice(0, 8);
+
+/**
+ * The project an administrator's notice belongs to: the first, in order, of the projects in which the agent holds a live grant that is not a tool grant (a grant for every project names none). Undefined for an agent that is gone,
+ * not active, or works in no project (card A09 follow-up T6b).
+ */
+export async function administratorProject(principal: { id: string; kind: string; name: string; state?: string; grants: readonly unknown[] } | undefined, effective: (p: { id: string; kind: string; name: string; grants: never }) => Promise<{ grants: readonly { action: string; project: string; expiresAt?: string }[] }>): Promise<string | undefined> {
+  if (principal === undefined || principal.kind !== "agent" || principal.state !== "active") return undefined;
+  const now = new Date().toISOString();
+  const projects = (await effective(principal as never)).grants.filter((g) => g.project !== "*" && !g.action.startsWith("tool.") && (g.expiresAt === undefined || g.expiresAt > now)).map((g) => g.project).sort();
+  return projects[0];
+}
+
+/**
+ * The text of an administrator's own notice: IDs and the kind only, within the inbox's 200-unit limit (the cut never splits a surrogate pair), and neutral: it says who may decide, not what to decide (the request's
+ * own text stays in the request, which only its readers see).
+ */
+export function maintenanceAdminDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorId">): string {
+  const max = NOTIFICATION_LIMITS.detail;
+  const full = `${n.agentId} asked for a ${n.kind} change. ${n.administratorId ?? "An administrator"} may decide it (maintenance.get reads it, maintenance.decide records the verdict); the owner may too.`;
+  const text = full.length <= max ? full : `${n.agentId} asked for a ${n.kind} change; ${n.administratorId ?? "an administrator"} may decide it with maintenance.decide.`;
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 export function maintenanceOwnerDetail(n: Pick<MaintenanceNotice, "agentId" | "kind" | "administratorIds">): string {
   const max = NOTIFICATION_LIMITS.detail;
   const admins = n.administratorIds ?? [];
@@ -1081,15 +1116,20 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // change. Whatever the host supplies outright for either port is used instead of these.
     const RESUME_READER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
     const remoteHostIds: ReadonlySet<string> = new Set((options.dispatch?.remote?.hosts ?? []).map((h) => h.hostId));
-    const resumeProbe = !resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) || options.resume?.observe !== undefined ? undefined : checkoutDependencyObserver({
+    // What the recorded files and directories look like now (card L04e): a task placed on a remote host is looked at by that host on its own disk, one placed here is read from the checkout its worker works in (`resumeCheckout`), else the folder its
+    // repository is bound at; the project's paths apply to either. Whatever cannot be looked at stays unobserved, so the check says `unknown`.
+    const resumeProbeOn = resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) && options.resume?.observe === undefined;
+    const resumeObserve = !resumeProbeOn ? undefined : resumeObserver({
       manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId),
-      // A task placed on a remote host works on that host's disk, not this one: nothing here is evidence about it (and a task never
-      // placed, in an installation with remote hosts, may be about to go to one). Left unobserved, so the owner decides.
-      locate: locallyPlaced(remoteHostIds, async (taskId) => {
+      placedHostOf: async (taskId) => {
         const placed = (await storage.getAggregate({ kind: "task-placement", id: taskId }))?.body as { hostId?: unknown } | undefined;
         return typeof placed?.hostId === "string" ? placed.hostId : undefined;
-      }, async (taskId) => await resources.checkoutLocation(taskId)),
-      ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
+      },
+      remoteHostIds,
+      binding: async (taskId) => await resources.checkoutLocation(taskId),
+      ...(options.resumeCheckout === undefined ? {} : { workerCheckout: options.resumeCheckout }),
+      remote: () => (dispatch?.remote === undefined ? undefined : { remote: dispatch.remote, by: dispatch.principal }),
+      ...(typeof options.resumeProbe === "object" ? { limits: options.resumeProbe, ...(options.resumeProbe.remoteWaitMs === undefined ? {} : { remoteWaitMs: Math.max(1, Math.min(60_000, Math.floor(options.resumeProbe.remoteWaitMs))) }) } : {}),
       onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
     });
     // One bounded client over the host's raw reviewer client (card W10 wiring), shared by the resume reviewer and the second agent of a done, so the two share its slots.
@@ -1129,7 +1169,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the report interrogator on ${route}: ${detail}`)); },
     });
     const resumePorts: Partial<ResumePorts> = {
-      ...(resumeProbe === undefined ? {} : { observe: resumeProbe }),
+      ...(resumeObserve === undefined ? {} : { observe: resumeObserve }),
       ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),
       ...(shippedReview === undefined ? {} : { review: shippedReview }),
       ...options.resume,
@@ -1405,10 +1445,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
-      // An administrator's notice is not an inbox item of its own: the owner's inbox keeps one item per request (a second emit for the same request would fold into the owner's item), and an agent has
-      // no inbox outside a task, so the owner's item names the administrators who may decide it and each administrator finds it with maintenance.list. Card A09 follow-up T6, review.
-      if (n.to === "administrator") return;
+    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+      // An administrator's notice is an item of its own only when it is anchored in a project (card A09 follow-up T6b): the inbox keeps one item per kind, project and record, and an item without a project would fold into the owner's
+      // item for the request. Its record ID is the request's with a short code of the administrator, so each administrator has its own item, and it is closed when the request is decided or revoked. One without a project (the
+      // administrator works in none) stays only on the owner's item, and finds the request with maintenance.list.
+      if (n.to === "administrator") {
+        if (n.projectId === undefined || n.administratorId === undefined) return;
+        await notifications.emitFromController({ commandId: `mnt-adm-${n.maintenanceId}-${adminCode(n.administratorId)}`, kind: "maintenance", level: "notice", ref: { kind: ADMIN_NOTICE_REF, id: `${n.maintenanceId}-${adminCode(n.administratorId)}` }, projectId: n.projectId, detail: maintenanceAdminDetail(n) });
+        return;
+      }
       if (n.to === "owner") await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "needs-you", ref: { kind: "maintenance", id: n.maintenanceId }, detail: maintenanceOwnerDetail(n) });
       // The supervisor who may decide it is named to the owner at the lower level (an agent has no inbox outside a task; it reads its reports' requests with maintenance.list), so the owner knows who was asked.
       else await notifications.emitFromController({ commandId: `mnt-req-${n.maintenanceId}`, kind: "maintenance", level: "notice", ref: { kind: "maintenance", id: n.maintenanceId }, detail: `${n.agentId} asked for an environment change (${n.kind}); its supervisor ${n.supervisorId ?? ""} may decide it (maintenance.list shows it to them). You can decide it too.`.slice(0, NOTIFICATION_LIMITS.detail) }); } });

@@ -261,7 +261,17 @@ export class RemoteWorkerHandle implements WorkerHandle {
   constructor(private readonly remote: RemoteWorkerService, private readonly by: Principal, readonly attemptId: string, readonly placement: number, private readonly options: RemoteWorkerHostOptions) {}
   /** The placement's one stored result: a new primary that takes it again charges its figures under the same key (card H09b). */
   get resultKey(): string { return `result:${this.attemptId}:${this.placement}`; }
-  run(_gateway: ToolGateway): Promise<WorkerTurnResult> { void _gateway; return this.remote.waitForResult(this.by, this.attemptId, this.placement) as Promise<WorkerTurnResult>; }
+  /**
+   * The turn's result, with the checkpoint the worker sent with it (card L04e): as a local host's result carries its checkpoint, a remote turn's does too, so the dispatcher captures the turn's continuation with the worker's own read-back check
+   * (`nn.durable`) in it, and a resume can use it. A result without one (a failed or cancelled turn, a worker that sent none, a checkpoint that cannot be read back) is returned as it was: never an older checkpoint in its place.
+   */
+  async run(_gateway: ToolGateway): Promise<WorkerTurnResult> {
+    void _gateway;
+    const result = await this.remote.waitForResult(this.by, this.attemptId, this.placement) as WorkerTurnResult;
+    if (result.status !== "completed" || result.checkpoint !== undefined) return result;
+    const checkpoint = await this.remote.resultCheckpoint(this.by, this.attemptId, this.placement).catch(() => undefined);
+    return checkpoint === undefined ? result : { ...result, checkpoint };
+  }
   /** The handle acts only while its own placement holds the attempt: after a move, an old handle controls nothing. */
   async #current(): Promise<void> {
     const p = await this.remote.placement(this.by, this.attemptId);

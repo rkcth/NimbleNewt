@@ -3,6 +3,7 @@ import type { RemoteWorkerClient } from "./client.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
 import type { DoneCheckReport, DoneCheckRequest } from "../dispatch/ports.js";
 import type { JsonObject } from "../storage/types.js";
+import type { Observation } from "../dependencies/dependencies.js";
 
 /**
  * The remote worker's side of workspace requests (card H12m): takes the requests the poller read, hands each to the host's workspace port (the worker package's `WorkspaceHost.run`) in the background, and sends the answer back.
@@ -13,6 +14,9 @@ import type { JsonObject } from "../storage/types.js";
  * workspace requests without saying which attempts are busy. Just before a request is handed to the port, the responder asks it: a request whose attempts to be quiet include a busy one is refused (nothing is run; the
  * controller asks again later), and a busy check that throws refuses it too (fail closed). The port's own busy check (`LocalWorkspaces`' `busy`) still applies after this one.
  */
+/** How a host looks again at a task's recorded files (card L04e): what each is now, for the ones it could read. */
+export type ResponderObserve = (scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[], paths: readonly string[]) => Promise<Readonly<Record<string, Observation>>>;
+
 export class WorkspaceResponder {
   readonly #client: Pick<RemoteWorkerClient, "answerWorkspace">;
   readonly #port: WorkspacePort;
@@ -24,13 +28,15 @@ export class WorkspaceResponder {
   readonly #busy: () => readonly string[] | Promise<readonly string[]>;
   readonly #verify: ((attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>) | undefined;
   readonly #piState: { answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> } | undefined;
+  readonly #observe: ResponderObserve | undefined;
   #tail: Promise<void> = Promise.resolve();
 
-  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number; /** The host's check of an attempt's done (card H12a): the worker package's `doneVerifier` over this host's checkouts and sandbox. Absent: a check is refused, so the controller does not count the done. */ readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>; /** The host's answer to a request to send or put back its conversation stores (card K01i): a `PiStateHost`. Absent: such a request is refused, saying so. */ readonly piState?: { answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> } }) {
+  constructor(options: { readonly client: Pick<RemoteWorkerClient, "answerWorkspace">; readonly port: WorkspacePort; readonly busy: () => readonly string[] | Promise<readonly string[]>; readonly onError?: (error: unknown) => void; readonly now?: () => number; /** The host's check of an attempt's done (card H12a): the worker package's `doneVerifier` over this host's checkouts and sandbox. Absent: a check is refused, so the controller does not count the done. */ readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>; /** The host's answer to a request to send or put back its conversation stores (card K01i): a `PiStateHost`. Absent: such a request is refused, saying so. */ readonly piState?: { answer(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> }; /** The host's look at files and directories a task relied on (card L04e): `observeEntries` over the task's checkout on this host. Absent: the request is refused, saying so, and the controller reads the files as unknown. */ readonly observe?: ResponderObserve }) {
     if (typeof (options as { busy?: unknown }).busy !== "function") throw new TypeError("a workspace responder needs the host's busy check (which attempts have a call in flight here); without it no workspace request is answered");
     this.#busy = options.busy;
     this.#verify = options.verify;
     this.#piState = options.piState;
+    this.#observe = options.observe;
     this.#now = options.now ?? Date.now;
     this.#client = options.client; this.#port = options.port; this.#onError = options.onError;
   }
@@ -63,6 +69,12 @@ export class WorkspaceResponder {
       this.#running.delete(ask.requestId);
       return;
     }
+    // A look at a task's recorded files (card L04e) changes nothing and is asked before an attempt resumes, so it is not held back by the busy check either.
+    if (ask.operation === "observe") {
+      await this.#send(ask.requestId, await this.#look(ask));
+      this.#running.delete(ask.requestId);
+      return;
+    }
     // The conversation stores (card K01i): copied and sent for a backup, or fetched and put back after a restore. The host's own `PiStateHost` judges it (a store whose agent is running is not replaced), so the quiet-attempts check below does not apply.
     if (ask.operation === "pi-state-send" || ask.operation === "pi-state-restore" || ask.operation === "pi-thinking-purge") {
       let answered: RemoteWorkspaceAnswer;
@@ -89,6 +101,38 @@ export class WorkspaceResponder {
     }
     await this.#send(ask.requestId, answer);
     this.#running.delete(ask.requestId);
+  }
+
+  /**
+   * The host's look at the files and directories a request names, as an answer: for each one it could read, what it is now (`exists`, a file's `hash`, a directory's `members`); one it could not read, or may not read (outside the checkout, beyond the
+   * project's paths, too large), is left out. The answer is bounded: the entries that do not fit are named in `later` so the controller asks again for them. No content and no path of this host is in it, and a failure says only that the look
+   * did not happen.
+   */
+  async #look(ask: WorkspaceAsk): Promise<RemoteWorkspaceAnswer> {
+    const o = ask.observe;
+    if (this.#observe === undefined) return { ok: false, reason: "this host cannot look at a task's files (it was started without one), so they were not looked at" };
+    if (o === undefined || !Array.isArray(o.entries)) return { ok: false, reason: "the request named nothing to look at" };
+    let seen: Readonly<Record<string, Observation>>;
+    try { seen = await this.#observe({ taskId: ask.taskId, projectId: ask.projectId }, o.entries, o.paths ?? []); } catch (error) {
+      // The error's text stays on this host (it may name a path of its disk): it goes to the host's own log, and the controller is told only that the look failed.
+      try { this.#onError?.(error); } catch { /* a failing log changes nothing */ }
+      return { ok: false, reason: "this host could not look at the files (see the host's log), so they were not looked at" };
+    }
+    const observed: Record<string, JsonObject> = {};
+    const later: string[] = [];
+    // Room is kept for naming every entry that does not fit, so the answer as a whole stays within the limit.
+    let bytes = 100 + o.entries.reduce((n, e) => n + String(e.id).length + 4, 0);
+    for (const e of [...o.entries].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+      const got = Object.hasOwn(seen, e.id) ? seen[e.id] : undefined;
+      if (got === undefined || got === null || typeof got.exists !== "boolean") continue;
+      const one: JsonObject = got.exists ? (e.kind === "file" ? (typeof got.hash === "string" ? { exists: true, hash: got.hash } : {}) : (Array.isArray(got.members) ? { exists: true, members: [...got.members].sort() } : {})) : { exists: false };
+      if (Object.keys(one).length === 0) continue;
+      const size = Buffer.byteLength(JSON.stringify({ [e.id]: one }), "utf8") + 2;
+      if (bytes + size > REMOTE_LIMITS.workspaceDetailBytes) { later.push(e.id); continue; }
+      bytes += size;
+      observed[e.id] = one;
+    }
+    return { ok: true, summary: "looked", detail: { observed, ...(later.length === 0 ? {} : { later }) } };
   }
 
   /** The host's report of a done check as an answer: the report, cut to fit the answer's limit (a check's output is cut to its end, then dropped), or a refusal that says why. Never a pass the host did not find. */
