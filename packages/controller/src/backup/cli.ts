@@ -5,7 +5,7 @@ import type { ControllerStorage } from "../storage/types.js";
 import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { DeletionLedger, LEDGER_FILE } from "../retention/ledger.js";
-import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, type BackupKey, type Keyring } from "./crypto.js";
+import { PasscodeRefused, RecoveryCodeInvalid, UnlockFailed, addPasscode, createKeyring, keyringFingerprint, parseKeyring, recoveryCodeOf, rotateKeyring, unlockWithPasscode, unlockWithRecovery, unlockWithRecoveryCode, type BackupKey, type Keyring, type NewKdf } from "./crypto.js";
 import { readKeyringFile } from "./encryption.js";
 import { readSecretFile, SecretFileRefused } from "./secret-file.js";
 import { ENCRYPTION_MARKER } from "./format.js";
@@ -52,7 +52,8 @@ function options(rest: readonly string[], known: readonly string[]): Map<string,
  * The owner's command-line entry for backups (card K01f): list what is in a backups folder, verify one, and restore one into a new, empty database on a new machine from the backup alone. Prints with `print` and returns the exit code:
  * 0 done, 1 refused or failed, 2 not understood. It opens only what it is told to, and never the database a controller is running on.
  */
-export async function runBackupCli(argv: readonly string[], print: (line: string) => void, lockEnv?: LockEnv): Promise<number> {
+/** `newKdf` is a test seam: the settings new wrappers use. The real command line never passes it, so it uses the default (Argon2id); a test passes quick scrypt settings that are still at the stored floor. */
+export async function runBackupCli(argv: readonly string[], print: (line: string) => void, lockEnv?: LockEnv, newKdf: NewKdf = {}): Promise<number> {
   const [command, folder, ...rest] = argv;
   if (command === undefined || folder === undefined || !["list", "verify", "restore", "encryption-setup", "encryption-add-passcode", "encryption-rotate", "encryption-generations"].includes(command)) { print(USAGE); return 2; }
   try {
@@ -67,7 +68,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       const o = options(rest, ["passcode-file", "recovery-out", "recovery-code-out"]);
       if (typeof o === "string" || o.get("passcode-file") === undefined || o.get("recovery-out") === undefined) { print(typeof o === "string" ? o : "give --passcode-file and --recovery-out"); print(USAGE); return 2; }
       const passcode = await readSecretFile(o.get("passcode-file")!);
-      const { keyring, recoveryFile } = await createKeyring({ passcode });
+      const { keyring, recoveryFile } = await createKeyring({ passcode, ...newKdf });
       // Prove both methods open the key before anything is kept (setup is not finished until the recovery file is shown to work).
       await unlockWithPasscode(keyring, passcode); unlockWithRecovery(keyring, recoveryFile);
       const codeOut = o.get("recovery-code-out");
@@ -99,7 +100,7 @@ export async function runBackupCli(argv: readonly string[], print: (line: string
       if (report.unreadable > 0) print(`${report.unreadable} backup folder${report.unreadable === 1 ? "" : "s"} could not be read: until they can, no generation is called removable`);
       return 0;
     }
-    if (command === "encryption-add-passcode" || command === "encryption-rotate") return await manageKey(command, folder, rest, print);
+    if (command === "encryption-add-passcode" || command === "encryption-rotate") return await manageKey(command, folder, rest, print, newKdf);
     if (command === "verify") {
       const o = options(rest, ["passcode-file", "recovery-file", "recovery-code-file", "require-encrypted", "allow-plain", "trusted-signing-key-file", "manifest-digest"]);
       if (typeof o === "string") { print(o); print(USAGE); return 2; }
@@ -246,7 +247,7 @@ async function archiveKeyring(from: string, to: string): Promise<boolean> {
  * Rotation makes a NEW key: the old keyring is kept beside the new one as `<keyring>.generation-N`, the new passcodes and a new recovery file (and code) are proven to open the new key before anything is written, and the owner
  * is told the new fingerprint to approve (`backup.encryption.rekey`) and that a passcode left out still opens the backups made before.
  */
-async function manageKey(command: "encryption-add-passcode" | "encryption-rotate", keyringPath: string, rest: readonly string[], print: (line: string) => void): Promise<number> {
+async function manageKey(command: "encryption-add-passcode" | "encryption-rotate", keyringPath: string, rest: readonly string[], print: (line: string) => void, newKdf: NewKdf): Promise<number> {
   const rotate = command === "encryption-rotate";
   const o = options(rest, ["passcode-file", "recovery-file", "recovery-code-file", "new-passcode-file", ...(rotate ? ["new-passcode-file-2", "recovery-out", "recovery-code-out"] : [])]);
   if (typeof o === "string" || o.get("new-passcode-file") === undefined || (rotate && o.get("recovery-out") === undefined)) { print(typeof o === "string" ? o : rotate ? "give --new-passcode-file and --recovery-out" : "give --new-passcode-file"); print(USAGE); return 2; }
@@ -254,14 +255,14 @@ async function manageKey(command: "encryption-add-passcode" | "encryption-rotate
   const key = await unlockKeyring(keyring, o);
   const first = await readSecretFile(o.get("new-passcode-file")!);
   if (!rotate) {
-    const next = await addPasscode(key, first);
+    const next = await addPasscode(key, first, newKdf);
     await unlockWithPasscode(next, first); // proof: the new passcode opens the same key
     await replaceKeyringFile(keyringPath, next);
     print(`a passcode was added to key ${next.keyId} (fingerprint ${keyringFingerprint(next)}, unchanged). Restart the controller to use the new keyring file. Remove the passcode files now.`);
     return 0;
   }
   const more = o.get("new-passcode-file-2") === undefined ? [] : [await readSecretFile(o.get("new-passcode-file-2")!)];
-  const { keyring: next, recoveryFile } = await rotateKeyring({ current: key, passcodes: [first, ...more] });
+  const { keyring: next, recoveryFile } = await rotateKeyring({ current: key, passcodes: [first, ...more], ...newKdf });
   // Proof as at setup, before anything is kept: each new passcode and the new recovery file (and code) open the new key, and it is a different key.
   for (const p of [first, ...more]) await unlockWithPasscode(next, p);
   unlockWithRecovery(next, recoveryFile); unlockWithRecoveryCode(next, recoveryCodeOf(recoveryFile));
