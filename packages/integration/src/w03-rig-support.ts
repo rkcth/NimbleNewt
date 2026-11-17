@@ -107,6 +107,9 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
             progress: (scope) => ws.progress(scope),
             // The check of a done (card W05): the checkout's state from the same layout, and the contract's checks run in the attempt's sandbox.
             verify: doneVerifier({ workspaces: ws, checks: parts.checks }),
+            // A submit (card H12n): what it is checked against and its staging, from the same layout.
+            submitView: (scope) => ws.submitView(scope),
+            stage: (scope) => ws.stageWork(scope),
           });
           return local;
         },

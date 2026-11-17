@@ -21,7 +21,7 @@ import { reportNeeded } from "../dispatch/report.js";
  * - an owner stop wins (the attempt is no longer live, or its stop reason is the owner's: the intent is dropped, nothing is staged or submitted); an emergency stop drops the intent (`drop`);
  * - a restart finds the intents that are still open (`recover`) and completes each once;
  * - a call that had to be killed and was a write turns a submit into a plain end with the typed blocker `release_failed` (the tree cannot be trusted).
- * NOT here (remain): the real ports (dispatcher, GitBridge staging, Q01b submission records), the agent tool registration and its API operation.
+ * The ports are bound in `ports.ts` and `api/start.ts`: the dispatcher, the host's checkout (`dispatcherLanding`, `dispatcherStage`) and the Q01b submission records.
  */
 export const WORK_END_LIMITS = { result: 40, note: 1000, message: 2000, evidence: 30, evidenceItem: 200, evidencePath: 300, report: 4000, noteText: 600, answers: 3, answer: 800 } as const;
 /** The values `result` may take. Provisional (an owner question): the card names the field but not its vocabulary. */
@@ -41,9 +41,14 @@ export interface Landed {
 }
 
 /** A submit the base of which is stale where the changed files overlap. The agent can refresh (H12p) and submit again, or end plainly. */
+/** The overlapping files as a refusal names them: the first ten, each cut to 200 characters (a path may be thousands long), so the text stays bounded. */
+export function shownFiles(files: readonly string[]): string {
+  return `${files.slice(0, 10).map((f) => (f.length > 200 ? `${f.slice(0, 200)}...` : f)).join(", ")}${files.length > 10 ? ", ..." : ""}`;
+}
+
 export class SubmitRefused extends DomainError {
   constructor(readonly head: string, readonly overlapping: readonly string[]) {
-    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${overlapping.slice(0, 10).join(", ")}${overlapping.length > 10 ? ", ..." : ""}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
+    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
     this.name = "SubmitRefused";
   }
 }
@@ -138,8 +143,8 @@ export interface WorkEndDeps {
   };
   /** True while the task is paused, stopped or suspended (any gate on its chain): the ending is not asked for or completed then, and a stop drops it. Absent: nothing is known to be paused. */
   readonly paused?: (taskId: string) => Promise<boolean>;
-  /** The files the agent changed against the base and what the landing branch changed since (only asked for a submit). `undefined`: the checkout is unknown, which refuses the submit. */
-  readonly landing: (taskId: string) => Promise<Landed | undefined>;
+  /** The files the agent changed against the base and what the landing branch changed since (only asked for a submit), for the task and the attempt that ends. `undefined`: the checkout is unknown, which refuses the submit. */
+  readonly landing: (taskId: string, attemptId: string) => Promise<Landed | undefined>;
   /** Stages the agent's tree and opens a submission for it; returns its id. Absent: a submit cannot be completed and ends plainly with a blocker. */
   readonly submit?: (attempt: EndingAttempt, base: string, key: string) => Promise<{ readonly submissionId: string }>;
   readonly blockers: Pick<BlockerService, "openBlocker">;
@@ -280,7 +285,7 @@ export class WorkEndService {
 
     let base: string | undefined; let head: string | undefined;
     if (submit) {
-      const l = await this.#deps.landing(attempt.taskId);
+      const l = await this.#deps.landing(attempt.taskId, attemptId);
       if (l === undefined) throw new DomainError("unavailable", "the checkout's base is not known, so a submit cannot be checked; end without submitting or try again");
       const overlapping = overlapOf(l);
       if (overlapping.length > 0) throw new SubmitRefused(l.head, overlapping);
@@ -443,12 +448,12 @@ export class WorkEndService {
       await this.#guard(attemptId);
       let value: NonNullable<WorkEndSteps["submitted"]>;
       // The landing branch may have moved while the calls settled: the overlap is checked again before anything is staged.
-      const l = await this.#deps.landing(attempt.taskId).catch(() => undefined);
+      const l = await this.#deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
       const overlap = l === undefined ? [] : overlapOf(l);
       if (l === undefined || overlap.length > 0) {
         const summary = l === undefined
           ? "submit_refused: the checkout's base could not be checked again after the calls settled; the attempt ended without a submission"
-          : `submit_refused: the landing branch moved to ${l.head} and changed ${overlap.length} of your files (${overlap.slice(0, 10).join(", ")}) while the ending was settling; the attempt ended without a submission`;
+          : `submit_refused: the landing branch moved to ${l.head} and changed ${overlap.length} of your files (${shownFiles(overlap)}) while the ending was settling; the attempt ended without a submission`;
         value = clean({ typed: "submit_refused" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_refused`, summary) });
       } else if (this.#deps.submit === undefined) {
         const summary = "submit_unavailable: this controller cannot stage and open a submission yet; the attempt ended without one";
