@@ -166,24 +166,27 @@ function radiance(model: string, o: EndpointOptions): CacheProfile {
     retention: { control: "server", via: o.hostTier === true ? "VRAM blocks move to the host tier (--prefix-cache-mib) and are dropped after --prefix-cache-ttl idle seconds; not per request" : "VRAM blocks only, dropped by pool pressure or --prefix-cache-ttl; no host tier is configured" },
     isolation: "none",
     pin: UNSUPPORTED("no per-request pin; --prefix-cache-ttl 0 keeps conversations until memory is wanted, for the whole server"),
-    fork: AVAILABLE("a conversation that starts with another's tokens (a shared system prompt) reuses them; a shared head stays while any conversation using it is used"),
+    // G10 (2026-11-16) measured this on the owner's Radiance 2.1.0 with qwen3.8-flash-next (hybrid, two R9700 cards): a second conversation on a 13.5K-token head read 12,288 of its tokens, answered from
+    // them correctly, and its prompt took 0.4-1.3 s against 2.8-12.3 s cold (g10-evidence.md). Qualified for that server; another version or model is a new measurement.
+    fork: { level: "qualified", via: "a conversation that starts with another's tokens (a shared system prompt) reuses them, on a hybrid model up to the last 2,048-token state snapshot; measured by G10 on Radiance 2.1.0 (g10-evidence.md)" },
     decoderResume: NO_DECODER_RESUME,
     slotSaveRestore: UNSUPPORTED("conversations are keyed by their tokens; there are no named slot files"),
   };
   return {
-    kind: "radiance", label: "Radiance", model, wire: "openai-chat", capabilities, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
-    basis: "Radiance source (codeberg StillDeadcode/radiance, commit 123c439, 2026-10-22) and RADIANCE-R9700-SETUP-READ-ME; nothing was run",
+    // A hybrid model resumes only from a linear-state snapshot, written every 2,048 tokens (G10: every hit was a multiple of 2,048; prompts under 2,048 tokens were never reused).
+    kind: "radiance", label: "Radiance", model, wire: "openai-chat", capabilities, minPrefixTokens: o.minPrefixTokens ?? (hybrid ? 2048 : 1), defaultLifetimeMs: 3_600_000,
+    basis: "Radiance source (codeberg StillDeadcode/radiance, commit 123c439, 2026-10-22) and RADIANCE-R9700-SETUP-READ-ME; response shapes, reuse, the 2,048-token snapshot step and memory measured by G10 on Radiance 2.1.0 (2026-11-16)",
     hitFields: ["timings.cache_n", "timings.prompt_n", "usage.prompt_tokens_details.cached_tokens"],
     tuning: [
       { where: "request", setting: "session_id", why: "a label only (shown in /sessions); it does not select a cache entry" },
       { where: "server", setting: "--prefix-cache-mib", value: "at least one full conversation (about 1.43 GiB per 200K tokens on Flash-Next, 7.32 KiB a token)", why: "host tier for idle conversations; smaller than one conversation means the tail is prefilled again" },
       { where: "server", setting: "--prefix-cache-ttl", value: "3600", why: "seconds an unused conversation is kept; 0 keeps it until the memory is wanted" },
-      { where: "server", setting: "--checkpoint-slots", value: "auto", why: "linear-state snapshots of a hybrid model; without the snapshot under the next prompt nothing is reused" },
+      { where: "server", setting: "--checkpoint-slots", value: "auto", why: "linear-state snapshots of a hybrid model; without the snapshot under the next prompt nothing is reused. G10: one snapshot (about 119 MB on Flash-Next) per 2,048 tokens of each conversation, about four times the KV of those tokens; the store held 80, and older snapshots were evicted for retention while G10 ran" },
       { where: "server", setting: "--max-num-seqs", value: "8 on Flash-Next", why: "each sequence holds recurrent state; the pool must hold the live sessions or the next turn re-prefills everything (the cache cliff)" },
     ],
     caveats: [
       "cache_prompt, id_slot and prompt_cache_key are accepted and ignored by this server; the profile does not send them.",
-      ...(hybrid ? ["On a hybrid model cache_n can count attention blocks restored while every linear layer was re-run, so a high hit figure can still be a slow turn; check /sessions or the prompt time."] : []),
+      ...(hybrid ? ["On a hybrid model cache_n can count attention blocks restored while every linear layer was re-run, so a high hit figure can still be a slow turn; check /sessions or the prompt time. (G10 on Radiance 2.1.0: every hit it saw was real, the prompt time fell in proportion.)", "On a hybrid model reuse stops at the last 2,048-token state snapshot: up to 2,047 tokens are computed again on every turn, and a prompt under 2,048 tokens is never reused."] : []),
       "Conversations computed with a control vector or LoRA adapter are partitioned from those without; switching modes recomputes.",
       "Never call POST /reset_prefix_cache: it empties every agent's cache.",
     ],
