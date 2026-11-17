@@ -47,7 +47,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { ContractService, WaitGraphService } from "../planning/index.js";
 import { HEARTBEAT_ENV, HeartbeatWriter, ReleaseActivationService, ReleaseService, notificationSink, type ActivationOptions } from "../release/index.js";
 import { SwarmLimitsService, SwarmService } from "../swarm/index.js";
-import { CheckRunService, noteSuspendedResponsibilities, CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ResponsibilityEventChecks, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
+import { CheckRunService, noteSuspendedResponsibilities, routeUseOf, dispatchRoutesOf, CheckRunSettingsService, CoverageGapService, CoverageService, CoverageSettingsService, IncidentService, MaintenanceLeaseService, ResponsibilityEventChecks, ProjectPlanService, ProjectResourceService, ResponsibilityChecks, ResponsibilityService } from "../projects/index.js";
 import { InquiryService } from "../inquiries/index.js";
 import { DISPATCHER_PRINCIPAL, GrantService, PrincipalService, TaskCredentialService, type Principal } from "../security/index.js";
 import { MigrationGuardService, GATE_FILE, openApprovedContract } from "../migration/index.js";
@@ -92,7 +92,7 @@ import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SET
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
 import { AcceptanceService, SubmissionService, attemptOfAssignments } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
-import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute } from "../routing/index.js";
+import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute, targetOf } from "../routing/index.js";
 import { LANDING_SETTING_KEYS, landingPolicyFrom } from "./landing-policy.js";
 import { SecurityDetectors, watchIntegrity } from "../notifications/security-detect.js";
 import { watchdogSource } from "../notifications/watchdog.js";
@@ -751,7 +751,19 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const coverageSettings = CoverageSettingsService.withEpoch(storage, epoch);
     const coverage = CoverageService.withEpoch(storage, epoch, coverageSettings);
     // Events wake responsibilities, due checks become observations or bounded tasks, and the times nothing was watching are kept (card P04f).
-    const coverageGaps = CoverageGapService.withEpoch(storage, epoch);
+    // The routes an answering agent's calls can reach, from its default routing profile (T3): a provider outage is listed for a responsibility only when its agent can use that route, account or endpoint (unknown: listed).
+    const gapReader = { id: "service:coverage-gaps", kind: "owner", name: "coverage-gaps", grants: [] } as unknown as Principal;
+    // A check runs as a dispatched task, whose route comes from the task's difficulty profile (not from the agent), so every route an execution profile can lead to counts as reachable; a custom route resolver is not known (T3 review).
+    const executionProfiles = DifficultyService.withEpoch(storage, epoch, routing, contracts);
+    const coverageGaps = CoverageGapService.withEpoch(storage, epoch, { routesOf: async (ownerId) => {
+      if (options.dispatch?.route !== undefined) return undefined;
+      const agent = await agents.get(gapReader, ownerId.startsWith("agent:") ? ownerId.slice("agent:".length) : ownerId);
+      const table = await routing.get();
+      if (agent === undefined || table === undefined || cutoverLive === undefined) return undefined;
+      const dispatched = dispatchRoutesOf(await executionProfiles.profiles(gapReader), table.profiles);
+      const topology = await cutoverLive.topology();
+      return routeUseOf(agent, table.profiles, (route) => { const t = targetOf(topology, route); return { canonical: t.canonical, account: t.account, endpoint: t.endpoint }; }, { dispatched, tableRoutes: Object.keys(table.routes) });
+    } });
     const checkSettings = CheckRunSettingsService.withEpoch(storage, epoch);
     const eventChecks = ResponsibilityEventChecks.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, events: EventService.withEpoch(storage, epoch), gaps: coverageGaps });
     const checkRun = CheckRunService.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, incidents, settings: checkSettings, projects, assignments });
@@ -1012,7 +1024,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       },
       cancelJob: (by, jobId, o) => jobs.requestCancel(by, { commandId: `stopjob-${jobId}-${o.force ? "force" : "ask"}`, jobId, reason: o.reason, ...(o.force ? { force: true } : {}) }),
       charge: (by, c) => budgets.charge(by, { commandId: c.commandId, activity: "stop-cleanup", taskId: c.taskId, ...(c.agentId === undefined ? {} : { agentId: c.agentId }), ...(c.costMicros > 0 ? { costMicros: c.costMicros } : {}), ...(c.computeMs > 0 ? { computeMs: c.computeMs } : {}) }),
-    }), { mayHold: async (requestedBy, taskId) => { const p = await principals.get(requestedBy); return p !== undefined && p.state === "active" && stopMayControl((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal, taskId); }, onSettled: async (by, e) => { /* The controller writes the note under its own name at the owner's level, never as whoever settled the request (an agent may advance its own stop). */ await noteSuspendedResponsibilities(responsibilities, { id: "service:stop-notes", kind: "owner", name: "stop-notes", grants: [] } as Principal, e); if (e.scope.kind !== "task") return; await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] }, outcome: e.outcome.graceful && e.outcome.unresolved.length === 0 ? "confirmed" : "uncertain" } as never); } });
+    }), { mayHold: async (requestedBy, taskId) => { const p = await principals.get(requestedBy); return p !== undefined && p.state === "active" && stopMayControl((await grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants }, new Date().toISOString())) as Principal, taskId); }, onSettled: async (by, e) => { /* The controller writes the note under its own name at the owner's level, never as whoever settled the request (an agent may advance its own stop). */ /* A note that cannot be written does not cost a stopped task its lifecycle entry (T3 second review): the entry is written, then the note's failure is raised. */ let noteFailure: unknown; try { await noteSuspendedResponsibilities(responsibilities, { id: "service:stop-notes", kind: "owner", name: "stop-notes", grants: [] } as Principal, e, { teamAgents: (teamId) => agentsUnder(storage, { kind: "team", id: teamId }), taskResponsibilities: (taskId) => responsibilityChecks.responsibilitiesOfTask({ id: "service:stop-notes", kind: "owner", name: "stop-notes", grants: [] } as unknown as Principal, taskId) }); } catch (error) { noteFailure = error; /* #settle keeps the report best effort and swallows this, so the operator log is where a lost note shows (T3 third check). */ print(`A ${e.mode === "suspend" ? "Suspend" : "Stop"} finished (${e.intentId}), but its note on the affected responsibilities could not all be written (${error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200)}), so some of them may not say that their agent or check task was ${e.outcome.state}.`); } if (e.scope.kind === "task") await activity.record(by, { commandId: `${e.intentId}-act`, taskId: e.scope.id, kind: "lifecycle", summary: `${e.mode === "suspend" ? "Suspension" : "Stop"} ${e.outcome.state}${e.outcome.graceful ? "" : " (not graceful)"}${e.outcome.unresolved.length > 0 ? `; unresolved: ${e.outcome.unresolved.slice(0, 5).join(", ")}` : ""}.`, manifest: { refs: [{ kind: "stop-intent", id: e.intentId }] }, outcome: e.outcome.graceful && e.outcome.unresolved.length === 0 ? "confirmed" : "uncertain" } as never); if (noteFailure !== undefined) throw noteFailure; } });
 
     // Provider drain and cutover (card R04b): the owner's controls gate every route choice made through the fallback service, which the cutover cancels running calls on.
     // The same list rules as the routing table's (card R04c): a topology that would leave a model-using role without a valid fallback list is refused too, so neither change can break the lists.
