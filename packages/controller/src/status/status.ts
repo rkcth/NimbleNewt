@@ -293,6 +293,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
   secrets: { keys: [], about: "owner only (card U08): the names of the secrets the installation uses and whether each is set; never a value. A secret is entered write-only on the web page's Secrets form or put in the host's secret store, never typed in chat" },
   sandbox: { keys: [], about: "owner only (card U08): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox on Windows) and a warning where the boundary is weaker, as macOS Seatbelt's is" },
+  compatibility: { keys: [], about: "owner only (card U08): whether the runtimes in use are ones this version supports (the Node.js version, and the worker protocol each host's worker announced: current, older, refused or never connected), what database migrations wait, and for each finding the agents and operations it touches (a short list with the number of the rest)" },
   approval_load: { keys: ["days"], about: "the approval load (owner only): how many decisions you made per day, how long asks waited, how many actions ran by a rule, a standing grant, an agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer (what each would have covered) and whether you are due to be asked about the derived profile; days is the window, 1 to 90, default 7" },
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
@@ -383,6 +384,7 @@ export type StatusRequest =
   | { readonly kind: "providers" }
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
+  | { readonly kind: "compatibility" }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
@@ -546,7 +548,7 @@ export interface StatusDeps {
   /** The optional work-in-progress backup (card P02b). Absent: the view is not offered. */
   readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly credential?: string; readonly approvalHeld?: boolean; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string; readonly grantId?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
   /** The reads of the settings and administration pages (card U08); owner only. */
-  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox">;
+  readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox" | "compatibility">;
   readonly webAccess?: () => { settings(): WebSettings; browsers(ownerId: string): readonly WebBrowser[] } | undefined;
   /** The live jobs (card T07b). Absent: the view is not offered. */
   /** The agents' environments and their change requests (cards A08, A09). Absent: the views are not offered. */
@@ -892,6 +894,7 @@ export class StatusService {
       case "providers": { onlyKnown(request, ["kind"]); return this.providerLines(by); }
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
+      case "compatibility": { onlyKnown(request, ["kind"]); return this.compatibilityLines(by); }
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
@@ -1040,12 +1043,13 @@ export class StatusService {
     const r = await this.#deps.setup.check(by);
     const c = cite("setup", "readiness");
     const mark = (state: string): string => (state === "done" ? "done" : state === "default" ? "default (nothing chosen, works as it is)" : state === "optional" ? "optional, not yet" : "OPEN");
-    const open = r.items.find((i) => i.state === "missing" || (i.state === "optional" && i.id === "task"));
+    // The approval profile is asked first while nothing has been chosen (card U08): the question explains the derived profile, recommends it for testing and development and asks whether to switch from strict.
+    const open = r.items.find((i) => i.state === "missing" || (i.id === "profile" && i.state === "default") || (i.state === "optional" && i.id === "task"));
     const lines: Line[] = [
       line(r.ready ? "Everything a first agent needs is set up." : `Not ready for a first agent yet: the first required step still open is ${shown(r.items.find((i) => i.id === r.next)?.label ?? "", 80)}.`, c),
       ...r.items.map((i) => line(`${shown(i.label, 80)}: ${mark(i.state)}${i.required ? " (needed)" : ""}. ${shown(i.detail, 240)}`, c)),
     ];
-    if (open !== undefined) lines.push(line(`Next to ask: ${shown(open.guide.question, 700)} Recommended: ${shown(open.guide.recommended, 200)} If you decline: ${shown(open.guide.ifDeclined, 250)} Ask the owner this one question; apply nothing until they answer, and every answer can be changed later by chat.`, c));
+    if (open !== undefined) lines.push(line(`Next to ask: ${shown(open.guide.question, 700)} Recommended: ${shown(open.guide.recommended, 200)} If you decline: ${shown(open.guide.ifDeclined, 250)} Ask the owner this one question; apply nothing until they answer, and every answer can be changed later by chat.${open.id === "profile" ? " The answer is a policy_edit profile change to derived or to strict (strict is recorded too, so the question is not asked again), the same change the web page's buttons make." : ""}`, c));
     return { observedAt: this.#runner.now(), lines };
   }
 
@@ -1144,6 +1148,32 @@ export class StatusService {
       ...got.hosts.slice(0, 30).map((h) => row(`Host ${shown(h.hostId, 60)} (${h.freshness})`, h)),
       line(got.warn ? "Take the weaker boundary into account where you choose or review where work runs; Linux's bubblewrap is the strongest." : "Every host listed uses a strong boundary.", c),
     ] };
+  }
+
+  /** Compatibility and migration status (card U08): runtimes in use against what this version supports, what waits in the database, and the agents and operations each finding touches. At most 25 lines. */
+  async compatibilityLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.admin === undefined || by.kind !== "owner") return undefined;
+    const got = await this.#deps.admin.compatibility(by);
+    const c = cite("hosts", "compatibility");
+    const listed = (items: readonly string[], more: number, n: number, width: number, none: string): string => { const rest = Math.max(0, items.length - n) + more; return items.length === 0 ? none : `${items.slice(0, n).map((x) => shown(x, width)).join("; ")}${rest > 0 ? ` and ${rest} more` : ""}`; };
+    const who = (a: { agents: readonly string[]; agentsMore: number }): string => listed(a.agents, a.agentsMore, 5, 80, "no agent");
+    const what = (a: { operations: readonly string[]; operationsMore: number }): string => listed(a.operations, a.operationsMore, 3, 120, "no operation");
+    const lines: Line[] = [
+      line(got.status === "compatible" ? "Everything in use is a runtime this version supports, and no migration waits." : "Something is not current: see below.", c),
+      line(`Node.js ${shown(got.runtime.node.running, 30)} is running${got.runtime.node.supported ? `, which this version supports (${shown(got.runtime.node.minimum, 30)} or newer)` : `: this version needs ${shown(got.runtime.node.minimum, 30)} or newer`}. This controller speaks worker protocol ${got.runtime.protocol.min} to ${got.runtime.protocol.max}.`, c),
+    ];
+    const shownHosts = got.hosts.slice(0, 12);
+    if (shownHosts.length === 0) lines.push(line("No host has announced itself.", c));
+    for (const h of shownHosts) lines.push(line(`Host ${shown(h.hostId, 60)}: ${h.state}${h.protocol === undefined ? "" : `, protocol ${h.protocol}`}${h.workerVersion === undefined ? "" : `, worker ${shown(h.workerVersion, 60)}`}. ${shown(h.note, 300)}${h.state === "older" || h.state === "refused" ? ` Affected: ${who(h)}; ${what(h)}.` : ""}`, c));
+    if (got.hosts.length > shownHosts.length || got.truncated) lines.push(line(`${Math.max(1, got.hosts.length - shownHosts.length)} more host(s) are not shown.`, c));
+    if (got.migration !== undefined) {
+      const m = got.migration;
+      lines.push(line(`Database schema ${m.schemaVersion} of ${m.latestKnown}. ${shown(m.note, 300)}`, c));
+      for (const p of m.pending.slice(0, 5)) lines.push(line(`Migration ${p.version} ${shown(p.name, 80)} (${shown(p.kind, 20)}) is ${shown(p.state, 20)}.`, c));
+      if (m.pending.length > 0) lines.push(line(`It would touch: ${who(m)}; ${what(m)}.`, c));
+    }
+    for (const p of got.problems.slice(0, 3)) lines.push(line(`Not read: ${shown(p, 240)}`, c));
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /** The web chat's settings and the browsers signed in to it (card U07b). Owner only; nothing secret exists to show (no cookie, credential or pairing code is ever held in a readable form). */

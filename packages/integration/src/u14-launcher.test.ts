@@ -76,7 +76,8 @@ test("a first start makes the owner once with the credential in the secret store
       assert.equal(r.items.find((i: { id: string }) => i.id === "project").state, "done");
       const greeting = await setupGreeting(b.controller, b.ownerToken);
       assert.match(greeting, /\[x\] A project/);
-      assert.match(greeting, /Next: Which machine runs the agents/);
+      // No approval profile has been chosen yet, so the walk-through asks that first (card U08); the first required step still open is the host.
+      assert.match(greeting, /Next: How much should the team ask you before it acts\?.*Do you want to switch from strict to derived\?/);
     } finally { await b.close(); }
   } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
@@ -174,7 +175,8 @@ test("on a clean machine the owner reaches a first project on a self-hosted forg
     // 1. How do I start? The model reads it as the setup view; the answer holds the next question.
     script["I just installed this, what do I do first?"] = [intent("status", { request: { kind: "setup" } }, "I just installed this")];
     const first = await chatSays("I just installed this, what do I do first?");
-    assert.match(first, /Next to ask: What is your first project/);
+    // While no approval profile has been chosen, the first question is that one (card U08); the owner goes on to the project without answering it.
+    assert.match(first, /Next to ask: How much should the team ask you before it acts\?/);
     assert.equal(server.seen[0]!.url, "http://127.0.0.1:8002/v1/chat/completions", "the chat uses the local model first");
 
     // 2. The project, on their own Gitea, drawn up and applied on request.
