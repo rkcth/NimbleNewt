@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
-import { RetainedMaterial, REFERENCE_SCAN_LIMIT } from "../retention/references.js";
+import { RetainedMaterial, REFERENCE_SCAN_LIMIT, planSubjectIds } from "../retention/references.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson, type ControllerStorage, type SnapshotRow, type StorageSnapshot } from "../storage/index.js";
@@ -65,15 +65,19 @@ function snapshotLister(snapshot: StorageSnapshot): Pick<ControllerStorage, "lis
 }
 
 /** Reads every record of one kind, a page at a time. Returns false when the bound was reached (what was not read must not be assumed to be anything). */
-async function eachOf(lister: Pick<ControllerStorage, "listAggregates">, kind: string, each: (a: Aggregate) => void): Promise<boolean> {
+async function eachOf(lister: Pick<ControllerStorage, "listAggregates">, kind: string, each: (a: Aggregate) => void, limit = REFERENCE_SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
+  // A read with no cap must still end: a lister that does not move past the cursor (a page whose last ID was a cursor already) counts as a read that did not finish.
+  const cursors = new Set<string>();
   for (;;) {
     const page = await lister.listAggregates(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
     for (const a of page) each(a);
     seen += page.length;
     if (page.length < 500) return true;
-    if (seen >= REFERENCE_SCAN_LIMIT) return false;
+    if (seen >= limit) return false;
     after = page[page.length - 1]!.id;
+    if (cursors.has(after)) return false;
+    cursors.add(after);
   }
 }
 
@@ -117,11 +121,11 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
     ok = (await eachOf(lister, "catalog-version", (a) => {
       const b = a.body as { instructional?: { recordId?: unknown }; executable?: { recordId?: unknown } };
       for (const s of [b.instructional, b.executable]) if (typeof s?.recordId === "string") catalogSources.add(s.recordId);
-    })) && ok;
+    }, Number.POSITIVE_INFINITY)) && ok;
     // A decision link may name a finished task's private plan as its subject. The link is always in the backup, so the plan it names is kept too (otherwise a restore gives a link that points at nothing).
     ok = (await eachOf(lister, "decision-reliance", (a) => {
-      for (const l of (a.body as { links?: { subject?: { kind?: unknown; id?: unknown } }[] }).links ?? []) if (l.subject?.kind === "plan" && typeof l.subject.id === "string") catalogSources.add(l.subject.id);
-    })) && ok;
+      for (const id of planSubjectIds(a.body)) catalogSources.add(id);
+    }, Number.POSITIVE_INFINITY)) && ok;
     const l = line("scratch", "desk-record", values.scratchDays);
     const found: Aggregate[] = [];
     ok = (await eachOf(lister, "desk-record", (a) => {
@@ -168,8 +172,8 @@ export async function planLeaveOut(snapshot: StorageSnapshot, values: BackupScop
       const total = leftOut.reduce((n, l) => n + l.left, 0);
       const held = leftOut.reduce((n, l) => n + l.heldBack, 0);
       const text = !complete
-        ? `This backup was made under your backup scope (${sentence(values)}), but the check of which records a task that can still resume or a replay refers to could not be finished, so nothing was left out: it holds everything.`
-        : `This backup is NOT a full copy. Under your backup scope it leaves out ${sentence(values)}: ${total} record${total === 1 ? "" : "s"} in all${leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind}${l.stubbed > 0 ? `, kept as empty shells` : ""})`).join("")}${held > 0 ? `; ${held} that matched were kept because a task that can still resume, a replay or a catalogued tool refers to them` : ""}. The audit log, your decisions and everything else are in it whole. What was left out is not brought back by a restore.`;
+        ? `This backup was made under your backup scope (${sentence(values)}), but the check of which records a task that can still resume or a replay refers to could not be finished (this includes the check of which records a catalogued tool or a decision link relies on), so nothing was left out: it holds everything.`
+        : `This backup is NOT a full copy. Under your backup scope it leaves out ${sentence(values)}: ${total} record${total === 1 ? "" : "s"} in all${leftOut.filter((l) => l.left > 0).map((l) => ` (${l.left} ${l.kind}${l.stubbed > 0 ? `, kept as empty shells` : ""})`).join("")}${held > 0 ? `; ${held} that matched were kept because a task that can still resume, a replay, a catalogued tool or a decision link refers to them` : ""}. The audit log, your decisions and everything else are in it whole. What was left out is not brought back by a restore.`;
       return { rules: { scratchDays: values.scratchDays, transcriptDays: values.transcriptDays, logDays: values.logDays }, leftOut, referenceCheckComplete: complete, text };
     },
   };

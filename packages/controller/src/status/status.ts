@@ -16,6 +16,8 @@ import type { WebBrowser, WebSettings } from "../web/index.js";
 import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
+import { relianceOf } from "../security/reliance.js";
+import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
 import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
@@ -278,7 +280,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   activity: { keys: ["taskId|taskTitle", "latest", "after", "limit"], about: "the steps of a task's activity record" },
   revocations: { keys: ["name", "limit"], about: "the tool versions from the catalogue that the owner revoked: which tool and version, why, by whom and when (name is a tool's canonical name, anything else is refused)" },
   retention_hold: { keys: ["recordKind", "id", "name", "version"], about: "whether a record (recordKind and id) or a tool version (recordKind catalog-version with the tool's canonical name and its version) is kept from deletion, and why (owner only)" },
-  retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups kept (the newest ten by name) and the latest one, whether and when stored model thinking is removed (counts only), and the latest deletions and retention runs (counts and record IDs only). Use it for how much room is left, which quotas are near their limit, which backups are kept, whether the model's stored thinking is being removed and what retention deleted lately" },
+  retention: { keys: [], about: "owner only: the retention state in one answer: the values in force and which you set, the data disk's free room against the reserve for shutdown and recovery records, the per-project and per-agent storage quotas with use and the scopes near them, the backups kept (the newest ten by name) and the latest one, whether and when stored model thinking is removed (counts only), and the latest deletions and retention runs (counts and record IDs only), and for each bulk log (messages sent to the owner, messages between agents, recorded model replies) how many records and how much room it takes, the retention that applies and how many of its records the last runs removed. Use it for how much room is left, how much room the logs and messages use, which quotas are near their limit, which backups are kept, whether the model's stored thinking is being removed and what retention deleted lately" },
   model_routes: { keys: ["level", "name"], about: "the model routing controls in force (which model, endpoint, account, provider or local service is disabled, draining or cut over, why and since when), how failed routes come back and which are down, and each route's reply limit and reasoning cap; with a level and a name, whether that one is out of service, how many requests still run on it and whether it is safe to stop (owner only)" },
   environment: { keys: ["agent|agentName"], about: "what one agent's environment is now (which revision is active, the shared base, the agent's own packages with exact versions, its skills and limits) and whether a newer staged revision waits, with why each recent revision was made, including a change that was rolled back (owner only)" },
   access: { keys: ["agent|agentName"], about: "what approved environment requests give one agent right now: the network sites its attempts may reach through the relay and the host resources mounted read-only for its next attempts, each with the request behind it; a part this controller does not enforce is said so (owner only)" },
@@ -297,6 +299,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   wakes: { keys: [], about: "owner only: the stopped agents the controller itself woke for a meeting (card M04h): for each, the meeting, whether it is still waiting to be brought into the room, attending through its bounded meeting task, given up on (and why), stopped by you, or ended (it left the room, or you stopped, suspended or paused it again); its other work stays held throughout, and it is at rest again when the meeting ends. You stop a wake in chat by saying which agent should stay stopped for which meeting" },
   landing: { keys: [], about: "owner only: where finished work lands (card H12s): the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, then every project that has values of its own with each value and where it comes from (the installation, this project's own setting or its own landing branch)" },
   chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the reviewing agents (the resume reviewer and the second agent that questions a done) may use (the chat itself is never stopped by it), who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
+  grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -384,6 +387,7 @@ export type StatusRequest =
   | { readonly kind: "secrets" }
   | { readonly kind: "sandbox" }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
   | { readonly kind: "wakes" }
@@ -420,7 +424,7 @@ interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: s
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
-const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330 } as const;
+const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330, bulkLogs: 3 } as const;
 /**
  * Card K06d, second review: the chat shows the first 30 lines of a status answer (`CHAT_LIMITS.statusLines`, the same number; a test holds them equal), so the whole retention answer is kept to that many
  * lines. With many scopes near their quota and many deletions the figures alone passed 30 and the values were cut, with no narrower view to ask for. The lists shorten instead, the fullest scopes and the
@@ -494,7 +498,21 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
   const delAt = lines.length;
   const runs = Array.isArray(st["runs"]) ? (st["runs"] as unknown[]).map(obj).filter((r): r is Record<string, unknown> => r !== undefined && typeof r["id"] === "string") : [];
   if (runs.length === 0) lines.push(line("Retention has not run yet.", settings));
-  for (const r of runs.slice(0, RETENTION_SHOWN.runs)) lines.push(line(`Retention run ${shown(String(r["id"]), 60)} (${r["auto"] === true ? "automatic" : "by you"}), ${shown(typeof r["at"] === "string" ? r["at"] : "?", 40)}: ${count(r["removed"]) ?? 0} record(s) removed, ${count(r["backupsDeleted"]) ?? 0} backup(s) deleted, ${count(r["incidentsArchived"]) ?? 0} incident(s) archived, ${count(r["incidentsPurged"]) ?? 0} archived incident(s) removed.`, cite("retention-run", String(r["id"]))));
+  const runAt = lines.length;
+  const runLines = runs.slice(0, RETENTION_SHOWN.runs).map((r) => (line(`Retention run ${shown(String(r["id"]), 60)} (${r["auto"] === true ? "automatic" : "by you"}), ${shown(typeof r["at"] === "string" ? r["at"] : "?", 40)}: ${count(r["removed"]) ?? 0} record(s) removed, ${count(r["backupsDeleted"]) ?? 0} backup(s) deleted, ${count(r["incidentsArchived"]) ?? 0} incident(s) archived, ${count(r["incidentsPurged"]) ?? 0} archived incident(s) removed.`, cite("retention-run", String(r["id"])))));
+  // The bulk logs (card K06e): how many records and how much room each kind takes, the retention that applies to it and how many of its records the last runs removed. One line per kind, so the answer stays short.
+  const bulkLogs = Array.isArray(st["bulkLogs"]) ? (st["bulkLogs"] as unknown[]).map(obj).filter((b): b is Record<string, unknown> => b !== undefined && typeof b["kind"] === "string" && typeof b["label"] === "string" && count(b["records"]) !== undefined && count(b["bytes"]) !== undefined) : [];
+  const runShown = runs.slice(0, RETENTION_SHOWN.runs);
+  const bulkParts: string[] = [];
+  // Review fix (K06e): a run recorded before the per-kind counts (with more removed than it lists) does not say what it removed of each kind; it is not counted as 0, the line says it is not recorded.
+  const recorded = runShown.filter((r) => obj(r["byKind"]) !== undefined);
+  const unrecorded = runShown.length - recorded.length;
+  for (const b of bulkLogs.slice(0, RETENTION_SHOWN.bulkLogs)) {
+    const days = count(b["days"]); const gone = recorded.reduce((n, r) => n + (count(obj(r["byKind"])?.[String(b["kind"])]) ?? 0), 0);
+    const removedPart = unrecorded === 0 ? `${gone} removed by the last ${runShown.length} retention run(s)` : recorded.length === 0 ? `how many of them the last ${runShown.length} retention run(s) removed is not recorded (those runs did not count it by kind)` : `${gone} removed by the last ${recorded.length} retention run(s); ${unrecorded} other run(s) did not record it by kind`;
+    bulkParts.push(`${shown(String(b["label"]), 60)}: ${count(b["records"])}${b["partial"] === true ? "+" : ""} record(s), ${bytesWord(count(b["bytes"])!)}${b["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}, ${days === undefined ? "kept (no retention is set)" : `removed ${days} days after their last change`}, ${removedPart}`);
+  }
+  if (bulkParts.length > 0) lines.push(line(`Bulk logs, one after the other: ${bulkParts.join(" / ")}.`, settings, ...runShown.map((r) => cite("retention-run", String(r["id"])))));
   const think = obj(st["thinking"]);
   if (think !== undefined) {
     const days = count(think["days"]);
@@ -503,15 +521,19 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
     lines.push(line(`${kept} task cop${kept === 1 ? "y" : "ies"} of thinking ${kept === 1 ? "is" : "are"} kept and ${removed} ${removed === 1 ? "was" : "were"} removed; ${think["storesReached"] === true ? `the model's own conversation stores were cleaned for ${cleaned} attempt(s) (${blocks} block(s) removed) and ${without} had none` : "the model's own conversation stores are not reached on this installation"}${think["partial"] === true ? " (counting was cut short, so these figures are low)" : ""}.`, settings));
   }
   // The two long lists take what the budget leaves: first the scopes down to three, then the deletions down to three, then each down to one. What is left out is counted.
-  let nNear = Math.min(nearLines.length, RETENTION_SHOWN.quotaScopes); let nDel = Math.min(delLines.length, RETENTION_SHOWN.deletions);
-  const total = (): number => lines.length + nNear + (near.length > nNear ? 1 : 0) + nDel + (deletions.length > nDel ? 1 : 0);
+  let nNear = Math.min(nearLines.length, RETENTION_SHOWN.quotaScopes); let nDel = Math.min(delLines.length, RETENTION_SHOWN.deletions); let nRun = runLines.length;
+  const total = (): number => lines.length + nNear + (near.length > nNear ? 1 : 0) + nDel + (deletions.length > nDel ? 1 : 0) + nRun + (runLines.length > nRun ? 1 : 0);
+  // The runs shorten first (to the two newest) to make room for the bulk-log line; what the bulk-log lines say of them is counted over all of them.
+  if (bulkParts.length > 0) while (total() > budget && nRun > Math.min(2, nRun)) nRun--;
   for (const [floorNear, floorDel] of [[3, delLines.length], [3, 3], [1, 3], [1, 1]] as const) {
     while (total() > budget && nNear > Math.min(floorNear, nNear)) nNear--;
     while (total() > budget && nDel > Math.min(floorDel, nDel)) nDel--;
   }
   const delPart = [...delLines.slice(0, nDel), ...(deletions.length > nDel ? [line(`${deletions.length - nDel} older deletion(s) are not listed.`, settings)] : [])];
   const nearPart = [...nearLines.slice(0, nNear), ...(near.length > nNear ? [line(`${near.length - nNear} more scope(s) are near their quota and not listed.`, settings)] : [])];
+  const runPart = [...runLines.slice(0, nRun), ...(runLines.length > nRun ? [line(`${runLines.length - nRun} older retention run(s) are not listed.`, settings)] : [])];
   // Inserted from the later position first, so the earlier position stays right.
+  lines.splice(runAt, 0, ...runPart);
   lines.splice(delAt, 0, ...delPart);
   lines.splice(nearAt, 0, ...nearPart);
   return lines;
@@ -893,6 +915,7 @@ export class StatusService {
       case "secrets": { onlyKnown(request, ["kind"]); return this.secretLines(by); }
       case "sandbox": { onlyKnown(request, ["kind"]); return this.sandboxLines(by); }
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
+      case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1611,6 +1634,28 @@ export class StatusService {
   }
 
   /** What happens to running calls when a version is revoked and the revoke names no choice: the policy in force, where it comes from, and the owner's own setting. Owner only. */
+  /**
+   * The running work that relies on a standing right (follow-up to card T7), for the owner before a right is taken back: one right (grantId) in full, or every active right that has running work, one line each.
+   * Owner only; read only from the grant, assignment, attempt and task records. At most 12 lines.
+   */
+  async grantRelianceLines(by: Principal, grantId?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if (grantId !== undefined && !(typeof grantId === "string" && /^grt-[a-z2-7]{20}$/.test(grantId))) invalid("grantId", "must be a right's ID (grt-...)");
+    const got = await relianceOf(this.#runner, grantId === undefined ? {} : { grantId });
+    if (got === undefined) return undefined;
+    const lines: Line[] = [];
+    if (grantId !== undefined) {
+      const r = got.items[0]!;
+      const c = cite("grant", r.grantId, r.revision);
+      return { observedAt: this.#runner.now(), lines: relianceLines(r).map((text) => line(text, c)) };
+    }
+    const busy = got.items.filter((r) => r.total > 0);
+    lines.push(line(relianceSummary(got.items, got.more), cite("grants", "active")));
+    for (const r of busy.slice(0, 10)) lines.push(line(relianceHead(r, 2), cite("grant", r.grantId, r.revision)));
+    if (busy.length > 10) lines.push(line(`${busy.length - 10} more rights with running work are not listed; ask about one by its ID.`, cite("grants", "active")));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   async catalogPolicyLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.catalogPolicy === undefined || by.kind !== "owner") return undefined;
     let p;

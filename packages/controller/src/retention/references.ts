@@ -5,6 +5,22 @@ import type { Aggregate, ControllerStorage } from "../storage/types.js";
 /** The most records of one kind the reference scan reads. Past it the scan is `partial` and nothing it did not see may be treated as unreferenced. */
 export const REFERENCE_SCAN_LIMIT = 100_000;
 
+/**
+ * The IDs of the desk records a decision-link record names as the subject of kind `plan` (links in any state). Reads the stored shape defensively: a missing, non-list or malformed `links` (a null entry, a link with no subject,
+ * a subject whose ID is not text or is empty) names nothing and never throws for any shape a stored record can have (stored bodies are parsed JSON), so one odd record cannot stop a retention or backup read.
+ * A body that throws when read (an accessor, which stored JSON never has) is not swallowed: the caller's read then fails closed. A link to a plan that is empty, archived or missing still names its ID (it is held, never blanked).
+ */
+export function planSubjectIds(body: unknown): string[] {
+  const links = (body as { links?: unknown } | null | undefined)?.links;
+  if (!Array.isArray(links)) return [];
+  const ids: string[] = [];
+  for (const l of links) {
+    const subject = (l as { subject?: { kind?: unknown; id?: unknown } } | null | undefined)?.subject;
+    if (subject?.kind === "plan" && typeof subject.id === "string" && subject.id !== "") ids.push(subject.id);
+  }
+  return ids;
+}
+
 const TERMINAL = new Set(["done", "cancelled"]);
 const RETIREMENT_KIND = "retirement";
 
@@ -12,7 +28,7 @@ const RETIREMENT_KIND = "retirement";
 export const REPLAY_REASON = "cited by the replay of task ";
 export const isReplayReason = (reason: string): boolean => reason.startsWith(REPLAY_REASON);
 /** How a replay step names a record kind elsewhere in the system, to the stored kind. */
-const REPLAY_KIND: Readonly<Record<string, string>> = { summary: "summary-record", "summary-record": "summary-record", "desk-record": "desk-record", artifact: "artifact", compaction: "ctx-compaction", "ctx-compaction": "ctx-compaction", "catalog-version": "catalog-version", "chat-turn": "chat-turn", decision: "decision", "owner-decision": "decision" };
+const REPLAY_KIND: Readonly<Record<string, string>> = { summary: "summary-record", "summary-record": "summary-record", "desk-record": "desk-record", artifact: "artifact", compaction: "ctx-compaction", "ctx-compaction": "ctx-compaction", "catalog-version": "catalog-version", "chat-turn": "chat-turn", decision: "decision", "owner-decision": "decision", "agent-message": "agent-message" };
 
 /**
  * What a resumable task or a replay still needs (card K06: "material referenced by a resumable task or by replay is never deleted and shows as retained").

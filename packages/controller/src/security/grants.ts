@@ -9,6 +9,7 @@ import { ACTIONS, allows, covers, mayHold } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
 import type { Grant, NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
+import { relianceOf, type Reliance } from "./reliance.js";
 
 /** Where a grant came from. `direct`: the owner's decision for something specific. `standing`: a lasting delegation. `derived`: a step reasonably necessary under another grant, never wider than it. */
 export type GrantSource = "direct" | "standing" | "derived";
@@ -101,6 +102,21 @@ function holdsWith(byId: ReadonlyMap<string, GrantRecordBody>, now: string): (bo
     return parent !== undefined && depth < MAX_DEPTH && holds(parent, depth + 1) && within(body, parent);
   };
   return holds;
+}
+/**
+ * Whether one grant record holds at `now` as `effectiveOf` judges it: active, inside its window, not lapsed from non-use and, for a derived grant, resting on a chain of parents that hold
+ * (T7b review: an ended, lapsed or not yet started right, or one whose parent was taken back, gives nothing, so no running work can rely on it). Reads only the parents named on the chain.
+ */
+export async function holdsNow(runner: CommandRunner, body: GrantRecordBody, now: string): Promise<boolean> {
+  const byId = new Map<string, GrantRecordBody>();
+  let p = body;
+  for (let depth = 0; p.source === "derived" && p.parentId !== undefined && !byId.has(p.parentId) && depth <= MAX_DEPTH; depth++) {
+    const found = await runner.get("grant-record", p.parentId);
+    if (found === undefined) break;
+    p = found.body as unknown as GrantRecordBody;
+    byId.set(found.id, p);
+  }
+  return holdsWith(byId, now)(body, 0);
 }
 
 const ENVIRONMENT = /^[a-z][a-z0-9-]{0,39}$/;
@@ -520,6 +536,18 @@ export class GrantService {
     }
     // Something may remain after the last record looked at: the next page starts there, so no grant is skipped however far a filter has to look.
     return { items, ...(more && last !== undefined ? { next: last } : {}), ...(more && items.length < limit ? { scanLimited: true } : {}) };
+  }
+
+  /**
+   * Running work that relies on a right, for the owner who is about to take it back (follow-up to card T7): of the named right, or of every active right. Read only; see `relianceOf`.
+   * A right that does not exist is `undefined`.
+   */
+  async reliance(owner: Principal, query: { grantId?: string } = {}): Promise<{ items: readonly Reliance[]; more: boolean } | undefined> {
+    requireOwner(owner);
+    // Second review: an owner credential narrowed to one task reads no other task's title, so it is not the owner for this read (the status kind refuses it the same way).
+    if (owner.taskScope !== undefined) throw new DomainError("forbidden", "a task credential may not read the running work of every right");
+    if (query.grantId !== undefined && !(typeof query.grantId === "string" && GRANT_ID.test(query.grantId))) invalid("grantId", "is not a grant ID");
+    return relianceOf(this.#runner, query);
   }
 
   async getGrant(id: string): Promise<View<GrantRecordBody> | undefined> {
