@@ -1,0 +1,237 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadConfig } from "@nimblenewt/config";
+import { launch, runTerminalChat, setupGreeting, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
+
+// Card D01: the owner's user guide (docs/nimblenewt/user-guide.md) is kept true by running it. The example conversation in the guide is fed, line by line, to the real launcher and the real terminal chat; the
+// model behind the chat is a scripted stand-in (no model is called), so the test proves that every step the guide shows exists, is shown first where the guide says so, and ends where the guide says it ends,
+// and that every reply the guide quotes is what the chat really prints. The typed recovery orders of the guide are run with the model down.
+
+const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const GUIDE = join(repository, "docs", "nimblenewt", "user-guide.md");
+const guide = (): string => readFileSync(GUIDE, "utf8").replace(/\r\n/g, "\n");
+const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
+const facts: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
+const start = { facts, filesystem: ext4 } as const;
+const memorySecrets = (seed: Record<string, string> = {}): LauncherSecrets => { const values = new Map(Object.entries(seed)); return { resolve: async (n) => values.get(n), set: async (n, v) => { values.set(n, v); }, remove: async (n) => values.delete(n) }; };
+async function* lines(items: string[]): AsyncGenerator<string> { for (const i of items) yield i; }
+
+/** The fenced blocks that directly follow each HTML marker `<!-- d01:NAME -->` in the guide. */
+function blocksAfter(text: string, name: string): string[] {
+  const marker = `<!-- d01:${name} -->`;
+  const out: string[] = [];
+  for (let at = text.indexOf(marker); at >= 0; at = text.indexOf(marker, at + marker.length)) {
+    const m = /^\s*```[a-z]*\n([\s\S]*?)```/.exec(text.slice(at + marker.length));
+    assert.ok(m !== null, `the ${name} marker is not directly followed by a fenced block`);
+    out.push(m[1]!);
+  }
+  assert.ok(out.length > 0, `the guide has no ${marker} marker`);
+  return out;
+}
+
+/** The conversation: each `You:` line, with the `NimbleNewt:` lines that follow it until the next `You:`. */
+function conversation(block: string): { you: string; replies: string[] }[] {
+  const out: { you: string; replies: string[] }[] = [];
+  for (const line of block.split("\n")) {
+    const you = /^You: (.+)$/.exec(line);
+    const said = /^NimbleNewt: (.+)$/.exec(line);
+    if (you !== null) out.push({ you: you[1]!.trim(), replies: [] });
+    else if (said !== null) { assert.ok(out.length > 0, "a reply before anything was said"); out.at(-1)!.replies.push(said[1]!.trim()); }
+    else assert.ok(line.trim() === "", `a conversation line must start with "You: " or "NimbleNewt: ": ${line}`);
+  }
+  return out;
+}
+
+/** A quoted reply holds fragments of the real reply joined by "...": each fragment must appear in the reply, in order. */
+function quotedIn(quote: string, reply: string): boolean {
+  const flat = reply.replace(/\s+/g, " ");
+  const parts = quote.split("...").map((p) => p.trim()).filter((p) => p.length > 0);
+  assert.ok(parts.length > 0, `the quote "${quote}" holds no words`);
+  let from = 0;
+  for (const part of parts) {
+    const at = flat.indexOf(part, from);
+    if (at < 0) return false;
+    from = at + part.length;
+  }
+  return true;
+}
+
+/**
+ * The guide's install lines, run as written: the shell steps are the ones the repository really uses, `init` runs with exactly the guide's options (into a fresh data folder instead of ~/.nimblenewt) and
+ * must write a configuration the launcher accepts, and the `secret set` line names the secret the `init` line asked for. `secret set` itself is not run (it would write to this machine's real secret store);
+ * the tests give the launcher a store in memory instead. Returns the configuration `start` would load.
+ */
+async function installFromGuide(dir: string): Promise<LauncherConfig> {
+  const all = blocksAfter(guide(), "install").join("\n").replace(/\\\n\s*/g, "").split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+  for (const step of ["npm ci", "npx tsc --build", "node scripts/nimblenewt.mjs start"]) assert.ok(all.includes(step), `the guide's install steps include ${step}`);
+  const clone = all.find((x) => x.startsWith("git clone "));
+  assert.ok(clone !== undefined && /^git clone https:\/\/github\.com\/[\w-]+\/NimbleNewt\.git$/.test(clone), "the guide clones the NimbleNewt repository");
+  assert.ok(all.includes(`cd ${/\/(\w+)\.git$/.exec(clone)![1]}`), "and goes into the folder git makes");
+  const { main } = await import(pathToFileURL(join(repository, "scripts", "nimblenewt.mjs")).href) as { main: (argv: string[], io: unknown) => Promise<number> };
+  const launcher = all.filter((x) => x.startsWith("node scripts/nimblenewt.mjs ")).map((x) => x.split(/\s+/).slice(2));
+  assert.deepEqual(launcher.map((a) => a.slice(0, a[0] === "secret" ? 2 : 1).join(" ")), ["init", "secret set", "start"], "the guide runs init, secret set and start, in that order");
+  const init = launcher[0]!;
+  let said = "";
+  const io = { stdin: { isTTY: false }, stdout: { write: (t: string) => { said += t; } }, stderr: { write: (t: string) => { said += t; } }, env: {} };
+  assert.equal(await main([...init, "--data", dir], io), 0, said);
+  const named = [init.indexOf("--backup-key-secret"), init.indexOf("--model-key-secret")].filter((i) => i >= 0).map((i) => init[i + 1]);
+  assert.deepEqual(launcher[1]!.slice(2), named, "the secret the guide sets is the one init names");
+  assert.match(said, new RegExp(`secret set ${named[0]}`), "init itself tells the owner to set that secret");
+  const loaded = loadConfig(readFileSync(join(dir, "nimblenewt.config.json"), "utf8"));
+  assert.ok(loaded.ok, JSON.stringify(loaded));
+  return loaded.config as unknown as LauncherConfig;
+}
+const intent = (kind: string, rest: Record<string, unknown>, evidence: string) => ({ kind, ...rest, evidence, basis: "owner" });
+type Turn = { outcomes: { status: string; proposalId?: string; op?: string }[] };
+const call = (l: { controller: { api: { handle: (t: string, r: never) => Promise<unknown> } }; ownerToken: string }, op: string, args: Record<string, unknown> = {}, commandId?: string) =>
+  l.controller.api.handle(l.ownerToken, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<any>;
+
+// What the stand-in model answers to each line of the guide's conversation. A real model reads the same words; this table is the "understanding", so that the test checks everything after it: that the
+// steps exist, are shown first, are applied on the owner's yes and end where the guide says. A line added to or changed in the guide without a matching entry here fails the test, and so does an entry here
+// that the guide no longer has.
+const RIGHTS = ["attempt.work", "effect.perform", "review.request", "task.read", "desk.write", "desk.read", "message.receive"];
+const TASK = "Add a greeting to the README";
+function understanding(lastProposals: () => string[]): Record<string, () => unknown[]> {
+  const yes = (words: string) => () => lastProposals().map((proposalId) => ({ kind: "apply_proposal", proposalId, evidence: words, basis: "owner" }));
+  const rights = "Give Ann the rights attempt.work, effect.perform, review.request, task.read, desk.write, desk.read and message.receive in the project Garden, because Ann works on Garden";
+  const project = "My project is called Garden. Its code is in /home/me/garden and we keep it on our own Gitea server with Woodpecker CI.";
+  return {
+    "help me get started": () => [intent("status", { request: { kind: "setup" } }, "help me get started")],
+    "Stay on strict for now": () => [{ kind: "policy_edit", change: { type: "profile", to: "strict" }, evidence: "Stay on strict", basis: "owner" }],
+    "yes, keep it": yes("yes, keep it"),
+    [project]: () => [intent("command", { op: "project.create", args: { name: "Garden", goal: "Garden", repositories: [{ id: "garden", location: "/home/me/garden" }], versionControl: { host: "self-hosted", hostName: "Gitea", ci: "Woodpecker CI" }, integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } } }, "My project is called Garden")],
+    "yes, make it": yes("yes, make it"),
+    "Run the agents on this computer": () => [intent("command", { op: "host.local.set", args: { enabled: true } }, "Run the agents on this computer")],
+    "yes, do that": yes("yes, do that"),
+    "Add an agent called Ann as an author": () => [intent("command", { op: "agent.create", args: { friendlyName: "Ann", roles: ["author"] } }, "Add an agent called Ann")],
+    "yes, add her": yes("yes, add her"),
+    [rights]: () => RIGHTS.map((action) => intent("command", { op: "grant.create", args: { agentName: "Ann", action, projectName: "Garden", basis: "Ann works on Garden" } }, rights)),
+    "yes, give them": yes("yes, give them"),
+    [`Add a task to Garden: ${TASK}`]: () => [intent("command", { op: "task.create", args: { title: TASK, projectName: "Garden" } }, "Add a task to Garden")],
+    "yes, add it": yes("yes, add it"),
+    [`${TASK} is ready for work, give it to Ann`]: () => [intent("command", { op: "task.transition", args: { taskTitle: TASK, to: "ready" } }, "ready for work"), intent("command", { op: "task.assign", args: { taskTitle: TASK, agentName: "Ann" } }, "give it to Ann")],
+    "yes, go ahead": yes("yes, go ahead"),
+    "What is waiting for me?": () => [intent("status", { request: { kind: "needs_you" } }, "What is waiting for me?")],
+  };
+}
+
+test("the guide's example conversation, run line by line through the launcher and the terminal chat, takes an empty installation to a first task given to an agent, and every reply it quotes is real (card D01)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-"));
+  const turns: Turn[] = [];
+  const lastProposals = (): string[] => (turns.at(-1)?.outcomes ?? []).flatMap((o) => (o.status === "proposed" && o.proposalId !== undefined ? [o.proposalId] : []));
+  const table = understanding(lastProposals);
+  const asked: string[] = [];
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    asked.push(text);
+    const intents = table[text]?.() ?? [{ kind: "none", reason: "not in the guide" }];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const steps = conversation(blocksAfter(guide(), "conversation")[0]!);
+  const secrets = memorySecrets({ "backup-key": "backup-secret-value" });
+  // The guide and the table say the same lines, in the same order.
+  assert.deepEqual(steps.map((s) => s.you), Object.keys(table), "the guide's conversation and the test's table of what the model understands differ: update both together");
+  const config = await installFromGuide(dir);
+  let l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+  try {
+    assert.equal(l.ownerCreated, true, "the first start makes the owner");
+    // The greeting the guide describes: the setup list with its marks.
+    const greeting = await setupGreeting(l.controller, l.ownerToken);
+    for (const mark of ["[x]", "[-]", "[ ]"]) assert.ok(greeting.includes(mark), `the greeting shows ${mark}`);
+    const chat = l.controller.chat!;
+    const wrapped = { api: l.controller.api, chat: { submit: async (...a: Parameters<typeof chat.submit>) => { const t = await chat.submit(...a); turns.push(t as unknown as Turn); return t; } } };
+    for (const step of steps) {
+      const out: string[] = [];
+      const before = turns.length;
+      await runTerminalChat({ controller: wrapped as never, ownerToken: l.ownerToken, input: lines([step.you]), write: (t) => out.push(t) });
+      const reply = out.join("");
+      assert.equal(turns.length, before + 1, `"${step.you}" made one turn: ${reply}`);
+      assert.ok(!turns.at(-1)!.outcomes.some((o) => o.status === "refused"), `"${step.you}" was refused: ${reply}`);
+      for (const quote of step.replies) assert.ok(quotedIn(quote, reply), `the guide quotes "${quote}" for "${step.you}", but the chat printed:\n${reply}`);
+      // "yes" applies exactly what was shown, and something was shown before every "yes".
+      if (/^yes\b/.test(step.you)) assert.ok(turns.at(-1)!.outcomes.length > 0 && turns.at(-1)!.outcomes.every((o) => o.status === "applied"), `"${step.you}" applied what was shown: ${reply}`);
+    }
+    assert.deepEqual(asked, steps.map((s) => s.you), "every line went to the model once, and nothing else did");
+
+    // Where the guide says the conversation ends: a project on its own forge, the host asked for, Ann with her rights in Garden only, the task ready and given to her.
+    const project = (await call(l, "project.list")).result.items[0];
+    assert.deepEqual([project.name, project.versionControl], ["Garden", { host: "self-hosted", hostName: "Gitea", ci: "Woodpecker CI" }]);
+    assert.equal((await call(l, "host.local.get")).result.item.enabled, true);
+    const ann = (await call(l, "agent.list")).result.items[0];
+    assert.deepEqual([ann.friendlyName, ann.roles], ["Ann", ["author"]]);
+    const grants = ((await call(l, "grant.list", { limit: 100 })).result.items as { grantee: string; action: string; project: string; state: string }[]).filter((g) => g.grantee === `agent:${ann.id}`);
+    assert.deepEqual(grants.map((g) => g.action).sort(), [...RIGHTS].sort());
+    assert.ok(grants.every((g) => g.project === project.id && g.state === "active"), "each right is in Garden only");
+    const task = (await call(l, "task.list", { projectId: project.id })).result.items[0];
+    assert.deepEqual([task.title, task.state], [TASK, "ready"]);
+    assert.deepEqual((await call(l, "assignment.get", { taskId: task.id })).result.item.owner, { kind: "agent", id: ann.id });
+    const ready = (await call(l, "setup.readiness")).result.item;
+    assert.deepEqual(ready.items.filter((i: { required: boolean; state: string }) => i.required && i.state !== "done").map((i: { id: string }) => i.id), ["host"], "only the host is left, and it joins at the next start");
+    assert.match(ready.items.find((i: { id: string }) => i.id === "host").detail, /joins when the controller is started again/);
+    await l.close();
+
+    // "Press Ctrl-D and start again": the same owner, nothing asked again, and the answers are still there. (That the host then runs the task in a sandbox is the U14e test's; it needs bubblewrap.)
+    l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+    assert.equal(l.ownerCreated, false);
+    assert.equal((await call(l, "task.list", { projectId: project.id })).result.items[0].state, "ready");
+    assert.equal((await call(l, "setup.readiness")).result.item.items.find((i: { id: string }) => i.id === "profile").state, "done", "the strict answer was recorded, so it is not asked again");
+  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("with every model server down, each typed recovery order in the guide runs as written, with no model call, and the guide's quoted answers are real (card D01)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-down-"));
+  let modelCalls = 0;
+  const down: typeof globalThis.fetch = async () => { modelCalls++; throw new TypeError("fetch failed: connection refused"); };
+  const l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch: down });
+  try {
+    // Something to act on, made through the API (how it was made does not matter to the orders).
+    const project = (await call(l, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const taskId = (await call(l, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+    const agentId = (await call(l, "agent.create", { friendlyName: "Ann", roles: ["author"] }, "a1")).result.id as string;
+    const grant = (await call(l, "grant.create", { grantee: `agent:${agentId}`, action: "task.read", project, basis: "Ann reads Garden" }, "g1")).result;
+    const fill = (line: string): string => line.replace(/TASK-ID/g, taskId).replace(/AGENT-ID/g, agentId).replace(/GRANT-ID/g, grant.id).replace(/"expectedRevision": 1/, `"expectedRevision": ${grant.revision}`).replace(/PROVIDER-NAME/g, "backup");
+    const say = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: l.controller, ownerToken: l.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join(""); };
+
+    // A message in plain words: the model is down, and the chat says so in the words the guide quotes.
+    const plain = await say("pause everything please");
+    for (const block of blocksAfter(guide(), "model-down")) for (const { replies } of conversation(`You: (plain words)\n${block}`)) for (const q of replies) assert.ok(quotedIn(q, plain), `the guide quotes "${q}", the chat printed:\n${plain}`);
+    const tried = modelCalls;
+    assert.ok(tried > 0, "the chat did try the model");
+
+    const orders = blocksAfter(guide(), "recovery").flatMap((b) => b.split("\n").map((x) => x.trim()).filter((x) => x.length > 0));
+    assert.ok(orders.length >= 10, "the guide's typed orders were read");
+    const ran: string[] = [];
+    for (const order of orders) {
+      const line = fill(order);
+      const turn = await l.controller.chat!.submit(l.ownerToken, { messageId: `order-${ran.length}`, text: line }) as unknown as { outcomes: { status: string; code?: string; message?: string; shown?: string[] }[] };
+      const o = turn.outcomes[0]!;
+      if (order.startsWith("/exclude ")) {
+        // The short form is shown as its full line, which is the next line of the guide.
+        assert.equal(o.code, "needs_confirmation", JSON.stringify(o));
+        const next = fill(orders[orders.indexOf(order) + 1]!);
+        assert.ok(o.message!.endsWith(next), `the guide's next line is the full form NimbleNewt shows: ${o.message}`);
+      } else {
+        assert.equal(o.status, "applied", `${line}: ${JSON.stringify(o)}`);
+      }
+      ran.push(order.split(" ")[0]!);
+    }
+    assert.equal(modelCalls, tried, "no typed order asked the model");
+    // They took effect: the stopped task is kept (not cancelled), the right is revoked and the installation is no longer paused.
+    assert.notEqual((await call(l, "task.get", { taskId })).result.item.state, "cancelled");
+    assert.equal(((await call(l, "grant.list", { limit: 100 })).result.items as { id: string; state: string }[]).find((g) => g.id === grant.id)!.state, "revoked");
+    assert.equal((await call(l, "lifecycle.status", { scope: { kind: "installation", id: "installation" } })).result.item.intent, "active");
+    assert.ok(ran.includes("/nimblenewt.lifecycle-force") && ran.includes("/nimblenewt.grant-revoke") && ran.includes("/nimblenewt.routing-reenable"));
+
+    // A key typed into the chat: the refusal the guide quotes, and nothing reaches the model.
+    const key = ["s", "k-", "abcdefghijklmnop", "qrstuvwxyz123456"].join("");
+    const refused = await say(`my key is ${key} please use it`);
+    for (const block of blocksAfter(guide(), "key-refusal")) for (const { replies } of conversation(`You: (a key)\n${block}`)) for (const q of replies) assert.ok(quotedIn(q, refused), `the guide quotes "${q}", the chat printed:\n${refused}`);
+    assert.ok(!refused.includes(key));
+    assert.equal(modelCalls, tried);
+  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
