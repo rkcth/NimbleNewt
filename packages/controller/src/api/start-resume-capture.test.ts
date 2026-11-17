@@ -17,7 +17,8 @@ const capture = (agent: string, verified = true) => ({
 test("through the state API a host captures a continuation for the attempt it runs and the agent records what it relied on; after a move the attempt is checked, the change is reviewed and the agent is told (card L04c)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-rcap-"));
   const policy: { dataHosts: string[] } = { dataHosts: [] };
-  const w = await world(d, policy);
+  // Card L04e: no host here answers a look at a task's files (a host that does is tested in remote/resume-observe.test.ts), so the controller waits only briefly and the file reads as unknown, as before.
+  const w = await world(d, policy, { start: { resumeProbe: { remoteWaitMs: 50 } } });
   try {
     const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await w.c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
     const to = await w.host("r1", false);

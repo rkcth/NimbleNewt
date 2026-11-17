@@ -85,7 +85,8 @@ import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJo
 import { McpService, callToolAsJob, type McpJobCall } from "../mcp/index.js";
 import type { ResumePorts } from "../continuation/resume.js";
 import { ContinuationService, ResumeCheckService, ResumeReviewer, ResumeSettingsService, ReviewNotRun, controllerResumePorts, type ResumeReviewModel, type ResumeReviewRoutes } from "../continuation/index.js";
-import { DependencyService, checkoutDependencyObserver, locallyPlaced, resumeProbeEnabled } from "../dependencies/index.js";
+import { DependencyService, resumeProbeEnabled } from "../dependencies/index.js";
+import { resumeObserver } from "../continuation/resume-observer.js";
 import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationService } from "../activity/index.js";
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
@@ -152,14 +153,19 @@ export interface StartOptions {
    */
   readonly reportInterrogation?: { readonly model: ResumeReviewModel & Pick<ModelCall, "completeDetailed">; readonly routes?: ResumeReviewRoutes; readonly role?: string };
   /**
+   * Where the worker of this machine keeps a task's checkout (card L04e): the folder an agent really worked in, so the resume check reads the files the task relied on there rather than in the repository's own folder (which a task's uncommitted
+   * work never reaches). Asked for a task placed on this machine; `undefined` (no checkout made yet, or no worker here) falls back to the folder the task's repository is bound at. It is a folder, never read outside by the probe.
+   */
+  readonly resumeCheckout?: (task: { readonly taskId: string; readonly projectId: string }) => string | undefined | Promise<string | undefined>;
+  /**
    * Whether a checked resume may look at the task's own checkout to see how its recorded files and directories are now (card L04d),
    * instead of leaving every one of them `unknown`. Default: yes. `false` turns the reading off, `{ maxEntries, maxBytes }` bounds it
    * tighter. A probe reads nothing outside the checkout the task's records name, and reports only what it really read. An explicit
-   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`) the default is off: the resumed attempt's host is
-   * chosen after the check, and this machine's disk says nothing about another's. Given explicitly there, a task last placed on a
-   * remote host (or never placed) is still not probed, so its files stay `unknown` unless the host's own `resume.observe` answers.
+   * `resume.observe` wins over this. With remote hosts (`dispatch.remote.hosts`), a task last placed on a remote host is looked at by
+   * that host on its own disk (the `observe` workspace request, answered by a host that was started with an observer); one that does
+   * not answer, and a task never placed there, leave the files `unknown`. A task placed on this machine is read here.
    */
-  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number };
+  readonly resumeProbe?: boolean | { readonly maxEntries?: number; readonly maxBytes?: number; readonly maxTotalBytes?: number; readonly timeoutMs?: number; /** How long a remote host may take to answer a look at a task's files, in ms (default 8000); a host that does not answer leaves them unknown. */ readonly remoteWaitMs?: number };
   /**
    * Moving the controller database to another one from chat (card F04e). The databases a transfer may go to are named here by the host (a PostgreSQL address holds a password, so it is never typed in chat); with none given
    * the transfer commands answer "not configured". Needs a data directory (the transfer journal and the authority file live there). `inject` is a test hook.
@@ -1085,15 +1091,20 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // change. Whatever the host supplies outright for either port is used instead of these.
     const RESUME_READER: Principal = { id: "service:resume-check", kind: "service", name: "resume-check", grants: [] };
     const remoteHostIds: ReadonlySet<string> = new Set((options.dispatch?.remote?.hosts ?? []).map((h) => h.hostId));
-    const resumeProbe = !resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) || options.resume?.observe !== undefined ? undefined : checkoutDependencyObserver({
+    // What the recorded files and directories look like now (card L04e): a task placed on a remote host is looked at by that host on its own disk, one placed here is read from the checkout its worker works in (`resumeCheckout`), else the folder its
+    // repository is bound at; the project's paths apply to either. Whatever cannot be looked at stays unobserved, so the check says `unknown`.
+    const resumeProbeOn = resumeProbeEnabled(options.resumeProbe, remoteHostIds.size) && options.resume?.observe === undefined;
+    const resumeObserve = !resumeProbeOn ? undefined : resumeObserver({
       manifest: async (taskId) => await contextDependencies.get(RESUME_READER, taskId),
-      // A task placed on a remote host works on that host's disk, not this one: nothing here is evidence about it (and a task never
-      // placed, in an installation with remote hosts, may be about to go to one). Left unobserved, so the owner decides.
-      locate: locallyPlaced(remoteHostIds, async (taskId) => {
+      placedHostOf: async (taskId) => {
         const placed = (await storage.getAggregate({ kind: "task-placement", id: taskId }))?.body as { hostId?: unknown } | undefined;
         return typeof placed?.hostId === "string" ? placed.hostId : undefined;
-      }, async (taskId) => await resources.checkoutLocation(taskId)),
-      ...(typeof options.resumeProbe === "object" ? options.resumeProbe : {}),
+      },
+      remoteHostIds,
+      binding: async (taskId) => await resources.checkoutLocation(taskId),
+      ...(options.resumeCheckout === undefined ? {} : { workerCheckout: options.resumeCheckout }),
+      remote: () => (dispatch?.remote === undefined ? undefined : { remote: dispatch.remote, by: dispatch.principal }),
+      ...(typeof options.resumeProbe === "object" ? { limits: options.resumeProbe, ...(options.resumeProbe.remoteWaitMs === undefined ? {} : { remoteWaitMs: Math.max(1, Math.min(60_000, Math.floor(options.resumeProbe.remoteWaitMs))) }) } : {}),
       onFault: (detail) => { options.onInternalError?.(new Error(`the resume dependency probe: ${detail}`)); },
     });
     // One bounded client over the host's raw reviewer client (card W10 wiring), shared by the resume reviewer and the second agent of a done, so the two share its slots.
@@ -1133,7 +1144,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       onFailure: (route, detail) => { options.onInternalError?.(new Error(`the report interrogator on ${route}: ${detail}`)); },
     });
     const resumePorts: Partial<ResumePorts> = {
-      ...(resumeProbe === undefined ? {} : { observe: resumeProbe }),
+      ...(resumeObserve === undefined ? {} : { observe: resumeObserve }),
       ...(reviewer === undefined ? {} : { review: (request) => reviewer.review(request) }),
       ...(shippedReview === undefined ? {} : { review: shippedReview }),
       ...options.resume,
