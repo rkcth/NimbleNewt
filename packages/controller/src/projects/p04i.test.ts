@@ -1,0 +1,232 @@
+import assert from "node:assert/strict";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { after, test } from "node:test";
+import { AssignmentService } from "../domain/assignments.js";
+import { DomainError } from "../domain/errors.js";
+import { ProjectService } from "../domain/service.js";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { PrincipalService, type Principal } from "../security/index.js";
+import { CheckRunService, CheckRunSettingsService, IncidentService, ResponsibilityChecks, ResponsibilityProbeService, ResponsibilityService, httpCheckProbe, nodeProbeRequest, probeResult, type ProbeAnswer, type ProbeRequest } from "./index.js";
+
+after(stopServer);
+
+let n = 0;
+const cid = (label: string): string => `${label}-${n++}`;
+const T0 = "2026-11-12T10:00:00.000Z";
+const iso = (minutes: number): string => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
+const code = async (p: Promise<unknown>): Promise<string> => p.then(() => "ok", (e: unknown) => (e instanceof DomainError ? e.code : String(e)));
+
+/** A request the test answers by hand: each call waits until `answer` is called for it. */
+function manualRequest(): { request: ProbeRequest; calls: { url: string; timeoutMs: number }[]; answer(a: ProbeAnswer): Promise<void> } {
+  const calls: { url: string; timeoutMs: number }[] = [];
+  const waiting: ((a: ProbeAnswer) => void)[] = [];
+  return {
+    calls,
+    request: (url, timeoutMs) => { calls.push({ url, timeoutMs }); return new Promise((resolve) => waiting.push(resolve)); },
+    answer: async (a) => { const next = waiting.shift(); assert.ok(next !== undefined, "a request is waiting"); next(a); await new Promise((r) => setImmediate(r)); },
+  };
+}
+
+// Card P04, slice P04i: the owner's HTTP probe takes a due check with no agent and no model.
+for (const backend of backends) {
+  interface World {
+    owner: Principal; ann: Principal; project: string; setNow(minutes: number): void;
+    duties: ResponsibilityService; checks: ResponsibilityChecks; inc: IncidentService; probes: ResponsibilityProbeService;
+    runner(request: ProbeRequest, maxInFlight?: number): CheckRunService;
+    make(extra?: Record<string, unknown>): Promise<string>;
+    taskCount(): Promise<number>;
+    raw: { put(id: string, body: unknown): Promise<void> };
+  }
+  const suite = (name: string, body: (c: World) => Promise<void>) =>
+    test(`${backend.name}: ${name}`, async () => {
+      const world = await backend.open();
+      let now = T0;
+      const options = { clock: () => now, pause: async () => undefined };
+      try {
+        const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+        const epoch = projects.epoch;
+        const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+        const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+        const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
+        const duties = ResponsibilityService.withEpoch(world.storage, epoch, options);
+        const checks = ResponsibilityChecks.withEpoch(world.storage, epoch, duties, options);
+        const inc = IncidentService.withEpoch(world.storage, epoch, duties, options);
+        const settings = CheckRunSettingsService.withEpoch(world.storage, epoch, options);
+        const probes = ResponsibilityProbeService.withEpoch(world.storage, epoch, options);
+        const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Ops" })).id;
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "ann", grants: [{ action: "responsibility.read", project }, { action: "responsibility.write", project }] as never });
+        const ann = await principals.authenticate((await principals.issueCredential(owner, "agent:ann")).token);
+        await body({
+          owner, ann, project, duties, checks, inc, probes,
+          setNow: (m) => { now = iso(m); },
+          runner: (request, maxInFlight) => CheckRunService.withEpoch(world.storage, epoch, { responsibilities: duties, checks, incidents: inc, settings, projects, assignments, probe: httpCheckProbe({ setting: (id) => probes.setting(id), request, now: () => Date.parse(now), ...(maxInFlight === undefined ? {} : { maxInFlight }) }) }, options),
+          make: async (extra = {}) => (await duties.create(owner, { commandId: cid("r"), projectId: project, title: "Keep the web up", objective: "Up", desiredCondition: "answers on /health", everyMinutes: 60, ownerId: ann.id, ...extra } as never)).id,
+          taskCount: async () => (await world.storage.listAggregates("task", { limit: 500 })).length,
+          raw: { put: async (id, b) => {
+            const current = await world.storage.getAggregate({ kind: "responsibility-probe", id });
+            await world.storage.applyOperation({ operationId: cid("raw"), epoch, actor: "owner:rob", correlationId: cid("raw"), at: now, changes: [current === undefined ? { type: "create", ref: { kind: "responsibility-probe", id }, body: b } : { type: "update", ref: { kind: "responsibility-probe", id }, expectedRevision: current.revision, body: b }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+          } },
+        });
+      } finally { await world.close(); }
+    });
+
+  suite("only the owner sets, reads and clears a probe; bad addresses, statuses and waits are refused and nothing is stored", async (c) => {
+    const r = await c.make();
+    assert.deepEqual(await c.probes.get(c.owner, r), { responsibilityId: r, revision: 0 });
+    assert.equal(await code(c.probes.set(c.ann, { commandId: cid("s"), responsibilityId: r, url: "http://127.0.0.1:9/health" })), "forbidden", "an agent that may change the responsibility still cannot point the controller anywhere");
+    assert.equal(await code(c.probes.get(c.ann, r)), "forbidden");
+    for (const url of ["ftp://host/x", "http://user:pw@host/health", "http://host/health#x", "http://host/he alth", "file:///etc/passwd", "not an address", "", `http://host/${"a".repeat(500)}`, "http://host/health?token=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB", "http://host/health?api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", 42, undefined]) {
+      assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url } as never)), "invalid_command", String(url));
+    }
+    for (const extra of [{ expectStatus: [] }, { expectStatus: [99] }, { expectStatus: [600] }, { expectStatus: ["200"] }, { expectStatus: Array.from({ length: 11 }, (_, i) => 200 + i) }, { timeoutSeconds: 0 }, { timeoutSeconds: 31 }, { timeoutSeconds: 2.5 }, { other: 1 }, { expectedRevision: "0" }]) {
+      assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "http://127.0.0.1:9/health", ...extra } as never)), "invalid_command", JSON.stringify(extra));
+    }
+    assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: "rsp-aaaaaaaaaaaaaaaaaaaa", url: "http://127.0.0.1:9/health" })), "not_found");
+    assert.deepEqual(await c.probes.get(c.owner, r), { responsibilityId: r, revision: 0 }, "nothing was stored by a refused command");
+
+    const id = cid("s");
+    const set = await c.probes.set(c.owner, { commandId: id, responsibilityId: r, url: "http://web.internal:8080/health?full=1", expectStatus: [204, 200, 200], timeoutSeconds: 5 });
+    assert.deepEqual(set, { revision: 1, shown: "http://web.internal:8080/health" }, "the answer shows the address without its query");
+    assert.deepEqual(await c.probes.set(c.owner, { commandId: id, responsibilityId: r, url: "http://web.internal:8080/health?full=1", expectStatus: [204, 200, 200], timeoutSeconds: 5 }), set, "a repeat replays");
+    const got = await c.probes.get(c.owner, r);
+    assert.deepEqual([got.revision, got.probe?.url, got.probe?.expectStatus, got.probe?.timeoutSeconds, got.probe?.setBy], [1, "http://web.internal:8080/health?full=1", [200, 204], 5, c.owner.id]);
+    assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "https://web.example/health", expectedRevision: 0 })), "stale_revision");
+    assert.equal((await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "https://web.example/health", expectedRevision: 1 })).revision, 2);
+    const again = await c.probes.get(c.owner, r);
+    assert.deepEqual([again.probe?.expectStatus, again.probe?.timeoutSeconds], [[], 10], "setting replaces the whole probe: the defaults come back");
+    assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: null, timeoutSeconds: 5 } as never)), "invalid_command");
+
+    // Retired: setting is refused, clearing is allowed.
+    const rev = (await c.duties.get(c.owner, r))!.revision;
+    await c.duties.update(c.owner, { commandId: cid("u"), responsibilityId: r, expectedRevision: rev, state: "retired" });
+    assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "https://web.example/other" })), "invalid_command");
+    assert.equal((await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: null })).revision, 3);
+    assert.equal((await c.probes.get(c.owner, r)).probe, undefined);
+    assert.equal(await c.probes.setting(r), undefined);
+  });
+
+  suite("a due check with a probe is taken with no agent: asked once apart from the pass, the answer recorded on a later pass; a bad answer is a grouped incident", async (c) => {
+    const r = await c.make();
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "http://web.internal/health?secret-free=1", timeoutSeconds: 3 });
+    const m = manualRequest();
+    const runner = c.runner(m.request);
+    c.setNow(60); await c.checks.generate(c.owner, c.project);
+    assert.deepEqual(await runner.run(c.owner, c.project), { observed: 0, tasks: 0, coalesced: 0, noAgent: 0, deferred: 1 }, "the pass does not wait for the answer");
+    assert.deepEqual(m.calls, [{ url: "http://web.internal/health?secret-free=1", timeoutMs: 3000 }]);
+    assert.deepEqual((await runner.run(c.owner, c.project)).deferred, 1, "still waiting: the check stays owed");
+    assert.equal(m.calls.length, 1, "asked once, not once per pass");
+    assert.equal((await c.inc.observed(c.owner, r))!.observed, "unknown", "no answer yet is never healthy");
+    await m.answer({ status: 200, ms: 12 });
+    assert.deepEqual(await runner.run(c.owner, c.project), { observed: 1, tasks: 0, coalesced: 0, noAgent: 0, deferred: 0 });
+    assert.equal(await c.taskCount(), 0, "no agent was asked");
+    assert.deepEqual(await c.checks.pending(c.owner, c.project), []);
+    const history = (await c.duties.history(c.owner, r, { limit: 10 }))!.items;
+    assert.deepEqual(history.map((h) => [h.kind, h.outcome, h.summary]), [["check", "ok", "HTTP check of http://web.internal/health answered 200 in 12 ms."]], "the query is never written to history");
+    assert.equal((await c.inc.observed(c.owner, r))!.observed, "ok");
+
+    for (const [minutes, answer] of [[120, { status: 503, ms: 5 }], [180, { error: "ECONNREFUSED", ms: 1 }], [240, { error: "TIMEOUT", ms: 3000 }]] as const) {
+      c.setNow(minutes); await c.checks.generate(c.owner, c.project);
+      assert.equal((await runner.run(c.owner, c.project)).deferred, 1);
+      await m.answer(answer);
+      assert.equal((await runner.run(c.owner, c.project)).observed, 1);
+    }
+    const summaries = (await c.duties.history(c.owner, r, { limit: 10 }))!.items.slice(1).map((h) => [h.outcome, h.summary]);
+    assert.deepEqual(summaries, [
+      ["failed", "HTTP check of http://web.internal/health answered 503 in 5 ms (expected 200-299)."],
+      ["failed", "HTTP check of http://web.internal/health: the connection was refused (ECONNREFUSED)."],
+      ["failed", "HTTP check of http://web.internal/health: no answer within 3 s."],
+    ]);
+    const incidents = (await c.inc.list(c.owner, c.project, { open: true }))!;
+    assert.deepEqual(incidents.map((i) => [i.signature, i.count, i.worst]), [["scheduled-check", 3, "failed"]], "repeated bad answers group into one incident");
+    assert.equal(await c.taskCount(), 0);
+  });
+
+  suite("without a probe the agent takes the check; a cleared probe hands checks back; a damaged probe is attention, never healthy; nobody answering is no obstacle for a probe", async (c) => {
+    await c.make();
+    // A responsibility nobody answers for: a probe still takes its check (the remote service needs no agent and no worker on it).
+    const lone = await c.make({ ownerId: undefined, title: "Watch the status page" });
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: lone, url: "https://status.example/ping", expectStatus: [204] });
+    const m = manualRequest();
+    const runner = c.runner(m.request);
+    c.setNow(60); await c.checks.generate(c.owner, c.project);
+    assert.deepEqual(await runner.run(c.owner, c.project), { observed: 0, tasks: 1, coalesced: 0, noAgent: 0, deferred: 1 }, "no probe: a bounded task as before; with one: asked");
+    assert.equal(m.calls.length, 1);
+    await m.answer({ status: 204, ms: 3 });
+    const pass = await runner.run(c.owner, c.project);
+    assert.equal(pass.observed, 1); assert.equal(pass.noAgent, 0);
+    assert.equal((await c.duties.history(c.owner, lone, { limit: 5 }))!.items[0]!.outcome, "ok", "204 was named as healthy");
+
+    // The probe record damaged in storage: the check is attention (reported), not ok and not a silent agent task.
+    await c.raw.put(lone, { responsibilityId: lone, projectId: c.project, url: "ftp://x", setBy: "owner:rob", setAt: T0 });
+    assert.equal(await code(c.probes.get(c.owner, lone)), "unavailable");
+    c.setNow(130); await c.checks.generate(c.owner, c.project);
+    await runner.run(c.owner, c.project);
+    const last = (await c.duties.history(c.owner, lone, { limit: 10 }))!.items.at(-1)!;
+    assert.deepEqual([last.kind, last.outcome], ["check", "attention"]);
+    assert.match(last.summary, /damaged/);
+
+    // Cleared: the next due check goes to the agent again (here nobody answers, so it is recorded as not taken).
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: lone, url: null });
+    c.setNow(200); await c.checks.generate(c.owner, c.project);
+    const after = await c.runner(m.request).run(c.owner, c.project);
+    assert.equal(after.noAgent >= 1, true, JSON.stringify(after));
+    assert.equal(m.calls.length, 1, "a cleared probe asks nothing");
+  });
+
+  suite("at most the in-flight limit is asked at once (the rest wait, owed); an answer for an address the owner has since changed is not used", async (c) => {
+    const a = await c.make({ title: "A" });
+    const b = await c.make({ title: "B" });
+    for (const r of [a, b]) await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: `http://${r === a ? "a" : "b"}.internal/health` });
+    const m = manualRequest();
+    const runner = c.runner(m.request, 1);
+    c.setNow(60); await c.checks.generate(c.owner, c.project);
+    assert.equal((await runner.run(c.owner, c.project)).deferred, 2);
+    assert.equal(m.calls.length, 1, "one at a time");
+    await m.answer({ status: 200, ms: 1 });
+    const second = await runner.run(c.owner, c.project);
+    assert.deepEqual([second.observed, second.deferred, m.calls.length], [1, 1, 2], "the first answer is taken and the second address asked");
+    // The owner points the second one somewhere else while its request is out: the old answer is dropped and the new address asked. (Which one is asked first follows the check IDs.)
+    const later = m.calls[1]!.url === "http://a.internal/health" ? a : b;
+    const bProbe = await c.probes.get(c.owner, later);
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: later, url: "http://b2.internal/health", expectedRevision: bProbe.revision });
+    await m.answer({ status: 500, ms: 1 });
+    const third = await runner.run(c.owner, c.project);
+    assert.deepEqual([third.observed, third.deferred, m.calls.at(-1)!.url], [0, 1, "http://b2.internal/health"]);
+    await m.answer({ status: 200, ms: 1 });
+    assert.equal((await runner.run(c.owner, c.project)).observed, 1);
+    assert.equal((await c.inc.list(c.owner, c.project, { open: true }))!.length, 0, "the stale 500 was never recorded");
+  });
+}
+
+// The real request, against a server on this machine only.
+test("the real request: a status is read without the body, a redirect is not followed, silence times out, a closed port is refused; nothing throws", async () => {
+  const hits: string[] = [];
+  const server: Server = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    if (req.url === "/ok") { res.writeHead(200, { "content-type": "text/plain" }); res.end("x".repeat(1_000_000)); return; }
+    if (req.url === "/down") { res.writeHead(503); res.end(); return; }
+    if (req.url === "/moved") { res.writeHead(302, { location: "/ok" }); res.end(); return; }
+    // "/silent": never answers.
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const ok = await nodeProbeRequest(`http://127.0.0.1:${port}/ok`, 5000);
+    assert.equal("status" in ok && ok.status, 200);
+    assert.equal("status" in (await nodeProbeRequest(`http://127.0.0.1:${port}/down`, 5000)) && (await nodeProbeRequest(`http://127.0.0.1:${port}/down`, 5000) as { status: number }).status, 503);
+    const moved = await nodeProbeRequest(`http://127.0.0.1:${port}/moved`, 5000);
+    assert.deepEqual("status" in moved && moved.status, 302);
+    assert.equal(hits.filter((h) => h === "/ok").length, 1, "the redirect was not followed");
+    const silent = await nodeProbeRequest(`http://127.0.0.1:${port}/silent`, 300);
+    assert.equal("error" in silent && silent.error, "TIMEOUT");
+    const closed = createServer(); await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const closedPort = (closed.address() as AddressInfo).port; await new Promise((r) => closed.close(r));
+    const refused = await nodeProbeRequest(`http://127.0.0.1:${closedPort}/x`, 5000);
+    assert.equal("error" in refused && refused.error, "ECONNREFUSED");
+    const setting = { url: `http://127.0.0.1:${port}/ok?k=v`, expectStatus: [], timeoutSeconds: 5 };
+    assert.deepEqual(probeResult(setting, { status: 302, ms: 1 }, true), { outcome: "failed", summary: `HTTP check of http://127.0.0.1:${port}/ok answered 302 in 1 ms (expected 200-299). A maintenance window was on.` });
+    assert.equal(probeResult({ ...setting, expectStatus: [302] }, { status: 302, ms: 1 }, false).outcome, "ok");
+    assert.equal(probeResult(setting, { error: "WEIRD_CODE", ms: 1 }, false).summary, `HTTP check of http://127.0.0.1:${port}/ok: the request failed (WEIRD_CODE).`);
+  } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
+});

@@ -1233,7 +1233,7 @@ export class ChatService {
       labels[String(args["itemId"])] = String(found["topic"]);
     }
     // Ongoing responsibilities (card P04): a responsibility is named by its title, a managed resource by its label, an incident by the responsibility's title and, when it has several, the words of its signature. Exactly one match, else the owner is asked.
-    if (intent.op === "responsibility.update" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
+    if (intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
       const pick = (what: string, field: string, words: string, items: { id: string; name: string }[]): { id: string } | ReturnType<typeof refuse> | { ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } => {
         const matches = items.filter((i) => words === "" || i.name.toLowerCase().includes(words));
         if (matches.length === 0) return refuse("not_found", words === "" ? `there is no ${what} in that project` : `no ${what} in that project is called ${quotedText(words, 80)}`);
@@ -1246,11 +1246,11 @@ export class ChatService {
         if (v !== undefined && typeof v !== "string") return refuse("invalid_command", `${key} must be text`);
         return v?.trim().toLowerCase();
       };
-      const dutyTitle = intent.op === "responsibility.update" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
+      const dutyTitle = intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
       const resourceLabel = intent.op.startsWith("lease.") ? words("resourceLabel") : undefined;
       const signature = intent.op === "incident.resolve" ? words("incidentSignature") : undefined;
       for (const w of [dutyTitle, resourceLabel, signature]) if (typeof w === "object") return w;
-      if (intent.op === "responsibility.update" && args["responsibilityId"] === undefined) {
+      if ((intent.op === "responsibility.update" || intent.op === "responsibility.probe.set") && args["responsibilityId"] === undefined) {
         const listed = await this.#plainItems(token, "responsibility.list", { projectId });
         const r = pick("responsibility", "responsibilityId", (dutyTitle as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["title"]) })));
         if (!("id" in r)) return r;
