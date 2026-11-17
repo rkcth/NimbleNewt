@@ -80,7 +80,7 @@ for (const backend of backends) {
     assert.deepEqual(await c.probes.get(c.owner, r), { responsibilityId: r, revision: 0 });
     assert.equal(await code(c.probes.set(c.ann, { commandId: cid("s"), responsibilityId: r, url: "http://127.0.0.1:9/health" })), "forbidden", "an agent that may change the responsibility still cannot point the controller anywhere");
     assert.equal(await code(c.probes.get(c.ann, r)), "forbidden");
-    for (const url of ["ftp://host/x", "http://user:pw@host/health", "http://host/health#x", "http://host/he alth", "file:///etc/passwd", "not an address", "", `http://host/${"a".repeat(500)}`, "http://host/health?token=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB", "http://host/health?api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", 42, undefined]) {
+    for (const url of ["ftp://host/x", "http://user:pw@host/health", "http://host/health#x", "http://host/he alth", "file:///etc/passwd", "not an address", "", `http://host/${"a".repeat(500)}`, "http://host/health?token=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB", "http://host/\u202ehtlaeh", "http://a.example\\@10.0.0.1/health", "http:/\\/host/health", "http:host/health", "http://host\u200b.example/health", "http://host/health\u0085", "http://host/\ud800", "http://host/health?api_key=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", 42, undefined]) {
       assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url } as never)), "invalid_command", String(url));
     }
     for (const extra of [{ expectStatus: [] }, { expectStatus: [99] }, { expectStatus: [600] }, { expectStatus: ["200"] }, { expectStatus: Array.from({ length: 11 }, (_, i) => 200 + i) }, { timeoutSeconds: 0 }, { timeoutSeconds: 31 }, { timeoutSeconds: 2.5 }, { other: 1 }, { expectedRevision: "0" }]) {
@@ -136,7 +136,7 @@ for (const backend of backends) {
     assert.equal(await c.taskCount(), 0, "no agent was asked");
     assert.deepEqual(await c.checks.pending(c.owner, c.project), []);
     const history = (await c.duties.history(c.owner, r, { limit: 10 }))!.items;
-    assert.deepEqual(history.map((h) => [h.kind, h.outcome, h.summary]), [["check", "ok", "HTTP check of http://web.internal/health answered 200 in 12 ms."]], "the query is never written to history");
+    assert.deepEqual(history.map((h) => [h.kind, h.outcome, h.summary]), [["check", "ok", "HTTP check of the owner's health address answered 200 in 12 ms."]], "neither the address nor its query is written to history (agents read it)");
     assert.equal((await c.inc.observed(c.owner, r))!.observed, "ok");
 
     for (const [minutes, answer] of [[120, { status: 503, ms: 5 }], [180, { error: "ECONNREFUSED", ms: 1 }], [240, { error: "TIMEOUT", ms: 3000 }]] as const) {
@@ -147,13 +147,17 @@ for (const backend of backends) {
     }
     const summaries = (await c.duties.history(c.owner, r, { limit: 10 }))!.items.slice(1).map((h) => [h.outcome, h.summary]);
     assert.deepEqual(summaries, [
-      ["failed", "HTTP check of http://web.internal/health answered 503 in 5 ms (expected 200-299)."],
-      ["failed", "HTTP check of http://web.internal/health: the connection was refused (ECONNREFUSED)."],
-      ["failed", "HTTP check of http://web.internal/health: no answer within 3 s."],
+      ["failed", "HTTP check of the owner's health address answered 503 in 5 ms (expected 200-299)."],
+      ["failed", "HTTP check of the owner's health address: the connection was refused (ECONNREFUSED)."],
+      ["failed", "HTTP check of the owner's health address: no answer within 3 s."],
     ]);
     const incidents = (await c.inc.list(c.owner, c.project, { open: true }))!;
     assert.deepEqual(incidents.map((i) => [i.signature, i.count, i.worst]), [["scheduled-check", 3, "failed"]], "repeated bad answers group into one incident");
     assert.equal(await c.taskCount(), 0);
+    // Second review: what an agent that may read the responsibility reads (history, incidents, observed state, the checks with their notes) never names the address, its host or its query (the responsibility's own text may say /health: that is not the probe).
+    const seen = JSON.stringify([await c.duties.history(c.ann, r, { limit: 50 }), await c.inc.list(c.ann, c.project, {}), await c.inc.observed(c.ann, r), await c.duties.status(c.ann, r), await c.checks.pending(c.ann, c.project), await c.storage.listAggregates("responsibility-check", { limit: 50 })]);
+    assert.ok(seen.includes("the owner's health address"), seen.slice(0, 300));
+    for (const part of ["web.internal", "secret-free", "http:"]) assert.ok(!seen.includes(part), `${part} is not shown to an agent: ${seen.slice(0, 2000)}`);
   });
 
   suite("without a probe the agent takes the check; a cleared probe hands checks back; a damaged probe is attention, never healthy; nobody answering is no obstacle for a probe", async (c) => {
@@ -210,6 +214,7 @@ for (const backend of backends) {
     await m.answer({ status: 200, ms: 1 });
     assert.equal((await runner.run(c.owner, c.project)).observed, 1);
     assert.equal((await c.inc.list(c.owner, c.project, { open: true }))!.length, 0, "the stale 500 was never recorded");
+
   });
 
   // First review (card P04i): one request per responsibility however many checks it owes; a changed healthy status is a changed probe; only the primary controller asks; closing starts nothing.
@@ -251,6 +256,47 @@ for (const backend of backends) {
     assert.equal(m.calls.length, 0, "another controller took the database: this one asks nothing");
   });
 }
+
+// Second review: the limit counts requests still out, not answers waited for. One whose probe was cleared (or changed) while it was out still holds its connection.
+test("a request whose probe was cleared while it was out still counts against the limit; one responsibility never takes another's answer", async () => {
+  const settings = new Map<string, { url: string; expectStatus: number[]; timeoutSeconds: number }>([["rsp-a", { url: "http://a.internal/x", expectStatus: [], timeoutSeconds: 5 }], ["rsp-b", { url: "http://b.internal/x", expectStatus: [], timeoutSeconds: 5 }]]);
+  const m = manualRequest();
+  const probe = httpCheckProbe({ setting: async (id) => settings.get(id), request: m.request, maxInFlight: 1, now: () => 0 });
+  const ask = (id: string) => probe({ responsibility: { id } as never, check: { id: `chk-${id}`, body: {} } as never });
+  assert.equal(await ask("rsp-a"), "later");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(m.calls.map((x) => x.url), ["http://a.internal/x"]);
+  settings.delete("rsp-a");
+  assert.equal(await ask("rsp-a"), undefined, "cleared: the agent takes it");
+  settings.set("rsp-a", { url: "http://a2.internal/x", expectStatus: [], timeoutSeconds: 5 });
+  assert.equal(await ask("rsp-a"), "later");
+  assert.equal(await ask("rsp-b"), "later");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(m.calls.length, 1, "the cleared request is still out: nothing more is asked at a limit of one");
+  await m.answer({ status: 500, ms: 1 });
+  assert.equal(await ask("rsp-b"), "later");
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(m.calls.map((x) => x.url), ["http://a.internal/x", "http://b.internal/x"], "once it ended, the next is asked");
+  assert.equal(await ask("rsp-a"), "later", "a's 500 (asked under the cleared probe) is not a's answer, and the limit holds");
+  await m.answer({ status: 204, ms: 1 });
+  assert.equal(((await ask("rsp-a")) as { outcome?: string } | undefined) , "later", "b's answer is not a's");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(m.calls.at(-1)!.url, "http://a2.internal/x");
+  assert.equal(((await ask("rsp-b")) as { outcome: string }).outcome, "ok");
+});
+
+// Second review: a request ended by the controller closing is not an answer from the address: nothing is recorded, and the check (still owed) is asked again.
+test("an answer of ABORTED (the controller closing) is never taken as the check's result", async () => {
+  const m = manualRequest();
+  const probe = httpCheckProbe({ setting: async () => ({ url: "http://a.internal/x", expectStatus: [], timeoutSeconds: 5 }), request: m.request, now: () => 0 });
+  const ask = () => probe({ responsibility: { id: "rsp-a" } as never, check: { id: "chk-a", body: {} } as never });
+  assert.equal(await ask(), "later");
+  await new Promise((r) => setImmediate(r));
+  await m.answer({ error: "ABORTED", ms: 1 });
+  assert.equal(await ask(), "later", "no result: asked again");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(m.calls.length, 2);
+});
 
 // The real request, against a server on this machine only.
 test("the real request: a status is read without the body, a redirect is not followed, silence times out, a closed port is refused; nothing throws", async () => {
@@ -295,8 +341,8 @@ test("the real request: a status is read without the body, a redirect is not fol
     await gone;
     assert.equal((await nodeProbeRequest(`http://127.0.0.1:${port}/ok`, 5000, stop.signal) as { error?: string }).error, "ABORTED", "an ended signal asks nothing");
     const setting = { url: `http://127.0.0.1:${port}/ok?k=v`, expectStatus: [], timeoutSeconds: 5 };
-    assert.deepEqual(probeResult(setting, { status: 302, ms: 1 }, true), { outcome: "failed", summary: `HTTP check of http://127.0.0.1:${port}/ok answered 302 in 1 ms (expected 200-299). A maintenance window was on.` });
+    assert.deepEqual(probeResult(setting, { status: 302, ms: 1 }, true), { outcome: "failed", summary: `HTTP check of the owner's health address answered 302 in 1 ms (expected 200-299). A maintenance window was on.` });
     assert.equal(probeResult({ ...setting, expectStatus: [302] }, { status: 302, ms: 1 }, false).outcome, "ok");
-    assert.equal(probeResult(setting, { error: "WEIRD_CODE", ms: 1 }, false).summary, `HTTP check of http://127.0.0.1:${port}/ok: the request failed (WEIRD_CODE).`);
+    assert.equal(probeResult(setting, { error: "WEIRD_CODE", ms: 1 }, false).summary, `HTTP check of the owner's health address: the request failed (WEIRD_CODE).`);
   } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
 });

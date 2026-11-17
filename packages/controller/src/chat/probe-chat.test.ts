@@ -13,6 +13,7 @@ const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ 
 for (const backend of backends) {
   test(`${backend.name}: the owner sets a health address for a responsibility by chat (shown first, named by title), clears it, and an address the owner never wrote is refused; an agent cannot (card P04i)`, async () => {
     assert.equal(CHAT_OPS["responsibility.probe.set"]?.mode, "propose");
+    assert.ok(CHAT_OPS["responsibility.probe.set"]!.verb.length <= 80, "the verb is shown whole in the proposal line");
     for (const k of ["url", "expectStatus", "timeoutSeconds", "responsibilityTitle"]) assert.ok(acceptedArgs("responsibility.probe.set")!.includes(k), `the interpreter is told about ${k}`);
     const script: Record<string, unknown> = {};
     const w = await openWorld(backend, script, undefined, (storage: ControllerStorage, epoch: number) => ({ checkProbes: ResponsibilityProbeService.withEpoch(storage, epoch) }));
@@ -46,6 +47,20 @@ for (const backend of backends) {
       const shown = await chat.submit(w.ownerToken, { messageId: cid("m"), text: withQuery });
       assert.equal(shown.outcomes[0]!.status, "proposed", JSON.stringify(shown.outcomes[0]));
       assert.ok(JSON.stringify(shown.outcomes[0]).includes("https://web.example.test/health?deep=1"), JSON.stringify(shown.outcomes[0]));
+      // Second review: the line says what setting it means (NimbleNewt itself asks, from its own machine, any address), and a long address is shown whole, never cut.
+      assert.match(JSON.stringify(shown.outcomes[0]), /NimbleNewt itself, from the machine it runs on, will request this exact address/);
+      const longUrl = `https://web.example.test/${"segment/".repeat(40)}health?deep=1`;
+      const long = `for keep web up, have nimblenewt itself ask ${longUrl}`;
+      script[long] = [cmd("responsibility.probe.set", { responsibilityTitle: "keep web up", url: longUrl }, long)];
+      const longOut = await chat.submit(w.ownerToken, { messageId: cid("m"), text: long });
+      assert.equal(longOut.outcomes[0]!.status, "proposed", JSON.stringify(longOut.outcomes[0]));
+      assert.ok(JSON.stringify(longOut.outcomes[0]).includes(longUrl), JSON.stringify(longOut.outcomes[0]));
+      // An address the probe would refuse is refused before it is shown (here a text-direction mark that would make it read otherwise).
+      const marked = "https://web.example.test/\u202ehtlaeh";
+      const markedText = `for keep web up, have nimblenewt itself ask ${marked}`;
+      script[markedText] = [cmd("responsibility.probe.set", { responsibilityTitle: "keep web up", url: marked }, markedText)];
+      const markedOut = await chat.submit(w.ownerToken, { messageId: cid("m"), text: markedText });
+      assert.equal(markedOut.outcomes[0]!.status, "refused", JSON.stringify(markedOut.outcomes[0]));
       // Only the whole address, as written: a host cut short, a path cut off or other letter case is not the owner's address (first review).
       for (const [said, url] of [
         ["for keep web up let nimblenewt ask https://web.example.test.other.example/health itself", "https://web.example.test"],

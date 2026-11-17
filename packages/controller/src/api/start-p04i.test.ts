@@ -15,9 +15,8 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 type Reply = { ok: boolean; result?: any; error?: { code: string } };
 
 test("through the running controller: the owner sets an HTTP probe, a due check is taken by the controller itself with no task, a bad answer is an incident (clearing is tested in projects/p04i); an agent cannot set or read a probe (card P04i)", async () => {
-  let status = 200;
   const hits: string[] = [];
-  const server = createServer((req, res) => { hits.push(req.url ?? ""); res.writeHead(status); res.end(); });
+  const server = createServer((req, res) => { hits.push(req.url ?? ""); res.writeHead(req.url === "/down" ? 503 : 200); res.end(); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   const d = mkdtempSync(join(tmpdir(), "nn-p04i-"));
@@ -31,8 +30,16 @@ test("through the running controller: the owner sets an HTTP probe, a due check 
     const as = (token: string) => (op: string, args: Record<string, unknown>, commandId?: string) => c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
     const call = as(boot.token); const asAnn = as(annToken);
     const project = (await call("project.create", { name: "Ops" }, "p1")).result.id as string;
-    // A one-minute schedule, so the first check is due a minute after creation.
-    const duty = (await call("responsibility.create", { projectId: project, title: "Keep web up", objective: "Up", desiredCondition: "health answers 200", everyMinutes: 1, ownerId: "agent:ann" }, "r1")).result.id as string;
+    // Two hourly responsibilities started long ago, so a check of each is due at once (the stored time is moved back, as the clock cannot be: no real wait). One is healthy, one answers 503.
+    const make = async (title: string, k: string) => (await call("responsibility.create", { projectId: project, title, objective: "Up", desiredCondition: "health answers 200", everyMinutes: 60, ownerId: "agent:ann" }, k)).result.id as string;
+    const duty = await make("Keep web up", "r1");
+    const down = await make("Keep api up", "r2");
+    const long = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const realGet = c.storage.getAggregate.bind(c.storage);
+    const realList = c.storage.listAggregates.bind(c.storage);
+    const back = (a: any) => (a?.kind === "responsibility" ? { ...a, createdAt: long, updatedAt: long } : a);
+    c.storage.getAggregate = async (ref) => back(await realGet(ref));
+    c.storage.listAggregates = (async (kind: string, o: any) => (await realList(kind, o)).map(back)) as never;
 
     assert.equal((await asAnn("responsibility.probe.set", { responsibilityId: duty, url: `http://127.0.0.1:${port}/health` }, "a1")).error?.code, "forbidden");
     assert.equal((await asAnn("responsibility.probe.get", { responsibilityId: duty })).error?.code, "forbidden");
@@ -41,34 +48,34 @@ test("through the running controller: the owner sets an HTTP probe, a due check 
     const set = await call("responsibility.probe.set", { responsibilityId: duty, url: `http://127.0.0.1:${port}/health?verbose=1`, timeoutSeconds: 5 }, "s1");
     assert.deepEqual(set.result, { revision: 1, shown: `http://127.0.0.1:${port}/health` });
     assert.equal((await call("responsibility.probe.get", { responsibilityId: duty })).result.item.probe.timeoutSeconds, 5);
+    assert.ok((await call("responsibility.probe.set", { responsibilityId: down, url: `http://127.0.0.1:${port}/down` }, "s2")).ok);
 
-    // Wait (real time) for the check to come due, then tick until the answer is recorded.
+    // Tick until both answers are recorded (the request runs apart from the pass, so a few passes).
     let lastBad: unknown = [];
-    const settle = async (want: number): Promise<any[]> => {
-      const deadline = Date.now() + 100_000;
-      for (;;) {
-        const ticked = await c.dispatch!.dispatcher.tick();
-        lastBad = (ticked.loops ?? []).filter((l) => !l.ok);
-        const h = (await call("responsibility.history", { responsibilityId: duty })).result.items as any[];
-        const checks = h.filter((x) => x.kind === "check");
-        if (checks.length >= want) return checks;
-        if (Date.now() >= deadline) assert.fail(`no check recorded in time: ${JSON.stringify(h)} checks=${JSON.stringify((await call("responsibility.checks", { projectId: project })))} hits=${JSON.stringify(hits)} failedLoops=${JSON.stringify(lastBad)} status=${JSON.stringify((await call("responsibility.status", { responsibilityId: duty })))}`);
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    };
-    const first = await settle(1);
-    assert.deepEqual([first[0].outcome, first[0].summary.startsWith(`HTTP check of http://127.0.0.1:${port}/health answered 200`)], ["ok", true]);
-    assert.ok(!first[0].summary.includes("verbose"), "the query is not shown");
+    const deadline = Date.now() + 60_000;
+    const checksOf = async (id: string): Promise<any[]> => ((await call("responsibility.history", { responsibilityId: id })).result.items as any[]).filter((x) => x.kind === "check");
+    for (;;) {
+      const ticked = await c.dispatch!.dispatcher.tick();
+      lastBad = (ticked.loops ?? []).filter((l) => !l.ok);
+      if ((await checksOf(duty)).length >= 1 && (await checksOf(down)).length >= 1) break;
+      if (Date.now() >= deadline) assert.fail(`no check recorded in time: checks=${JSON.stringify((await call("responsibility.checks", { projectId: project })))} hits=${JSON.stringify(hits)} failedLoops=${JSON.stringify(lastBad)}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const [first] = await checksOf(duty);
+    assert.deepEqual([first.outcome, first.summary.startsWith("HTTP check of the owner's health address answered 200")], ["ok", true], first.summary);
     assert.ok(hits.includes("/health?verbose=1"), "the address was asked as the owner wrote it");
     assert.equal((await c.storage.listAggregates("task", { limit: 20 })).length, 0, "no agent task");
     assert.equal((await call("responsibility.observed", { responsibilityId: duty })).result.item.observed, "ok");
 
-    status = 503;
-    const second = await settle(2);
-    assert.equal(second[1].outcome, "failed");
+    const [bad] = await checksOf(down);
+    assert.equal(bad.outcome, "failed");
     const incidents = (await call("responsibility.incidents", { projectId: project, open: true })).result.items as any[];
-    assert.equal(incidents.length, 1);
+    assert.deepEqual(incidents.map((i) => i.responsibilityId), [down]);
     assert.equal((await c.storage.listAggregates("task", { limit: 20 })).length, 0);
+    // What the agent reads names neither address (second review).
+    const seen = JSON.stringify([await asAnn("responsibility.history", { responsibilityId: duty }), await asAnn("responsibility.history", { responsibilityId: down }), await asAnn("responsibility.incidents", { projectId: project }), await asAnn("responsibility.checks", { projectId: project })]);
+    assert.ok(seen.includes("the owner's health address"), seen.slice(0, 500));
+    for (const part of ["127.0.0.1", "/health", "/down", "verbose"]) assert.ok(!seen.includes(part), `${part}: ${seen.slice(0, 1500)}`);
 
   } finally {
     await c.close();

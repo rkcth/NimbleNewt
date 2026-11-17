@@ -36,7 +36,10 @@ export const shownUrl = (url: string): string => {
 /** An address the controller may ask: http or https, a host, no user name or password, no `#` part, no text that looks like a credential, at most 500 characters. */
 export function probeUrl(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > PROBE_LIMITS.url) return invalid("url", `must be an http or https address of at most ${PROBE_LIMITS.url} characters`);
-  if (/[\s\u0000-\u001f\u007f]/.test(value)) return invalid("url", "must not contain spaces or control characters");
+  // Spaces, control characters, invisible formatting characters (text-direction marks, zero-width ones) and broken characters: an address shown to the owner must read as it is asked (second review).
+  if (/[\s\u0000-\u001f\u007f-\u009f\p{Cf}\p{Cs}]/u.test(value)) return invalid("url", "must not contain spaces, control characters or invisible formatting characters");
+  // Written the plain way, so the owner reads the host the parser reads (second review): `http:host`, `http:/\/host` and a backslash (which the parser takes for `/`, so `http://a.example\@b.example/` asks a.example) are refused.
+  if (!/^https?:\/\/[^\\]*$/i.test(value)) return invalid("url", "must start with http:// or https:// and contain no backslash");
   let u: URL;
   try { u = new URL(value); } catch { return invalid("url", "is not an address (for example https://web.example.com/health)"); }
   if (u.protocol !== "http:" && u.protocol !== "https:") return invalid("url", "must start with http:// or https://");
@@ -185,9 +188,12 @@ export const nodeProbeRequest: ProbeRequest = (url, timeoutMs, signal) => new Pr
 
 const PLAIN: Readonly<Record<string, string>> = { TIMEOUT: "no answer in time", ECONNREFUSED: "the connection was refused", ENOTFOUND: "the host name was not found", EAI_AGAIN: "the host name could not be looked up", ECONNRESET: "the connection was cut", EHOSTUNREACH: "the host could not be reached", ENETUNREACH: "the network could not be reached" };
 
-/** The probe's finding as a check result: an expected status is `ok`, anything else `failed`. */
+/**
+ * The probe's finding as a check result: an expected status is `ok`, anything else `failed`. The summary goes to the history, the incident and the check's notes, which agents that may read the responsibility read, so it never
+ * names the address (second review): the address is the owner's alone (`responsibility.probe.get`), and an agent learns only that the owner's HTTP check answered, or how it failed.
+ */
 export function probeResult(setting: ProbeSetting, answer: ProbeAnswer, inWindow: boolean): CheckProbeResult {
-  const where = shownUrl(setting.url);
+  const where = "the owner's health address";
   const window = inWindow ? " A maintenance window was on." : "";
   if ("error" in answer) {
     const why = answer.error === "TIMEOUT" ? `no answer within ${setting.timeoutSeconds} s` : `${PLAIN[answer.error] ?? "the request failed"} (${answer.error})`;
@@ -215,6 +221,8 @@ export function httpCheckProbe(deps: { readonly setting: (responsibilityId: stri
   const request = deps.request ?? nodeProbeRequest;
   const now = deps.now ?? (() => Date.now());
   const max = deps.maxInFlight ?? PROBE_LIMITS.maxInFlight;
+  // Requests still out, counted apart from the map (second review): one whose entry was dropped (the probe cleared or changed while it was out) still holds a connection until it ends.
+  let out = 0;
   return async ({ responsibility, check }) => {
     const at = now();
     for (const [k, a] of asked) if (a.settled !== undefined && at - a.settled > PROBE_LIMITS.keepMinutes * 60_000) asked.delete(k);
@@ -229,11 +237,7 @@ export function httpCheckProbe(deps: { readonly setting: (responsibilityId: stri
       // A result for an address (or healthy statuses, or wait) the owner has since changed is not this probe's answer: ask again.
       if (earlier.asked === askedAs(setting)) return earlier.result;
     }
-    const full = (): boolean => {
-      let inFlight = 0;
-      for (const a of asked.values()) if (a.result === undefined) inFlight++;
-      return inFlight >= max || asked.size >= PROBE_LIMITS.entries;
-    };
+    const full = (): boolean => out >= max || asked.size >= PROBE_LIMITS.entries;
     const stopped = (): boolean => deps.signal?.aborted === true;
     if (stopped() || full()) return "later";
     if (deps.primary !== undefined && !(await deps.primary())) return "later";
@@ -241,9 +245,11 @@ export function httpCheckProbe(deps: { readonly setting: (responsibilityId: stri
     if (stopped() || asked.has(key) || full()) return "later";
     const entry: Asked = { asked: askedAs(setting), started: at };
     asked.set(key, entry);
-    void request(setting.url, setting.timeoutSeconds * 1000, deps.signal)
+    out++;
+    void Promise.resolve().then(() => request(setting.url, setting.timeoutSeconds * 1000, deps.signal))
       .catch((): ProbeAnswer => ({ error: "REQUEST_FAILED", ms: 0 }))
       .then((answer) => {
+        out--;
         // Ended because the controller is closing: not an answer from the address, so nothing is kept (after a restart the check, still owed, is asked again).
         if ("error" in answer && answer.error === "ABORTED") { if (asked.get(key) === entry) asked.delete(key); return; }
         entry.result = probeResult(setting, answer, check.inMaintenanceWindow === true); entry.settled = now();
