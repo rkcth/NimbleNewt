@@ -15,8 +15,11 @@ import type { ResponsibilityBody, ResponsibilityService } from "./responsibiliti
 
 /** What a deterministic probe found, with no agent asked. */
 export interface CheckProbeResult { readonly outcome: "ok" | "attention" | "failed"; readonly summary: string }
-/** A way to take a check without an agent: given the responsibility and the due check it returns what it found, or `undefined` when the check needs interpretation or action (then the agent is given a bounded task). */
-export type CheckProbe = (context: { readonly responsibility: View<ResponsibilityBody>; readonly check: View<CheckBody> }) => Promise<CheckProbeResult | undefined>;
+/**
+ * A way to take a check without an agent: given the responsibility and the due check it returns what it found, or `undefined` when the check needs interpretation or action (then the agent is given a bounded task), or `"later"` when
+ * it has started looking and the answer is not in yet (the check stays owed, shown as not observed, and is offered again on a later pass; card P04i).
+ */
+export type CheckProbe = (context: { readonly responsibility: View<ResponsibilityBody>; readonly check: View<CheckBody> }) => Promise<CheckProbeResult | "later" | undefined>;
 
 export const CHECK_RUN_LIMITS = { maxOpen: { min: 1, max: 50, default: 5 }, summary: 500, perPass: 100, attempts: 3, retryMinutes: 5 } as const;
 export interface CheckRunSettings { readonly enabled: boolean; readonly maxOpen: number }
@@ -93,7 +96,7 @@ export interface CheckPassResult {
   readonly coalesced: number;
   /** Checks recorded as not taken because nobody answers for the responsibility. */
   readonly noAgent: number;
-  /** Checks left owed for now: the owner switched check tasks off, or the project is at its limit of open check tasks. */
+  /** Checks left owed for now: the owner switched check tasks off, the project is at its limit of open check tasks, or a probe is still waiting for its answer. */
   readonly deferred: number;
 }
 
@@ -153,6 +156,7 @@ export class CheckRunService {
         const r = await this.#deps.responsibilities.get(by, c.responsibilityId);
         if (r === undefined || r.state !== "active") continue;
         const probed = this.#deps.probe === undefined ? undefined : await this.#deps.probe({ responsibility: r, check: c });
+        if (probed === "later") { out.deferred++; continue; }
         if (probed !== undefined) { await this.#observe(by, r, c, probed); out.observed++; finished.add(r.id); continue; }
         if (r.ownerId === undefined) { await this.#observe(by, r, c, { outcome: "attention", summary: "Nobody answers for this responsibility, so this check was not taken." }, "no-agent"); out.noAgent++; finished.add(r.id); continue; }
         const earlier = openOf.get(r.id);
