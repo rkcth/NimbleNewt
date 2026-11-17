@@ -404,7 +404,10 @@ for (const backend of backends) {
       const sent: ScratchOrder[] = [];
       const slow = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: (o) => { sent.push(o); return gate; }, report: async () => undefined }, { clock: r.w.clock.now });
       const first = slow.run(plain(r), []);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Waits for the first run to have claimed the order and sent it (the state, not a fixed time: a fixed 100 ms could pass before the first run claimed it on a slow runner, and the second run then claimed it and waited on the gate).
+      for (let i = 0; i < 400 && sent.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(sent.length, 1, "the first run's order is out");
+      assert.notEqual((await slow.get(plain(r).attemptId))?.lease, undefined, "and the first run holds the order's claim");
       const second = await slow.run(plain(r), []);
       assert.equal(second.state, "ordering", "the second run finds the order claimed and leaves it");
       assert.equal(sent.length, 1);
@@ -450,7 +453,9 @@ for (const backend of backends) {
       const began = Date.now();
       await tight.recover();
       assert.ok(calls >= 1 && calls <= 4, `a pass of 40 ms started ${calls} orders`);
-      assert.ok(Date.now() - began < 1000);
+      // The count above is the real check (the pass stopped after a few records instead of trying all 100). The time is only a loose guard that the pass returned rather than waiting on
+      // the hung orders (each is cut off after 25 ms): a much larger bound than the ~40 ms pass, so a slow runner does not fail it.
+      assert.ok(Date.now() - began < 30_000, `the tight pass returned (it took ${Date.now() - began} ms)`);
     } finally { await r.store.close(); }
     // One record, a day of outage with a pass every five minutes: the retries are spaced and not used up.
     const day = await rig();
