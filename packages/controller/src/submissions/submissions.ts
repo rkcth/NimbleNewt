@@ -73,6 +73,21 @@ export interface SubmissionApproval {
 interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string }[] }
 const VERDICTS = "submission-verdicts";
 const MAX_VERDICTS = 50;
+/**
+ * A review's write met another review of the same subject written at the same moment (card H12o review): both changed the subject's verdict list. Not a refusal: the command is built again from the
+ * list as it now is (`rebuildOnVerdictRace`), a few times, and only then answered `unavailable` (send it again).
+ */
+class VerdictRace extends DomainError {}
+const VERDICT_RACE_TRIES = 5;
+/** The service's runner, whose `command` builds a command again when its write lost a `VerdictRace`; everything else is the runner's own. */
+function rebuildOnVerdictRace(runner: CommandRunner): CommandRunner {
+  const command: CommandRunner["command"] = async (type, meta, prepare) => {
+    for (let tries = 1; ; tries++) {
+      try { return await runner.command(type, meta, prepare); } catch (error) { if (!(error instanceof VerdictRace) || tries >= VERDICT_RACE_TRIES) throw error; }
+    }
+  };
+  return new Proxy(runner, { get: (target, key) => { if (key === "command") return command; const value: unknown = Reflect.get(target, key, target); return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value; } });
+}
 
 /** The recorded reason a review is not required: the project has no agent besides the worker that could review. */
 export const REVIEW_DISABLED_SINGLE_AGENT = "review_disabled_single_agent" as const;
@@ -169,7 +184,7 @@ export class SubmissionService {
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
-    this.#runner = runner; this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
+    this.#runner = rebuildOnVerdictRace(runner); this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
   }
 
@@ -263,31 +278,13 @@ export class SubmissionService {
     const review: SubmissionBody["review"] | undefined = kind !== "code" || this.#reviewers === undefined ? undefined
       : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
     const body: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
-    // A review also writes its subject's verdict list (card H12o). Another review of the same subject written at the same moment changes that list under this one: the write is built again from the
-    // list as it now is (a few times), instead of the review being refused as if its command ID had been used by something else.
-    let result: Awaited<ReturnType<CommandRunner["command"]>> | undefined;
-    for (let tries = 1; result === undefined; tries++) {
-      let raced = false;
-      try {
-        result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
-          payload: { ...(body as unknown as JsonObject), submittedAt: null },
-          build: async () => {
-            const ref = { kind: "submission", id };
-            return {
-              ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body))], detail: { taskId, kind, role },
-              contention: async () => {
-                if ((await this.#runner.get("submission", id)) !== undefined) return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
-                raced = true;
-                return new DomainError("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
-              },
-            };
-          },
-        }));
-      } catch (error) {
-        if (!raced || tries >= 5) throw error;
-      }
-    }
-    if (result === undefined) throw new DomainError("unavailable", "the submission could not be recorded; send it again");
+    const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+      payload: { ...(body as unknown as JsonObject), submittedAt: null },
+      build: async () => {
+        const ref = { kind: "submission", id };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body))], detail: { taskId, kind, role }, contention: () => this.#contention(id, body) };
+      },
+    }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
     return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
@@ -337,6 +334,12 @@ export class SubmissionService {
       if (chunk.length < pageSize) return { items };
     }
     return { items, ...(after === undefined ? {} : { next: this.#seal(by, taskId, after) }), scanLimited: true };
+  }
+
+  /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
+  async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
+    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "review") return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
+    return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
   }
 
   /**
