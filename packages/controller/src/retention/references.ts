@@ -12,7 +12,7 @@ const RETIREMENT_KIND = "retirement";
 export const REPLAY_REASON = "cited by the replay of task ";
 export const isReplayReason = (reason: string): boolean => reason.startsWith(REPLAY_REASON);
 /** How a replay step names a record kind elsewhere in the system, to the stored kind. */
-const REPLAY_KIND: Readonly<Record<string, string>> = { summary: "summary-record", "summary-record": "summary-record", "desk-record": "desk-record", artifact: "artifact", compaction: "ctx-compaction", "ctx-compaction": "ctx-compaction", "catalog-version": "catalog-version", "chat-turn": "chat-turn", decision: "decision", "owner-decision": "decision" };
+const REPLAY_KIND: Readonly<Record<string, string>> = { summary: "summary-record", "summary-record": "summary-record", "desk-record": "desk-record", artifact: "artifact", compaction: "ctx-compaction", "ctx-compaction": "ctx-compaction", "catalog-version": "catalog-version", "chat-turn": "chat-turn", decision: "decision", "owner-decision": "decision", "agent-message": "agent-message" };
 
 /**
  * What a resumable task or a replay still needs (card K06: "material referenced by a resumable task or by replay is never deleted and shows as retained").

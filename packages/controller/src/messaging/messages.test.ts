@@ -12,6 +12,7 @@ import { InquiryService } from "../inquiries/index.js";
 import { PauseService } from "../lifecycle/index.js";
 import { MeetingService } from "../meetings/index.js";
 import { NotificationService } from "../notifications/index.js";
+import { RETENTION_DEFAULTS, RetentionService } from "../retention/index.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import { AgentMessageService, MESSAGE_LIMITS, type SendAgentMessage } from "./index.js";
 
@@ -493,6 +494,44 @@ for (const backend of backends) {
     assert.equal((await c.notifications.inbox(c.owner)).items.filter((i) => i.kind === "owner-question").length, 0, "the notification is closed with the answer");
     assert.equal((await c.inquiries.view(c.ann.p, asked.inquiryId))!.inquiry.answer, "Postgres.");
     assert.equal((await c.msgs.answerOwner(c.owner, { commandId: "owner-answer-1", inquiryId: asked.inquiryId, answer: "Postgres." })).replayed, true);
+  });
+
+  // Card K06e second review: the retention rule for messages between agents reads the fields this service writes (state, deadline, replyTo, replyId, escalationId). Driven through the real send, acknowledge,
+  // reply, handled and escalation paths, so a renamed field or state here makes this test fail rather than letting the rule remove a message that a kept one still names.
+  suite("retention of messages between agents follows the records this service writes: a request stays while its reply waits, both go once dealt with; an escalated request with a deadline keeps its escalation (card K06e)", async (c) => {
+    const DAY = 86_400_000;
+    const retention = () => RetentionService.withEpoch(c.storage as never, c.epoch, { settings: { effective: async () => ({ ...RETENTION_DEFAULTS, reserveBytes: 0, thinkingAuto: false, agentMessageDays: 30 }) }, now: () => now } as never, options);
+    const req = await c.send(c.ben, { to: c.ann.pid, taskId: c.tAnn, expectsReply: true, purpose: "which keys?" });
+    await c.msgs.acknowledge(c.ann.p, { commandId: cid("a"), boundary: "safe-boundary", messageIds: [req.id] });
+    const rep = await c.msgs.send(c.ann.p, { commandId: cid("r"), class: "advice", purpose: "answer", text: "UUID keys.", replyTo: req.id });
+    await c.msgs.acknowledge(c.ben.p, { commandId: cid("a"), boundary: "safe-boundary", messageIds: [rep.id] });
+    const late = await c.send(c.ben, { to: c.ann.pid, taskId: c.tAnn, expectsReply: true, deadline: iso(60 * MIN), escalateTo: c.boss.pid, purpose: "need the decision" });
+    await c.msgs.acknowledge(c.ann.p, { commandId: cid("a"), boundary: "safe-boundary", messageIds: [late.id] });
+    await c.msgs.markHandled(c.ann.p, { commandId: cid("h"), messageId: late.id });
+    now += 61 * MIN;
+    assert.deepEqual((await c.msgs.settleDue(c.host)).escalated, [late.id]);
+    const escId = (await c.msgs.get(c.ben.p, late.id))!.escalationId!;
+    await c.msgs.acknowledge(c.boss.p, { commandId: cid("a"), boundary: "safe-boundary", messageIds: [escId] });
+    await c.msgs.markHandled(c.boss.p, { commandId: cid("h"), messageId: escId });
+
+    // 40 days on: the reply is delivered but not dealt with, so it and the request it answers stay; the handled request with a deadline stays, and so does the escalation it names.
+    now += 40 * DAY;
+    const first = await retention().run(c.owner, {});
+    assert.deepEqual(first.candidates.map((x) => x.id), []);
+    const why = Object.fromEntries(first.retained.map((r) => [r.id, r.reasons.join(" | ")]));
+    assert.match(why[req.id]!, new RegExp(`the message ${rep.id}, which is kept, names it`));
+    assert.match(why[escId]!, new RegExp(`the message ${late.id}, which is kept, names it`));
+
+    // Ben deals with the reply; once that is older than the window, the request and its reply go together, the escalated request and its escalation stay.
+    await c.msgs.markHandled(c.ben.p, { commandId: cid("h"), messageId: rep.id });
+    now += 31 * DAY;
+    const second = await retention().run(c.owner, {});
+    assert.deepEqual(second.candidates.map((x) => x.id).sort(), [req.id, rep.id].sort());
+    assert.equal((await retention().run(c.owner, { dryRun: false, confirm: second.digest! })).removed, 2);
+    assert.equal(await c.msgs.get(c.owner, req.id), undefined);
+    assert.equal(await c.msgs.get(c.owner, rep.id), undefined);
+    assert.equal((await c.msgs.get(c.owner, late.id))!.escalationId, escId);
+    assert.equal((await c.msgs.get(c.owner, escId))!.kind, "escalation");
   });
 
   suite("a request without a reply reaches its escalation path at its deadline, once, across a restart; an answered request does not", async (c) => {
