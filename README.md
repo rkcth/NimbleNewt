@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **281 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **282 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -125,7 +125,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 15 of 18 |
-| Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
+| Test campaigns and platforms | `▓▓▓░░░░░░░░░` 25% | 4 of 16 |
 | Release | `▓▓░░░░░░░░░░` 16% | 1 of 6 |
 
 ### The parts in detail
@@ -631,7 +631,7 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 </details>
 
 <details>
-<summary><strong>Test campaigns and platforms</strong> — ▓▓░░░░░░░░░░ 3 of 16</summary>
+<summary><strong>Test campaigns and platforms</strong> — ▓▓▓░░░░░░░░░ 4 of 16</summary>
 
 Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and macOS qualification, and the typical and exhaustive test tiers.
 
@@ -640,7 +640,7 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 - [ ] **G06** · P24 · Qualify actual Windows implementation _(needs G02, G03, G05, F03)_
 - [x] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** · P34 · QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
-- [ ] **X09b** · P35 · Finish release testing: job delivery to the host, outer supervisor, chat wording _(needs X09)_
+- [x] **X09b** · P35 · Finish release testing: job delivery to the host, outer supervisor, chat wording _(needs X09)_
 - [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
 - [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
 - [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
