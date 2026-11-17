@@ -3,7 +3,7 @@
 Card G10 asks for each running backend to be measured through the production cache code (C06 profiles and `CacheAdapter`), with cold, native and retained runs kept apart, the reused tokens checked, the answers checked for context fidelity, memory, time to first token, switch latency and the cache-miss fallback reported, the real responses kept as fixtures and the C06 profiles re-tested against them. On this machine one backend is running: the owner's Radiance server. Everything else is in the matrix below as **not measured**.
 
 - Server: Radiance 2.1.0 on localhost:8002, model `qwen3.8-flash-next-iq4r` (the hybrid Qwen3.8 Flash-Next, tensor-parallel over two AMD Radeon AI PRO R9700 cards), already loaded and pinned. The run did not load, unload, switch or restart anything, never called a cache reset, and sent one request at a time (46 requests in about 7 minutes; the server's request counter went from 40 to 86, 2026-11-17 04:16 to 04:23 UTC).
-- The server was shared: an image model (`krea-2-raw-fp8`) became resident during the run and the machine's load average was about 50. Timings vary by up to four times between repeats for that reason; token counts do not vary.
+- The server was shared: an image model (`krea-2-raw-fp8`) became resident during the run and the machine's load average was about 50. Timings vary by up to about four and a half times between repeats for that reason; the cached-token counts do not vary.
 - Code: `packages/integration/src/g10-radiance-bench.ts` (the bench; not a test, never run by CI) and `packages/integration/src/c06b-scenario.ts` (C06b's two-agent conversation, now shared by the C06b simulator test and the bench). Fixtures: `packages/controller/test-fixtures/g10-radiance/`, read by `packages/controller/src/inference-cache/g10-captured.test.ts`.
 - Raw results: `evidence/g10-radiance-run1.json` (every request's figures, the server's `/stats` before and after, the `/sessions` entries of the bench's conversations, and the captured responses).
 - Reproduce: `npx tsc --build`, then `node packages/integration/dist/g10-radiance-bench.js --out <file> --repeats 3 --idle 90`. The key is read from Pi's own configuration (provider `radiance`) and only put in the Authorization header.
@@ -14,13 +14,13 @@ Each repeat uses a new random head of about 13,470 tokens (400 synthetic ledger 
 
 | Step | What is sent | Cached of prompt (tokens) | Prompt time (server, ms) | Time to first token (client, ms) | Outcome (adapter) | Answer right |
 |---|---|---|---|---|---|---|
-| cold | new head + question A | 0 of 13,471 (all three) | 8,316 / 12,286 / 2,769 | 8,324 / 12,290 / 2,782 | cold | 3 of 3 |
-| repeat | the same request again | 12,288 of 13,471 | 1,314 / 1,066 / 395 | 1,319 / 1,191 / 400 | hit | 3 of 3 |
-| fork | same head, a different question (a second conversation) | 12,288 of 13,471 | 1,215 / 850 / 404 | 1,227 / 1,017 / 411 | hit | 3 of 3 |
-| switch back | the first conversation continued after the fork | 12,288 of 13,500 | 1,220 / 820 / 403 | 1,231 / 927 / 410 | hit | 3 of 3 |
-| no label | the repeat with no `session_id` | 12,288 of 13,471 | 1,220 / 671 / 402 | 1,227 / 819 / 408 | hit | 3 of 3 |
-| changed head | one word put in front of the head | 0 of 13,473 | 8,356 / 2,921 / 2,760 | 8,364 / 3,075 / 2,764 | miss | 3 of 3 |
-| after 90 s idle | the repeat after 90 seconds of nothing from the bench | 12,288 of 13,471 | 1,210 / 397 / 517 | 1,223 / 410 / 541 | hit | 3 of 3 |
+| cold | new head + question A | 0 of 13,471 / 13,474 / 13,471 | 8,316 / 12,286 / 2,769 | 8,324 / 12,290 / 2,782 | cold | 3 of 3 |
+| repeat | the same request again | 12,288 of 13,471 / 13,474 / 13,471 | 1,314 / 1,066 / 395 | 1,319 / 1,191 / 400 | hit | 3 of 3 |
+| fork | same head, a different question (a second conversation) | 12,288 of 13,471 / 13,474 / 13,471 | 1,215 / 850 / 404 | 1,227 / 1,017 / 411 | hit | 3 of 3 |
+| switch back | the first conversation continued after the fork | 12,288 of 13,500 / 13,503 / 13,500 | 1,220 / 820 / 403 | 1,231 / 927 / 410 | hit | 3 of 3 |
+| no label | the repeat with no `session_id` | 12,288 of 13,471 / 13,474 / 13,471 | 1,220 / 671 / 402 | 1,227 / 819 / 408 | hit | 3 of 3 |
+| changed head | one word put in front of the head | 0 of 13,473 / 13,476 / 13,473 | 8,356 / 2,921 / 2,760 | 8,364 / 3,075 / 2,764 | miss | 3 of 3 |
+| after 90 s idle | the repeat after 90 seconds of nothing from the bench | 12,288 of 13,471 / 13,474 / 13,471 | 1,210 / 397 / 517 | 1,223 / 410 / 541 | hit | 3 of 3 |
 
 What this shows:
 
@@ -54,9 +54,9 @@ For comparison, the simulator figures recorded by C06b for Radiance were 1,719 a
 ## Memory (from `/sessions` and `/stats`)
 
 - **KV cache:** about 203 MB for a 13,500-token conversation, about 15.1 KB a token as `/sessions` reports it (`bytes`). C06's figure is 7.32 KiB (7.5 KB) a token; the two agree if `bytes` counts both cards' halves, which is not recorded, so the host-tier size in the profile's tuning notes is left as it was.
-- **Linear-state snapshots:** about 119 MB each (`/sessions`: `snap_bytes` 713,957,664 for 6 snapshots), one per 2,048 tokens, so about 714 MB for the same conversation, about four times its KV. The store's size, 80 snapshots (about 9.5 GB, roughly 164,000 tokens of resumable positions across all conversations together), is not in the recorded JSON (the bench keeps only some `/stats` fields), so it is not checked against the raw data. During the run the server evicted 41 snapshots for retention (`ckpt_evictions.retention` 0 to 41), which ones is not reported; the bench's own conversations still had 5 or 6 snapshots each when listed right after their steps.
-- **What this means:** on this model the snapshot store, not the KV pool (1.07 million tokens), is what limits how many long conversations stay resumable. A 200,000-token transcript needs about 98 snapshots, more than a store of 80 holds, so the card's "long shared transcript not dropped" needs a larger store or fewer, longer-spaced snapshots; that is a server setting for the owner, not a NimbleNewt change.
-- **Time to first token** is in the table above. Cold prefill ran at about 1,600 to 4,900 tokens a second depending on load; a hit at about 900 to 3,000 tokens a second over the recomputed tail.
+- **Linear-state snapshots:** about 119 MB each (`/sessions`: `snap_bytes` 713,957,664 for 6 snapshots), one per 2,048 tokens, so about 714 MB for the same conversation, about four times its KV. The size of the snapshot store is not in the recorded JSON (the bench keeps only some `/stats` fields), so it is not stated here. During the run the server evicted 41 snapshots for retention (`ckpt_evictions.retention` 0 to 41), which ones is not reported; the bench's own conversations still had 5 or 6 snapshots each when listed right after their steps.
+- **What this means:** on this model a resumable conversation costs about four times as much memory in snapshots as in KV (a 200,000-token transcript would need about 98 snapshots, about 11.6 GB). Whether the snapshot store or the KV pool (1.07 million tokens) is the limit was not measured, because the store's size was not recorded; the 41 retention evictions show snapshots are dropped. The card's "long shared transcript not dropped" is therefore not shown; if the store turns out too small, that is a server setting for the owner, not a NimbleNewt change.
+- **Time to first token** is in the table above. Cold prefill (cold and changed-head steps) ran at about 1,100 to 4,900 tokens a second depending on load; a hit at about 900 to 3,000 tokens a second over the recomputed tail.
 
 ## Capability matrix (pinned versions)
 
@@ -80,7 +80,7 @@ For comparison, the simulator figures recorded by C06b for Radiance were 1,719 a
 - **One server version, one model, one configuration.** Radiance 2.1.0 with Flash-Next on two cards; another version, model or `--checkpoint-slots` setting is a new measurement. The 2,048-token step was observed, not read from the server's settings.
 - **No concurrency.** One request at a time, on purpose; the eight-sequence limit and the "cache cliff" when more conversations are live than the pool holds were not tested.
 - **Retention beyond 90 seconds** was not measured, nor what happens when the snapshot store is full of other users' conversations (the 41 retention evictions show it does fill).
-- **Timings are from a shared, busy machine** and vary up to four times between repeats; they show the size of the effect, not a stable figure.
+- **Timings are from a shared, busy machine** and vary up to about four and a half times between repeats; they show the size of the effect, not a stable figure.
 - **The refusal fallback** (a server that refuses `session_id`) was not exercised: this server accepts it. It is covered only by the simulator tests.
 - **Part B is not the full controller.** It runs the production Pi adapter, layout and cache policy, but sends the built bodies itself instead of going through the dispatcher and a worker; the history uses scripted replies.
 - **The fixtures are the last two events of each stream**, parsed and written back compactly, not the raw byte stream.
