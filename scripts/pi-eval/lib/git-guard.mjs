@@ -9,7 +9,9 @@
 //   - a setting that would loosen the run's git settings (ssh command, URL rewrites, allowed protocols, credential
 //     helpers, push settings, remote addresses that are not local folders, http and include settings), given with -c,
 //     --config-env, GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT, or written with `git config` in any scope;
-// and runs the real git otherwise, without GIT_SSH, GIT_SSH_COMMAND, GIT_PROXY_COMMAND or an askpass program.
+// an alias is judged as what it stands for, and the remotes' addresses are read with the call's own -C, --git-dir and -c;
+// and runs the real git otherwise, without GIT_SSH, GIT_SSH_COMMAND, GIT_PROXY_COMMAND or an askpass program, and with the
+// run's own git settings (GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM set back, GIT_CONFIG_NOSYSTEM dropped).
 // Each refusal is logged (its kind only) to the config's log, which the bench reads after the run.
 // This is a guard for an agent following its habits, not a sandbox: an agent that runs the real git by its full path
 // gets past it. What it then meets is the run's git settings, and on Linux a home folder with no keys in it.
@@ -39,7 +41,7 @@ export function parseGlobal(args, env = {}) {
     else if (name.startsWith("-c") && name.length > 2 && !name.startsWith("--")) configs.push(splitKv(name.slice(2)));
     else if (name === "--config-env" && value !== undefined) { const [k, v] = splitKv(value); configs.push([k, env[v] ?? ""]); }
   }
-  return { dirs, configs, sub: args[i], rest: args.slice(i + 1) };
+  return { dirs, configs, globals: args.slice(0, i), sub: args[i], rest: args.slice(i + 1) };
 }
 
 const splitKv = (s) => { const j = String(s).indexOf("="); return j < 0 ? [String(s), "true"] : [s.slice(0, j), s.slice(j + 1)]; };
@@ -176,15 +178,54 @@ export function checkRemote(rest, { cwd }) {
   return localPath(url, cwd) === null ? "a remote that is not a local folder" : null;
 }
 
-/** The whole decision for one git call: { refuse: reason } or { refuse: null }. */
-export function decide(args, { cwd, roots, env, git }) {
+/**
+ * git's own commands, which an alias cannot replace (git runs a built-in before looking for an alias of that name): no
+ * alias lookup for them. Any other name is looked up, so an unknown one costs one more git call.
+ */
+const NOT_ALIASES = new Set(("push send-pack http-push send-email remote config fetch clone pull ls-remote submodule status diff log add commit show " +
+  "checkout switch branch rev-parse rev-list stash reset restore merge rebase init tag ls-files ls-tree grep blame cherry-pick revert apply rm mv " +
+  "worktree for-each-ref cat-file hash-object update-index update-ref diff-index diff-tree diff-files symbolic-ref describe clean reflog shortlog " +
+  "format-patch am notes gc fsck version help var merge-base name-rev check-ignore check-attr read-tree write-tree commit-tree show-ref bisect").split(" "));
+
+/** An alias's words (git splits a non-shell alias like a shell would, quotes included). */
+export function splitAlias(text) {
+  const words = [];
+  let cur = null, quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === quote) quote = null; else if (c === "\\" && quote === '"' && i + 1 < text.length) cur += text[++i]; else cur += c; continue; }
+    if (c === "'" || c === '"') { quote = c; cur ??= ""; continue; }
+    if (c === "\\" && i + 1 < text.length) { cur = (cur ?? "") + text[++i]; continue; }
+    if (/\s/.test(c)) { if (cur !== null) words.push(cur); cur = null; continue; }
+    cur = (cur ?? "") + c;
+  }
+  if (cur !== null) words.push(cur);
+  return words;
+}
+
+/**
+ * The whole decision for one git call: { refuse: reason } or { refuse: null }. The real git is asked (with the call's own
+ * global options, so -C, --git-dir and -c count) for the remotes' addresses and for an alias the call may use; an alias
+ * is decided as what it stands for. A shell alias (`!...`) runs a shell, whose `git` is this wrapper again.
+ */
+export function decide(args, { cwd, roots, env, git }, depth = 0) {
   const g = parseGlobal(args, env);
   let dir = cwd;
   for (const d of g.dirs) dir = resolve(dir, d);
-  const ctx = { cwd: dir, roots, git: (a) => git(a, dir) };
+  // The real git gets the call's global options minus -C (its folder is already `dir`).
+  const globalsNoC = [];
+  for (let i = 0; i < g.globals.length; i++) { if (g.globals[i] === "-C") { i++; continue; } globalsNoC.push(g.globals[i]); }
+  const ctx = { cwd: dir, roots, git: (a) => git([...globalsNoC, ...a], dir) };
   for (const [k, v] of [...g.configs, ...envConfigs(env)]) {
     const why = protectedSetting(k, v, ctx);
     if (why) return { refuse: `changing ${why} is disabled in this environment`, kind: "setting" };
+  }
+  if (typeof g.sub === "string" && !NOT_ALIASES.has(g.sub) && /^[A-Za-z0-9][\w.-]*$/.test(g.sub)) {
+    const alias = (ctx.git(["config", "--get", `alias.${g.sub}`]) ?? "").replace(/\r?\n$/, "");
+    if (alias !== "" && !alias.startsWith("!")) {
+      if (depth >= 10) return { refuse: "an alias that leads to itself is disabled in this environment", kind: "unchecked" };
+      return decide([...g.globals, ...splitAlias(alias), ...g.rest], { cwd, roots, env, git }, depth + 1);
+    }
   }
   switch (g.sub) {
     case "push": case "send-pack": case "http-push": {
@@ -212,6 +253,10 @@ function main() {
   try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")); } catch { process.stderr.write("git: the bench's git settings could not be read; git is disabled\n"); process.exit(1); }
   const env = { ...process.env };
   for (const k of STRIP) delete env[k];
+  // The run's own git settings, whatever the caller set: GIT_CONFIG_GLOBAL=/dev/null or GIT_CONFIG_NOSYSTEM=1 would drop
+  // the rules that send nothing out.
+  if (typeof cfg.gitConfig === "string") { env.GIT_CONFIG_GLOBAL = cfg.gitConfig; env.GIT_CONFIG_SYSTEM = cfg.gitConfig; }
+  delete env.GIT_CONFIG_NOSYSTEM;
   const runGit = (a, cwd) => { const r = spawnSync(cfg.realGit, a, { cwd, env, encoding: "utf8" }); return r.status === 0 ? r.stdout : null; };
   let d;
   try { d = decide(args, { cwd: process.cwd(), roots: cfg.allowRoots, env, git: runGit }); } catch { d = { refuse: "this git command could not be checked; it is disabled in this environment", kind: "unchecked" }; }

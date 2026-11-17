@@ -29,7 +29,8 @@
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
 //   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, the
-//                        runtime folder of sockets and /srv/ai (README "The agent's isolation")
+//                        runtime folder of sockets, /srv/ai, the team's and test database's key folders and the
+//                        container engine's socket (README "The agent's isolation")
 //   --allow-visible-home run the agent even where its owner's folders cannot be hidden (no usable bubblewrap: macOS,
 //                        Windows, a Linux without user namespaces); it still gets a fresh home, environment and git
 //                        settings, but can read the owner's files by their full path

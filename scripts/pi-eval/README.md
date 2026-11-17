@@ -111,10 +111,14 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   `TMPDIR` point into a fresh temporary folder (`<tmp>/pi-eval-iso-*`), removed at the end of the run whatever `--keep`
   says (also on Ctrl-C). It holds only a `.gitconfig` and, when the owner's Pi configuration has the task set's provider,
   `.pi/agent/models.json` (mode 0600) with that one provider entry, its key and any header fields left out.
-- **No model key.** The per-run Pi configuration points at a loopback proxy the bench runs for the length of the run,
-  which forwards requests under the API path to the model server and puts the key in the Authorization header. The key is
-  read by the bench from `~/.pi/agent/models.json` and is never written into the agent's home, printed or logged, so an
-  agent that prints its configuration prints no key. (The agent can still send model requests through the proxy.)
+- **No model key.** The per-run Pi configuration points at a loopback proxy the bench runs for the length of the run
+  (127.0.0.1, a random port, closed with the run). It forwards only `POST <api>/chat/completions` and `GET <api>/models`
+  (the exact path, no query, redirects passed back and never followed), only when the request carries the run's own
+  random token as its key (`pi-eval-local-proxy-<48 hex digits>`, in the per-run configuration), and puts the real key in
+  the Authorization header instead; anything else answers 404 or 401 and is not forwarded. The key is read by the bench
+  from `~/.pi/agent/models.json` and is never written into the agent's home, printed or logged, so an agent that prints its
+  configuration prints no key, and another local process or another run cannot borrow the key through the proxy. (The
+  agent itself can still send model requests through it.)
 - **An environment from an allowlist.** `PATH` (with the run's `bin` first), locale, terminal, `USER`/`LOGNAME`,
   `NODE_OPTIONS`/`NODE_ENV`/`CI`, and names starting `PI_EVAL_`, `STUB_AGENT_`, `CLAUDE_AGENT_`, `FAKE_CLAUDE_`,
   `NIMBLENEWT_`, `LC_` (on Windows also the system names); never a name containing KEY, TOKEN, SECRET, PASSW, CREDENTIAL,
@@ -129,13 +133,22 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   this environment": a push unless every destination is a local repository inside the run's own folders (its checkout or
   its temporary folder, where NimbleNewt's own tests make bare repositories); `remote add`/`set-url` to an address that is
   not a local folder; and a setting that would loosen the above, given with `-c`, `--config-env`, `GIT_CONFIG_PARAMETERS`
-  or `GIT_CONFIG_COUNT`, or written with `git config` in any scope. It runs the real git without `GIT_SSH`,
-  `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND` or askpass programs. Each refusal is logged (its kind only) to `git-guard.log` in
-  the run's artifacts.
-- **The owner's folders hidden (Linux, bubblewrap).** The agent runs under `bwrap`: the file system as it is, but the
-  owner's home folder, the runtime folder of sockets (`/run/user/<uid>`: ssh-agent, keyring, D-Bus) and `/srv/ai` are
-  empty folders (more with `--hide a,b`); the checkout, the run's temporary folder and its artifacts folder are bound
-  back writable, Node's install, Pi's install and the bench's scripts read-only; the run's git settings and wrapper are
+  or `GIT_CONFIG_COUNT`, or written with `git config` in any scope. An alias (written, or given with `-c alias.x=...`) is
+  judged as what it stands for, and a push's remotes are read with the call's own `-C`, `--git-dir` and `-c`. It runs the
+  real git without `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND` or askpass programs, and with the run's own
+  settings (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` set back, `GIT_CONFIG_NOSYSTEM` dropped). Each refusal is logged (its
+  kind only) to `git-guard.log` in the run's artifacts.
+- **The owner's folders hidden (Linux, bubblewrap).** The agent runs under `bwrap`: the file system as it is, but these
+  are empty (more with `--hide a,b`): the owner's home folder, the runtime folder of sockets (`/run/user/<uid>`:
+  ssh-agent, keyring, D-Bus), `/srv/ai`, the team's folder `/srv/code/team` (its `secrets` holds SSH deploy and server
+  keys), `/srv/code/test-postgres` (the test database's credentials), the container engine's socket
+  (`/run/docker.sock`: the owner is in the `docker` group, and a container can mount the owner's home, so without this
+  every other hidden folder could be read through it), and the per-user socket folders in `/tmp` (the Codex daemon's,
+  the Claude Code driver's scratch folder, tmux, screen, a hand-started ssh-agent). `/srv/code` (other worktrees, the
+  reference checkouts, the bench's own scripts), the reference repositories and the work root's parent are read-only, so
+  the agent cannot change code the owner runs later outside any sandbox. The checkout, the run's temporary folder and its
+  artifacts folder are bound back writable, Node's install, Pi's install and the bench's scripts read-only; the run's git
+  settings and wrapper are
   read-only, so the agent cannot edit them; a process list and `/proc` of its own, so other processes' environments and
   `/proc/<pid>/root` (a way around the hidden folders) are out of reach, and every process the agent left behind ends
   with it. The network is shared: the model server is on the host's loopback address, and a network namespace would cut
@@ -143,17 +156,23 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   `--allow-visible-home` is given; then the agent still gets the fresh home, environment and git settings, but can read
   the owner's files by their full path. `--dry-run` says which applies.
 - **Detection as well as blocking.** A run is flagged `contaminated` when its tool calls show a push, a remote added or
-  changed, or a path or socket of the owner's keys and logins (`~/.ssh`, `.git-credentials`, `id_rsa`/`id_ed25519` and
-  the like, `.netrc`, the gh token, `SSH_AUTH_SOCK`, Pi's own `.pi/agent`), or when the git wrapper refused anything.
+  changed to an address that is not a local folder, or a path or socket of the owner's keys and logins (`~/.ssh`,
+  `.git-credentials`, `id_rsa`/`id_ed25519` and the like, `.netrc`, the gh token, `SSH_AUTH_SOCK`, Pi's own
+  `.pi/agent`, the container engine, the team's key folder; in a code search with grep, rg or git grep only such a path
+  under a home folder counts, since code may name `.ssh`), or when the git wrapper refused anything.
   Records carry `credentialAttempts` (the kinds seen), `guardRefusals` and `isolation` (what applied to the run). File
   content the agent writes is not searched (code may talk about pushing).
 
-What the agent can still do, said plainly: reach the network (an upload of the checkout to a server that asks for no
-login would work; no credential of the owner is in its reach to push anywhere that needs one); read everything outside
+What the agent can still do, said plainly: reach the network, the host's loopback services included (an upload of the
+checkout to a server that asks for no login would work, and a local service that trusts loopback callers answers it; no
+credential of the owner that this review found is in its reach to push anywhere that needs one); read everything outside
 the hidden folders that the user can read (`/srv/code`, including the reference checkout and other worktrees holding
-merged solutions, which `contaminated` already looks for, and `/srv/code/test-postgres/credentials`, the synthetic test
-database's); run the real git by its full path past the wrapper (it then meets the run's git settings, which it can
-override on its own command line, but finds no key to use); send requests to the model through the proxy. Inside the
+merged solutions, which `contaminated` already looks for; `/tmp`, including other programs' scratch files and the test
+database's sockets; a credential kept somewhere not listed above would be readable too, so add such a place with
+`--hide`); write only in its own folders, `/tmp` and `/var/tmp`; run the real git by its full path past the wrapper (it
+then meets the run's git settings, which refuse network transports, but `-c protocol.allow=always` on that command line
+reaches the network; it finds no key to use); send requests to the model through the proxy; connect to abstract unix
+sockets of the host (the network namespace is shared). Inside the
 sandbox the agent cannot start a nested bubblewrap (AppArmor here refuses nested user namespaces), so its own runs of
 the worker's and integration's real-sandbox tests skip (or fail under `NIMBLENEWT_REQUIRE_SANDBOX=1`); every current
 task's tests are controller tests, which use no real sandbox, and the bench's grading runs outside with its own

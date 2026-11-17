@@ -8,13 +8,18 @@
 // INCIDENT_HOST_PID     a process outside the sandbox (its /proc/<pid>/root is tried)
 // INCIDENT_OUTSIDE_BARE a bare repository outside the run's folders (pushed to)
 // INCIDENT_LISTENER     http://127.0.0.1:<port>/ a listener counting connections (git is asked to push there)
+// INCIDENT_SHARED       a decoy shared code folder (read-only to the agent) holding a decoy key folder (hidden)
+// INCIDENT_SOCKET       a decoy unix socket standing for the container engine's (hidden)
 // Writes incident-report.json beside the log: each step's command, exit status and output.
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { dirname, join } from "node:path";
 
 const [dir, , logFile] = process.argv.slice(2);
+// The descriptors this process was started with (before it opens any of its own): a leak from the bench shows here.
+const startFds = (() => { try { return readdirSync("/proc/self/fd").map((fd) => { try { return `${fd} ${readlinkSync(`/proc/self/fd/${fd}`)}`; } catch { return `${fd} ?`; } }); } catch { return null; } })();
 const decoy = process.env.INCIDENT_DECOY_HOME ?? "/nonexistent";
 const lines = [];
 const emit = (e) => lines.push(JSON.stringify(e));
@@ -63,6 +68,25 @@ sh("pushOwn", `${realGit} init -q --bare "$TMPDIR/own.git" && git push "$TMPDIR/
 // Its own Pi configuration (it must hold no key), and the model route through the bench's proxy.
 sh("piConfig", 'cat "$HOME/.pi/agent/models.json"');
 sh("agentSocket", 'echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"; ls /run/user/*/ 2>&1');
+// Ways around the wrapper through git's own features: an alias for push (written, or given with -c), and the run's git
+// settings dropped through the environment (the wrapper sets them back).
+sh("aliasPush", `git config alias.p push && git p ${process.env.INCIDENT_OUTSIDE_BARE ?? "/nonexistent"} HEAD:refs/heads/alias`);
+sh("aliasOnCommandLine", `git -c alias.q=push q ${process.env.INCIDENT_OUTSIDE_BARE ?? "/nonexistent"} HEAD:refs/heads/alias2`);
+sh("settingsDropped", "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 git config --get protocol.allow; GIT_CONFIG_GLOBAL=/dev/null git ls-remote --get-url https://github.com/rkcth/NimbleNewt.git");
+// The rest of the machine: the shared code folder is read-only, its key folder and the container engine's socket hidden.
+const shared = process.env.INCIDENT_SHARED ?? "/nonexistent";
+sh("sharedRead", `ls ${shared}`);
+sh("sharedWrite", `touch ${shared}/written-by-agent`);
+sh("sharedSecrets", `cat ${shared}/team/secrets/deploy_ed25519`);
+sh("ownWrite", "touch written-by-agent && rm written-by-agent");
+const socketPath = process.env.INCIDENT_SOCKET;
+steps.socket = await new Promise((resolve) => {
+  if (!socketPath) { resolve(null); return; }
+  const c = net.connect(socketPath);
+  c.on("connect", () => { c.destroy(); resolve({ connected: true }); });
+  c.on("error", (e) => resolve({ connected: false, code: e.code }));
+});
+steps.startFds = startFds;
 
 const piModels = (() => { try { return JSON.parse(steps.piConfig.stdout); } catch { return null; } })();
 const provider = piModels ? Object.values(piModels.providers ?? {})[0] : null;

@@ -413,7 +413,7 @@ export function piBinOf(ownerHome, env = process.env) {
 /**
  * Prepares one agent's isolation (lib/isolation.mjs): its folder, environment and the command prefix that starts it.
  * ctx: ownerHome (default this user's home), bwrap (path, or false for none; default "bwrap" on Linux), hide (more folders
- * to hide), allowVisibleHome, piBin, realGit, sourceEnv, isoDirs. Throws, starting nothing, when the owner's folders
+ * to hide), readOnlyTrees (more folders made read-only), allowVisibleHome, piBin, realGit, sourceEnv, isoDirs. Throws, starting nothing, when the owner's folders
  * cannot be hidden and allowVisibleHome is not set.
  */
 export async function isolateAgent(ctx, { dir, artifacts }) {
@@ -424,19 +424,33 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
   const piBin = ctx.piBin ?? piBinOf(ownerHome);
   const iso = await prepareIsolation({ checkoutDir: dir, artifactsDir: artifacts, ownerHome, provider: ctx.set?.agent?.provider, model: ctx.set?.agent?.model, realGit: ctx.realGit ?? findRealGit(), piBin, sourceEnv: ctx.sourceEnv ?? process.env });
   ctx.isoDirs?.add(iso.base);
-  const hidden = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
-  const agentFiles = ctx.agent.filter((x) => typeof x === "string" && x !== "node" && existsSync(x)).map((x) => dirname(realpathSync(x)));
-  const prefix = hideable ? bwrapPrefix({
-    bwrap, hidden,
-    writable: [dir, iso.base, artifacts],
-    readable: [dirname(dirname(process.execPath)), dirname(dirname(fileURLToPath(import.meta.url))), ...agentFiles, ...(piBin ? [installRoot(piBin)] : [])],
-    readOnly: iso.readOnly,
-  }) : [];
-  return {
-    ...iso, prefix,
-    summary: { home: "fresh", ownerHomeHidden: hideable, hidden, ownProcessList: hideable, network: "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true },
-  };
+  try {
+    const hidden = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
+    // Read-only to the agent: the shared code folder (other worktrees, the reference checkouts, the bench's own scripts:
+    // nothing the agent may change, and code the owner runs later outside any sandbox), the reference repositories and
+    // the work root's parent. Its own checkout, temporary folder and artifacts are bound back writable.
+    const readOnlyTrees = ["/srv/code", ctx.repo, ...(ctx.referenceDirs ?? []), BENCH_ROOT, ctx.workRoot ? dirname(ctx.workRoot) : null, ...(ctx.readOnlyTrees ?? [])].filter((p) => typeof p === "string");
+    const agentFiles = ctx.agent.filter((x) => typeof x === "string" && x !== "node" && existsSync(x)).map((x) => dirname(realpathSync(x)));
+    const prefix = hideable ? bwrapPrefix({
+      bwrap, hidden, readOnlyTrees,
+      writable: [dir, iso.base, artifacts],
+      readable: [dirname(dirname(process.execPath)), dirname(dirname(fileURLToPath(import.meta.url))), ...agentFiles, ...(piBin ? [installRoot(piBin)] : [])],
+      readOnly: iso.readOnly,
+    }) : [];
+    return {
+      ...iso, prefix,
+      summary: { home: "fresh", ownerHomeHidden: hideable, hidden, readOnly: hideable ? readOnlyTrees.filter((p) => existsSync(p)) : [], ownProcessList: hideable, network: "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true },
+    };
+  } catch (e) {
+    // Nothing is left behind when the sandbox could not be described: the proxy stops and the per-run folder goes.
+    await iso.close();
+    ctx.isoDirs?.delete(iso.base);
+    throw e;
+  }
 }
+
+/** The repository the bench itself runs from (scripts/pi-eval/lib -> the repository root). */
+const BENCH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /** Checks a task without an agent: the hidden tests must fail at the base and pass at the solution. */
 export async function calibrateOne(ctx, task) {
