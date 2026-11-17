@@ -655,7 +655,7 @@ for (const backend of backends) {
     assert.deepEqual(items.map((i) => i.detail["deliverableId"]).sort(), [accepted, submitted, privateOne].sort(), "submitted and accepted deliverables are stale, a draft is not, another task's is not");
     assert.ok(!items.some((i) => i.detail["deliverableId"] === drafted || i.detail["deliverableId"] === onOther));
     const a = items.find((i) => i.detail["deliverableId"] === accepted)!;
-    assert.deepEqual({ ...a.detail }, { deliverableId: accepted, title: "\"Install guide\"", reason: "contract_changed", version: 1, state: "accepted", checkedAgainst: 1, contractVersion: 4, fields: ["acceptanceCriteria"] });
+    assert.deepEqual({ ...a.detail }, { deliverableId: accepted, title: "\"Install guide\"", reason: "contract_changed", version: 1, state: "accepted", checkedAgainst: 1, contractVersion: 4, fields: ["acceptanceCriteria"], at: "first_change" });
     assert.equal(a.kind, "stale_artifact");
     assert.equal(a.at, changedAt, "at is when the work first changed after the version it was checked against");
     assert.equal(a.agentId, "ann");
@@ -796,6 +796,7 @@ for (const backend of backends) {
     const longItems = await stale(long);
     assert.deepEqual(longItems.map((i) => i.detail["deliverableId"]).sort(), [...longIds].sort());
     assert.ok(longItems.every((i) => i.at === v24 && i.at !== v23), "past the walk the current version's time stands in");
+    assert.ok(longItems.every((i) => i.detail["at"] === "current_version" && /Its first change is more than 20 contract versions back, so the time given is when the current version was stored; the work changed earlier\.$/.test(i.summary)), "and the item says that time is not the first change");
     const reads = (await acceptance.contractStale(c.owner, long)).reads;
     // The index, the contract, each deliverable and its newest version (3 x 2), the version they were checked against, the 20 walked and the current one: once each.
     assert.equal(reads, 1 + 1 + 6 + 1 + 20 + 1, "contract versions are read once per call, not once per deliverable");
@@ -809,6 +810,58 @@ for (const backend of backends) {
     const nearAt = at();
     await contract(near, { priority: 2 });
     assert.equal((await stale(near))[0]!.at, nearAt);
+    assert.equal((await stale(near))[0]!.detail["at"], "first_change");
+    assert.ok(!(await stale(near))[0]!.summary.includes("versions back"));
+    // The edge of the walk: a first change exactly 20 versions after the one checked against is found; one 21 versions after is not, and the current version's time is given instead.
+    const edge20 = await c.ready("edge 20");
+    await contract(edge20, { acceptanceCriteria: ["e"] });
+    await deliver(edge20, "Edge twenty");
+    for (let i = 0; i < 19; i++) await contract(edge20, { priority: i % 2 === 0 ? 7 : 3 });
+    await contract(edge20, { checks: [{ name: "lint", run: ["npm", "run", "lint"] }] });
+    const e20At = at();
+    await contract(edge20, { priority: 1 });
+    assert.equal(await version(edge20), 22);
+    const [e20] = await stale(edge20);
+    assert.deepEqual([e20!.at, e20!.detail["at"], e20!.detail["checkedAgainst"]], [e20At, "first_change", 1], "a change 20 versions on is within the walk");
+    const edge21 = await c.ready("edge 21");
+    await contract(edge21, { acceptanceCriteria: ["e"] });
+    await deliver(edge21, "Edge twenty-one");
+    for (let i = 0; i < 20; i++) await contract(edge21, { priority: i % 2 === 0 ? 7 : 3 });
+    await contract(edge21, { checks: [{ name: "lint", run: ["npm", "run", "lint"] }] });
+    const e21Change = at();
+    await contract(edge21, { priority: 1 });
+    const e21Now = at();
+    const [e21] = await stale(edge21);
+    assert.deepEqual([e21!.at, e21!.detail["at"]], [e21Now, "current_version"], "a change 21 versions on is past the walk");
+    assert.notEqual(e21!.at, e21Change);
+
+    // Paging while the data changes: the cursor names the last deliverable handed out, so one that stops being stale between pages (here the one just handed out, and a later one) is neither repeated nor makes another one skipped.
+    const moving = await c.ready("moving");
+    await contract(moving, { acceptanceCriteria: ["m"] });
+    const movingIds = [await deliver(moving, "M1"), await deliver(moving, "M2"), await deliver(moving, "M3"), await deliver(moving, "M4")].sort();
+    await contract(moving, { acceptanceCriteria: ["m2"] });
+    const resubmit = async (id: string) => {
+      const cur = (await acceptance.get(c.owner, id))!;
+      const nv = await acceptance.newVersion(c.owner, { commandId: cid("nv"), id, expectedRevision: Number(cur["revision"]), artifacts: (cur["version"] as { content: { artifacts: { artifactId: string }[] } }).content.artifacts.map((x) => ({ artifactId: x.artifactId })) });
+      await acceptance.submit(c.owner, { commandId: cid("s"), id, expectedRevision: nv.revision, contractVersion: await version(moving) });
+    };
+    const pageOf = (afterId?: string) => status.attention(c.owner, { taskId: moving, kind: "stale_artifact", limit: 1, ...(afterId === undefined ? {} : { afterId }) });
+    const p1 = await pageOf();
+    assert.deepEqual(p1.items.map((i) => i.detail["deliverableId"]), [movingIds[0]]);
+    await resubmit(movingIds[0]!);
+    await resubmit(movingIds[2]!);
+    const p2 = await pageOf(p1.next);
+    assert.deepEqual(p2.items.map((i) => i.detail["deliverableId"]), [movingIds[1]], "the next one, not the one handed out again");
+    const p3 = await pageOf(p2.next);
+    assert.deepEqual(p3.items.map((i) => i.detail["deliverableId"]), [movingIds[3]], "one that stopped being stale is left out, the one after it is not skipped");
+    assert.equal(p3.next, undefined);
+    assert.deepEqual((await stale(moving)).map((i) => i.detail["deliverableId"]), [movingIds[1], movingIds[3]]);
+
+    // Principals that are neither the owner nor an agent read no deliverable through the overview either, even holding the task read right that lets them see the task.
+    for (const kind of ["host", "client", "service"]) {
+      const other = { ...ann, kind, id: `${kind}:x` } as unknown as Principal;
+      assert.deepEqual(await stale(back, other), [], `a ${kind} sees no stale deliverable`);
+    }
 
     // A title that reads like an instruction is shown as a quotation: inside one pair of quotes, its own quotes escaped, credentials removed; nothing is done because of it.
     const odd = await c.ready("odd title");

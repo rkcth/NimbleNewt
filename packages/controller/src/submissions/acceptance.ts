@@ -128,6 +128,8 @@ export interface StaleDeliverable {
   readonly fields: readonly string[];
   /** When the work first changed after `checkedAgainst`; absent when no stored version says so. */
   readonly changedAt?: string;
+  /** Set (to `CONTRACT_WALK`) when the first change lies further back than the walk reads: `changedAt` is then the current version's time, a time by which the work had changed, not when it first did. */
+  readonly firstChangeBeyond?: number;
 }
 const WRITERS = ["author", "docs", "qa"] as const;
 
@@ -668,7 +670,7 @@ export class AcceptanceService {
    * The deliverables of a task, readable by the caller, whose newest version stands (submitted, under review or accepted) on a task contract that has since changed in what it asks for
    * (card U13: a stale artifact in the overview). Only the fields that say what the work must be count (`CONTRACT_WORK_FIELDS`): a new priority, budget, difficulty, class, permission or
    * recovery need does not make a delivered result out of date. `changedAt` is when the first such change after the version's contract was stored (the current version's time when the
-   * walk would pass `CONTRACT_WALK` versions). Read only and bounded whatever the history: at most `MAX_PER_TASK` deliverables and the newest version of each, and each contract version at most once (a task with no deliverable costs one read and its contract is not read); the walk covers at most
+   * walk would pass `CONTRACT_WALK` versions, marked by `firstChangeBeyond`). Read only and bounded whatever the history: at most `MAX_PER_TASK` deliverables and the newest version of each, and each contract version at most once (a task with no deliverable costs one read and its contract is not read); the walk covers at most
    * `CONTRACT_WALK` versions after the one a deliverable was checked against, so a call reads at most 3 + `MAX_PER_TASK` x (`CONTRACT_WALK` + 3) records, and as few as 3 + `MAX_PER_TASK` x 2 + `CONTRACT_WALK` + 1 when the deliverables were checked against one version. `reads` counts them.
    * Nothing the agent wrote is returned except the title, which the caller shows quoted; the contract's own text is never returned, only the names of the fields that changed.
    */
@@ -711,12 +713,14 @@ export class AcceptanceService {
       const fields = differ(base, now);
       if (fields.length === 0) continue;
       let changedAt: string | undefined;
+      let found = false;
       for (let k = v.contractVersion + 1; k <= nowVersion && k <= v.contractVersion + CONTRACT_WALK; k++) {
         const step = await versionAt(k);
-        if (step !== undefined && differ(base, step).length > 0) { changedAt = step.changedAt; break; }
+        if (step !== undefined && differ(base, step).length > 0) { changedAt = step.changedAt; found = true; break; }
       }
-      if (changedAt === undefined) changedAt = (await versionAt(nowVersion))?.changedAt;
-      items.push({ id, revision: agg.revision, title: d.title, version: v.version, state: d.state, responsibleAgent: d.responsibleAgent, checkedAgainst: v.contractVersion, contractVersion: nowVersion, fields, ...(changedAt === undefined ? {} : { changedAt }) });
+      // Past the walk the current version's time stands in, and the item says so (`firstChangeBeyond`): the work had changed by then, but it first changed earlier.
+      if (!found) changedAt = (await versionAt(nowVersion))?.changedAt;
+      items.push({ id, revision: agg.revision, title: d.title, version: v.version, state: d.state, responsibleAgent: d.responsibleAgent, checkedAgainst: v.contractVersion, contractVersion: nowVersion, fields, ...(changedAt === undefined ? {} : { changedAt }), ...(found ? {} : { firstChangeBeyond: CONTRACT_WALK }) });
     }
     return { items, reads };
   }
