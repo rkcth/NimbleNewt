@@ -334,7 +334,8 @@ export const APP_JS = String.raw`(function (root) {
   // otherwise turn the rest of a line around ("... for <agent> in project <id>"), so the owner would read something other than what the record says.
   var UNSEEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
   function unseen(c) { return '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4); }
-  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); t = t.length > n ? t.slice(0, n - 3) + '...' : t; return t.replace(UNSEEN, unseen); }
+  // A cut never leaves half of a character written as two UTF-16 units (an emoji at the cut point is dropped whole, T7b review).
+  function clip(v, n) { var t = v === null || v === undefined ? '' : String(v); if (t.length > n) { var k = n - 3; var c = t.charCodeAt(k - 1); if (c >= 0xd800 && c <= 0xdbff) k -= 1; t = t.slice(0, k) + '...'; } return t.replace(UNSEEN, unseen); }
   function isNum(v) { return typeof v === 'number' && isFinite(v); }
   function obj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null; }
   function list(v, max) { return Array.isArray(v) ? v.slice(0, max || 200) : []; }
@@ -1023,18 +1024,34 @@ export const APP_JS = String.raw`(function (root) {
   }
 
   /** One standing right's take-back form (card U08 follow-up): the reason is the owner's own words and is required. The chat shows it first. */
-  function grantRevoker(parent, g, i, out) {
+  /** The running work that may rely on a right, in plain words, one line each (the read is capped at ten entries a right; the rest is counted). r is undefined when the read failed and null when the right was not in it. */
+  function relianceLines(r) {
+    if (r === undefined) return ['Which running work relies on this right could not be checked just now.'];
+    if (r === null) return ['Which running work relies on this right is not known (it may be newer than this page).'];
+    if (r.inForce === false) return ['It is not in force now (it ended, lapsed or has not started), so no running work relies on it now.'];
+    var items = list(r.items, 10).map(obj).filter(Boolean);
+    var total = isNum(r.total) ? r.total : items.length;
+    if (!total) return ['No running work relies on it' + (r.complete === false ? ', but not every record could be read, so some may not be listed' : '') + '.'];
+    var out = [total + (r.complete === false ? ' or more' : '') + ' running ' + (total === 1 && r.complete !== false ? 'task' : 'tasks') + ' may rely on it:'];
+    items.forEach(function (w) { out.push('"' + clip(w.title, 60) + '" (task ' + clip(w.taskId, 40) + ', agent ' + clip(w.agentId, 40) + ', attempt ' + (isNum(w.attemptNumber) ? w.attemptNumber : '?') + ')'); });
+    if (total > items.length) out.push(String(total - items.length) + ' more not listed.');
+    return out;
+  }
+  function grantRevoker(parent, g, i, out, reliance) {
     var card = el('div', 'card');
     // The project is part of every label: one grantee may hold the same action in two projects, and the owner must see which one is taken back.
     var what = clip(g.action, 60) + ' for ' + clip(g.grantee, 60) + (g.project && g.project !== '*' ? ' in ' + clip(g.project, 60) : ' in every project');
     card.appendChild(el('h4', 'card-title', 'Take back: ' + what));
+    var relLines = relianceLines(reliance);
+    card.appendChild(el('div', 'card-line', 'Running work that relies on it'));
+    relLines.forEach(function (l) { card.appendChild(el('div', 'card-line', l)); });
     var why = labelled(card, 'nn-grant-why-' + i, 'Why take back ' + what + '?', field('input', 'text')); why.setAttribute('maxlength', '300');
     var row = el('div', 'row');
     approvalButton(row, 'Take back', 'Take back the right ' + what, false, function () {
       var reason = String(why.value).trim();
       if (!reason) { clear(out); out.appendChild(el('p', 'error', 'Say why first; the reason is kept with the change.')); return; }
       if (UNSEEN_ONE.test(reason)) { clear(out); out.appendChild(el('p', 'error', 'The reason may not contain invisible or text-direction characters.')); return; }
-      if (!root.confirm('Take back ' + what + ' (' + clip(g.id, 40) + ')? Work that relies on it may stop at its next check. You will see the change in the chat and can still decline it there.')) return;
+      if (!root.confirm('Take back ' + what + ' (' + clip(g.id, 40) + ')? ' + (relLines.length > 1 || reliance === undefined || reliance === null ? relLines.slice(0, 4).join(' ') + ' ' : '') + 'Work that relies on it may stop at its next check. You will see the change in the chat and can still decline it there.')) return;
       sendAdmin('grant-revoke', { grantId: g.id, reason: reason }, 'Take back the right ' + what, out);
     });
     card.appendChild(row);
@@ -1054,7 +1071,9 @@ export const APP_JS = String.raw`(function (root) {
       var gsec = region(box, 'Rights you have given (' + gs.length + ' shown)');
       if (!gs.length) note(gsec, 'No right has been granted beyond the profile.');
       else table(gsec, 'Granted rights', ['Who', 'What', 'Project', 'State', 'Why'], gs.map(function (g) { return [clip(g.grantee, 80), clip(g.action, 80), clip(g.project, 80) || 'all', clip(g.state, 20), clip(g.basis, 160)]; }));
-      gs.filter(function (g) { return g.state === 'active' && typeof g.id === 'string'; }).forEach(function (g, i) { grantRevoker(gsec, g, i, out); });
+      var rel = {}; var relOk = !!(obj(parts.reliance) && !obj(parts.reliance.error));
+      if (relOk) list(parts.reliance.items, 50).map(obj).filter(Boolean).forEach(function (r) { if (typeof r.grantId === 'string') rel[r.grantId] = r; });
+      gs.filter(function (g) { return g.state === 'active' && typeof g.id === 'string'; }).forEach(function (g, i) { grantRevoker(gsec, g, i, out, relOk ? (rel[g.id] || null) : undefined); });
       note(gsec, 'To take one back, give the reason below; it is shown to you in the chat first and counts only when you say so. You can also tell the chat which right and why.');
     }
     if (!failed(box, 'How long standing rules last', parts.settings)) {
