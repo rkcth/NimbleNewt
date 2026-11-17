@@ -558,6 +558,31 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: shutdown during an order gives up its lease (nothing decided), so the next controller can send the order at once`, async () => {
+    const r = await rig();
+    let svc: ScratchCleanupService | undefined;
+    let run: ReturnType<ScratchCleanupService["run"]> | undefined;
+    try {
+      let seen: AbortSignal | undefined;
+      svc = ScratchCleanupService.withEpoch(r.w.storage, r.w.epoch, { mode: async () => "after-handoff", order: (_o, signal) => { seen = signal; return new Promise<never>(() => undefined); }, report: async () => undefined }, { clock: r.w.clock.now });
+      run = svc.run(plain(r), []);
+      for (let i = 0; i < 400 && seen === undefined; i++) await new Promise((resolve) => setTimeout(resolve, 25)); // the state, not a fixed time
+      assert.ok(seen !== undefined, "the order went out");
+      assert.notEqual((await svc.get("att-1"))?.lease, undefined, "the order is claimed while it is out");
+      await svc.close();
+      assert.ok(seen.aborted, "the order was told to stop");
+      assert.equal((await run).state, "ordering", "nothing was decided");
+      const after = await svc.get("att-1");
+      assert.equal(after?.state, "ordering");
+      assert.equal(after?.lease, undefined, "the lease was given up at shutdown");
+      assert.equal(after?.retries ?? 0, 0, "no retry was used up");
+    } finally {
+      await svc?.close();
+      await run?.catch(() => undefined);
+      await r.store.close();
+    }
+  });
+
   test(`${backend.name}: A5: a removal the host reports is recorded even when another run has already closed the cleanup as kept`, async () => {
     const r = await rig();
     try {
