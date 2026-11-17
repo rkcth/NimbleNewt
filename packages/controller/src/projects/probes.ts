@@ -44,9 +44,12 @@ export function probeUrl(value: unknown): string {
   if (u.username !== "" || u.password !== "") return invalid("url", "must not carry a user name or password; a health address that needs a credential cannot be probed");
   if (u.hash !== "") return invalid("url", "must not have a # part");
   noCredential(value, "url");
-  let query = u.search;
-  try { query = decodeURIComponent(u.search); } catch { /* not decodable: checked as written */ }
-  noCredential(query, "url");
+  // The path is shown in history, so text written with %-escapes is checked as it reads once decoded, as the query is.
+  for (const part of [u.pathname, u.search]) {
+    let decoded = part;
+    try { decoded = decodeURIComponent(part); } catch { /* not decodable: checked as written */ }
+    noCredential(decoded, "url");
+  }
   return value;
 }
 
@@ -84,7 +87,7 @@ export class ResponsibilityProbeService {
 
   /** Owner only. A responsibility with no probe has `revision` 0 (or the revision of a cleared one) and no `probe`. */
   async get(by: Principal, responsibilityId: unknown): Promise<ProbeView> {
-    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read responsibility probes`);
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not read responsibility probes`);
     const id = typeof responsibilityId === "string" && RESPONSIBILITY_ID.test(responsibilityId) ? responsibilityId : invalid("responsibilityId", "is not a responsibility ID");
     if ((await this.#duty(id)) === undefined) throw new DomainError("not_found", "no such responsibility");
     const found = await this.#runner.get(PROBE, id);
@@ -100,7 +103,7 @@ export class ResponsibilityProbeService {
    * default 10). Setting replaces the whole probe. Refused on a retired responsibility (clearing is always allowed).
    */
   async set(owner: Principal, command: NoActor & { responsibilityId?: unknown; url?: unknown; expectStatus?: unknown; timeoutSeconds?: unknown; expectedRevision?: unknown }): Promise<{ revision: number; shown?: string }> {
-    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not set responsibility probes`);
+    if (owner.kind !== "owner" || owner.taskScope !== undefined) throw new DomainError("forbidden", `${owner.id} may not set responsibility probes`);
     const bad = Object.keys(command).filter((k) => !["commandId", "responsibilityId", "url", "expectStatus", "timeoutSeconds", "expectedRevision"].includes(k));
     if (bad.length > 0) invalid(bad[0]!, "is not a field of this command");
     const id = typeof command.responsibilityId === "string" && RESPONSIBILITY_ID.test(command.responsibilityId) ? command.responsibilityId : invalid("responsibilityId", "is not a responsibility ID");
@@ -142,28 +145,34 @@ export class ResponsibilityProbeService {
 
 /** What one request found: the status of the answer, or why there was none (a short code, never the server's text). */
 export type ProbeAnswer = { readonly status: number; readonly ms: number } | { readonly error: string; readonly ms: number };
-export type ProbeRequest = (url: string, timeoutMs: number) => Promise<ProbeAnswer>;
+export type ProbeRequest = (url: string, timeoutMs: number, signal?: AbortSignal) => Promise<ProbeAnswer>;
 
 const CODE = /^[A-Z][A-Z0-9_]{1,39}$/;
 
 /**
  * One GET with Node's own client: no redirect is followed (a redirect is an answer like any other), no body is read (the socket is closed as soon as the status is in), no keep-alive, the platform's certificate checks. It never throws.
+ * `signal` ends it at once (the controller closing): the answer is then `ABORTED` and the connection is closed.
  */
-export const nodeProbeRequest: ProbeRequest = (url, timeoutMs) => new Promise((resolve) => {
+export const nodeProbeRequest: ProbeRequest = (url, timeoutMs, signal) => new Promise((resolve) => {
   const started = Date.now();
   let done = false;
   let request: http.ClientRequest | undefined;
+  const onAbort = (): void => finish({ error: "ABORTED" });
   const finish = (answer: { status: number } | { error: string }): void => {
     if (done) return;
     done = true;
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
     request?.destroy();
     resolve({ ...answer, ms: Date.now() - started });
   };
   const timer = setTimeout(() => finish({ error: `TIMEOUT` }), timeoutMs);
   timer.unref?.();
+  if (signal?.aborted === true) { finish({ error: "ABORTED" }); return; }
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
-    const client = url.startsWith("https:") ? https : http;
+    // The scheme as the address parser reads it (`HTTPS://` is https), never a prefix of the text.
+    const client = new URL(url).protocol === "https:" ? https : http;
     request = client.request(url, { method: "GET", agent: false, headers: { "user-agent": "NimbleNewt-check/1", accept: "*/*" } }, (response) => {
       const status = response.statusCode ?? 0;
       response.destroy();
@@ -189,14 +198,19 @@ export function probeResult(setting: ProbeSetting, answer: ProbeAnswer, inWindow
   return { outcome: expected ? "ok" : "failed", summary: `HTTP check of ${where} answered ${answer.status} in ${answer.ms} ms${expected ? "" : ` (expected ${wanted})`}.${window}` };
 }
 
-interface Asked { readonly url: string; readonly started: number; settled?: number; result?: CheckProbeResult }
+interface Asked { readonly asked: string; readonly started: number; settled?: number; result?: CheckProbeResult }
+/** What a result was asked under: an answer for another address, other healthy statuses or another wait is not this probe's answer. */
+const askedAs = (s: ProbeSetting): string => JSON.stringify([s.url, s.expectStatus, s.timeoutSeconds]);
 
 /**
  * The check runner's probe from the owner's HTTP probes. The request is never waited for inside the runner's pass (a slow or silent host must not hold up the controller's loop): the first pass that meets the due check starts it and
  * answers `"later"` (the check stays owed), and a later pass takes the result. At most `maxInFlight` requests at once; a result not taken within `keepMinutes` is dropped (the check is asked again). Kept in memory only: after a restart
  * the check, still owed, is simply asked again. A responsibility with no probe gives `undefined` (its agent takes the check); a damaged probe record gives `attention`, never a healthy result.
+ *
+ * One request per responsibility, not per owed check: a `check` entry finishes every owed check of its responsibility, so several owed checks share the answer. `primary` (when given) is asked before each new request, so a
+ * controller that is no longer the primary one sends nothing; `signal` ends the requests out and starts no more (the controller closing).
  */
-export function httpCheckProbe(deps: { readonly setting: (responsibilityId: string) => Promise<ProbeSetting | undefined | "damaged">; readonly request?: ProbeRequest; readonly now?: () => number; readonly maxInFlight?: number }): CheckProbe {
+export function httpCheckProbe(deps: { readonly setting: (responsibilityId: string) => Promise<ProbeSetting | undefined | "damaged">; readonly request?: ProbeRequest; readonly now?: () => number; readonly maxInFlight?: number; readonly primary?: () => Promise<boolean>; readonly signal?: AbortSignal }): CheckProbe {
   const asked = new Map<string, Asked>();
   const request = deps.request ?? nodeProbeRequest;
   const now = deps.now ?? (() => Date.now());
@@ -204,24 +218,36 @@ export function httpCheckProbe(deps: { readonly setting: (responsibilityId: stri
   return async ({ responsibility, check }) => {
     const at = now();
     for (const [k, a] of asked) if (a.settled !== undefined && at - a.settled > PROBE_LIMITS.keepMinutes * 60_000) asked.delete(k);
-    const setting = await deps.setting(responsibility.id);
-    if (setting === undefined) { asked.delete(check.id); return undefined; }
+    const key = responsibility.id;
+    const setting = await deps.setting(key);
+    if (setting === undefined) { asked.delete(key); return undefined; }
     if (setting === "damaged") return { outcome: "attention", summary: "The probe set for this responsibility is damaged, so this check was not taken; set it again (responsibility.probe.set)." };
-    const earlier = asked.get(check.id);
+    const earlier = asked.get(key);
     if (earlier !== undefined) {
       if (earlier.result === undefined) return "later";
-      asked.delete(check.id);
-      // A result for an address the owner has since changed is not this probe's answer: ask again.
-      if (earlier.url === setting.url) return earlier.result;
+      asked.delete(key);
+      // A result for an address (or healthy statuses, or wait) the owner has since changed is not this probe's answer: ask again.
+      if (earlier.asked === askedAs(setting)) return earlier.result;
     }
-    let inFlight = 0;
-    for (const a of asked.values()) if (a.result === undefined) inFlight++;
-    if (inFlight >= max || asked.size >= PROBE_LIMITS.entries) return "later";
-    const entry: Asked = { url: setting.url, started: at };
-    asked.set(check.id, entry);
-    void request(setting.url, setting.timeoutSeconds * 1000)
+    const full = (): boolean => {
+      let inFlight = 0;
+      for (const a of asked.values()) if (a.result === undefined) inFlight++;
+      return inFlight >= max || asked.size >= PROBE_LIMITS.entries;
+    };
+    const stopped = (): boolean => deps.signal?.aborted === true;
+    if (stopped() || full()) return "later";
+    if (deps.primary !== undefined && !(await deps.primary())) return "later";
+    // Another pass may have started this one while the primary check was read.
+    if (stopped() || asked.has(key) || full()) return "later";
+    const entry: Asked = { asked: askedAs(setting), started: at };
+    asked.set(key, entry);
+    void request(setting.url, setting.timeoutSeconds * 1000, deps.signal)
       .catch((): ProbeAnswer => ({ error: "REQUEST_FAILED", ms: 0 }))
-      .then((answer) => { entry.result = probeResult(setting, answer, check.inMaintenanceWindow === true); entry.settled = now(); });
+      .then((answer) => {
+        // Ended because the controller is closing: not an answer from the address, so nothing is kept (after a restart the check, still owed, is asked again).
+        if ("error" in answer && answer.error === "ABORTED") { if (asked.get(key) === entry) asked.delete(key); return; }
+        entry.result = probeResult(setting, answer, check.inMaintenanceWindow === true); entry.settled = now();
+      });
     return "later";
   };
 }

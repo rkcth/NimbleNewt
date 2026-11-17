@@ -586,6 +586,15 @@ export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"
 export const wholeWord = (text: string, value: string): boolean => value.length > 0 && new RegExp(`(?<![A-Za-z0-9._-])${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])(?![\-_.:][A-Za-z0-9])`, "i").test(text);
 
 /**
+ * True if `address` is written out whole in `text`, exactly as given (card P04i first review): the address a probe makes NimbleNewt ask must be one the owner wrote, not a part of a longer one (a host cut short, a path cut
+ * off) and not one changed in letter case. Each run of the text between spaces is compared, once as it is and once without the quotes, brackets or sentence punctuation around it.
+ */
+export function addressWritten(text: string, address: string): boolean {
+  if (address.length === 0) return false;
+  return text.split(/\s+/).some((t) => t === address || t.replace(/^[<(\["'`*]+/, "").replace(/[>)\]"'`*.,;:!]+$/, "") === address);
+}
+
+/**
  * How an owner names a platform (card X09b part 2 review 2, item 3): `os` and `arch` are fixed choices the words check lets through, so the chat checks them itself, and an owner writes "my mac" or
  * "linux-x64" rather than "darwin x64". Each choice is therefore written down here with the ways people spell it.
  */

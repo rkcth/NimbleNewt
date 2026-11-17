@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
 import { AssignmentService } from "../domain/assignments.js";
 import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { CheckRunService, CheckRunSettingsService, IncidentService, ResponsibilityChecks, ResponsibilityProbeService, ResponsibilityService, httpCheckProbe, nodeProbeRequest, probeResult, type ProbeAnswer, type ProbeRequest } from "./index.js";
 
@@ -33,7 +34,8 @@ for (const backend of backends) {
   interface World {
     owner: Principal; ann: Principal; project: string; setNow(minutes: number): void;
     duties: ResponsibilityService; checks: ResponsibilityChecks; inc: IncidentService; probes: ResponsibilityProbeService;
-    runner(request: ProbeRequest, maxInFlight?: number): CheckRunService;
+    runner(request: ProbeRequest, maxInFlight?: number, extra?: { primary?: () => Promise<boolean>; signal?: AbortSignal }): CheckRunService;
+    storage: ControllerStorage; epoch: number; takeOver(): Promise<void>;
     make(extra?: Record<string, unknown>): Promise<string>;
     taskCount(): Promise<number>;
     raw: { put(id: string, body: unknown): Promise<void> };
@@ -60,7 +62,9 @@ for (const backend of backends) {
         await body({
           owner, ann, project, duties, checks, inc, probes,
           setNow: (m) => { now = iso(m); },
-          runner: (request, maxInFlight) => CheckRunService.withEpoch(world.storage, epoch, { responsibilities: duties, checks, incidents: inc, settings, projects, assignments, probe: httpCheckProbe({ setting: (id) => probes.setting(id), request, now: () => Date.parse(now), ...(maxInFlight === undefined ? {} : { maxInFlight }) }) }, options),
+          runner: (request, maxInFlight, extra = {}) => CheckRunService.withEpoch(world.storage, epoch, { responsibilities: duties, checks, incidents: inc, settings, projects, assignments, probe: httpCheckProbe({ setting: (id) => probes.setting(id), request, now: () => Date.parse(now), ...(maxInFlight === undefined ? {} : { maxInFlight }), ...extra }) }, options),
+          storage: world.storage, epoch,
+          takeOver: async () => { await ProjectService.open(world.storage, { holder: "c2", ...options }); },
           make: async (extra = {}) => (await duties.create(owner, { commandId: cid("r"), projectId: project, title: "Keep the web up", objective: "Up", desiredCondition: "answers on /health", everyMinutes: 60, ownerId: ann.id, ...extra } as never)).id,
           taskCount: async () => (await world.storage.listAggregates("task", { limit: 500 })).length,
           raw: { put: async (id, b) => {
@@ -104,6 +108,16 @@ for (const backend of backends) {
     assert.equal((await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: null })).revision, 3);
     assert.equal((await c.probes.get(c.owner, r)).probe, undefined);
     assert.equal(await c.probes.setting(r), undefined);
+    // A credential written with %-escapes in the path (the path is shown in history) is refused like one written plainly.
+    const escaped = [..."ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"].map((ch) => `%${ch.charCodeAt(0).toString(16)}`).join("");
+    // (On a live responsibility: the one above is retired, which is refused for its own reason.)
+    const live = await c.make({ title: "Live" });
+    assert.equal(await code(c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: live, url: `http://host/${escaped}/health` })), "invalid_command");
+    assert.equal((await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: live, url: "http://host/a%20b/health" })).revision, 1, "ordinary escapes are fine");
+    // An owner object limited to one task (none is issued today; refused all the same).
+    const scoped = { ...c.owner, taskScope: { taskId: "task-aaaaaaaaaaaaaaaaaaaa", projectId: c.project } };
+    assert.equal(await code(c.probes.get(scoped, r)), "forbidden");
+    assert.equal(await code(c.probes.set(scoped, { commandId: cid("s"), responsibilityId: r, url: null })), "forbidden");
   });
 
   suite("a due check with a probe is taken with no agent: asked once apart from the pass, the answer recorded on a later pass; a bad answer is a grouped incident", async (c) => {
@@ -197,6 +211,45 @@ for (const backend of backends) {
     assert.equal((await runner.run(c.owner, c.project)).observed, 1);
     assert.equal((await c.inc.list(c.owner, c.project, { open: true }))!.length, 0, "the stale 500 was never recorded");
   });
+
+  // First review (card P04i): one request per responsibility however many checks it owes; a changed healthy status is a changed probe; only the primary controller asks; closing starts nothing.
+  suite("several owed checks of one responsibility share one request; an answer asked under other healthy statuses is not used", async (c) => {
+    const r = await c.make();
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "http://web.internal/health" });
+    const m = manualRequest();
+    const runner = c.runner(m.request);
+    c.setNow(60); await c.checks.generate(c.owner, c.project);
+    await c.checks.recordEvent(c.owner, c.project, r, { kind: "event", source: "alerts", events: 1, firstSeq: 1, lastSeq: 1, kinds: ["alert"] }, iso(60));
+    assert.equal((await c.checks.pending(c.owner, c.project))!.length, 2, "two checks are owed");
+    assert.equal((await runner.run(c.owner, c.project)).deferred, 2);
+    assert.equal(m.calls.length, 1, "one request for the responsibility, not one per owed check");
+    // The owner now counts only 204 as healthy: the 200 asked for under the old setting is not this probe's answer.
+    const now = await c.probes.get(c.owner, r);
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "http://web.internal/health", expectStatus: [204], expectedRevision: now.revision });
+    await m.answer({ status: 200, ms: 1 });
+    const second = await runner.run(c.owner, c.project);
+    assert.deepEqual([second.observed, m.calls.length], [0, 2], "asked again under the new setting");
+    await m.answer({ status: 200, ms: 1 });
+    assert.equal((await runner.run(c.owner, c.project)).observed, 1);
+    assert.deepEqual((await c.duties.history(c.owner, r, { limit: 5 }))!.items.filter((h) => h.kind === "check").map((h) => h.outcome), ["failed"], "200 is not healthy once only 204 is");
+    assert.deepEqual(await c.checks.pending(c.owner, c.project), [], "one check entry finished both owed checks");
+    assert.equal(m.calls.length, 2);
+  });
+
+  suite("a controller that is no longer the primary sends nothing; a closed probe starts nothing", async (c) => {
+    const r = await c.make();
+    await c.probes.set(c.owner, { commandId: cid("s"), responsibilityId: r, url: "http://web.internal/health" });
+    c.setNow(60); await c.checks.generate(c.owner, c.project);
+    const stop = new AbortController(); stop.abort();
+    const closed = manualRequest();
+    assert.equal((await c.runner(closed.request, undefined, { signal: stop.signal }).run(c.owner, c.project)).deferred, 1);
+    assert.equal(closed.calls.length, 0, "closing: nothing is asked");
+    const m = manualRequest();
+    const primary = async (): Promise<boolean> => (await c.storage.currentEpoch()) === c.epoch;
+    await c.takeOver();
+    assert.equal((await c.runner(m.request, undefined, { primary }).run(c.owner, c.project)).deferred, 1);
+    assert.equal(m.calls.length, 0, "another controller took the database: this one asks nothing");
+  });
 }
 
 // The real request, against a server on this machine only.
@@ -224,6 +277,23 @@ test("the real request: a status is read without the body, a redirect is not fol
     const closedPort = (closed.address() as AddressInfo).port; await new Promise((r) => closed.close(r));
     const refused = await nodeProbeRequest(`http://127.0.0.1:${closedPort}/x`, 5000);
     assert.equal("error" in refused && refused.error, "ECONNREFUSED");
+    // The scheme is read by the address parser, not by a prefix of the text: `HTTP://` is http, and `HTTPS://` is https (here a TLS greeting to a plain server, which fails as a TLS error, never as a request the client refused to make).
+    const upper = await nodeProbeRequest(`HTTP://127.0.0.1:${port}/ok`, 5000);
+    assert.equal("status" in upper && upper.status, 200, JSON.stringify(upper));
+    const tls = await nodeProbeRequest(`HTTPS://127.0.0.1:${port}/ok`, 5000);
+    assert.ok("error" in tls && tls.error !== "REQUEST_FAILED" && tls.error !== "TIMEOUT", JSON.stringify(tls));
+    // Closing while a request is out ends it at once and closes the connection (the silent server sees it go).
+    const stop = new AbortController();
+    const arrived = new Promise<IncomingMessage>((resolve) => server.once("request", resolve));
+    const out = nodeProbeRequest(`http://127.0.0.1:${port}/silent`, 30_000, stop.signal);
+    const req = await arrived;
+    const gone = new Promise<void>((resolve) => req.socket.once("close", () => resolve()));
+    stop.abort();
+    const aborted = await out;
+    assert.equal("error" in aborted && aborted.error, "ABORTED");
+    assert.ok(aborted.ms < 30_000);
+    await gone;
+    assert.equal((await nodeProbeRequest(`http://127.0.0.1:${port}/ok`, 5000, stop.signal) as { error?: string }).error, "ABORTED", "an ended signal asks nothing");
     const setting = { url: `http://127.0.0.1:${port}/ok?k=v`, expectStatus: [], timeoutSeconds: 5 };
     assert.deepEqual(probeResult(setting, { status: 302, ms: 1 }, true), { outcome: "failed", summary: `HTTP check of http://127.0.0.1:${port}/ok answered 302 in 1 ms (expected 200-299). A maintenance window was on.` });
     assert.equal(probeResult({ ...setting, expectStatus: [302] }, { status: 302, ms: 1 }, false).outcome, "ok");

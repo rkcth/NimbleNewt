@@ -802,8 +802,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const checkSettings = CheckRunSettingsService.withEpoch(storage, epoch);
     const eventChecks = ResponsibilityEventChecks.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, events: EventService.withEpoch(storage, epoch), gaps: coverageGaps });
     // The owner's HTTP probes (card P04i): a responsibility with one has its due checks taken by the controller itself, with no agent; the request runs apart from the pass and its answer is taken on a later one.
+    // Only the primary controller asks (a controller another start took the database from sends nothing), and closing ends the requests out.
     const checkProbes = ResponsibilityProbeService.withEpoch(storage, epoch);
-    const checkRun = CheckRunService.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, incidents, settings: checkSettings, projects, assignments, probe: httpCheckProbe({ setting: (id) => checkProbes.setting(id) }) });
+    const probeStop = new AbortController();
+    const checkRun = CheckRunService.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, incidents, settings: checkSettings, projects, assignments, probe: httpCheckProbe({ setting: (id) => checkProbes.setting(id), primary: async () => (await storage.currentEpoch()) === epoch, signal: probeStop.signal }) });
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
     // The plain 09:00 digest gives way to scheduled stand-ups (card U11d) when they carry every decision it would tell: the active stand-ups of live projects. The stand-up service starts with the dispatcher; until then, or when it fails, none is known and the owner is told.
     const standupProjects = async (): Promise<ReadonlySet<string>> => {
@@ -1720,7 +1722,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),
       // The heartbeat stops last: a clean stop that takes a while (a backup finishing, workers closing, the database shutting down) keeps beating, so the launcher never takes it for a hang and kills it.
-      close: async () => { try { maintenanceStopped = true; if (remotePiTimer !== undefined) clearInterval(remotePiTimer); transferLive?.dispose(); if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); } finally { await heartbeat?.stop().catch(() => undefined); } },
+      close: async () => { try { maintenanceStopped = true; if (remotePiTimer !== undefined) clearInterval(remotePiTimer); transferLive?.dispose(); if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); probeStop.abort(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); } finally { await heartbeat?.stop().catch(() => undefined); } },
     };
   } catch (error) {
     toolsLive?.dispose();

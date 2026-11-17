@@ -40,6 +40,24 @@ for (const backend of backends) {
       assert.notEqual(bad.outcomes[0]!.status, "proposed", JSON.stringify(bad.outcomes[0]));
       assert.notEqual(bad.outcomes[0]!.status, "applied");
 
+      // What the owner is shown before confirming names the address as it will be asked, query included.
+      const withQuery = "for keep web up, have nimblenewt itself ask <https://web.example.test/health?deep=1>.";
+      script[withQuery] = [cmd("responsibility.probe.set", { responsibilityTitle: "keep web up", url: "https://web.example.test/health?deep=1" }, withQuery)];
+      const shown = await chat.submit(w.ownerToken, { messageId: cid("m"), text: withQuery });
+      assert.equal(shown.outcomes[0]!.status, "proposed", JSON.stringify(shown.outcomes[0]));
+      assert.ok(JSON.stringify(shown.outcomes[0]).includes("https://web.example.test/health?deep=1"), JSON.stringify(shown.outcomes[0]));
+      // Only the whole address, as written: a host cut short, a path cut off or other letter case is not the owner's address (first review).
+      for (const [said, url] of [
+        ["for keep web up let nimblenewt ask https://web.example.test.other.example/health itself", "https://web.example.test"],
+        ["for keep web up let nimblenewt ask https://web.example.test/health/deep itself", "https://web.example.test/health"],
+        ["for keep web up let nimblenewt ask https://web.example.test/Health itself", "https://web.example.test/health"],
+        ["for keep web up let nimblenewt ask http://web.example.test:80801/health itself", "http://web.example.test:8080"],
+      ] as const) {
+        script[said] = [cmd("responsibility.probe.set", { responsibilityTitle: "keep web up", url }, said)];
+        const out = await chat.submit(w.ownerToken, { messageId: cid("m"), text: said });
+        assert.equal(out.outcomes[0]!.status, "refused", `${url}: ${JSON.stringify(out.outcomes[0])}`);
+      }
+
       const off = "stop probing keep web up, let ann look at it again";
       script[off] = [cmd("responsibility.probe.set", { responsibilityTitle: "keep web up", url: null }, off)];
       const cr = await chat.submit(w.ownerToken, { messageId: cid("m"), text: off });
