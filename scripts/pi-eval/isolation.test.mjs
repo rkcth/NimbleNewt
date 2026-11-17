@@ -766,55 +766,55 @@ test("the bridge on its own: a half-closed request still gets its answer, at mos
     return { c, port };
   };
   const exited = (c) => new Promise((r) => (c.exitCode !== null || c.signalCode !== null ? r() : c.on("exit", r)));
-  const { c, port } = await start(p.socketPath);
   try {
-    const request = (half) => new Promise((res) => {
-      const s = net.connect(port, "127.0.0.1");
-      let b = "";
-      const req = `GET /v1/models HTTP/1.1\r\nhost: x\r\nauthorization: Bearer ${p.token}\r\nconnection: close\r\n\r\n`;
-      s.on("connect", () => (half ? s.end(req) : s.write(req)));
-      s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => {});
-      setTimeout(() => s.destroy(), 10_000).unref();
-    });
-    assert.match(await request(false), /^HTTP\/1\.1 200[\s\S]*fake-model/);
-    assert.match(await request(true), /^HTTP\/1\.1 200[\s\S]*fake-model/, "a half-closed request gets the whole answer");
-    // 80 idle connections at once, to a socket that keeps every connection (the proxy itself takes 32): those over the
-    // bridge's cap are closed at once, the rest stay open until closed.
-    const holder = net.createServer((x) => { x.on("error", () => {}); });
-    await new Promise((r) => holder.listen(join(sockDir, "hold.sock"), r));
-    const h = await start(join(sockDir, "hold.sock"));
-    const socks = [];
+    const { c, port } = await start(p.socketPath);
     try {
-      socks.push(...await Promise.all(Array.from({ length: 80 }, () => new Promise((r) => { const s = net.connect(h.port, "127.0.0.1"); s.on("error", () => {}); s.on("close", () => { s.closedEarly = true; }); s.on("connect", () => r(s)); }))));
-      await new Promise((r) => setTimeout(r, 500));
-      const kept = socks.filter((s) => !s.closedEarly).length;
-      assert.ok(kept >= 60 && kept <= 64, `${kept} connections kept open`);
-    } finally { for (const s of socks) s.destroy(); h.c.kill("SIGTERM"); await exited(h.c); holder.close(); }
-    // It forwards only to its one socket: a CONNECT line or an absolute-form address naming another listener reaches the
-    // proxy (which refuses it), never that listener.
-    const seenBefore = listenerConnections;
-    for (const line of [`CONNECT 127.0.0.1:${listener.address().port} HTTP/1.1\r\nhost: 127.0.0.1:${listener.address().port}\r\n\r\n`, `GET http://127.0.0.1:${listener.address().port}/ HTTP/1.1\r\nhost: 127.0.0.1:${listener.address().port}\r\nconnection: close\r\n\r\n`]) {
-      const got = await new Promise((res) => { const s = net.connect(port, "127.0.0.1"); let b = ""; s.on("connect", () => s.write(line)); s.on("data", (d) => { b += d; if (/\r\n\r\n/.test(b)) s.destroy(); }); s.on("close", () => res(b)); s.on("error", () => res(b)); setTimeout(() => s.destroy(), 3000); });
-      assert.doesNotMatch(got, /^HTTP\/1\.1 2/, got);
+      const request = (half) => new Promise((res) => {
+        const s = net.connect(port, "127.0.0.1");
+        let b = "";
+        const req = `GET /v1/models HTTP/1.1\r\nhost: x\r\nauthorization: Bearer ${p.token}\r\nconnection: close\r\n\r\n`;
+        s.on("connect", () => (half ? s.end(req) : s.write(req)));
+        s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => {});
+        setTimeout(() => s.destroy(), 10_000).unref();
+      });
+      assert.match(await request(false), /^HTTP\/1\.1 200[\s\S]*fake-model/);
+      assert.match(await request(true), /^HTTP\/1\.1 200[\s\S]*fake-model/, "a half-closed request gets the whole answer");
+      // 80 idle connections at once, to a socket that keeps every connection (the proxy itself takes 32): those over the
+      // bridge's cap are closed at once, the rest stay open until closed.
+      const holder = net.createServer((x) => { x.on("error", () => {}); });
+      await new Promise((r) => holder.listen(join(sockDir, "hold.sock"), r));
+      const h = await start(join(sockDir, "hold.sock"));
+      const socks = [];
+      try {
+        socks.push(...await Promise.all(Array.from({ length: 80 }, () => new Promise((r) => { const s = net.connect(h.port, "127.0.0.1"); s.on("error", () => {}); s.on("close", () => { s.closedEarly = true; }); s.on("connect", () => r(s)); }))));
+        await new Promise((r) => setTimeout(r, 500));
+        const kept = socks.filter((s) => !s.closedEarly).length;
+        assert.ok(kept >= 60 && kept <= 64, `${kept} connections kept open`);
+      } finally { for (const s of socks) s.destroy(); h.c.kill("SIGTERM"); await exited(h.c); holder.close(); }
+      // It forwards only to its one socket: a CONNECT line or an absolute-form address naming another listener reaches the
+      // proxy (which refuses it), never that listener.
+      const seenBefore = listenerConnections;
+      for (const line of [`CONNECT 127.0.0.1:${listener.address().port} HTTP/1.1\r\nhost: 127.0.0.1:${listener.address().port}\r\n\r\n`, `GET http://127.0.0.1:${listener.address().port}/ HTTP/1.1\r\nhost: 127.0.0.1:${listener.address().port}\r\nconnection: close\r\n\r\n`]) {
+        const got = await new Promise((res) => { const s = net.connect(port, "127.0.0.1"); let b = ""; s.on("connect", () => s.write(line)); s.on("data", (d) => { b += d; if (/\r\n\r\n/.test(b)) s.destroy(); }); s.on("close", () => res(b)); s.on("error", () => res(b)); setTimeout(() => s.destroy(), 3000); });
+        assert.doesNotMatch(got, /^HTTP\/1\.1 2/, got);
+      }
+      assert.equal(listenerConnections, seenBefore, "nothing reached the other listener");
+      // A reset mid-request, then a normal request: the bridge is still there.
+      await new Promise((r) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.write("GET /v1/mo"); s.resetAndDestroy(); r(); }); s.on("error", () => r()); });
+      assert.match(await request(false), /^HTTP\/1\.1 200/);
+      assert.equal(c.exitCode, null, "the bridge is still running");
+    } finally {
+      c.kill("SIGTERM");
+      await exited(c);
     }
-    assert.equal(listenerConnections, seenBefore, "nothing reached the other listener");
-    // A reset mid-request, then a normal request: the bridge is still there.
-    await new Promise((r) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.write("GET /v1/mo"); s.resetAndDestroy(); r(); }); s.on("error", () => r()); });
-    assert.match(await request(false), /^HTTP\/1\.1 200/);
-    assert.equal(c.exitCode, null, "the bridge is still running");
-  } finally {
-    c.kill("SIGTERM");
-    await exited(c);
-  }
-  try {
-    assert.equal(c.signalCode ?? c.exitCode, "SIGTERM", "it ends with its agent's signal");
-    // A missing proxy socket: the connection is closed, the bridge keeps running.
-    const m = await start(join(sockDir, "missing.sock"));
-    try {
-      const r = await new Promise((res) => { const s = net.connect(m.port, "127.0.0.1"); let b = ""; s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => res("error")); });
-      assert.equal(r, "");
-      assert.equal(m.c.exitCode, null);
-    } finally { m.c.kill("SIGTERM"); await exited(m.c); }
+      assert.equal(c.signalCode ?? c.exitCode, "SIGTERM", "it ends with its agent's signal");
+      // A missing proxy socket: the connection is closed, the bridge keeps running.
+      const m = await start(join(sockDir, "missing.sock"));
+      try {
+        const r = await new Promise((res) => { const s = net.connect(m.port, "127.0.0.1"); let b = ""; s.on("data", (d) => { b += d; }); s.on("close", () => res(b)); s.on("error", () => res("error")); });
+        assert.equal(r, "");
+        assert.equal(m.c.exitCode, null);
+      } finally { m.c.kill("SIGTERM"); await exited(m.c); }
   } finally {
     await p.close();
     rmSync(sockDir, { recursive: true, force: true });
