@@ -179,7 +179,13 @@ export async function startRemoteWorker(setup, config) {
   // The conversation stores of this host's agents (card K01i): the controller asks for them when it makes a backup (`pi-state-send`) and gives them back after a restore (`pi-state-restore`). Each attempt's home is `<base>/attempts/<attemptId>/home`.
   const stores = new worker.LocalConversationStores({ root: join(base, "attempts"), homeFolder: "home" });
   const piState = new controller.PiStateHost({ client, source: stores.source, final: stores.final, busy: () => local.busyAttempts(), scratch: join(base, "pi-state-copies"), purgeThinking: piAdapter.removeStoredThinking });
-  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), verify: verifyDone, piState, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
+  // A look at the files a task relied on (card L04e): read again in the task's checkout on THIS host (never outside it, never beyond the project's paths the controller names), before a resumed attempt's first turn. The answer carries hashes and
+  // member names, never content. A task with no checkout here has nothing to look at: everything is left out and the controller reads it as unknown.
+  const observeTask = (scope, entries, paths) => controller.observeEntries({
+    locate: (taskId, projectId) => { const where = workspaces.locate({ taskId, projectId }); return where === undefined ? undefined : { root: where.checkout, paths }; },
+    onFault: (detail) => log(`the look at the files of task ${scope.taskId}: ${detail}`),
+  }, scope, entries);
+  const responder = new controller.WorkspaceResponder({ client, port: workspaces.port, busy: () => local.busyAttempts(), verify: verifyDone, piState, observe: observeTask, onError: (error) => log(`a workspace answer could not be sent (${describe(error)})`) });
 
   const abort = new AbortController();
   const poller = new controller.HostPoller({

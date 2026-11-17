@@ -258,21 +258,22 @@ for (const backend of backends) {
   });
 }
 
-test("review: with remote hosts the probe is off unless asked for, and a task not placed on this machine is never located", async () => {
+test("review: the probe is on by default (a remote host answers for its own tasks), and a task not placed on this machine is never located here", async () => {
   assert.equal(resumeProbeEnabled(undefined, 0), true);
-  assert.equal(resumeProbeEnabled(undefined, 1), false, "remote hosts: the controller's disk is no evidence by default");
+  assert.equal(resumeProbeEnabled(undefined, 1), true, "remote hosts: a task placed on one is looked at by that host; the controller's disk is read only for tasks placed here");
+  assert.equal(resumeProbeEnabled(false, 1), false);
   assert.equal(resumeProbeEnabled(true, 1), true);
   assert.equal(resumeProbeEnabled({ maxEntries: 3 }, 2), true);
   assert.equal(resumeProbeEnabled(false, 0), false);
   const placed: Record<string, string> = { "tsk-local": "host:local", "tsk-remote": "host:far" };
   const located: string[] = [];
   const locate = locallyPlaced(new Set(["host:far"]), async (t) => placed[t], async (t) => { located.push(t); return "/srv/checkout"; });
-  assert.equal(await locate("tsk-local"), "/srv/checkout");
-  assert.equal(await locate("tsk-remote"), undefined);
-  assert.equal(await locate("tsk-never"), undefined, "never placed, with remote hosts: it may be about to go to one");
+  assert.equal(await locate("tsk-local", "p"), "/srv/checkout");
+  assert.equal(await locate("tsk-remote", "p"), undefined);
+  assert.equal(await locate("tsk-never", "p"), undefined, "never placed, with remote hosts: it may be about to go to one");
   assert.deepEqual(located, ["tsk-local"]);
   const alone = locallyPlaced(new Set(), async () => undefined, async () => "/srv/checkout");
-  assert.equal(await alone("tsk-never"), "/srv/checkout", "one machine: every task's checkout is here");
+  assert.equal(await alone("tsk-never", "p"), "/srv/checkout", "one machine: every task's checkout is here");
 });
 
 test("second review: a file whose size moved while it was read is not hashed from what was read", { skip: process.platform !== "linux" }, async () => {

@@ -4,7 +4,7 @@ import { open, opendir, readlink, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { redactText } from "../security/redact.js";
 import { relativePath, scopeAllows } from "../projects/resources.js";
-import type { ManifestBody, Observation } from "./dependencies.js";
+import type { DependencyEntry, ManifestBody, Observation } from "./dependencies.js";
 
 /**
  * What a resume check may read while it looks at a task's dependencies before the resumed attempt's first turn (card L04d).
@@ -233,23 +233,33 @@ export function checkoutDependencyObserver(options: DependencyObserverOptions): 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 /**
- * Whether a controller probes by default (card L04d review): yes on one machine; with remote hosts only when the operator said so,
- * because the resumed attempt's host is chosen after the check and this machine's disk says nothing about another's.
+ * Whether a controller probes by default (card L04e): yes. A task last placed on a remote host is not read from this machine's disk (`locallyPlaced`): that host looks at its own disk when it is asked (`resume.observe`, `observeOnHost`),
+ * so remote hosts no longer turn the probe off. `remoteHosts` is kept for callers that still pass it.
  */
-export function resumeProbeEnabled(option: boolean | object | undefined, remoteHosts: number): boolean {
-  return option === undefined ? remoteHosts === 0 : option !== false;
+export function resumeProbeEnabled(option: boolean | object | undefined, remoteHosts?: number): boolean {
+  void remoteHosts;
+  return option === undefined ? true : option !== false;
 }
 
 /**
  * A `locate` that answers only for a task last placed on a host of this machine: a task placed on a remote host, or never placed in
- * an installation that has remote hosts, is nowhere the probe can look, so its files stay `unknown` and the owner decides.
+ * an installation that has remote hosts, is nowhere the probe can look from here, so its files stay `unknown` here (a remote host's own look answers for the first) and the owner decides.
  */
-export function locallyPlaced(remoteHostIds: ReadonlySet<string>, placedHostOf: (taskId: string) => Promise<string | undefined>, locate: (taskId: string) => Promise<ProbeLocation | undefined>): (taskId: string) => Promise<ProbeLocation | undefined> {
-  return async (taskId) => {
+export function locallyPlaced(remoteHostIds: ReadonlySet<string>, placedHostOf: (taskId: string) => Promise<string | undefined>, locate: (taskId: string, projectId: string) => Promise<ProbeLocation | undefined>): (taskId: string, projectId: string) => Promise<ProbeLocation | undefined> {
+  return async (taskId, projectId) => {
     if (remoteHostIds.size > 0) {
       const placed = await placedHostOf(taskId);
       if (placed === undefined || remoteHostIds.has(placed)) return undefined;
     }
-    return await locate(taskId);
+    return await locate(taskId, projectId);
   };
+}
+
+/**
+ * Looks at files and directories a caller names (a remote host answering `resume.observe`, card L04e) under one checkout, with exactly the rules of `checkoutDependencyObserver`: nothing outside the checkout or the project's `paths`, no
+ * guess, never a throw. `locate` is asked for the task's checkout on this machine. Returns what it could read, by entry ID; the rest is left out (unknown).
+ */
+export async function observeEntries(options: Omit<DependencyObserverOptions, "manifest">, scope: { readonly taskId: string; readonly projectId: string }, entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[]): Promise<Readonly<Record<string, Observation>>> {
+  const observe = checkoutDependencyObserver({ ...options, manifest: async () => ({ taskId: scope.taskId, projectId: scope.projectId, entries: entries.map((e) => ({ id: e.id, kind: e.kind, key: e.key })) as unknown as readonly DependencyEntry[] }) });
+  return await observe(scope.taskId);
 }

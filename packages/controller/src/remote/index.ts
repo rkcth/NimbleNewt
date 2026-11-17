@@ -9,7 +9,7 @@ export { PlacementSettingsService, dataHostsFor, type PlacementSettingsBody } fr
 export { QUIET_HOST, QuietHostSettingsService, type QuietHostFigures, type QuietHostSettingsBody } from "./quiet-host-settings.js";
 export { DEFAULT_MAX_GAP_MS, DEFAULT_QUIET_AFTER_MS, QUIET_HOST_KIND, QUIET_HOST_LIMITS, QUIET_HOST_RETENTION_MS, QuietHostService, type MoveWorkResult, type QuietHostBody, type QuietHostDeps, type QuietHostNotice, type QuietHostOptions, type QuietHostPass } from "./quiet-hosts.js";
 export { ReconnectSettingsService, profileReaccept, type ReacceptMode, type ReconnectSettingsBody } from "./reconnect-settings.js";
-export { WorkspaceResponder } from "./responder.js";
+export { WorkspaceResponder, type ResponderObserve } from "./responder.js";
 export { PiStateHost, PiStateTransfers, REMOTE_STORE_PREFIX, RemotePiRestore, RemotePiState, RemoteThinkingStores, combinedPiState, isRemoteStoreId, localOnly, newPiId, parseRemoteStoreId, remoteStoreId, type PiStateHostOptions, type RemotePiRestoreOptions, type RemoteThinkingStoresOptions, type RemotePiRestoreState, type RemotePiStateOptions } from "./pi-state.js";
 export { CONTRACT_FORMAT, CONTRACT_FEATURES, checkContract, contractDigest, contractProblems, enforcementFor, requiresOf, sealContract, type ContractEnforcement, type WorkerAbilities } from "./contract.js";
 export { RELEASE_RUNNER_LIMITS, ReleaseHostRunner, type ReleaseHostRunnerOptions, type ReleaseSuiteJob, type ReleaseSuiteResult, type ReleaseTested } from "./release-runner.js";
@@ -17,3 +17,5 @@ export { commandReleaseSuite, readSuiteAnswer, type CommandSuiteConfig } from ".
 export { readReleaseHostConfig, runReleaseHost, type ReleaseHostConfig, type RunReleaseHostOptions } from "./release-host.js";
 export { RemoteScriptRuns, orderProblem, type HostScriptLaunch, type HostScriptRunner, type RemoteScriptRunsOptions } from "./script-runs.js";
 export { ScriptOrders, orderDigest, runIdOf, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
+export { OBSERVE_ON_HOST, observationOf, observeOnHost, type ObserveAsker } from "./observe.js";
+export { observeEntries } from "../dependencies/observe.js";

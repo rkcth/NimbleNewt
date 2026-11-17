@@ -170,7 +170,7 @@ export type StoredResult = Omit<WorkerTurnResult, "checkpoint">;
 /** A request for the host that holds a task's checkout (card H12m): integration, landing, refresh or quarantine, carried over the authenticated channel. The same fields as the controller's `WorkspaceCall`. */
 export interface WorkspaceAsk {
   readonly requestId: string;
-  readonly operation: "integration" | "landing" | "refresh" | "reapply" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore" | "pi-thinking-purge";
+  readonly operation: "integration" | "landing" | "refresh" | "reapply" | "release" | "quarantine" | "verify" | "pi-state-send" | "pi-state-restore" | "pi-thinking-purge" | "observe";
   readonly taskId: string;
   readonly projectId: string;
   readonly reason: string;
@@ -184,6 +184,12 @@ export interface WorkspaceAsk {
   readonly piState?: { readonly transferId: string };
   /** `pi-thinking-purge` only (card K06c): the attempts whose conversation stores on the host are to lose their stored model thinking (the retention rule's act, 14 days after the task is done). The host removes it from the stores it keeps for these attempts (never one with a call in flight) and answers which it cleaned and which it keeps none of. */
   readonly thinkingPurge?: { readonly attemptIds: readonly string[] };
+  /**
+   * `observe` only (card L04e): the files and directories a task recorded as relied on, for the host to look at again in the task's checkout on its own disk before a resumed attempt starts. The host answers, for each it could read, what it is now
+   * (`detail.observed[id]`: `exists`, and `hash` of a file's bytes or the sorted `members` of a directory); one it could not read or may not read (outside the checkout, beyond the project's `paths`, too large) is left out, which the controller reads as unknown. No
+   * content and no path ride the answer.
+   */
+  readonly observe?: { readonly entries: readonly { readonly id: string; readonly kind: "file" | "directory"; readonly key: string }[]; readonly paths?: readonly string[] };
   /** When the controller stops waiting (an ISO time). It frees the agent then, so a host must not start the work after it. */
   readonly expiresAt?: string;
 }
