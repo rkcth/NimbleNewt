@@ -293,6 +293,18 @@ export class PrincipalService {
     return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants, ...(body.credential === undefined ? {} : { credentialId: credentialIdOf(body.credential) }) }, this.#clockNow());
   }
 
+  /**
+   * The principal with this ID as it stands now (its grants and restrictions as of now, as `authenticate` gives them), or nothing when there is no such principal or it is not active. For the controller's
+   * own checks made on someone's behalf (card L04d: a recorded search is made again with the rights of whoever made it); never offered through the API, and it carries no credential.
+   */
+  async current(principalId: string): Promise<Principal | undefined> {
+    if (typeof principalId !== "string" || principalId.length < 1 || principalId.length > 200) return undefined;
+    const found = await this.#runner.get("principal", principalId);
+    const body = found?.body as unknown as PrincipalBody | undefined;
+    if (found === undefined || body === undefined || body.state !== "active") return undefined;
+    return effectiveOf(this.#runner, { id: found.id, kind: body.kind, name: body.name, grants: body.grants }, this.#clockNow());
+  }
+
   async get(principalId: string): Promise<(View<Omit<PrincipalBody, "credential">> & { hasCredential: boolean }) | undefined> {
     const found = await this.#runner.get("principal", principalId);
     if (found === undefined) return undefined;
