@@ -253,6 +253,8 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
   (provider, model, thinking), start and end time, wall time, exit code, timeout, **outcome** and the reason, the end kind,
   the last stop reason and visible characters, turns, tool calls, tokens, nudges (0 until W04), PLAN.md progress, commits
   ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout or tried to push or reach the owner's keys (contaminated; `credentialAttempts`, `guardRefusals` and `isolation` say more).
+  A Pi run also carries `argClean` (card W01b, below): `{ applied, requests, requestsChanged, stringsChanged,
+  argumentsChanged, errors }`, counts only.
 - `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
   setup, the acceptance run (`hidden-setup.log`, `hidden-tests.log`), the shipped suites (`shipped-setup.log`,
   `shipped-tests.log`), the diff stat. The record's `hidden` is the acceptance result (with `interfaceMismatch` and
@@ -324,6 +326,20 @@ descend from one that is seen, is missed; on other systems only the agent's own 
      not done, so `wrong` can undercount; a closing "Let me know ..." is a sign-off, not an announced step. Only the
      first and last 600 characters of the report (before any closing caveat note) are read for these words.
    - **unclassified**: anything the rules above do not cover; the gate requires none.
+
+## Tool-call arguments kept valid Unicode JSON (card W01b, 2026-11-17)
+
+`pi-agent.mjs` starts Pi with `-e arg-clean-extension.mjs` (beside it, so the sandbox already lets the agent's script
+read it; it reaches nothing more). Its `before_provider_request` handler (`lib/arg-clean.mjs`) replaces lone surrogates
+(U+D800..U+DFFF not part of a valid pair) with U+FFFD: in each tool call's `arguments` JSON text an unpaired `\uD800`-style
+escape becomes `\ufffd`, and a raw lone surrogate in any string of the request becomes U+FFFD. Pairs and every other byte
+stay; a request that needs nothing is passed on untouched; it never throws. Why: Pi 1.5.0's edit tool decodes an `edits`
+argument sent as a JSON string into the stored call, and pi-ai re-sends it with `JSON.stringify` and no cleaning, so a
+model's `\ud800-\udfff` made Radiance refuse the history (`server-rejected-history`, W01 night batch). It writes its
+counts to `arg-clean.json` beside the log, which the runner copies into the record as `argClean` (`applied` when any
+request was repaired). Tests: `arg-clean.test.mjs` (the cleaner, the extension through a fake runner, the night run's 77
+messages replayed through pi-ai's request builder from `fixtures/w01b-night-run-messages.jsonl`, all texts left out but
+the tool calls' arguments) and `isolation.test.mjs` (the real Pi against a stand-in server that refuses as Radiance did).
 
 ## Variants
 
