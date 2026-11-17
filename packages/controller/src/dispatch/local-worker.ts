@@ -6,7 +6,7 @@ import type { Capabilities, HostService } from "../hosts/index.js";
 import type { Principal } from "../security/principals.js";
 import type { JsonObject } from "../storage/types.js";
 import type { WorkspacePort } from "../workspace-ops/workspace-ops.js";
-import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, HostLocalWork, WorkOrder, WorkerTurnResult, WorkProgress, DoneCheckReport, DoneCheckRequest } from "./ports.js";
+import type { RecipeSummary, ToolCallRequest, ToolExecutor, ToolGateway, ToolResult, TurnUsage, WorkerHandle, WorkerHost, HostLocalWork, WorkOrder, WorkerTurnResult, WorkProgress, DoneCheckReport, DoneCheckRequest, HostSubmitView, HostStagedWork } from "./ports.js";
 
 /** An isolation session for one attempt (card A03's launcher, behind a port): the host opens one with the recipe the dispatcher stated and closes it when the attempt ends or the recipe changes. */
 export interface SandboxSession {
@@ -122,6 +122,10 @@ export interface LocalWorkerOptions {
   readonly progress?: (scope: { readonly taskId: string; readonly projectId: string; readonly planOnly?: boolean }) => Promise<WorkProgress | undefined>;
   /** Checks an attempt's work when its agent says it is done (card W05): the worker package's `doneVerifier` fits it. Absent: this host cannot check work, and a done of a task with a contract is not taken as verified. */
   readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>;
+  /** What an agent's submit is checked against (card H12n): the worker package's `LocalWorkspaces.submitView` fits it. Absent: a submit from this host is refused as unavailable. */
+  readonly submitView?: (scope: { readonly taskId: string; readonly projectId: string }) => Promise<HostSubmitView | undefined>;
+  /** Stages a task's checkout for a submission (card H12n): the worker package's `LocalWorkspaces.stageWork` fits it. Absent: this host cannot stage. */
+  readonly stage?: (scope: { readonly taskId: string; readonly projectId: string }) => Promise<HostStagedWork>;
   /** Told when a guard fails (the attempt goes on; a guard never silently stops working). */
   readonly onGuardError?: (attemptId: string, what: string, error: unknown) => void;
 }
@@ -175,6 +179,8 @@ export class LocalWorker implements WorkerHost {
   readonly workspace?: WorkspacePort;
   readonly progress?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string; readonly planOnly?: boolean }) => Promise<WorkProgress | undefined>;
   readonly verify?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest) => Promise<DoneCheckReport>;
+  readonly submitView?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }) => Promise<HostSubmitView | undefined>;
+  readonly stage?: (attemptId: string, scope: { readonly taskId: string; readonly projectId: string }) => Promise<HostStagedWork>;
   #sequence = 0;
   #beat = 0;
   /** For each attempt whose turn is running here, how much work (tool calls, model calls) it has in flight (card H12q). */
@@ -185,6 +191,9 @@ export class LocalWorker implements WorkerHost {
     const progress = options.progress;
     if (progress !== undefined) this.progress = async (_attemptId, scope) => progress({ taskId: scope.taskId, projectId: scope.projectId, ...(scope.planOnly === true ? { planOnly: true } : {}) });
     if (options.verify !== undefined) this.verify = options.verify;
+    const submitView = options.submitView, stage = options.stage;
+    if (submitView !== undefined) this.submitView = async (_attemptId, scope) => submitView({ taskId: scope.taskId, projectId: scope.projectId });
+    if (stage !== undefined) this.stage = async (_attemptId, scope) => stage({ taskId: scope.taskId, projectId: scope.projectId });
     this.hostId = options.hostId;
     this.resources = options.resources;
     this.ownerPolicy = options.ownerPolicy === true;

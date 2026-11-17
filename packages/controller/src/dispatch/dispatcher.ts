@@ -45,7 +45,7 @@ import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND,
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
-import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest } from "./ports.js";
+import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
@@ -426,6 +426,14 @@ interface StoppedEarlyCount {
 }
 /** How long the blocker of an agent that stopped early waits for its host to say what the checkout holds. */
 const PROGRESS_MS = 10_000;
+/** How long the host may take to say what a submit is checked against, or to stage the work (card H12n): git reads the whole checkout once. */
+const SUBMIT_HOST_MS = 5 * 60_000;
+/** `work` or a rejection when it has not settled within `ms`. */
+async function withinMs<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DomainError("unavailable", `the host did not answer within ${Math.round(ms / 1000)} s`)), ms); })]); }
+  finally { if (timer !== undefined) clearTimeout(timer); }
+}
 /** The bounds of what the blocker shows: the agent's last text, each plan step, and how many open steps are named. */
 const STOPPED_EARLY_SHOWN = { text: 300, step: 80, steps: 5, diff: 160 } as const;
 
@@ -1077,6 +1085,29 @@ export class DispatcherService {
   }
 
   readonly #verifying = new Map<string, Promise<unknown>>();
+
+  /**
+   * What the agent's `work.end { submit: true }` is checked against (card H12n), from the host the attempt runs on: the checkout's base, the landing branch's head, the files the agent changed and the files the landing branch changed
+   * since the base. Staff only (the ending's port, as the dispatcher's principal). `undefined` when it cannot be known: the attempt has no host, its host cannot say (`submitView` left out, a remote host today), holds no checkout for
+   * the task, fails or does not answer within `SUBMIT_HOST_MS` (the fault goes to `onError`). A submit is then refused as unavailable; nothing is guessed.
+   */
+  async submitView(by: Principal, attemptId: string): Promise<HostSubmitView | undefined> {
+    const b = (await this.#controlled(by, attemptId)).body;
+    const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
+    if (host?.submitView === undefined) return undefined;
+    try { return await withinMs(host.submitView(attemptId, { taskId: b.taskId, projectId: b.projectId }), SUBMIT_HOST_MS); } catch (error) { this.#options.onError?.(error); return undefined; }
+  }
+
+  /**
+   * Stages the attempt's work for its submission (card H12n), on the host the attempt runs on: the base, tree, patch ID and files of the staged change. Staff only. Throws `unavailable` when the attempt has no host or its host cannot
+   * stage, and passes the host's refusal on (nothing to submit, a link in the checkout); the ending then ends plainly with a `release_failed` blocker.
+   */
+  async stageWork(by: Principal, attemptId: string): Promise<HostStagedWork> {
+    const b = (await this.#controlled(by, attemptId)).body;
+    const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
+    if (host?.stage === undefined) throw new DomainError("unavailable", `the host this attempt runs on (${b.hostId ?? "none"}) cannot stage work for a submission`);
+    return withinMs(host.stage(attemptId, { taskId: b.taskId, projectId: b.projectId }), SUBMIT_HOST_MS);
+  }
 
   /**
    * Checks an agent's work.end done against the task contract before it is taken (card W05). A task whose stored contract names no evidence and no checks (or that has none) is not checked (`skipped`: today's behaviour). Otherwise the

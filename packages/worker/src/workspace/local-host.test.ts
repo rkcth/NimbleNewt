@@ -334,3 +334,47 @@ test("doneState runs no filter, diff driver, hook or fsmonitor the agent's check
     assert.deepEqual((await readdir(made.gitDir)).filter((f) => f.startsWith("nn-index-")), [], "the throwaway index is removed");
   } finally { await w.done(); }
 });
+
+test("submitView and stageWork: the base, the landing branch's head and the changed files on both sides; the staged tree and its stable patch ID; nothing to submit is refused (card H12n)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    assert.equal(await w.ws.submitView(scope), undefined, "no checkout: nothing to say");
+    await assert.rejects(w.ws.stageWork(scope), /holds no checkout/);
+    const made = await w.ws.ensure(scope);
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    assert.deepEqual(await w.ws.submitView(scope), { base, head: base, mine: [], landed: [] }, "a fresh checkout on the landing branch's head: nothing on either side");
+    await assert.rejects(w.ws.stageWork(scope), /nothing to submit/, "a checkout with no change has nothing to submit");
+    // The agent's work, not committed (it cannot commit in this layout): a changed file, a new one, a deleted one; an ignored one is not carried.
+    await writeFile(join(w.shared, "src", "b.ts"), "export const b = 1;\n");
+    await writeFile(join(w.shared, "README"), "readme\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "second");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(made.checkout, "src", "c.ts"), "export const c = 3;\n");
+    await writeFile(join(made.checkout, ".gitignore"), "build/\n");
+    await mkdir(join(made.checkout, "build"));
+    await writeFile(join(made.checkout, "build", "out.js"), "ignored\n");
+    // The landing branch moves: one file the agent also changed, one it did not.
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 10;\n");
+    await writeFile(join(w.shared, "other.ts"), "export const o = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    const head = sh(w.shared, "rev-parse", "HEAD");
+    const view = await w.ws.submitView(scope);
+    assert.deepEqual(view, { base, head, mine: [".gitignore", "src/a.ts", "src/c.ts"], landed: ["README", "other.ts", "src/a.ts", "src/b.ts"] }, "the agent's files against its base (ignored left out) and every file the landing branch changed since that base");
+    const g = (...args: string[]): string => execFileSync("git", ["--git-dir", made.gitDir, "--work-tree", made.checkout, ...args], { encoding: "utf8" });
+    assert.equal(g("diff", "--cached", "--name-only"), "", "reading changes nothing in the checkout's index");
+    const staged = await w.ws.stageWork(scope);
+    assert.equal(staged.base, base);
+    assert.deepEqual([...staged.files].sort(), [".gitignore", "src/a.ts", "src/c.ts"]);
+    assert.equal(staged.tree, g("write-tree").trim(), "the tree is what the checkout's index now holds");
+    // The patch ID is git's own stable patch ID of the staged change.
+    const expected = execFileSync("git", ["patch-id", "--stable"], { input: g("diff", "--cached", "--binary", "--full-index", base), encoding: "utf8" }).trim().split(/\s+/)[0];
+    assert.match(staged.patchId, /^[0-9a-f]{40}$/);
+    assert.equal(staged.patchId, expected);
+    assert.deepEqual(await w.ws.stageWork(scope), staged, "staging again with nothing changed gives the same tree and patch ID");
+    await writeFile(join(made.checkout, "src", "c.ts"), "export const c = 4;\n");
+    const other = await w.ws.stageWork(scope);
+    assert.notEqual(other.patchId, staged.patchId, "another change has another patch ID");
+    assert.notEqual(other.tree, staged.tree);
+  } finally { await w.done(); }
+});

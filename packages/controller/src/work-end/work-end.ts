@@ -21,7 +21,7 @@ import { reportNeeded } from "../dispatch/report.js";
  * - an owner stop wins (the attempt is no longer live, or its stop reason is the owner's: the intent is dropped, nothing is staged or submitted); an emergency stop drops the intent (`drop`);
  * - a restart finds the intents that are still open (`recover`) and completes each once;
  * - a call that had to be killed and was a write turns a submit into a plain end with the typed blocker `release_failed` (the tree cannot be trusted).
- * NOT here (remain): the real ports (dispatcher, GitBridge staging, Q01b submission records), the agent tool registration and its API operation.
+ * The ports are bound in `ports.ts` and `api/start.ts`: the dispatcher, the host's checkout (`dispatcherLanding`, `dispatcherStage`) and the Q01b submission records.
  */
 export const WORK_END_LIMITS = { result: 40, note: 1000, message: 2000, evidence: 30, evidenceItem: 200, evidencePath: 300, report: 4000, noteText: 600, answers: 3, answer: 800 } as const;
 /** The values `result` may take. Provisional (an owner question): the card names the field but not its vocabulary. */
@@ -138,8 +138,8 @@ export interface WorkEndDeps {
   };
   /** True while the task is paused, stopped or suspended (any gate on its chain): the ending is not asked for or completed then, and a stop drops it. Absent: nothing is known to be paused. */
   readonly paused?: (taskId: string) => Promise<boolean>;
-  /** The files the agent changed against the base and what the landing branch changed since (only asked for a submit). `undefined`: the checkout is unknown, which refuses the submit. */
-  readonly landing: (taskId: string) => Promise<Landed | undefined>;
+  /** The files the agent changed against the base and what the landing branch changed since (only asked for a submit), for the task and the attempt that ends. `undefined`: the checkout is unknown, which refuses the submit. */
+  readonly landing: (taskId: string, attemptId: string) => Promise<Landed | undefined>;
   /** Stages the agent's tree and opens a submission for it; returns its id. Absent: a submit cannot be completed and ends plainly with a blocker. */
   readonly submit?: (attempt: EndingAttempt, base: string, key: string) => Promise<{ readonly submissionId: string }>;
   readonly blockers: Pick<BlockerService, "openBlocker">;
@@ -280,7 +280,7 @@ export class WorkEndService {
 
     let base: string | undefined; let head: string | undefined;
     if (submit) {
-      const l = await this.#deps.landing(attempt.taskId);
+      const l = await this.#deps.landing(attempt.taskId, attemptId);
       if (l === undefined) throw new DomainError("unavailable", "the checkout's base is not known, so a submit cannot be checked; end without submitting or try again");
       const overlapping = overlapOf(l);
       if (overlapping.length > 0) throw new SubmitRefused(l.head, overlapping);
@@ -443,7 +443,7 @@ export class WorkEndService {
       await this.#guard(attemptId);
       let value: NonNullable<WorkEndSteps["submitted"]>;
       // The landing branch may have moved while the calls settled: the overlap is checked again before anything is staged.
-      const l = await this.#deps.landing(attempt.taskId).catch(() => undefined);
+      const l = await this.#deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
       const overlap = l === undefined ? [] : overlapOf(l);
       if (l === undefined || overlap.length > 0) {
         const summary = l === undefined
