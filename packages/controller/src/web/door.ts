@@ -115,7 +115,7 @@ const VIEWS: Readonly<Record<string, readonly { readonly key: string; readonly o
   "admin-providers": [{ key: "providers", op: "provider.list", args: {} }, { key: "secrets", op: "secret.status", args: {} }],
   "admin-secrets": [{ key: "secrets", op: "secret.status", args: {} }],
   "admin-team": [{ key: "agents", op: "agent.list", args: { limit: 100 } }, { key: "teams", op: "team.list", args: { limit: 100 } }],
-  "admin-policy": [{ key: "readiness", op: "setup.readiness", args: {} }, { key: "suggestion", op: "approval.suggestion", args: {} }, { key: "grants", op: "grant.list", args: { limit: 50 } }, { key: "settings", op: "settings.effective", args: { prefix: "grants" } }],
+  "admin-policy": [{ key: "readiness", op: "setup.readiness", args: {} }, { key: "suggestion", op: "approval.suggestion", args: {} }, { key: "grants", op: "grant.list", args: { limit: 50 } }, { key: "reliance", op: "grant.reliance", args: {} }, { key: "settings", op: "settings.effective", args: { prefix: "grants" } }],
   "admin-access": [{ key: "web", op: "web.access.get", args: {} }, { key: "local", op: "host.local.get", args: {} }, { key: "sandbox", op: "sandbox.status", args: {} }],
   "admin-operations": [{ key: "lifecycle", op: "lifecycle.status", args: { scope: { kind: "installation", id: "installation" } } }, { key: "workers", op: "workers.limits.get", args: {} }, { key: "capacity", op: "capacity.limits.get", args: {} }, { key: "dispatch", op: "dispatch.limits.get", args: {} }, { key: "quiet", op: "host.quiet.get", args: {} }, { key: "sandbox", op: "sandbox.status", args: {} }],
   "admin-sandbox": [{ key: "sandbox", op: "sandbox.status", args: {} }],

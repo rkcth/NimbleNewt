@@ -589,7 +589,7 @@ test("a standing right is taken back from the page with the owner's reason, afte
   page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
   chip(form, "Take back").click(); await settle();
   assert.equal(asked.length, 1);
-  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Work that relies on it may stop`));
+  assert.match(asked[0]!, new RegExp(`^Take back task\\.update for agent:ann in proj-1 \\(${GRT}\\)\\? Which running work relies on this right could not be checked just now\\. Work that relies on it may stop`));
   const posts = sent(page);
   assert.equal(posts.length, 1);
   assert.deepEqual([posts[0]!.method, posts[0]!.path, posts[0]!.body], ["POST", "/web/admin/grant-revoke", { grantId: GRT, reason: "the project is finished" }]);
@@ -597,6 +597,57 @@ test("a standing right is taken back from the page with the owner's reason, afte
   assert.match(text(page.doc.byId.get("log")!), /Take back the right task\.update for agent:ann/);
   assert.ok(![...page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)));
   assert.deepEqual(page.doc.violations, []);
+});
+
+// Follow-up to card T7: the running work that may rely on a right is shown on its take-back card and in the question asked before it is sent.
+const work = (n: number) => Array.from({ length: n }, (_, i) => ({ agentId: "ann", taskId: "task-" + String(i).padStart(20, "a"), title: i === 0 ? HOSTILE : "Chore " + i, projectId: "proj-1", attemptId: "att-" + i, attemptNumber: i + 1 }));
+const relyViews = (reliance: unknown) => { const v = ownerEditViews(); (v["admin-policy"] as Record<string, unknown>)["reliance"] = reliance; return v; };
+const takeBack = async (reliance: unknown) => {
+  const asked: string[] = [];
+  const page = boot(relyViews(reliance), [(c) => (c.path === "/web/admin/grant-revoke" ? { status: 201, body: queuedWith("Take back") } : undefined)], () => true);
+  const policy = await admin(page, "policy", "Policy");
+  const form = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: "))[0]!;
+  inputOf(form, "Why take back task.update for agent:ann in proj-1?").value = "all done";
+  page.confirmWith(((q: string) => { asked.push(q); return true; }) as never);
+  chip(form, "Take back").click(); await settle();
+  return { page, form, asked, shown: form.find((e) => e.className === "card-line").map((e) => e.textContent) };
+};
+
+test("the take-back card lists the running work that may rely on the right, ten at most with the rest counted, and the question repeats it (follow-up to card T7)", async () => {
+  const got = await takeBack({ items: [{ grantId: GRT, total: 12, complete: true, items: work(10) }, { grantId: "grt-" + "e".repeat(20), total: 0, complete: true, items: [] }] });
+  assert.equal(got.shown[0], "Running work that relies on it");
+  assert.equal(got.shown[1], "12 running tasks may rely on it:");
+  assert.equal(got.shown.filter((l) => /^".*" \(task task-a+\d, agent ann, attempt \d+\)$/.test(l)).length, 10);
+  assert.equal(got.shown[12], "2 more not listed.");
+  assert.match(got.shown[2]!, /^"/);
+  assert.equal(got.asked.length, 1);
+  assert.match(got.asked[0]!, /\? 12 running tasks may rely on it: "[^]*" \(task task-a+\d, agent ann, attempt 1\)[^]* Work that relies on it may stop/s);
+  assert.doesNotMatch(got.asked[0]!, /Chore 3/, "the question names the first few, the card the ten");
+  assert.equal(sent(got.page).length, 1);
+  assert.deepEqual(got.page.doc.violations, []);
+  assert.ok(![...got.page.doc.tags()].some((x) => /^(script|img|iframe|a)$/.test(x)), "a title is only text");
+});
+
+test("the take-back card says so when nothing runs, when not every record could be read, when the right is not in the read and when the read failed (follow-up to card T7)", async () => {
+  const none = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, items: [] }] });
+  assert.deepEqual(none.shown.slice(0, 2), ["Running work that relies on it", "No running work relies on it."]);
+  assert.match(none.asked[0]!, /^Take back [^?]*\? Work that relies on it may stop/, "nothing is added to the question when nothing runs");
+  const part = await takeBack({ items: [{ grantId: GRT, total: 1, complete: false, items: work(1) }] });
+  assert.equal(part.shown[1], "1 or more running tasks may rely on it:");
+  const empty = await takeBack({ items: [{ grantId: GRT, total: 0, complete: false, items: [] }] });
+  assert.match(empty.shown[1]!, /^No running work relies on it, but not every record could be read, so some may not be listed\.$/);
+  const missing = await takeBack({ items: [] });
+  assert.match(missing.shown[1]!, /is not known/);
+  assert.match(missing.asked[0]!, /is not known/);
+  // T7b review: a right that gives nothing now (ended, lapsed, not started) is said so, and a title cut at an emoji never keeps half of it.
+  const off = await takeBack({ items: [{ grantId: GRT, total: 0, complete: true, inForce: false, items: [] }] });
+  assert.match(off.shown[1]!, /^It is not in force now \(it ended, lapsed or has not started\), so no running work relies on it now\.$/);
+  const cut = await takeBack({ items: [{ grantId: GRT, total: 1, complete: true, items: [{ ...work(1)[0]!, title: "x".repeat(56) + "\u{1F600}" + "y".repeat(20) }] }] });
+  assert.equal(cut.shown[2], '"' + "x".repeat(56) + '..." (task task-aaaaaaaaaaaaaaaaaaa0, agent ann, attempt 1)');
+  assert.ok(!/[\ud800-\udfff]/.test(cut.asked[0]!), "the question keeps no half of a character");
+  const bad = await takeBack({ error: { code: "unavailable", message: "no" } });
+  assert.match(bad.shown[1]!, /could not be checked just now/);
+  assert.match(bad.asked[0]!, /could not be checked just now/);
 });
 
 test("the edit forms keep nothing but what the owner typed in the outbox, and a hostile name or right is only text (card U08 follow-up)", async () => {
@@ -632,4 +683,30 @@ test("two agents with one name and one right held in two projects are told apart
   const takes = policy.find((e) => e.className === "card" && e.textContent.startsWith("Take back: ")).map((c) => c.find((e) => e.tag === "h4")[0]!.textContent);
   assert.deepEqual(takes, ["Take back: task.update for agent:ann in proj-1", "Take back: task.update for agent:ann in every project"]);
   assert.deepEqual(page.doc.violations, []);
+});
+
+test("second review: the page's clip is unchanged for text without a pair and never keeps half of one, at every length and cut position and for every limit the page uses", () => {
+  // The page's own clip, taken from the script as served (the T7b change to it touches every clipped field on the page).
+  const lines = APP_JS.split("\n");
+  const src = ["UNSEEN = ", "function unseen(", "function clip("].map((k) => lines.find((l) => l.includes(k))!.trim()).join("\n");
+  const clip = runInNewContext(`${src}\nclip`) as (v: unknown, n: number) => string;
+  const before = (v: string, n: number) => (v.length > n ? v.slice(0, n - 3) + "..." : v);
+  const E = "\u{1F600}";
+  const half = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const limits = [...new Set((APP_JS.match(/clip\([^()]*, (\d+)\)/g) ?? []).map((m) => Number(/(\d+)\)$/.exec(m)![1])))];
+  assert.ok(limits.length >= 10 && limits.every((n) => n >= 4), `the limits the page uses: ${limits}`);
+  for (const n of limits) for (let len = 0; len <= n + 3; len++) {
+    const plain = "a".repeat(len);
+    assert.equal(clip(plain, n), before(plain, n), `plain ${len} at ${n}`);
+    for (let at = 0; at + 2 <= len; at++) {
+      const s = "a".repeat(at) + E + "a".repeat(len - at - 2);
+      const got = clip(s, n);
+      if (len <= n) assert.equal(got, s, "text that fits is kept whole");
+      else {
+        assert.ok(!half.test(got) && got.endsWith("...") && got.length <= n && got.length >= n - 4, `${n} ${len} ${at}: ${JSON.stringify(got)}`);
+        assert.equal(got, at + 2 <= n - 3 ? s.slice(0, n - 3) + "..." : s.slice(0, Math.min(at, n - 3)) + "...", "only an emoji that would be cut is left out");
+      }
+    }
+  }
+  assert.deepEqual([clip(null, 10), clip(undefined, 10), clip(0, 10), clip("", 10), clip("a", 10)], ["", "", "0", "", "a"]);
 });

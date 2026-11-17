@@ -162,7 +162,7 @@ export interface StateApiDeps {
   readonly messages?: Pick<AgentMessageService, "send" | "readable" | "acknowledge" | "markHandled" | "get" | "inbox" | "setFocus" | "release" | "askOwner" | "ownerQuestions" | "answerOwner" | "referencesFor">;
   readonly ownerQuestions?: Pick<AgentMessageService, "askOwner" | "ownerQuestions" | "answerOwner">;
   /** When present, the owner can grant and revoke rights through the API (card U03e). */
-  readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list">;
+  readonly grants?: Pick<GrantService, "grant" | "revoke" | "getGrant" | "list"> & Partial<Pick<GrantService, "reliance">>;
   /** When present, the owner can say which hosts may hold local-only data through the API (card H07c). */
   readonly placement?: Pick<PlacementSettingsService, "get" | "set" | "change">;
   readonly reconnect?: Pick<ReconnectSettingsService, "get" | "set"> & Pick<RemoteWorkerService, "decideReaccept" | "pending">;
