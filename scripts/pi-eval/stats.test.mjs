@@ -74,3 +74,19 @@ test("an interface mismatch is a non-finish that counts in the false-done gate, 
   assert.match(text, /matches shipped wording \(informational, not a gate\): 0\/2/);
   assert.match(text, /interface mismatch .*1 run\(s\)/);
 });
+
+test("the report counts timeouts whose acceptance tests pass, and warns when variant B mixes the pre-W06 and W06 prompts", () => {
+  const late = { variant: "A", size: "S", outcome: "timeout", wallMs: 1, hidden: { passed: true } };
+  const stuck = { variant: "A", size: "S", outcome: "timeout", wallMs: 1, hidden: { passed: false } };
+  const r = renderReport([late, late, stuck, ...runs("A", "S", { "verified-finish": 1 })]);
+  assert.match(r.text, /timeouts whose acceptance tests pass at the limit \(the work was done, the agent did not end\): 2 of 3/);
+  assert.equal(r.groups[0].counts.timeout, 3, "still non-finishes");
+  assert.doesNotMatch(renderReport(runs("A", "S", { "verified-finish": 1 })).text, /timeouts whose/, "no line without a timeout");
+  const old = { variant: "B", size: "S", outcome: "verified-finish", wallMs: 1 };
+  const w06 = { ...old, completionRules: { sha256: "ab", chars: 10 } };
+  assert.match(renderReport([old, w06]).text, /WARNING: variant B mixes two prompts: 1 run\(s\) before card W06 .* and 1 with the W06 completion rules/);
+  assert.doesNotMatch(renderReport([w06, w06]).text, /mixes two prompts/);
+  assert.doesNotMatch(renderReport([old, old]).text, /mixes two prompts/);
+  // An interface mismatch is reported as counted in the false-done gate, as gatesFor counts it.
+  assert.match(renderReport([{ variant: "A", size: "S", outcome: "interface-mismatch", wallMs: 1 }]).text, /false done 1\/1[\s\S]*counted as non-finishes and in the false-done gate/);
+});

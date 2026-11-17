@@ -18,11 +18,23 @@
 //                        they demand nothing the prompt or the base source does not show (spec fit, see README), and
 //                        run the shipped suites at the solution (--no-shipped skips that informational part)
 //   --keep               keep the throwaway checkouts      --dry-run  print what would run
+//   --token-budget N     stop starting runs once the batch's finished runs used N input+output tokens (cache reads not
+//                        counted); a run already started ends at its own limit
+//   --idle-wait-minutes N  how long to wait for an idle Radiance before a run (default 30); past it the batch stops
+//   --test-slot CMD      a slot command (e.g. /tmp/nn-slot.sh) the bench's own builds and grading runs hold a slot of;
+//                        the agent's work never does (default PI_EVAL_TEST_SLOT, else none)
+//   --no-radiance-gate   skip the Radiance check. With the task set on the radiance provider (any agent but the bench's
+//                        Claude control agent and stub, which never reach Radiance) the bench reads
+//                        GET /stats and /v1/models before each run (key only in the Authorization header) and starts a
+//                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
+//                        loads, switches or restarts anything, and with the gate on runs go one at a time
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runBatch } from "./lib/batch.mjs";
+import { radianceGate } from "./lib/radiance-gate.mjs";
 import { appendJsonl, calibrateOne, killProcessesInSync, runOne } from "./lib/runner.mjs";
 import { renderReport } from "./lib/stats.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
@@ -36,12 +48,19 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument ${a}`);
     const [k, inline] = a.slice(2).split(/=(.*)/s);
-    if (["calibrate", "keep", "dry-run", "no-report", "help", "no-shipped"].includes(k)) { o.flags.add(k); continue; }
+    if (["calibrate", "keep", "dry-run", "no-report", "help", "no-shipped", "no-radiance-gate"].includes(k)) { o.flags.add(k); continue; }
     const v = inline ?? argv[++i];
     if (v === undefined) throw new Error(`--${k} needs a value`);
     o[k] = v;
   }
   return o;
+}
+
+/** The bench's own agents that never send a request to Radiance: agents/ (the Claude control agent, its fake) and the stub. */
+export function offServerAgent(agentPath) {
+  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const a = real(agentPath);
+  return dirname(a) === real(join(here, "agents")) || a === real(join(here, "stub-agent.mjs"));
 }
 
 const defaultRoot = (envName, sub) => process.env[envName] || (existsSync("/srv/code/worktrees-pi") ? join("/srv/code/worktrees-pi", sub) : join(here, "..", "..", "..", "pi-eval", sub));
@@ -80,6 +99,7 @@ async function main() {
   const activeDirs = new Set();
   const ctx = {
     set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs,
+    testSlot: (o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT ?? "") ? [o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT] : null,
     keep: o.flags.has("keep"), skipShipped: o.flags.has("no-shipped"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
   };
@@ -113,25 +133,35 @@ async function main() {
 
   const jobs = [];
   for (const t of tasks) for (const v of variants) for (let r = 1; r <= repeats; r++) jobs.push([t, v, r]);
+  const tokenBudget = o["token-budget"] === undefined ? Infinity : Number(o["token-budget"]);
+  if (!(tokenBudget > 0)) throw new Error("--token-budget must be a positive number");
+  // The shared-server guard: on whenever the task set routes to Radiance, for any agent (the default Pi agent named or not,
+  // or a wrapper of it), except the bench's own agents that never reach Radiance (the Claude control agent and its fake,
+  // the stand-in stub) or an explicit --no-radiance-gate.
+  const useGate = !o.flags.has("no-radiance-gate") && set.agent.provider === "radiance" && !offServerAgent(agentPath);
+  if (useGate && concurrency !== 1) throw new Error("the Radiance gate runs one agent at a time: use --concurrency 1, or --no-radiance-gate on a server nobody else uses");
+  const idleWaitMinutes = Number(o["idle-wait-minutes"] ?? 30);
+  if (!(idleWaitMinutes >= 0)) throw new Error("--idle-wait-minutes must be 0 or more");
   if (o.flags.has("dry-run")) {
     for (const [t, v, r] of jobs) process.stdout.write(`${t.id} (${t.size}) variant ${v} repeat ${r}: base ${t.base.slice(0, 8)}, ${t.testFiles.length} hidden test file(s), limit ${ctx.timeoutMinutes ?? t.timeoutMinutes} min\n`);
     process.stdout.write(`${jobs.length} run(s), concurrency ${concurrency}, results ${resultsDir}, checkouts ${workRoot}, agent ${agentPath}\n`);
+    process.stdout.write(`Radiance gate ${useGate ? `on (idle wait ${idleWaitMinutes} min)` : "off"}, token budget ${Number.isFinite(tokenBudget) ? tokenBudget : "none"}\n`);
     return 0;
   }
   const resultsFile = join(resultsDir, "results.jsonl");
-  ctx.log(`${batchId}: ${jobs.length} run(s), concurrency ${concurrency}, results ${resultsFile}`);
-  const records = [];
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
-    while (next < jobs.length) {
-      const [t, v, r] = jobs[next++];
-      const rec = await runOne(ctx, t, v, r);
-      records.push(rec);
-      await appendJsonl(resultsFile, rec);
-    }
-  }));
+  ctx.log(`${batchId}: ${jobs.length} run(s), concurrency ${concurrency}, results ${resultsFile}, Radiance gate ${useGate ? "on" : "off"}, token budget ${Number.isFinite(tokenBudget) ? tokenBudget : "none"}`);
+  const gate = useGate ? radianceGate({ model: set.agent.model, maxWaitMs: idleWaitMinutes * 60_000, log: ctx.log }) : null;
+  const { records, stopped, spent } = await runBatch({
+    jobs, concurrency, gate, tokenBudget, log: ctx.log,
+    runJob: (t, v, r, opts) => runOne(ctx, t, v, r, opts),
+    onRecord: (rec) => appendJsonl(resultsFile, rec),
+  });
+  if (stopped !== null) await appendJsonl(join(resultsDir, "batches.jsonl"), { batchId, stopped, spent, tokenBudget: Number.isFinite(tokenBudget) ? tokenBudget : null });
   if (!o.flags.has("no-report")) {
     const rep = renderReport(records, { title: `Pi completion bench ${batchId}` });
+    const tail = [`\nbatch: ${records.length} of ${jobs.length} run(s), ${spent} input+output tokens${Number.isFinite(tokenBudget) ? ` (budget ${tokenBudget})` : ""}, Radiance gate ${useGate ? "on" : "off"}`];
+    if (stopped !== null) tail.push(`batch stopped early: ${stopped.reason}; ${stopped.remaining} run(s) not started`);
+    rep.text += tail.join("\n");
     await writeFile(join(resultsDir, `${batchId}-report.md`), `${rep.text}\n`);
     process.stdout.write(`${rep.text}\n`);
   }
