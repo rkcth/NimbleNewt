@@ -543,6 +543,9 @@ export class GitBridge {
     const tip = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
     const sharedGit = await this.#sharedGitDir(options.shared);
     const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
+    // The same attribute neutralizing as `stage` (second review): without it a `text`, `eol`, `ident` or encoding attribute in the checkout converts a file back to the base's content here while `stage` carries
+    // it changed, so a file the submission carries would be missing from `mine` and its overlap with the landing branch unseen.
+    await this.#neutralAttributes(options.gitDir);
     const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
     let mine: string[];
     try {

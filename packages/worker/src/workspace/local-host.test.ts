@@ -449,3 +449,41 @@ test("a checkout holding a platform commit that has not landed (a release, H12o)
     assert.deepEqual(view.landed, ["src/a.ts"], "the landing branch's change since the checkout's start");
   } finally { await w.done(); }
 });
+
+test("the view lists a file the staging carries even when the checkout's attributes would convert it back to the base (line endings, ident): a conversion cannot hide an overlap (card H12n second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    await writeFile(join(w.shared, "src", "id.ts"), "// $Id$\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "ident");
+    const made = await w.ws.ensure(scope);
+    // The agent's changes differ from the base only in what a `text` or `ident` attribute would normalize away.
+    await writeFile(join(made.checkout, ".gitattributes"), "src/a.ts text\nsrc/id.ts ident\n");
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 1;\r\n");
+    await writeFile(join(made.checkout, "src", "id.ts"), "// $Id: 0123456789abcdef0123456789abcdef01234567 $\n");
+    // The landing branch changes both files.
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 10;\n");
+    await writeFile(join(w.shared, "src", "id.ts"), "// $Id$ landed\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    const view = (await w.ws.submitView(scope))!;
+    const staged = await w.ws.stageWork(scope);
+    for (const f of staged.files) assert.ok(view.mine.includes(f), `${f} is carried by the staging, so the view lists it as the agent's`);
+    assert.deepEqual(view.mine, [".gitattributes", "src/a.ts", "src/id.ts"]);
+    assert.deepEqual(view.landed, ["src/a.ts", "src/id.ts"]);
+  } finally { await w.done(); }
+});
+
+test("two different binary changes never share a patch ID: the staged patch carries the binary content (card H12n second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    const made = await w.ws.ensure(scope);
+    await writeFile(join(made.checkout, "logo.bin"), Buffer.from([0, 1, 2, 3, 0, 255, 254, 0, 7]));
+    const one = await w.ws.stageWork(scope);
+    await writeFile(join(made.checkout, "logo.bin"), Buffer.from([0, 1, 2, 3, 0, 255, 254, 0, 8]));
+    const two = await w.ws.stageWork(scope);
+    assert.deepEqual([one.files, two.files], [["logo.bin"], ["logo.bin"]]);
+    assert.notEqual(one.tree, two.tree);
+    assert.notEqual(one.patchId, two.patchId, "the patch ID names the binary content, not only the file name");
+  } finally { await w.done(); }
+});
