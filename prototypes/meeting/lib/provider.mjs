@@ -24,8 +24,9 @@ function openaiProvider(cfg) {
   const envFile = (cfg.envFile ?? "~/.config/nimblenewt/openai.env").replace(/^~/, homedir());
   const base = cfg.baseUrl ?? "https://api.openai.com/v1";
   // A key is sent only to the host it belongs to (OpenAI by default, or the host the caller named with its own key file), never with noAuth.
-  const own = cfg.envFile !== undefined || new URL(base).hostname === "api.openai.com";
-  const key = cfg.noAuth || !own ? undefined : (process.env[cfg.apiKeyEnv ?? "OPENAI_API_KEY"] ?? loadEnvFile(envFile)[cfg.apiKeyEnv ?? "OPENAI_API_KEY"]);
+  // cfg.apiKey: a key the caller read from the configuration of the host it names (the Radiance route reads Pi's own config).
+  const own = cfg.apiKey !== undefined || cfg.envFile !== undefined || new URL(base).hostname === "api.openai.com";
+  const key = cfg.noAuth || !own ? undefined : (cfg.apiKey ?? process.env[cfg.apiKeyEnv ?? "OPENAI_API_KEY"] ?? loadEnvFile(envFile)[cfg.apiKeyEnv ?? "OPENAI_API_KEY"]);
   if (!key && !cfg.noAuth && own) throw new Error("no API key (set the environment variable or the env file)");
   const maxParam = cfg.maxTokensParam ?? "max_completion_tokens";
   return {
@@ -56,6 +57,8 @@ function openaiProvider(cfg) {
           input: u.prompt_tokens ?? 0,
           cached: u.prompt_tokens_details?.cached_tokens ?? json.timings?.cache_n ?? 0,
           output: u.completion_tokens ?? 0,
+          // hidden reasoning inside the output count, when the server reports it (Radiance and OpenAI do); visible = output - reasoning
+          ...(typeof u.completion_tokens_details?.reasoning_tokens === "number" ? { reasoning: u.completion_tokens_details.reasoning_tokens } : {}),
         },
         ms: Date.now() - started,
       };
