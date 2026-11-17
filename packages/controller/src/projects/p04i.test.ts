@@ -298,6 +298,27 @@ test("an answer of ABORTED (the controller closing) is never taken as the check'
   assert.equal(m.calls.length, 2);
 });
 
+// Re-check of the second review: the address check and Node's client read the same host and port. The connection is stopped before it is made (nothing leaves this process), and what the client was about to connect to is compared with what the check read.
+test("an address is asked where the check read it: legitimate odd forms are kept, port 0 (which the client would turn into 80) is refused", async () => {
+  const http = await import("node:http");
+  const https = await import("node:https");
+  const real = [http.Agent.prototype.createConnection, https.Agent.prototype.createConnection] as const;
+  let seen: { host?: string; port?: number } | undefined;
+  for (const A of [http.Agent, https.Agent]) A.prototype.createConnection = function (options: { host?: string; port?: number }) { seen = { host: options.host!, port: options.port! }; throw new Error("stopped before connecting"); } as never;
+  try {
+    const { probeUrl } = await import("./probes.js");
+    // [address, host the client must connect to, port]: IPv6, an IDN, a top port with escapes and a query, a backslash written as an escape in the path, a full-width letter, a number host, a padded port.
+    for (const [url, host, port] of [["http://[::1]:8080/h", "::1", 8080], ["https://bücher.example/health", "xn--bcher-kva.example", 443], ["http://web.example:65535/a%20b?x=1&y=%2F", "web.example", 65535], ["http://a.example/%5C@10.0.0.1/", "a.example", 80], ["http://ｗeb.example/", "web.example", 80], ["http://0x7f.1:9/", "127.0.0.1", 9], ["http://web.example:0080/", "web.example", 80], ["HTTPS://[::FFFF:127.0.0.1]/", "::ffff:7f00:1", 443]] as const) {
+      assert.equal(probeUrl(url), url, url);
+      seen = undefined;
+      const answer = await nodeProbeRequest(url, 2000);
+      assert.ok("error" in answer, url);
+      assert.deepEqual(seen, { host, port }, url);
+    }
+    for (const url of ["http://web.example:0/", "http://web.example:00/health", "https://web.example:0"]) assert.throws(() => probeUrl(url), /port 0/, url);
+  } finally { http.Agent.prototype.createConnection = real[0]; https.Agent.prototype.createConnection = real[1]; }
+});
+
 // The real request, against a server on this machine only.
 test("the real request: a status is read without the body, a redirect is not followed, silence times out, a closed port is refused; nothing throws", async () => {
   const hits: string[] = [];

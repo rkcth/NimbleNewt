@@ -44,6 +44,8 @@ export function probeUrl(value: unknown): string {
   try { u = new URL(value); } catch { return invalid("url", "is not an address (for example https://web.example.com/health)"); }
   if (u.protocol !== "http:" && u.protocol !== "https:") return invalid("url", "must start with http:// or https://");
   if (u.hostname === "") return invalid("url", "must name a host");
+  // Port 0 is kept by the address parser as written, but Node's client takes it for "no port" and asks the scheme's own (80 or 443), so the address would not be asked as shown (re-check of the second review).
+  if (u.port === "0") return invalid("url", "must not name port 0");
   if (u.username !== "" || u.password !== "") return invalid("url", "must not carry a user name or password; a health address that needs a credential cannot be probed");
   if (u.hash !== "") return invalid("url", "must not have a # part");
   noCredential(value, "url");
