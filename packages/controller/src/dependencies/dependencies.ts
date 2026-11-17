@@ -100,7 +100,7 @@ export class DependencyService {
     if (this.#searches === undefined) throw new DomainError("unavailable", "this controller does not make recorded searches again");
     const projectId = checkProjectId(query.projectId);
     // Only someone who could rely on a search there asks: the answer carries the project's event position, which is not for a caller outside the project (nor for a task credential of another project).
-    if (!this.#maySearchFor(by, projectId)) throw new DomainError("forbidden", `${by.id} may not record a search of that project`);
+    if (!(await this.#maySearchFor(by, projectId))) throw new DomainError("forbidden", `${by.id} may not record a search of that project`);
     if (typeof query.query !== "string") invalid("query", "must be text");
     const key = query.key ?? query.query.replace(/[\0\r\n]+/g, " ").slice(0, DEPENDENCY_LIMITS.key);
     if (typeof key !== "string" || key.length < 1 || key.length > DEPENDENCY_LIMITS.key || /[\0\r\n]/.test(key)) invalid("key", `must be 1 to ${DEPENDENCY_LIMITS.key} characters on one line`);
@@ -164,13 +164,20 @@ export class DependencyService {
   // ---- searches the controller makes again (card L04d) ------------------------------------------------------------------------
 
   /** Whether this caller may ask what to record for a search of the project: the owner (inside a task credential's project), or one who may work a task there or read its desk records or histories. */
-  #maySearchFor(by: Principal, projectId: string): boolean {
+  async #maySearchFor(by: Principal, projectId: string): Promise<boolean> {
     if (!inTaskScope(by, projectId)) return false;
     if (by.kind === "owner") return true;
+    // A project that does not exist is refused like one the caller has no right in, even for a grant over every project (second review): the answer would otherwise tell which IDs exist.
+    if ((await this.#runner.get("project", projectId)) === undefined) return false;
     const own = by.taskScope === undefined ? {} : { resource: { kind: "task", id: by.taskScope.taskId } };
     if (allows(by, "attempt.work", projectId, own) || allows(by, "desk.read", projectId) || allows(by, "history.read", projectId)) return true;
-    // A right to work one named task of the project counts as well.
-    return by.grants.some((g) => g.resource?.kind === "task" && allows(by, "attempt.work", projectId, { resource: g.resource }));
+    // A right to work one named task counts as well, only when that task is in this project: a one-task grant whose project is `*` says nothing about other projects (second review).
+    for (const g of by.grants) {
+      if (g.resource?.kind !== "task" || !allows(by, "attempt.work", projectId, { resource: g.resource })) continue;
+      const task = (await this.#runner.get("task", g.resource.id).catch(() => undefined))?.body as unknown as TaskBody | undefined;
+      if (task?.projectId === projectId) return true;
+    }
+    return false;
   }
 
   /** Whether the controller itself judges this search: it has the port, and the search is of the task's own project. A search of another project stays the worker's to observe. */

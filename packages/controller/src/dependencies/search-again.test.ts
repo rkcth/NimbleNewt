@@ -173,6 +173,50 @@ for (const backend of backends) {
     assert.equal((await status(c, owner))["pond filter"], "cursor-expired");
   });
 
+  suite("second review: a project that does not exist answers like one without rights, a one-task right over every project counts only in its task's project, and a hit's title or status alone is a change", async (c) => {
+    const answer = async (by: Principal, projectId: string): Promise<string> => {
+      try { await c.deps.searchDependency(by, { projectId, query: "shed" }); return "answered"; } catch (error) { assert.ok(error instanceof DomainError); return JSON.stringify([error.code, error.message, error.field ?? null]); }
+    };
+    const missing = "proj-aaaaaaaaaaaaaaaaaaaa";
+    // Wide reads every project's desk records (a grant over `*`); Nobody has no rights at all.
+    const enrolled = async (nm: string, g: Grant[]) => { await c.principals.enroll(c.owner, { commandId: cid("e"), kind: "agent", name: nm, grants: g }); return c.principals.authenticate((await c.principals.issueCredential(c.owner, `agent:${nm}`)).token); };
+    const wide = await enrolled("wide", [{ action: "desk.read", project: "*" }]);
+    assert.equal((await c.deps.searchDependency(wide, { projectId: c.b, query: "shed" })).kind, "search", "a right over every project reaches B");
+    const nobody = await enrolled("nobody", []);
+    const refusedHere = await answer(nobody, c.b);
+    const refusedMissing = await answer(nobody, missing);
+    assert.notEqual(refusedHere, "answered");
+    assert.equal(refusedMissing, refusedHere, "the same refusal, word for word, for a project that does not exist and one without rights");
+    assert.equal((await answer(wide, missing)).replace("agent:wide", "agent:nobody"), refusedHere, "even a right over every project gets that refusal for a project that does not exist");
+    // A one-task right whose project is `*` (the owner may grant it directly) reaches the project of its task only.
+    const oneTask: Principal = { ...nobody, grants: [{ action: "attempt.work", project: "*", resource: { kind: "task", id: c.task } }] as unknown as Principal["grants"] };
+    assert.equal(await answer(oneTask, c.a), "answered", "its task's project");
+    assert.equal((await answer(oneTask, c.b)).replace("agent:nobody", "x"), refusedHere.replace("agent:nobody", "x"), "not another project");
+    assert.equal((await answer(oneTask, missing)).replace("agent:nobody", "x"), refusedHere.replace("agent:nobody", "x"), "nor one that does not exist");
+    // The owner through a credential limited to one task (as a task-scoped conversation gives it) reaches that task's project only.
+    const ownerForTask: Principal = { ...c.owner, taskScope: { taskId: c.task, projectId: c.a } };
+    assert.equal(await answer(ownerForTask, c.a), "answered");
+    assert.equal(JSON.parse(await answer(ownerForTask, c.b))[0], "forbidden", "not another project, owner or not");
+    assert.equal(JSON.parse(await answer(ownerForTask, missing))[0], "forbidden");
+
+    // Each hit is its link as well as its text: two private drafts with the same title, text and status, one Ann's and one Ben's, are two different results (a hit gone and an identical one added elsewhere never cancel out).
+    await c.note(c.ann, "Fence", "paint the fence", { visibility: "private", status: "draft" });
+    await c.note(c.ben, "Fence", "paint the fence", { visibility: "private", status: "draft" });
+    assert.notEqual(await c.judge.digest(c.ann, c.a, "fence"), await c.judge.digest(c.ben, c.a, "fence"));
+
+    // A draft hit whose title alone is revised, and then whose status alone moves, is a different result each time.
+    const id = await c.note(c.ann, "Greenhouse vents", "open the vents at noon", { status: "draft" });
+    const dep = await c.deps.searchDependency(c.ann, { projectId: c.a, query: "vents" });
+    await rec(c, [dep]);
+    assert.equal((await status(c))["vents"], "unchanged");
+    await c.desks.revise(c.ann, { commandId: cid("rv"), recordId: id, expectedRevision: 1, title: "Greenhouse vents (east)" });
+    assert.equal((await status(c))["vents"], "changed", "a new title is a new result");
+    await rec(c, [await c.deps.searchDependency(c.ann, { projectId: c.a, query: "vents" })]);
+    assert.equal((await status(c))["vents"], "unchanged");
+    await c.desks.revise(c.ann, { commandId: cid("rv"), recordId: id, expectedRevision: 2, status: "accepted" });
+    assert.equal((await status(c))["vents"], "changed", "a hit accepted since is a new result");
+  });
+
   suite("a search of another project stays the worker's to observe, and one check makes at most ten searches, the same one once", async (c) => {
     await c.note(c.ann, "Shed", "paint the shed");
     await rec(c, [{ kind: "search", key: "elsewhere", scope: { projectId: c.b, query: "shed" }, cursor: 3, hash: H("r") }]);
