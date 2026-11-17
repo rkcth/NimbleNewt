@@ -465,11 +465,36 @@ test("the view lists a file the staging carries even when the checkout's attribu
     await writeFile(join(w.shared, "src", "a.ts"), "export const a = 10;\n");
     await writeFile(join(w.shared, "src", "id.ts"), "// $Id$ landed\n");
     sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    // A checkout made before createCheckout wrote the neutral file has none (second review of the H12n re-check follow-up): the view must write it itself, not rely on the checkout's making.
+    await rm(join(made.gitDir, "info", "attributes"), { force: true });
     const view = (await w.ws.submitView(scope))!;
     const staged = await w.ws.stageWork(scope);
     for (const f of staged.files) assert.ok(view.mine.includes(f), `${f} is carried by the staging, so the view lists it as the agent's`);
     assert.deepEqual(view.mine, [".gitattributes", "src/a.ts", "src/id.ts"]);
     assert.deepEqual(view.landed, ["src/a.ts", "src/id.ts"]);
+  } finally { await w.done(); }
+});
+
+test("doneState counts a change that the checkout's attributes would convert back to the base (line endings, ident), as the staging carries it, even in a checkout made before the neutral attribute file (W05 follow-up)", { skip }, async () => {
+  const w = await world();
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    // The base itself names the attributes, so the agent's checkout holds no change of its own to .gitattributes.
+    await writeFile(join(w.shared, ".gitattributes"), "src/a.ts text\nsrc/id.ts ident\n");
+    await writeFile(join(w.shared, "src", "id.ts"), "// $Id$\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "attributes");
+    const made = await w.ws.ensure(scope);
+    // A checkout made before createCheckout wrote the neutral file has none: doneState must write it itself.
+    await rm(join(made.gitDir, "info", "attributes"), { force: true });
+    assert.equal((await w.ws.doneState(scope, []))?.changed, 0, "a fresh checkout has no change");
+    await rm(join(made.gitDir, "info", "attributes"), { force: true });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 1;\r\n");
+    await writeFile(join(made.checkout, "src", "id.ts"), "// $Id: 0123456789abcdef0123456789abcdef01234567 $\n");
+    const state = await w.ws.doneState(scope, []);
+    const staged = await w.ws.stageWork(scope);
+    assert.deepEqual(staged.files, ["src/a.ts", "src/id.ts"], "the staging carries both");
+    assert.equal(state?.changed, 2, "doneState counts what the staging carries");
+    assert.deepEqual(state?.uncommitted.slice().sort(), ["src/a.ts", "src/id.ts"], "both are uncommitted changes");
   } finally { await w.done(); }
 });
 

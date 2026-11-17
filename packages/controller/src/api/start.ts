@@ -644,6 +644,48 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   let transferLive: DatabaseTransferService | undefined;
   let toolsLive: ToolExecutionService | undefined;
   let jobRuns: LocalJobRuns | undefined;
+  // What the start has set going, for the one shutdown (`stopAll`) that both the controller's close() and a start that fails part way use: the same order, and once.
+  // Not `maintenanceLive`: the start's body declares a variable of that name of its own (the readiness view's), which would hide this one.
+  let maintenanceToStop: MaintenanceService | undefined;
+  let scratchCleanupLive: ScratchCleanupService | undefined;
+  let backupsLive: BackupService | undefined;
+  let transportLive: ConversationTransport | undefined;
+  let webChatLive: WebChatDoor | undefined;
+  let heartbeat: HeartbeatWriter | undefined;
+  let remotePiTimer: ReturnType<typeof setInterval> | undefined;
+  let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
+  let maintenanceStopped = false;
+  let stopping: Promise<void> | undefined;
+  let remotePiFirst: ReturnType<typeof setTimeout> | undefined;
+  // Ends the owner's HTTP probe requests that are out (card P04i), after the dispatcher's stop, as close() did.
+  const probeStop = new AbortController();
+  // Every step is tried in both uses, so one that fails never leaves a later one (a listener, the storage) open: the shutdown runs once, so a second close() could not finish it later.
+  // `strict` (close()): the first failure of the dispatcher's stop, the transport, the web chat, the backups or the storage is raised once every step has run. Not strict (a failed start): none is raised, so none hides the start-up error.
+  // The scratch cleanup stops after the dispatcher's loops and before the storage closes, so none of its runs writes to a closed storage.
+  const stopAll = (strict: boolean): Promise<void> => (stopping ??= (async () => {
+    let failed: { readonly error: unknown } | undefined;
+    const quiet = async (f: () => unknown): Promise<void> => { try { await f(); } catch { /* set aside, as before */ } };
+    const step = async (f: () => unknown): Promise<void> => { try { await f(); } catch (error) { if (strict) failed ??= { error }; } };
+    try {
+      maintenanceStopped = true;
+      if (remotePiTimer !== undefined) clearInterval(remotePiTimer);
+      if (remotePiFirst !== undefined) clearTimeout(remotePiFirst);
+      await quiet(() => transferLive?.dispose());
+      if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer);
+      await quiet(() => maintenanceToStop?.close());
+      await quiet(() => toolsLive?.dispose());
+      await quiet(() => jobRuns?.close());
+      await step(() => dispatch?.driver.stop());
+      probeStop.abort();
+      await quiet(() => scratchCleanupLive?.close());
+      await quiet(() => dispatch?.closeWorkers());
+      await step(() => transportLive?.close());
+      await step(() => webChatLive?.close());
+      await step(() => backupsLive?.finish());
+      await step(() => storage.close());
+    } finally { await heartbeat?.stop().catch(() => undefined); }
+    if (failed !== undefined) throw failed.error;
+  })());
   try {
     const projects = await ProjectService.open(storage, { holder: options.holder ?? "controller" });
     const epoch = projects.epoch;
@@ -804,7 +846,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // The owner's HTTP probes (card P04i): a responsibility with one has its due checks taken by the controller itself, with no agent; the request runs apart from the pass and its answer is taken on a later one.
     // Only the primary controller asks (a controller another start took the database from sends nothing), and closing ends the requests out.
     const checkProbes = ResponsibilityProbeService.withEpoch(storage, epoch);
-    const probeStop = new AbortController();
+    // `probeStop` (the requests' stop) is made before the start's `try`, so the shared shutdown (`stopAll`) ends the requests out in close() and in a failed start.
     const checkRun = CheckRunService.withEpoch(storage, epoch, { responsibilities, checks: responsibilityChecks, incidents, settings: checkSettings, projects, assignments, probe: httpCheckProbe({ setting: (id) => checkProbes.setting(id), primary: async () => (await storage.currentEpoch()) === epoch, signal: probeStop.signal }) });
     // Questions to the owner (card U12): agents ask through the API, the owner sees and answers them; the owner is told through the notifications.
     // The plain 09:00 digest gives way to scheduled stand-ups (card U11d) when they carry every decision it would tell: the active stand-ups of live projects. The stand-up service starts with the dispatcher; until then, or when it fails, none is known and the owner is told.
@@ -1028,7 +1070,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });
     // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
     let workEndLate: WorkEndService | undefined;
-    const scratchCleanup = ScratchCleanupService.withEpoch(storage, epoch, {
+    const scratchCleanup = scratchCleanupLive = ScratchCleanupService.withEpoch(storage, epoch, {
       mode: async () => (await cleanupSettings.effective()).scratch,
       patienceHours: async () => (await cleanupSettings.effective()).awaitStopHours,
       before: async (a) => workEndLate?.droppedReason(a.attemptId),
@@ -1347,7 +1389,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     let policyEditsLive: PolicyEditService | undefined;
     const policyForward = { forward: async (by: Principal, request: { commandId: string; threadId: string; seq: number }) => { if (policyEditsLive === undefined) throw new DomainError("unavailable", "forwarding owner messages needs chat to be configured"); return policyEditsLive.forward(by, request); } };
     let backupSystemRef: BackupSystem | undefined;
-    const backups = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), retentionSource: async () => { const v = await retentionSettings.effective(); const need = await preUpgradeNeed(); return { daily: v.backupDaily, weekly: v.backupWeekly, maxAgeDays: v.backupMaxAgeDays, preRestoreKept: v.preRestoreKept, preRestoreMaxAgeDays: v.preRestoreMaxAgeDays, ...(need === undefined ? {} : { preUpgrade: need }) }; }, ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryptionSource: async () => { const set = await backupEncryptionSetting!.effective(); return sealsBackups(set) ? { keyring: backupEncryption.keyring, scope: set.scope } : undefined; } }), ...(backupSecrets === undefined ? {} : { secrets: backupSecrets.source }), ...(piState === undefined ? {} : { piState }), ...(backupSigning === undefined ? {} : { signer: backupSigning }), scopeSource: () => backupScope!.effective(), scheduleSource: async () => { const c = await backupConfig!.effective(); return c.changedBy === "" ? undefined : { everyMs: c.everyHours * 3_600_000, hourUtc: c.hourUtc }; }, verifiedSource: async () => backupSystemRef?.verifiedNames() ?? new Set<string>(), afterBackup: async (made) => { await backupSystemRef?.afterBackup(made); } });
+    const backups = backupsLive = options.backup === undefined ? undefined : new BackupService(storage, { root: options.backup.directory, version: options.backup.version ?? "0.0.0", ...(options.backup.everyMs === undefined ? {} : { everyMs: options.backup.everyMs }), ...(options.backup.retention === undefined ? {} : { retention: options.backup.retention }), retentionSource: async () => { const v = await retentionSettings.effective(); const need = await preUpgradeNeed(); return { daily: v.backupDaily, weekly: v.backupWeekly, maxAgeDays: v.backupMaxAgeDays, preRestoreKept: v.preRestoreKept, preRestoreMaxAgeDays: v.preRestoreMaxAgeDays, ...(need === undefined ? {} : { preUpgrade: need }) }; }, ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...(blobStore === undefined ? {} : { blobs: blobStore }), ...(backupEncryption === undefined ? {} : { encryptionSource: async () => { const set = await backupEncryptionSetting!.effective(); return sealsBackups(set) ? { keyring: backupEncryption.keyring, scope: set.scope } : undefined; } }), ...(backupSecrets === undefined ? {} : { secrets: backupSecrets.source }), ...(piState === undefined ? {} : { piState }), ...(backupSigning === undefined ? {} : { signer: backupSigning }), scopeSource: () => backupScope!.effective(), scheduleSource: async () => { const c = await backupConfig!.effective(); return c.changedBy === "" ? undefined : { everyMs: c.everyHours * 3_600_000, hourUtc: c.hourUtc }; }, verifiedSource: async () => backupSystemRef?.verifiedNames() ?? new Set<string>(), afterBackup: async (made) => { await backupSystemRef?.afterBackup(made); } });
     // The configurable backup system (card K01c): copies to the owner's targets, their own retention, purge, test restore, key generations and the notices.
     const backupSystem: BackupSystem | undefined = backupSystemRef = options.backup === undefined ? undefined : new BackupSystem({ service: backups!, config: backupConfig!, root: options.backup.directory, notifications, retention: async () => { const v = await retentionSettings.effective(); const need = await preUpgradeNeed(); return { daily: v.backupDaily, weekly: v.backupWeekly, maxAgeDays: v.backupMaxAgeDays, preRestoreKept: v.preRestoreKept, preRestoreMaxAgeDays: v.preRestoreMaxAgeDays, ...(need === undefined ? {} : { preUpgrade: need }) }; }, ...(options.backup.now === undefined ? {} : { now: options.backup.now }), ...((options.backup.secrets?.store ?? options.backup.signing?.store) === undefined ? {} : { resolveSecret: (name: string) => { const why = keptSecretRefusal(name, keptSecretNames(), "a backup target"); if (why !== undefined) return Promise.reject(new Error(`the secret name "${name.slice(0, 80)}" cannot be a backup target's credential: ${why}; name another secret`)); return (options.backup!.secrets?.store ?? options.backup!.signing!.store).resolve(name); } }), ...(backupEncryption === undefined ? {} : { unlock: async () => { for (const m of ["passcode", "recovery"] as const) { try { return await backupEncryption!.unlock(m); } catch { /* the next method */ } } return undefined; } }), ...(options.backup.encryption === undefined ? {} : { keyringFile: options.backup.encryption.keyringFile }) });
     // The maintenance barrier (card K01h): while a restore is prepared, the stores below stop writing. Added in the order they are held.
@@ -1509,7 +1551,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+    const maintenance = maintenanceToStop = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
       // An administrator's notice is an item of its own only when it is anchored in a project (card A09 follow-up T6b): the inbox keeps one item per kind, project and record, and an item without a project would fold into the owner's
       // item for the request. Its record ID is the request's with a short code of the administrator, so each administrator has its own item, and it is closed when the request is decided or revoked. One without a project (the
       // administrator works in none) stays only on the owner's item, and finds the request with maintenance.list.
@@ -1618,14 +1660,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       }
     }
     // The files of remote hosts' conversation stores reach this controller through the worker channel (card K01i); delivering the ones a restore left for a host is tried now and then.
-    let remotePiTimer: ReturnType<typeof setInterval> | undefined;
     if (dispatch?.remote !== undefined && piTransfers !== undefined) {
       dispatch.remote.attachPiTransfers(piTransfers);
       if (remotePiRestore !== undefined) {
         const sweepRemotePi = (): void => { void remotePiRestore.sweep().catch((error: unknown) => { options.onInternalError?.(error); }); };
         remotePiTimer = setInterval(sweepRemotePi, options.backup?.restore?.remotePiEveryMs ?? 30_000);
         remotePiTimer.unref();
-        setTimeout(sweepRemotePi, 1000).unref();
+        remotePiFirst = setTimeout(sweepRemotePi, 1000);
+        remotePiFirst.unref();
       }
     }
     // Endings still open when the controller went down are completed once, from their first undone step (the tick's sweep does the same for what is left).
@@ -1672,10 +1714,10 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Records of runs a stopped (or fenced) controller could not remove are cleared once they can no longer be running. Best effort (never throws; one bounded look), waited for so it never races the close.
     if (tools !== undefined) await tools.sweepRunRecords().catch(() => 0);
     await noteFirstStart(); // without a dispatcher: still before the maintenance loop and the transport
-    const transport = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
+    const transport = transportLive = options.conversationTransport === undefined ? undefined : await ConversationTransport.listen({ mcpEnabled: async () => (await configuration.installationValue(MCP_ENABLED_SETTING)) !== false, ...options.conversationTransport, conversations, principals });
     let webChat: WebChatDoor | undefined;
-    // A web chat that cannot open (no owner chat, a refused binding, a port in use) must not leave the conversation transport listening behind a failed start.
-    if (options.webChat !== undefined) try {
+    // A web chat that cannot open (no owner chat, a refused binding, a port in use) must not leave the conversation transport listening behind a failed start: the start's failure path (`stopAll`) closes it.
+    if (options.webChat !== undefined) {
       const owned = chat;
       if (owned === undefined) throw new DomainError("invalid_command", "the web chat needs the owner chat (the chat option)", { field: "webChat" });
       webChat = await WebChatDoor.listen({ ...options.webChat, backend: {
@@ -1695,16 +1737,14 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           return r.ok ? { ok: true, result: r.result } : { ok: false, error: { code: r.error.code, message: r.error.message } };
         },
       } });
+      webChatLive = webChat;
       const door = webChat;
       webAccessPort = { settings: () => door.settings(), browsers: (ownerId) => door.browsers(ownerId), revoke: (ownerId, want, commandId) => door.revokeBrowsers(ownerId, want, undefined, commandId) };
-    } catch (error) { await transport?.close().catch(() => undefined); throw error; }
+    }
     // A change that was approved but not finished when the last controller ended is picked up again (bounded; the applier is idempotent by request ID).
     maintenance.background(maintenance.ensureSettings().then(() => maintenance.resume()));
     // The maintenance loop: settings changes and lease expiries are looked at here, a bounded number per round, never inside the settings write.
     // The loop period is the owner's setting (maintenance.settings.set tickSeconds), read before each round; a start option overrides it for tests.
-    let heartbeat: HeartbeatWriter | undefined;
-    let maintenanceStopped = false;
-    let maintenanceTimer: ReturnType<typeof setTimeout> | undefined;
     const maintenanceTick = work.wrap("maintenance.tick", () => maintenance.tick());
     const maintenanceRound = (): void => {
       if (maintenanceStopped) return;
@@ -1736,14 +1776,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       ...(dispatch === undefined ? {} : { dispatch }), ...(tools === undefined ? {} : { tools }), ...(jobRuns === undefined ? {} : { jobRuns }), ...(jobsAtStart === undefined ? {} : { jobsAtStart }), ...(mcpJobs === undefined ? {} : { mcpJobs }), ...(dispatchProblem === undefined ? {} : { dispatchProblem }),
       ...(transport === undefined ? {} : { conversationUrl: transport.url }), ...(webChat === undefined ? {} : { webChat }),
       // The heartbeat stops last: a clean stop that takes a while (a backup finishing, workers closing, the database shutting down) keeps beating, so the launcher never takes it for a hang and kills it.
-      close: async () => { try { maintenanceStopped = true; if (remotePiTimer !== undefined) clearInterval(remotePiTimer); transferLive?.dispose(); if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer); await maintenance.close().catch(() => undefined); tools?.dispose(); await jobRuns?.close().catch(() => undefined); await dispatch?.driver.stop(); probeStop.abort(); await scratchCleanup.close().catch(() => undefined); await dispatch?.closeWorkers().catch(() => undefined); await transport?.close(); await webChat?.close(); await backups?.finish(); await storage.close(); } finally { await heartbeat?.stop().catch(() => undefined); } },
+      close: () => stopAll(true),
     };
   } catch (error) {
-    toolsLive?.dispose();
-    await jobRuns?.close().catch(() => undefined);
-    await dispatch?.driver.stop().catch(() => undefined);
-    await dispatch?.closeWorkers().catch(() => undefined);
-    await storage.close().catch(() => undefined);
+    // Everything started so far is stopped as the controller's close() would (the scratch cleanup before the storage), errors set aside, and the start-up error is the one raised.
+    await stopAll(false);
     throw error;
   }
 }
