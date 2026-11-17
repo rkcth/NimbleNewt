@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { link, mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { hostname, platform, uptime } from "node:os";
 import { join, resolve } from "node:path";
 import { DomainError } from "../domain/errors.js";
+import { renameReplacing } from "../release/rename-replacing.js";
 import { canon } from "./canon.js";
 
 /**
@@ -58,6 +59,10 @@ export interface LockEnv {
   readonly warn?: (message: string) => void;
   /** The hard link (tests inject one that fails the way some file systems do). */
   readonly link?: (existing: string, path: string) => Promise<void>;
+  /** The rename that puts a rewritten lock record in place, the platform it is judged by and the pause between tries (tests inject a rename that fails the way Windows does while a reader has the file open). */
+  readonly rename?: (from: string, to: string) => Promise<void>;
+  readonly platform?: NodeJS.Platform;
+  readonly pause?: (ms: number) => Promise<void>;
 }
 
 /** The locks this process holds, by nonce: a lock file of this very process that is not in the set was leaked by a start that failed, and is taken over. */
@@ -204,21 +209,39 @@ export async function acquireDataLock(dataDirectory: string, arg?: (() => Date) 
         if (!failing) { failing = true; say(`The data directory lock ${path} could not be refreshed (${error instanceof Error ? error.message : "error"}); another controller may take the directory over while this one runs.`); }
       }
     };
-    const arm = (): void => { if (timer !== undefined) clearInterval(timer); timer = setInterval(() => { void beat(); }, every()); timer.unref(); };
+    // The refresh, the rewrite of the record and the release take turns (one at a time, in order), so this holder's own refresh or check (`isHeld`, which the keeper asks) never has the file open while the rewrite renames
+    // over it (Windows refuses that rename), a release never runs while a rewrite is still trying (which could put the file back after the release removed it), and two rewrites never share the `.new` file. At most one refresh waits.
+    let chain: Promise<unknown> = Promise.resolve();
+    const serial = <T>(f: () => Promise<T>): Promise<T> => { const r = chain.then(f, f); chain = r.catch(() => undefined); return r; };
+    let beating = false;
+    const arm = (): void => { if (timer !== undefined) clearInterval(timer); timer = setInterval(() => { if (beating) return; beating = true; void serial(beat).finally(() => { beating = false; }); }, every()); timer.unref(); };
     arm();
     return {
       path,
-      isHeld: async () => !released && owns(),
-      setStaleMinutes: async (minutes) => {
+      isHeld: async () => !released && await serial(owns),
+      setStaleMinutes: (minutes) => serial(async () => {
+        const before = staleMinutes;
         staleMinutes = minutes;
         if (released) return;
         arm(); // the refresh period follows the new stale time
         if (!(await owns())) return;
         const next = join(dir, `${LOCK_FILE}.${nonce}.new`);
-        await writeFile(next, record(), { mode: 0o600 });
-        await rename(next, path);
-      },
-      release: async () => { if (released) return; released = true; if (timer !== undefined) clearInterval(timer); heldHere.delete(nonce); if (await owns()) await rm(path, { force: true }); },
+        // On Windows a rename over a file another reader has open at that moment (a keeper's check, another start reading the holder) fails with EPERM, EACCES or EBUSY until the reader closes it:
+        // it is tried again a few times (about half a second in all, the launcher's rule); elsewhere, and for any other error, it fails at once. The lock is this process's throughout (same nonce,
+        // same owner). A write or rename that still fails leaves the old record in place, removes the rewritten one and goes back to the old stale time, so the holder never refreshes more slowly
+        // than the record in the file tells other starts it does.
+        try {
+          await writeFile(next, record(), { mode: 0o600 });
+          await renameReplacing(next, path, { ...(e.platform === undefined ? {} : { platform: e.platform }), ...(e.rename === undefined ? {} : { rename: e.rename }), ...(e.pause === undefined ? {} : { pause: e.pause }) });
+        } catch (error) {
+          await rm(next, { force: true }).catch(() => undefined);
+          staleMinutes = before; if (!released) arm();
+          throw error;
+        }
+      }),
+      // The nonce stays among this process's held locks until the file is removed: while a rewrite still runs (and could put the record back) another start in this process sees a live holder and
+      // is refused, instead of judging its own pid's lock leaked, taking it over and having its record overwritten by the rewrite (second review).
+      release: async () => { if (released) return; released = true; if (timer !== undefined) clearInterval(timer); await serial(async () => { try { if (await owns()) await rm(path, { force: true }); } finally { heldHere.delete(nonce); } }); },
     };
   }
 }

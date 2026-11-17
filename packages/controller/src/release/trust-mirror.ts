@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsc } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { renameReplacing } from "./launcher.js";
+import { renameReplacing } from "./rename-replacing.js";
 import { SIGNING, parsePublicKey } from "./trust.js";
 
 /**

@@ -123,3 +123,25 @@ test("a second start on a live holder goes on without the lock, says so, takes t
     await assert.rejects(open(1), /cannot be read/);
   } finally { await b?.close().catch(() => undefined); await a.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
 });
+
+test("a lock stale time that cannot be written into the lock file is said (at start and when the owner changes it), not dropped silently; the controller runs on (CI repair winflake, first review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-bkw-"));
+  const told: string[] = [];
+  let refusing = true;
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: (l: string) => { told.push(l); }, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer() },
+    dataLockEnv: { heartbeatMs: 3_600_000, platform: "linux", rename: async (from: string, to: string) => { if (refusing) throw Object.assign(new Error("EPERM: rename refused"), { code: "EPERM" }); const { rename } = await import("node:fs/promises"); await rename(from, to); } } } as never);
+  try {
+    const said = () => told.filter((l) => /stale time could not be written/.test(l) && /EPERM/.test(l));
+    assert.equal(said().length, 1, `said at start: ${JSON.stringify(told)}`);
+    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
+    const set = async (minutes: number) => (await c.api.handle(boot.token, { v: 1, op: "retention.settings.set", commandId: `rs-${minutes}`, args: { dataLockStaleMinutes: minutes } } as never)) as any;
+    const r = await set(42);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(said().length, 2, "said when the owner's change could not be written");
+    refusing = false;
+    assert.ok((await set(43)).ok);
+    assert.equal(said().length, 2);
+    const record = JSON.parse(readFileSync(join(d, ".nn-data.lock"), "utf8")) as { staleMinutes: unknown };
+    assert.equal(record.staleMinutes, 43, "a later change that can be written reaches the file");
+  } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true }); }
+});

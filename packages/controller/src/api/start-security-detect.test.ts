@@ -27,11 +27,16 @@ test("U11d: a task credential used on other tasks raises one Urgent item per pai
   const d = mkdtempSync(join(tmpdir(), "nn-sdet-"));
   const sent: { text: string }[] = [];
   const channels = { chat: { send: async (m: { deliveryId: string; text: string }) => { sent.push(m); } } };
+  // CI repair (windows-latest, node 24): the detectors count a credential's burst per clock hour, so a run that crossed a full hour (11:00:00 on a slow runner) counted the burst afresh and saw 3 more items.
+  // The controller's notifications clock runs with real time but starts ten minutes into an hour, so the test never meets an hour's end by chance; `skip` moves it on by whole hours on purpose.
+  const t0 = Date.now(), start = Date.parse("2026-10-31T08:10:00.000Z");
+  let skip = 0;
+  const clock = (): string => new Date(start + skip + (Date.now() - t0)).toISOString();
   let hook: BuildServices["reportSecurity"] | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     dispatch: { timer: new ManualTimer(), manual: true, local: { acceptUnenforcedLimits: true, window: () => undefined, close: async () => undefined, build: (s: BuildServices) => { hook = s.reportSecurity; return new LocalWorker({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 }, version: "u11d", capabilities: () => ({ os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] }), guards: s.guards, sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) }, runtimes: { open: async () => { throw new Error("unused"); } } }) as unknown as WorkerHost; } } },
-    notifications: { channels },
+    notifications: { channels, clock },
   } as never);
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
@@ -47,7 +52,7 @@ test("U11d: a task credential used on other tasks raises one Urgent item per pai
     const rev = async () => (await call(boot.token, "notifications.settings", {})).result.item.revision as number;
     const set = async (args: Record<string, unknown>, id: string) => { const r = await call(boot.token, "notifications.configure", { ...args, expectedRevision: await rev() }, id); assert.ok(r.ok, JSON.stringify(r)); };
     await set({ channel: "external", channelName: "chat" }, "s1");
-    const notifications = NotificationService.withEpoch(c.storage, c.epoch, { channels });
+    const notifications = NotificationService.withEpoch(c.storage, c.epoch, { channels, clock });
     const items = async () => (await notifications.inbox(rob)).items.filter((i) => i.ref.kind === "security" && i.state !== "settled" && i.state !== "answered");
 
     // Its own task: allowed and silent. Another task: refused as before, and told to the detectors; the same pair again is the same event.
@@ -88,6 +93,13 @@ test("U11d: a task credential used on other tasks raises one Urgent item per pai
     assert.equal((await call(cred, "activity.steps", {})).ok, false, "a call that names no task is refused");
     await sleep(400);
     assert.ok((await items()).length - before <= 1, `one credential's burst is ONE more item (got ${(await items()).length - before})`);
+    // The detectors' hour is the controller's notifications clock, not the system's: in the next hour of that clock the same credential has its share again (three named pairs and ONE for the rest).
+    skip += 3_600_000;
+    const next = (await items()).length;
+    for (let i = 0; i < 30; i++) assert.equal((await call(cred, "activity.steps", { taskId: `task-next-hour-${i}` })).ok, false);
+    await until(async () => (await items()).length - next === 4, "a new hour of the controller's clock: the credential's share again");
+    await sleep(400);
+    assert.equal((await items()).length - next, 4, "three pairs and one item for the rest of the burst");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
