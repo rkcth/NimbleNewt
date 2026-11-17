@@ -9,7 +9,7 @@ import { ProjectService } from "../domain/service.js";
 import { PrincipalService } from "../security/index.js";
 import { NotificationService } from "./notifications.js";
 import { UrgentWatch } from "./urgent.js";
-import { DownWatchdog, heartbeatProbe, httpProbe, readWatchdogRecord, watchdogSource, webhookTell, type Probe } from "./watchdog.js";
+import { DownWatchdog, heartbeatProbe, httpProbe, readWatchdogRecord, watchdogSource, webhookTell, writeWatchdogRecord, type Probe } from "./watchdog.js";
 
 // Card U11d: the watchdog outside the controller tells the owner on a loopback fake channel while the controller is down; the controller raises the outage once when it returns.
 after(stopServer);
@@ -130,3 +130,51 @@ for (const backend of backends) {
     } finally { await world.close(); await rm(d, { recursive: true, force: true }); }
   });
 }
+
+test("the watchdog's record reaches its file on Windows while the controller has it open: the rename over it is tried again on EPERM, EACCES, EBUSY (bounded, the launcher's rule), elsewhere once; a refused record leaves the old one and no temporary file (CI repair winflake, second review)", async () => {
+  const root = await dir();
+  try {
+    const file = join(root, "watchdog.json");
+    const { rename: realRename } = await import("node:fs/promises");
+    const { readdirSync } = await import("node:fs");
+    const failing = (code: string, fails: number) => {
+      const w = { calls: 0, pauses: [] as number[] };
+      return Object.assign(w, { rename: async (from: string, to: string) => { w.calls += 1; if (w.calls <= fails) throw Object.assign(new Error(`${code}: rename`), { code }); await realRename(from, to); }, pause: async (ms: number) => { w.pauses.push(ms); } });
+    };
+    const first = { v: 1 as const, downSince: "2026-11-14T10:00:00.000Z", tells: 0 };
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      const w = failing(code, 2);
+      await writeWatchdogRecord(file, { ...first, tells: 1 }, { platform: "win32", rename: w.rename, pause: w.pause });
+      assert.equal(w.calls, 3, `${code}: two refusals, then it went through`);
+      assert.deepEqual(w.pauses, [10, 20]);
+      assert.equal(JSON.parse(await readFile(file, "utf8")).tells, 1);
+      await writeWatchdogRecord(file, first);
+    }
+    const never = failing("EPERM", Number.MAX_SAFE_INTEGER);
+    await assert.rejects(writeWatchdogRecord(file, { ...first, tells: 2 }, { platform: "win32", rename: never.rename, pause: never.pause }), (e: NodeJS.ErrnoException) => e.code === "EPERM");
+    assert.equal(never.calls, 10, "bounded: ten tries");
+    for (const [platform, code] of [["linux", "EPERM"], ["darwin", "EBUSY"], ["win32", "ENOENT"]] as const) {
+      const v = failing(code, Number.MAX_SAFE_INTEGER);
+      await assert.rejects(writeWatchdogRecord(file, { ...first, tells: 3 }, { platform, rename: v.rename, pause: v.pause }), (e: NodeJS.ErrnoException) => e.code === code);
+      assert.equal(v.calls, 1, `${platform} ${code}: one try`);
+    }
+    assert.equal(JSON.parse(await readFile(file, "utf8")).tells, 0, "a refused record leaves the old one");
+    assert.deepEqual(readdirSync(root).filter((n) => n.endsWith(".tmp")), [], "and no temporary file");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the watchdog's own process loads only its small modules: the compiled watchdog imports no more than the heartbeat and the rename rule (not the launcher and what it needs) (CI repair winflake, re-check)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { dirname: dirOf, relative, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const here = dirOf(fileURLToPath(import.meta.url));
+  const root = resolve(here, "..");
+  const seen = new Set<string>();
+  const walk = (file: string): void => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    for (const m of readFileSync(file, "utf8").matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s*["'](\.[^"']+)["']/g)) walk(resolve(dirOf(file), m[1]!));
+  };
+  walk(join(here, "watchdog.js"));
+  assert.deepEqual([...seen].map((f) => relative(root, f).split("\\").join("/")).sort(), ["notifications/watchdog.js", "release/heartbeat.js", "release/rename-replacing.js"]);
+});
