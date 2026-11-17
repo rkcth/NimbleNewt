@@ -125,7 +125,8 @@ test("closing the running controller ends a probe request that is out at once (t
     try { assert.notEqual(await Promise.race([ended.then(() => "ended" as const), late]), "late", "the request out was still open 10 s after close()"); } finally { clearTimeout(timer); }
     assert.ok(Date.now() - t0 < 10_000);
   } finally {
-    if (!closed) await c.close();
+    // A close() that failed is reported by the test body; here it must not keep the health address listening or the directory behind.
+    if (!closed) await c.close().catch(() => undefined);
     server.closeAllConnections(); await new Promise((r) => server.close(r));
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
