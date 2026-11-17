@@ -123,7 +123,8 @@ test("the measured fetch refuses before sending anything when the server is busy
 test("the whole scenario against the scripted server: every check holds, within the budget, one call at a time, the gate before every call, no key in the evidence", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-g09r-"));
   try {
-    const server = fakeRadiance({ key: SECRET });
+    // The server keeps each connection open a moment after [DONE] (as the real one was seen to): Pi's SDK stops reading at the marker, and the run must not wait on a body nobody reads (the first real run hung there).
+    const server = fakeRadiance({ key: SECRET, lingerMs: 300 });
     const evidence = await runG09Proof({ fetch: server.fetch, key, baseUrl: key.baseUrl, model: "qwen3.8-flash-next-iq4r", dir, budget: new Budget(14, 1024), briefLines: 120, cutAfterChars: 200, drainMaxMs: 5000 });
     const failed = evidence.phases.flatMap((p) => [...p.checks.filter((c) => !c.ok).map((c) => `${p.name}: ${c.name} (${c.seen})`), ...(p.error === undefined ? [] : [`${p.name}: ${p.error}`])]);
     assert.deepEqual(failed, [], JSON.stringify(evidence.phases.map((p) => [p.name, p.error, p.measured]), null, 1));

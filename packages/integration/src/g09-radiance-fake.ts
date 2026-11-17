@@ -17,6 +17,8 @@ export interface FakeOptions {
   readonly drainMs?: number;
   /** Stream a tool call's arguments in one piece (a server whose tool parser holds the whole call). */
   readonly wholeToolCalls?: boolean;
+  /** Keep the connection open this long after `[DONE]` before closing it (a reader that stops at the end marker must still let go). */
+  readonly lingerMs?: number;
 }
 export interface FakeRadiance {
   readonly fetch: typeof globalThis.fetch;
@@ -96,11 +98,12 @@ export function fakeRadiance(options: FakeOptions): FakeRadiance {
     pieces.push(enc.encode("data: [DONE]\n\n"));
     const slow = a.slow === true || a.tool !== undefined;
     let next = 0;
+    const isAborted = (): boolean => signal?.aborted === true;
     signal?.addEventListener("abort", () => { state.aborted++; leave(); }, { once: true });
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         if (signal?.aborted === true) { leave(); controller.error(new DOMException("aborted", "AbortError")); return; }
-        if (next >= pieces.length) { leave(); controller.close(); return; }
+        if (next >= pieces.length) { if (options.lingerMs !== undefined) await sleep(options.lingerMs); if (isAborted()) { leave(); controller.error(new DOMException("aborted", "AbortError")); return; } leave(); controller.close(); return; }
         if (slow && next > 0) await sleep(pieceMs);
         controller.enqueue(pieces[next++]!);
       },

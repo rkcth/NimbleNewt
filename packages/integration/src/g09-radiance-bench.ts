@@ -36,7 +36,19 @@ try { await new ServerGate({ root: serverRoot(key.baseUrl), key, fetch: globalTh
   process.exit(3);
 }
 say(`budget: at most ${MAX_CALLS} model calls, reply limits 256 / ${Math.min(1024, MAX_REPLY)} tokens; one call at a time; idle gate before every call`);
-const evidence = await runG09Proof({ fetch: globalThis.fetch, key, baseUrl: key.baseUrl, model: PINNED_MODEL, dir, budget: new Budget(MAX_CALLS, MAX_REPLY), replyTokens: { short: Math.min(256, MAX_REPLY), long: MAX_REPLY }, log: say });
+const TRACE = process.argv.includes("--trace");
+// If the run ever leaves nothing to wait on (a promise nobody settles), what was recorded so far is still written, marked as such.
+let partial: unknown;
+process.once("exit", () => {
+  if (partial === undefined || (partial as { finishedAt?: string }).finishedAt !== undefined) return;
+  (partial as { stopped?: string }).stopped ??= "the run left nothing to wait on before it finished (a pending step never settled); this is what was recorded";
+  const text = `${JSON.stringify(partial, null, 1)}\n`;
+  assertNoKey(text, key, "the partial evidence");
+  mkdirSync(dirname(OUT), { recursive: true });
+  writeFileSync(OUT, text);
+  say(`partial evidence: ${OUT}`);
+});
+const evidence = await runG09Proof({ fetch: globalThis.fetch, key, baseUrl: key.baseUrl, model: PINNED_MODEL, dir, budget: new Budget(MAX_CALLS, MAX_REPLY), replyTokens: { short: Math.min(256, MAX_REPLY), long: MAX_REPLY }, log: say, onEvidence: (e) => { partial = e; }, ...(TRACE ? { trace: (l: string) => say(`  . ${l}`) } : {}) });
 const text = `${JSON.stringify(evidence, null, 1)}\n`;
 assertNoKey(text, key, "the evidence");
 mkdirSync(dirname(OUT), { recursive: true });

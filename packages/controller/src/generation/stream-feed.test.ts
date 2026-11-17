@@ -99,6 +99,55 @@ for (const backend of backends) {
     assert.equal(r.lateCount, 0);
   });
 
+  suite("a reply read to its end marker and then left (the client cancels at [DONE] before the server closes) is finished, and its complete tool call can be admitted (card G09, seen on Radiance)", async (c) => {
+    const reply = sse(chunk({ content: "noting" }), chunk({ tool_calls: [{ index: 0, id: "call_d", type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    const never = deferred();
+    const e = endpoint([[reply, never.promise, ""]]);
+    const answer = await c.relayFor(e).relay(request as never);
+    const it = answer.body![Symbol.asyncIterator]();
+    let text = "";
+    while (!text.includes("[DONE]")) { const r = await it.next(); assert.equal(r.done, false); text += Buffer.from(r.value as Uint8Array).toString("utf8"); }
+    // Pi's SDK stops here and cancels the body; the server has not closed the connection yet.
+    await it.return?.(undefined);
+    let r = await run(c, 1);
+    for (let i = 0; i < 100 && r.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r = await run(c, 1); }
+    assert.equal(r.state, "finished", JSON.stringify(r));
+    assert.equal(r.toolCalls[0]!.state, "complete");
+    await c.gen.admitEffect(c.owner, { commandId: "adm-d", runId: r.id, toolCallId: "call_d", kind: "tool", target: "x" });
+    never.open();
+  });
+
+  suite("a reply read to its end marker whose call this side then aborts (the worker host's way: the reader cancels and the host aborts the call) is finished too (card G09)", async (c) => {
+    const reply = sse(chunk({ tool_calls: [{ index: 0, id: "call_h", type: "function", function: { name: "desk-read", arguments: "{}" } }] }), chunk({}, "tool_calls")) + "data: [DONE]\n\n";
+    const ac = new AbortController();
+    const gone = new Promise<void>((resolve) => ac.signal.addEventListener("abort", () => resolve(), { once: true }));
+    const e = endpoint([[reply, gone, new Error("This operation was aborted")]]);
+    const answer = await c.relayFor(e).relay({ ...request, signal: ac.signal } as never);
+    const it = answer.body![Symbol.asyncIterator]();
+    let text = "";
+    while (!text.includes("[DONE]")) { const r = await it.next(); text += Buffer.from(r.value as Uint8Array).toString("utf8"); }
+    const pending = it.next().catch(() => undefined);
+    ac.abort();
+    await pending;
+    let r = await run(c, 1);
+    for (let i = 0; i < 100 && r.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r = await run(c, 1); }
+    assert.equal(r.state, "finished", JSON.stringify(r));
+    assert.equal(r.toolCalls[0]!.state, "complete");
+  });
+
+  suite("a reply cut before its end marker is still recorded as failed", async (c) => {
+    const reply = sse(chunk({ content: "noting" }), chunk({ tool_calls: [{ index: 0, id: "call_e", type: "function", function: { name: "desk-read", arguments: "{}" } }] }));
+    const never = deferred();
+    const e = endpoint([[reply, never.promise, ""]]);
+    const it = (await c.relayFor(e).relay(request as never)).body![Symbol.asyncIterator]();
+    await it.next();
+    await it.return?.(undefined);
+    let r = await run(c, 1);
+    for (let i = 0; i < 100 && r.state === "streaming"; i++) { await new Promise((x) => setTimeout(x, 10)); r = await run(c, 1); }
+    assert.equal(r.state, "failed");
+    never.open();
+  });
+
   suite("a tool call that was still being written when the stream broke is dropped for good and never complete", async (c) => {
     const half = sse(chunk({ content: "ok" }), chunk({ tool_calls: [{ index: 0, id: "call_9", type: "function", function: { name: "desk-write", arguments: "{\"body\":\"half" } }] }));
     const e = endpoint([[half]]);

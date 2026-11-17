@@ -204,10 +204,12 @@ export class SseFacts {
  * Wraps a response body so every piece is seen as it passes, and a cancel from the reader goes straight to the connection (no tee: a tee would keep reading for the other branch, and the server would never see this
  * client go away). `onEnd` is told once how the body ended.
  */
-export function observeBody(body: ReadableStream<Uint8Array>, onPiece: (piece: Uint8Array) => void, onEnd: (how: "complete" | "cancelled" | "error", detail?: string) => void): ReadableStream<Uint8Array> {
+export function observeBody(body: ReadableStream<Uint8Array>, onPiece: (piece: Uint8Array) => void, onEnd: (how: "complete" | "cancelled" | "error", detail?: string) => void, signal?: AbortSignal): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   let ended = false;
   const end = (how: "complete" | "cancelled" | "error", detail?: string): void => { if (ended) return; ended = true; try { onEnd(how, detail); } catch { /* the stream is not affected */ } };
+  // The request's own abort ends the body here too, even if nobody reads it any more (a reader that stopped at the end marker and went away).
+  signal?.addEventListener("abort", () => { if (ended) return; end("cancelled", "aborted"); void reader.cancel().catch(() => undefined); }, { once: true });
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       let r: Awaited<ReturnType<typeof reader.read>>;
@@ -255,11 +257,12 @@ export interface CallRecord {
  * The fetch the relay uses to reach Radiance (`ModelRelayOptions.fetch`): budget, one at a time, idle gate, then the real call, with its stream observed. A refusal fails the call before anything is sent. `phase()` names
  * the scenario step each call is recorded under.
  */
-export function measuredFetch(options: { fetch: typeof globalThis.fetch; gate: Pick<ServerGate, "check">; budget: Budget; key: RadianceKey; phase: () => string; calls: CallRecord[]; callTimeoutMs?: number; t0?: number; onRefused?: (error: Error) => void }): typeof globalThis.fetch {
+export function measuredFetch(options: { fetch: typeof globalThis.fetch; gate: Pick<ServerGate, "check">; budget: Budget; key: RadianceKey; phase: () => string; calls: CallRecord[]; callTimeoutMs?: number; t0?: number; onRefused?: (error: Error) => void; trace?: (line: string) => void }): typeof globalThis.fetch {
+  const trace = (line: string): void => { try { options.trace?.(options.key.scrub(line)); } catch { /* ignored */ } };
   const queue = oneAtATime();
   const t0 = options.t0 ?? performance.now();
   const since = (): number => Math.round(performance.now() - t0);
-  return (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): Promise<Response> => queue(async (done) => {
+  return (async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): Promise<Response> => { trace(`call queued (${options.phase()})`); return queue(async (done) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
     const raw = init?.body;
     const text = typeof raw === "string" ? raw : raw instanceof Uint8Array ? Buffer.from(raw).toString("utf8") : raw === undefined || raw === null ? "" : undefined;
@@ -277,6 +280,7 @@ export function measuredFetch(options: { fetch: typeof globalThis.fetch; gate: P
       throw error;
     }
     options.calls.push(record);
+    trace(`call ${record.n} gated and sent (${record.phase})`);
     const signals = [AbortSignal.timeout(options.callTimeoutMs ?? 180_000), ...(init?.signal ? [init.signal] : [])];
     const signal = AbortSignal.any(signals);
     signal.addEventListener("abort", () => { record.closedMs ??= since() - record.startedMs; }, { once: true });
@@ -286,17 +290,19 @@ export function measuredFetch(options: { fetch: typeof globalThis.fetch; gate: P
       throw error;
     }
     record.headMs = since() - record.startedMs; record.status = res.status;
+    trace(`call ${record.n} head ${res.status} after ${record.headMs} ms`);
     if (res.body === null) { record.ended = "complete"; record.endMs = record.headMs; return res; }
     const sse = new SseFacts();
     record.facts = sse.facts;
     const observed = observeBody(res.body, (piece) => { if (record.firstByteMs === undefined) record.firstByteMs = since() - record.startedMs; record.bytes += piece.length; sse.push(piece); }, (how, detail) => {
       record.ended = how; record.endMs = since() - record.startedMs;
+      trace(`call ${record.n} body ${how} after ${record.endMs} ms (${record.bytes} bytes)`);
       if (how !== "complete") record.closedMs ??= record.endMs;
       if (detail !== undefined) record.detail = options.key.scrub(detail).slice(0, 200);
       done();
-    });
+    }, signal);
     return new Response(observed, { status: res.status, statusText: res.statusText, headers: res.headers });
-  })) as typeof globalThis.fetch;
+  }); }) as typeof globalThis.fetch;
 }
 
 /** Throws (without saying the key) if the text holds it. */

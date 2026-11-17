@@ -42,6 +42,10 @@ export interface ProofEnv {
   /** How long to wait for the server to say idle after this client closed its request (default 30 s). */
   readonly drainMaxMs?: number;
   readonly sleep?: (ms: number) => Promise<void>;
+  /** Told each step of each model call (scrubbed), for diagnosing a run. */
+  readonly trace?: (line: string) => void;
+  /** Handed the evidence object as soon as it exists, so a caller can write what there is if the run never returns. */
+  readonly onEvidence?: (evidence: Evidence) => void;
 }
 
 export interface Check { readonly name: string; readonly ok: boolean; readonly seen: string }
@@ -95,16 +99,22 @@ export function viaRelay(relay: AttemptRelay): typeof globalThis.fetch {
     if (init?.signal?.aborted === true) abort.abort(init.signal.reason);
     const res = await relay.relay({ url, method: (init?.method ?? "GET").toUpperCase(), headers, body, signal: abort.signal });
     const iterable = res.body;
-    const stream = iterable === null ? null : new ReadableStream<Uint8Array>({
+    const iterator = iterable === null ? undefined : iterable[Symbol.asyncIterator]();
+    const stream = iterator === undefined ? null : new ReadableStream<Uint8Array>({
       start(controller) {
         void (async () => {
           try {
-            for await (const piece of iterable) { if (abort.signal.aborted) return; controller.enqueue(piece); }
-            controller.close();
+            for (;;) {
+              const r = await iterator.next();
+              if (r.done) { controller.close(); return; }
+              if (abort.signal.aborted) return;
+              controller.enqueue(r.value);
+            }
           } catch (error) { try { controller.error(error); } catch { /* the reader has gone */ } }
         })();
       },
-      cancel() { abort.abort(); },
+      // The reader went away (Pi's SDK stops at the end marker; an abort): the relay's request is aborted and its reply closed, as the host does on the channel's `fetch.abort`.
+      cancel() { abort.abort(); void iterator.return?.(undefined)?.catch(() => undefined); },
     });
     return new Response(stream, { status: res.status, statusText: res.statusText, headers: res.headers as [string, string][] });
   }) as typeof globalThis.fetch;
@@ -136,11 +146,12 @@ export async function runG09Proof(env: ProofEnv): Promise<Evidence> {
     budget: { maxCalls: env.budget.maxCalls, maxReplyTokens: env.budget.maxReplyTokens, replyTokens: reply }, briefTokensApprox: Math.round(facts.text.length / 3.6),
     phases: [], calls: [], gate: { readings: 0 },
   };
+  env.onEvidence?.(evidence);
   const gate = new ServerGate({ root: env.baseUrl, key: env.key, fetch: env.fetch, model: env.model, sleep });
   let current = "setup";
   let refused: Error | undefined;
   let replyLimit = reply.short;
-  const measured = measuredFetch({ fetch: env.fetch, gate, budget: env.budget, key: env.key, phase: () => current, calls: evidence.calls, onRefused: (e) => { refused ??= e; } });
+  const measured = measuredFetch({ fetch: env.fetch, gate, budget: env.budget, key: env.key, phase: () => current, calls: evidence.calls, onRefused: (e) => { refused ??= e; }, ...(env.trace === undefined ? {} : { trace: env.trace }) });
 
   // ---- the controller's side ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   const backend = backends.find((b) => b.name === "SQLite")!;
@@ -300,8 +311,8 @@ export async function runG09Proof(env: ProofEnv): Promise<Evidence> {
     });
 
     await phase("D. an updated resume: an owner decision corrected while an inquiry is open", async (p) => {
-      const decisionA = await desks.write(ann, { commandId: cid("d"), projectId: project, kind: "decision", title: "Release colour", body: "Owner decision: the release colour is RED.", visibility: "shared", status: "accepted" } as never);
-      const placed = await (await parent.submit({ kind: "update", requestId: requestId(cid("place")), content: "Owner decision: the release colour is RED.", run: false })).result();
+      env.trace?.("D: desk"); const decisionA = await desks.write(ann, { commandId: cid("d"), projectId: project, kind: "decision", title: "Release colour", body: "Owner decision: the release colour is RED.", visibility: "shared", status: "accepted" } as never);
+      env.trace?.("D: placing"); const placed = await (await parent.submit({ kind: "update", requestId: requestId(cid("place")), content: "Owner decision: the release colour is RED.", run: false })).result();
       await mirror();
       const asked = await inquiries.ask(owner, { commandId: cid("ask"), taskId: task, to: "agent:ann", question: "Which colour?" });
       const svc = branches();
@@ -316,11 +327,15 @@ export async function runG09Proof(env: ProofEnv): Promise<Evidence> {
       v = (await svc.view(ann, opened.id))!;
       check(p, "C05: the corrected decision is applied once (a replay is a replay) and the old one shows as changed", placed.status === "placed" && !applied.replayed && again.replayed && v.updates.some((u) => u.state === "changed") && v.updates.filter((u) => u.state === "current").length === 1, JSON.stringify(v.updates.map((u) => [u.revision, u.state])));
       const correction = v.updates.find((u) => u.state === "current")!.text!;
-      await svc.resume(ann, { commandId: cid("rsm"), branchId: opened.id, expectedRevision: v.branch.revision });
+      env.trace?.("D: resume"); await svc.resume(ann, { commandId: cid("rsm"), branchId: opened.id, expectedRevision: v.branch.revision });
       const update = { kind: "update", requestId: requestId(cid("upd-run")), content: `${correction} Reply with the release colour now in force, one word.`, run: true } as const;
+      env.trace?.("D: submitting the update");
       const first = await parent.submit(update);
+      env.trace?.("D: submitting it again");
       const second = await parent.submit(update);
+      env.trace?.("D: waiting for the turn");
       const r = await first.result();
+      env.trace?.(`D: turn ${r.status}`);
       const answer = lastAnswer(await parent.transcript())?.text;
       const c = lastCall(p.name);
       const m = c?.manifest ?? [];
