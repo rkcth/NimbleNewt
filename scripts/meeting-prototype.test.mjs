@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -485,10 +485,10 @@ test("Radiance idle check on the other routes: checkpoint.mjs --spec radiance: a
     const budget = join(home, "budget.json");
     const runs = [
       ["checkpoint.mjs", ["--spec", "radiance:m", "--budget", budget]],
-      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "radiance:m", "--budget", budget, "--quiet"]],
-      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "pi:none", "--members", "a1=radiance:m", "--budget", budget, "--quiet"]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "radiance:m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "pi:none", "--members", "a1=radiance:m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
       // the generic OpenAI-compatible route pointed at the same server, with another spelling of the loopback host
-      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${server.address().port}/v1`, "--no-auth", "--budget", budget, "--quiet"]],
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${server.address().port}/v1`, "--no-auth", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet"]],
     ];
     for (const [script, argv] of runs) {
       const { code, stdout, stderr } = await runProto(home, script, argv);
@@ -523,6 +523,9 @@ test("Radiance runs are written under --runs-dir, never among the real runs; the
     assert.equal(isRadianceAddress(`http://localhost:${port}/v1`, home), true);
     assert.equal(isRadianceAddress(`http://127.0.0.1:${port}`, home), true);
     assert.equal(isRadianceAddress(`http://127.0.0.1:${port + 1}/v1`, home), false);
+    // other spellings of this machine reach the same server (it listens on every interface); look-alike hosts do not
+    for (const h of ["127.0.0.2", "0.0.0.0", "[::1]", "[::]", "[::ffff:127.0.0.1]", "localhost.", "a.localhost", hostname()]) assert.equal(isRadianceAddress(`http://${h}:${port}/v1`, home), true, h);
+    for (const u of [`http://localhost.evil:${port}/v1`, `http://127.0.0.1.example.com:${port}/v1`, `http://127.0.0.1:${port}@example.com/v1`, `http://[::ffff:8.8.8.8]:${port}/v1`, `http://128.0.0.1:${port}/v1`, `http://localhostx:${port}/v1`]) assert.equal(isRadianceAddress(u, home), false, u);
     assert.equal(isRadianceAddress("https://openrouter.ai/api/v1", home), false);
     assert.equal(isRadianceAddress(undefined, home), false);
     assert.equal(isRadianceAddress(`http://127.0.0.1:${port}/v1`, join(home, "no-such-home")), false);

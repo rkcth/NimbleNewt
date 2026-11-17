@@ -5,7 +5,7 @@
 //   nothing is in flight, running or waiting. Missing or non-numeric counts count as busy.
 // - Only GET /stats and GET /sessions are sent. Nothing here loads, unloads, switches, resets or restarts anything.
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 
 export function radianceConfig(home = homedir()) {
@@ -18,14 +18,23 @@ export function radianceConfig(home = homedir()) {
 // The server root: the OpenAI base URL without its trailing /v1.
 export const serverRoot = (baseUrl) => String(baseUrl).replace(/\/+$/, "").replace(/\/v1$/, "");
 
-// Whether an OpenAI base URL names the Radiance server in Pi's config (same port, same host, any loopback spelling counting as one).
+// Whether an OpenAI base URL names the Radiance server in Pi's config (same port, same host, any spelling of this machine counting as
+// one: the whole 127/8 range, localhost and *.localhost with or without a trailing dot, ::1, the unspecified addresses, IPv4-mapped
+// loopback, and this machine's own host name and interface addresses, since the server listens on every interface).
 // No Pi config (or an unreadable URL) means no known Radiance address, so false.
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+const OWN = () => {
+  try { return new Set([hostname().toLowerCase(), ...Object.values(networkInterfaces()).flat().map((a) => a.address.toLowerCase().replace(/%.*$/, ""))]); } catch { return new Set(); }
+};
+const isThisMachine = (h) => {
+  const bare = h.replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  return /^127\.\d+\.\d+\.\d+$/.test(bare) || bare === "0.0.0.0" || bare === "::" || bare === "::1" || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(bare)
+    || bare === "localhost" || bare.endsWith(".localhost") || OWN().has(bare);
+};
 export function isRadianceAddress(baseUrl, home = homedir()) {
   if (typeof baseUrl !== "string") return false;
   let target, mine;
   try { target = new URL(serverRoot(baseUrl)); mine = new URL(serverRoot(radianceConfig(home).baseUrl)); } catch { return false; }
-  const host = (u) => (LOOPBACK.has(u.hostname) ? "loopback" : u.hostname);
+  const host = (u) => (isThisMachine(u.hostname) ? "this machine" : u.hostname.replace(/\.$/, ""));
   const port = (u) => u.port || (u.protocol === "https:" ? "443" : "80");
   return host(target) === host(mine) && port(target) === port(mine);
 }
