@@ -473,3 +473,17 @@ test("the host refuses a submission of another form, or on another operation, be
     assert.equal(w.head(), base);
   } finally { await w.done(); }
 });
+
+test("a submission that holds no change from its base is refused and nothing is committed (card H12o review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const base = await w.git.baseOf(w.made.gitDir);
+    // The checkout is as it was: the approved tree is the base's own tree.
+    const tree = w.log(base, "%T");
+    const r = await w.ws.port.run(call("release", { submission: { id: SUB, base, tree } }));
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(reasonOf(r), /submission sbm-h{20} holds no change from the commit it is based on; nothing was committed/);
+    assert.equal(w.head(), base);
+    assert.equal(existsSync(releaseLedgerPath(w.made.gitDir)), false, "nothing was listed");
+  } finally { await w.done(); }
+});

@@ -47,7 +47,7 @@ for (const backend of backends) {
     });
     const service = (more: Partial<WorkspaceDeps> = {}) => WorkspaceOpService.withEpoch(store.storage, projects.epoch, deps(more), options);
     const recorded = async (commandId: string) => store.storage.getAggregate({ kind: "workspace-request", id: derivedId("wsr", scopedCommandId(owner.id, commandId)) });
-    return { store, owner, task, other, approvals, calls, service, recorded, setAnswer: (f: typeof answer) => { answer = f; }, setBeforeRun: (f: () => void) => { beforeRun = f; } };
+    return { store, owner, project, task, other, approvals, calls, service, recorded, setAnswer: (f: typeof answer) => { answer = f; }, setBeforeRun: (f: () => void) => { beforeRun = f; } };
   };
 
   test(`${backend.name}: a release names only an approved code submission of its own task; anything else is refused before anything is recorded or any host is asked (card H12o)`, async () => {
@@ -61,7 +61,15 @@ for (const backend of backends) {
       await refuses("not_found", () => release("a4", S2), /is not a code submission of task/);
       await refuses("review_invalid", () => release("a5", S1), /is not approved \(no reviewer has approved it yet\)/);
       await refuses("unavailable", () => r.service({ approvalOf: undefined } as never).request(r.owner, { commandId: "a6", operation: "release", taskId: r.task, reason: "x", submissionId: S1 }), /submissions are not known/);
-      for (const id of ["a1", "a2", "a3", "a4", "a5", "a6"]) assert.equal(await r.recorded(id), undefined, `${id} recorded nothing`);
+      // A task credential (even one carrying the owner's grants) never asks for a release, so it cannot have its own task's submission committed; the approval is not even looked up.
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev" });
+      let looked = 0;
+      const counting = r.service({ approvalOf: async (id) => { looked++; return r.approvals.get(id); } });
+      const scoped = { ...r.owner, taskScope: { taskId: r.task, projectId: r.project } } as never;
+      await refuses("not_found", () => counting.request(scoped, { commandId: "a7", operation: "release", taskId: r.task, reason: "x", submissionId: S1 }), /not yours to manage/);
+      assert.equal(looked, 0, "the approval was not looked up for a caller who may not ask");
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: false, reason: "no reviewer has approved it yet" });
+      for (const id of ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]) assert.equal(await r.recorded(id), undefined, `${id} recorded nothing`);
       assert.equal(r.calls.length, 0, "no host was asked");
       assert.equal(await svc.submissionCommit(S1), undefined);
     } finally { await r.store.close(); }
