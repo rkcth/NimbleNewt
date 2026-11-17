@@ -645,7 +645,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
   let toolsLive: ToolExecutionService | undefined;
   let jobRuns: LocalJobRuns | undefined;
   // What the start has set going, for the one shutdown (`stopAll`) that both the controller's close() and a start that fails part way use: the same order, and once.
-  let maintenanceLive: MaintenanceService | undefined;
+  // Not `maintenanceLive`: the start's body declares a variable of that name of its own (the readiness view's), which would hide this one.
+  let maintenanceToStop: MaintenanceService | undefined;
   let scratchCleanupLive: ScratchCleanupService | undefined;
   let backupsLive: BackupService | undefined;
   let transportLive: ConversationTransport | undefined;
@@ -669,7 +670,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       if (remotePiFirst !== undefined) clearTimeout(remotePiFirst);
       await quiet(() => transferLive?.dispose());
       if (maintenanceTimer !== undefined) clearTimeout(maintenanceTimer);
-      await quiet(() => maintenanceLive?.close());
+      await quiet(() => maintenanceToStop?.close());
       await quiet(() => toolsLive?.dispose());
       await quiet(() => jobRuns?.close());
       await step(() => dispatch?.driver.stop());
@@ -1537,7 +1538,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const agentMounts = options.maintenance?.mountResources === undefined ? undefined : AgentMounts.withEpoch(storage, epoch, MAINTENANCE_PRINCIPAL);
     const accessApplier = options.maintenance?.applier === undefined && (agentSites !== undefined || agentMounts !== undefined)
       ? new AccessChangeApplier({ inner: environmentApplier ?? noApplier, ...(agentSites === undefined ? {} : { sites: agentSites }), ...(agentMounts === undefined || options.maintenance?.mountResources === undefined ? {} : { mounts: agentMounts, resources: options.maintenance.mountResources }) }) : undefined;
-    const maintenance = maintenanceLive = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
+    const maintenance = maintenanceToStop = MaintenanceService.withEpoch(storage, epoch, { ...(options.maintenance?.applier === undefined ? (accessApplier !== undefined ? { applier: accessApplier } : environmentApplier === undefined ? {} : { applier: environmentApplier }) : { applier: options.maintenance.applier }), ...(options.maintenance?.heartbeatMs === undefined ? {} : { heartbeatMs: options.maintenance.heartbeatMs }), held: async (agentId) => (await pauses.agentHolds(agentId)).length > 0, fence: (agentId) => pauses.agentFence(agentId), anchor: async (administratorId) => administratorProject(await principals.get(administratorId), async (p) => grants.effective({ id: p.id, kind: p.kind, name: p.name, grants: p.grants as never } as never, new Date().toISOString())), closed: async (maintenanceId) => { await notifications.settleRefsFromController({ kind: "maintenance", refKind: ADMIN_NOTICE_REF, idPrefix: maintenanceId }); }, ...(options.maintenance?.environmentRuntime?.inspect === undefined ? {} : { inspector: (artifact, signal) => options.maintenance!.environmentRuntime!.inspect!(artifact, signal) }), notify: async (n) => {
       // An administrator's notice is an item of its own only when it is anchored in a project (card A09 follow-up T6b): the inbox keeps one item per kind, project and record, and an item without a project would fold into the owner's
       // item for the request. Its record ID is the request's with a short code of the administrator, so each administrator has its own item, and it is closed when the request is decided or revoked. One without a project (the
       // administrator works in none) stays only on the owner's item, and finds the request with maintenance.list.

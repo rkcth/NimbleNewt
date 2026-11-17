@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer as createNetServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,9 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { ScriptedInterpreter } from "../chat/index.js";
+import { MaintenanceService } from "../maintenance/index.js";
 import type { ControllerStorage } from "../storage/types.js";
+import { RemotePiRestore } from "../remote/pi-state.js";
 import { ConversationTransport } from "../transport/index.js";
 import type { WebAssets } from "../web/index.js";
 import { ScratchCleanupService, type ScratchReport } from "../work-end/index.js";
@@ -68,6 +70,11 @@ test("a start that fails after the dispatcher started closes what it started, th
   };
   const timer = new ManualTimer();
   let workersClosed = 0;
+  // The maintenance service's close is counted (its background work stops with the failed start too).
+  const maintenanceProto = MaintenanceService.prototype as unknown as { close: () => Promise<unknown> };
+  const realMaintenanceClose = maintenanceProto.close;
+  let maintenanceClosed = 0;
+  maintenanceProto.close = async function (this: unknown): Promise<unknown> { maintenanceClosed += 1; return realMaintenanceClose.call(this); };
   // The host's removal answers only when it is told to stop.
   const remove = (_o: unknown, signal: AbortSignal): Promise<ScratchReport> => { orderSignal = signal; return new Promise((_, reject) => { signal.addEventListener("abort", () => reject(new Error("stopped")), { once: true }); }); };
   let started: Error | undefined;
@@ -84,9 +91,11 @@ test("a start that fails after the dispatcher started closes what it started, th
     } catch (error) { started = error as Error; }
   } finally {
     (ScratchCleanupService as unknown as { withEpoch: typeof ScratchCleanupService.withEpoch }).withEpoch = realWithEpoch;
+    maintenanceProto.close = realMaintenanceClose;
   }
   try {
     assert.equal((started as NodeJS.ErrnoException).code, "EADDRINUSE", `the start-up error is the one raised, not a later one: ${String(started)}`);
+    assert.equal(maintenanceClosed, 1, "the maintenance service was closed once");
     assert.ok(service !== undefined && run !== undefined, "the controller built its scratch cleanup before the failure");
     // The dispatcher had started (its loop was armed) and was stopped; its workers were closed once.
     assert.ok(timer.delays.length >= 1, "the dispatcher's loop had started");
@@ -152,6 +161,61 @@ test("close() with a step that fails: every later step still runs (the web chat,
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("close() whose dispatcher stop fails still closes the maintenance service, the workers, the listener and the storage, and raises the dispatcher's failure", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-stop-fail-"));
+  try {
+    const timer = new ManualTimer();
+    let workersClosed = 0;
+    let captured: ControllerStorage | undefined;
+    const realWithEpoch = ScratchCleanupService.withEpoch.bind(ScratchCleanupService);
+    (ScratchCleanupService as unknown as { withEpoch: typeof ScratchCleanupService.withEpoch }).withEpoch = (...a) => { captured ??= a[0]; return realWithEpoch(...a); };
+    const maintenanceProto = MaintenanceService.prototype as unknown as { close: () => Promise<unknown> };
+    const realMaintenanceClose = maintenanceProto.close;
+    let maintenanceClosed = 0;
+    maintenanceProto.close = async function (this: unknown): Promise<unknown> { maintenanceClosed += 1; return realMaintenanceClose.call(this); };
+    let c: Awaited<ReturnType<typeof startController>>;
+    try {
+      c = await startController({
+        storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+        conversationTransport: { port: 0 }, dispatch: localDispatch(timer, () => { workersClosed++; }),
+      } as never);
+    } finally { (ScratchCleanupService as unknown as { withEpoch: typeof ScratchCleanupService.withEpoch }).withEpoch = realWithEpoch; }
+    const conversationPort = Number(new URL(c.conversationUrl!).port);
+    // The dispatcher's own stop does its work and then fails (set on this controller's driver only).
+    const driver = c.dispatch!.driver as unknown as { stop: () => Promise<void> };
+    const realStop = driver.stop.bind(driver);
+    driver.stop = async () => { await realStop(); throw new Error("the dispatcher's stop failed"); };
+    try { await assert.rejects(c.close(), /dispatcher's stop failed/, "close() reports the dispatcher's failure"); } finally { maintenanceProto.close = realMaintenanceClose; }
+    assert.equal(maintenanceClosed, 1, "the maintenance service was closed once (its background work stopped)");
+    assert.equal(workersClosed, 1, "the workers were closed after the failed stop");
+    await portFree(conversationPort);
+    assert.ok(captured !== undefined);
+    await assert.rejects(captured.listAudit({ afterSeq: 0, limit: 1 }), /closed/, "the storage was closed after the failed stop");
+    // The data directory's lock was released too: the same database opens again at once.
+    const c2 = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
+    await c2.close();
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("close() lets a backup that is being made finish before the storage closes", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-close-backup-"));
+  try {
+    const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], backup: { directory: join(d, "backups") } } as never);
+    let settled = false;
+    const made = c.services.backups!.backUpNow("manual");
+    void made.then(() => { settled = true; }, () => { settled = true; });
+    // Whether the backup had finished when the storage began to close.
+    let settledAtStorageClose: boolean | undefined;
+    const store = c.storage as unknown as { close: () => Promise<void> };
+    const realClose = store.close.bind(store);
+    store.close = async () => { settledAtStorageClose ??= settled; await realClose(); };
+    await c.close();
+    assert.equal(settledAtStorageClose, true, "the backup had finished before the storage closed");
+    const result = await made;
+    assert.ok(result.path.length > 0, "the backup was made");
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 test("a start whose web chat cannot listen closes the conversation listener (once) and the storage; a close that fails there never replaces the start-up error", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-web-fail-"));
   const holder = await listenAnywhere();
@@ -181,6 +245,47 @@ test("a start whose web chat cannot listen closes the conversation listener (onc
     const c2 = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [] });
     await c2.close();
   } finally {
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test("the remote hosts' restore delivery (its first try after one second and the repeating one) never runs after close() or after a failed start", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-remote-pi-"));
+  const proto = RemotePiRestore.prototype as unknown as { sweep: () => Promise<unknown> };
+  const realSweep = proto.sweep;
+  let sweeps = 0;
+  proto.sweep = async function (this: unknown): Promise<unknown> { sweeps += 1; return realSweep.call(this); };
+  // Remote dispatch with backups and a data directory: the controller arms the restore delivery (a one-off try after one second, then every hour here).
+  const options = (n: string, extra: Record<string, unknown> = {}): never => { mkdirSync(join(d, n), { recursive: true }); return {
+    storage: { kind: "sqlite", path: join(d, n, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    backup: { directory: join(d, n, "backups"), restore: { remotePiEveryMs: 3_600_000 } },
+    dispatch: { timer: new ManualTimer(), manual: true, remote: { blobDirectory: join(d, n, "blobs"), hosts: [] } }, ...extra,
+  } as never; };
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 1_600));
+  const holder = await listenAnywhere();
+  try {
+    // The path is reached: left running, the first try comes after about a second.
+    const live = await startController(options("a"));
+    try {
+      assert.ok(live.dispatch?.remote !== undefined, live.dispatchProblem);
+      for (let i = 0; i < 400 && sweeps === 0; i++) await new Promise((r) => setTimeout(r, 25));
+      assert.ok(sweeps >= 1, "the first delivery try ran while the controller was up");
+    } finally { await live.close(); }
+    // Closed at once: the first try (and the repeating one) are cleared, so neither runs against the closed storage.
+    const quick = await startController(options("b"));
+    const atClose = sweeps;
+    await quick.close();
+    await settle();
+    assert.equal(sweeps, atClose, "no delivery try ran after close()");
+    // A start that fails after arming them (the conversation port is held) clears them too.
+    const port = (holder.address() as { port: number }).port;
+    await assert.rejects(startController(options("c", { conversationTransport: { port } })), (e: NodeJS.ErrnoException) => e.code === "EADDRINUSE");
+    const atFail = sweeps;
+    await settle();
+    assert.equal(sweeps, atFail, "no delivery try ran after the failed start");
+  } finally {
+    proto.sweep = realSweep;
     await new Promise<void>((resolve) => holder.close(() => resolve()));
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
