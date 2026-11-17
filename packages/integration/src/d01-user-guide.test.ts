@@ -71,6 +71,13 @@ async function installFromGuide(dir: string): Promise<LauncherConfig> {
   const clone = all.find((x) => x.startsWith("git clone "));
   assert.ok(clone !== undefined && /^git clone https:\/\/github\.com\/[\w-]+\/NimbleNewt\.git$/.test(clone), "the guide clones the NimbleNewt repository");
   assert.ok(all.includes(`cd ${/\/(\w+)\.git$/.exec(clone)![1]}`), "and goes into the folder git makes");
+  // The address only works for everyone once the repository is published (card D03); the guide must say so right after the install lines, and offer the address the owner was given instead.
+  const afterInstall = guide().split("<!-- d01:install -->")[1]!.split("<!-- d01:install -->")[0]!;
+  assert.match(afterInstall, /publication \(card D03\)/, "the guide says the clone address depends on publication");
+  assert.match(afterInstall, /use that instead/, "and what to do with another address");
+  // What the guide tells the owner to look for at start ("Secrets are kept in: ...") is what the launcher prints.
+  assert.match(guide(), /"Secrets are kept in: \.\.\."/);
+  assert.ok(readFileSync(join(repository, "scripts", "nimblenewt.mjs"), "utf8").includes("out(`Secrets are kept in: ${reason}.`)"), "the launcher prints where secrets are kept");
   const { main } = await import(pathToFileURL(join(repository, "scripts", "nimblenewt.mjs")).href) as { main: (argv: string[], io: unknown) => Promise<number> };
   const launcher = all.filter((x) => x.startsWith("node scripts/nimblenewt.mjs ")).map((x) => x.split(/\s+/).slice(2));
   assert.deepEqual(launcher.map((a) => a.slice(0, a[0] === "secret" ? 2 : 1).join(" ")), ["init", "secret set", "start"], "the guide runs init, secret set and start, in that order");
@@ -136,19 +143,21 @@ test("the guide's example conversation, run line by line through the launcher an
   const secrets = memorySecrets({ "backup-key": "backup-secret-value" });
   // The guide and the table say the same lines, in the same order.
   assert.deepEqual(steps.map((s) => s.you), Object.keys(table), "the guide's conversation and the test's table of what the model understands differ: update both together");
-  const config = await installFromGuide(dir);
-  let l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
   try {
-    assert.equal(l.ownerCreated, true, "the first start makes the owner");
+    const config = await installFromGuide(dir);
+    const live = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+    l = live;
+    assert.equal(live.ownerCreated, true, "the first start makes the owner");
     // The greeting the guide describes: the setup list with its marks.
-    const greeting = await setupGreeting(l.controller, l.ownerToken);
+    const greeting = await setupGreeting(live.controller, live.ownerToken);
     for (const mark of ["[x]", "[-]", "[ ]"]) assert.ok(greeting.includes(mark), `the greeting shows ${mark}`);
-    const chat = l.controller.chat!;
-    const wrapped = { api: l.controller.api, chat: { submit: async (...a: Parameters<typeof chat.submit>) => { const t = await chat.submit(...a); turns.push(t as unknown as Turn); return t; } } };
+    const chat = live.controller.chat!;
+    const wrapped = { api: live.controller.api, chat: { submit: async (...a: Parameters<typeof chat.submit>) => { const t = await chat.submit(...a); turns.push(t as unknown as Turn); return t; } } };
     for (const step of steps) {
       const out: string[] = [];
       const before = turns.length;
-      await runTerminalChat({ controller: wrapped as never, ownerToken: l.ownerToken, input: lines([step.you]), write: (t) => out.push(t) });
+      await runTerminalChat({ controller: wrapped as never, ownerToken: live.ownerToken, input: lines([step.you]), write: (t) => out.push(t) });
       const reply = out.join("");
       assert.equal(turns.length, before + 1, `"${step.you}" made one turn: ${reply}`);
       assert.ok(!turns.at(-1)!.outcomes.some((o) => o.status === "refused"), `"${step.you}" was refused: ${reply}`);
@@ -159,43 +168,46 @@ test("the guide's example conversation, run line by line through the launcher an
     assert.deepEqual(asked, steps.map((s) => s.you), "every line went to the model once, and nothing else did");
 
     // Where the guide says the conversation ends: a project on its own forge, the host asked for, Ann with her rights in Garden only, the task ready and given to her.
-    const project = (await call(l, "project.list")).result.items[0];
+    const project = (await call(live, "project.list")).result.items[0];
     assert.deepEqual([project.name, project.versionControl], ["Garden", { host: "self-hosted", hostName: "Gitea", ci: "Woodpecker CI" }]);
-    assert.equal((await call(l, "host.local.get")).result.item.enabled, true);
-    const ann = (await call(l, "agent.list")).result.items[0];
+    assert.equal((await call(live, "host.local.get")).result.item.enabled, true);
+    const ann = (await call(live, "agent.list")).result.items[0];
     assert.deepEqual([ann.friendlyName, ann.roles], ["Ann", ["author"]]);
-    const grants = ((await call(l, "grant.list", { limit: 100 })).result.items as { grantee: string; action: string; project: string; state: string }[]).filter((g) => g.grantee === `agent:${ann.id}`);
+    const grants = ((await call(live, "grant.list", { limit: 100 })).result.items as { grantee: string; action: string; project: string; state: string }[]).filter((g) => g.grantee === `agent:${ann.id}`);
     assert.deepEqual(grants.map((g) => g.action).sort(), [...RIGHTS].sort());
     assert.ok(grants.every((g) => g.project === project.id && g.state === "active"), "each right is in Garden only");
-    const task = (await call(l, "task.list", { projectId: project.id })).result.items[0];
+    const task = (await call(live, "task.list", { projectId: project.id })).result.items[0];
     assert.deepEqual([task.title, task.state], [TASK, "ready"]);
-    assert.deepEqual((await call(l, "assignment.get", { taskId: task.id })).result.item.owner, { kind: "agent", id: ann.id });
-    const ready = (await call(l, "setup.readiness")).result.item;
+    assert.deepEqual((await call(live, "assignment.get", { taskId: task.id })).result.item.owner, { kind: "agent", id: ann.id });
+    const ready = (await call(live, "setup.readiness")).result.item;
     assert.deepEqual(ready.items.filter((i: { required: boolean; state: string }) => i.required && i.state !== "done").map((i: { id: string }) => i.id), ["host"], "only the host is left, and it joins at the next start");
     assert.match(ready.items.find((i: { id: string }) => i.id === "host").detail, /joins when the controller is started again/);
-    await l.close();
+    l = undefined; await live.close();
 
     // "Press Ctrl-D and start again": the same owner, nothing asked again, and the answers are still there. (That the host then runs the task in a sandbox is the U14e test's; it needs bubblewrap.)
-    l = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
-    assert.equal(l.ownerCreated, false);
-    assert.equal((await call(l, "task.list", { projectId: project.id })).result.items[0].state, "ready");
-    assert.equal((await call(l, "setup.readiness")).result.item.items.find((i: { id: string }) => i.id === "profile").state, "done", "the strict answer was recorded, so it is not asked again");
-  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+    const again = await launch({ config, secrets, argv: [], env: {}, print: () => undefined, start, fetch });
+    l = again;
+    assert.equal(again.ownerCreated, false);
+    assert.equal((await call(again, "task.list", { projectId: project.id })).result.items[0].state, "ready");
+    assert.equal((await call(again, "setup.readiness")).result.item.items.find((i: { id: string }) => i.id === "profile").state, "done", "the strict answer was recorded, so it is not asked again");
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
 test("with every model server down, each typed recovery order in the guide runs as written, with no model call, and the guide's quoted answers are real (card D01)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-down-"));
   let modelCalls = 0;
   const down: typeof globalThis.fetch = async () => { modelCalls++; throw new TypeError("fetch failed: connection refused"); };
-  const l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch: down });
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
   try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch: down });
+    const live = l;
     // Something to act on, made through the API (how it was made does not matter to the orders).
-    const project = (await call(l, "project.create", { name: "Garden" }, "p1")).result.id as string;
-    const taskId = (await call(l, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
-    const agentId = (await call(l, "agent.create", { friendlyName: "Ann", roles: ["author"] }, "a1")).result.id as string;
-    const grant = (await call(l, "grant.create", { grantee: `agent:${agentId}`, action: "task.read", project, basis: "Ann reads Garden" }, "g1")).result;
+    const project = (await call(live, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const taskId = (await call(live, "task.create", { projectId: project, title: "weed" }, "t1")).result.id as string;
+    const agentId = (await call(live, "agent.create", { friendlyName: "Ann", roles: ["author"] }, "a1")).result.id as string;
+    const grant = (await call(live, "grant.create", { grantee: `agent:${agentId}`, action: "task.read", project, basis: "Ann reads Garden" }, "g1")).result;
     const fill = (line: string): string => line.replace(/TASK-ID/g, taskId).replace(/AGENT-ID/g, agentId).replace(/GRANT-ID/g, grant.id).replace(/"expectedRevision": 1/, `"expectedRevision": ${grant.revision}`).replace(/PROVIDER-NAME/g, "backup");
-    const say = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: l.controller, ownerToken: l.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join(""); };
+    const say = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join(""); };
 
     // A message in plain words: the model is down, and the chat says so in the words the guide quotes.
     const plain = await say("pause everything please");
@@ -208,7 +220,7 @@ test("with every model server down, each typed recovery order in the guide runs 
     const ran: string[] = [];
     for (const order of orders) {
       const line = fill(order);
-      const turn = await l.controller.chat!.submit(l.ownerToken, { messageId: `order-${ran.length}`, text: line }) as unknown as { outcomes: { status: string; code?: string; message?: string; shown?: string[] }[] };
+      const turn = await live.controller.chat!.submit(live.ownerToken, { messageId: `order-${ran.length}`, text: line }) as unknown as { outcomes: { status: string; code?: string; message?: string; shown?: string[] }[] };
       const o = turn.outcomes[0]!;
       if (order.startsWith("/exclude ")) {
         // The short form is shown as its full line, which is the next line of the guide.
@@ -217,14 +229,18 @@ test("with every model server down, each typed recovery order in the guide runs 
         assert.ok(o.message!.endsWith(next), `the guide's next line is the full form NimbleNewt shows: ${o.message}`);
       } else {
         assert.equal(o.status, "applied", `${line}: ${JSON.stringify(o)}`);
+        // "Each stop answer says how far it got: Received, Accepted, and whether it has taken effect yet."
+        if (order.startsWith("/nimblenewt.lifecycle-") && !order.startsWith("/nimblenewt.lifecycle-status")) {
+          for (const stage of ["Received: yes", "Accepted: yes", "Effected: "]) assert.ok((o.shown ?? []).some((x) => x.startsWith(stage)), `${line} says ${stage}: ${JSON.stringify(o.shown)}`);
+        }
       }
       ran.push(order.split(" ")[0]!);
     }
     assert.equal(modelCalls, tried, "no typed order asked the model");
     // They took effect: the stopped task is kept (not cancelled), the right is revoked and the installation is no longer paused.
-    assert.notEqual((await call(l, "task.get", { taskId })).result.item.state, "cancelled");
-    assert.equal(((await call(l, "grant.list", { limit: 100 })).result.items as { id: string; state: string }[]).find((g) => g.id === grant.id)!.state, "revoked");
-    assert.equal((await call(l, "lifecycle.status", { scope: { kind: "installation", id: "installation" } })).result.item.intent, "active");
+    assert.notEqual((await call(live, "task.get", { taskId })).result.item.state, "cancelled");
+    assert.equal(((await call(live, "grant.list", { limit: 100 })).result.items as { id: string; state: string }[]).find((g) => g.id === grant.id)!.state, "revoked");
+    assert.equal((await call(live, "lifecycle.status", { scope: { kind: "installation", id: "installation" } })).result.item.intent, "active");
     assert.ok(ran.includes("/nimblenewt.lifecycle-force") && ran.includes("/nimblenewt.grant-revoke") && ran.includes("/nimblenewt.routing-reenable"));
 
     // A key typed into the chat: the refusal the guide quotes, and nothing reaches the model.
@@ -233,5 +249,5 @@ test("with every model server down, each typed recovery order in the guide runs 
     for (const block of blocksAfter(guide(), "key-refusal")) for (const { replies } of conversation(`You: (a key)\n${block}`)) for (const q of replies) assert.ok(quotedIn(q, refused), `the guide quotes "${q}", the chat printed:\n${refused}`);
     assert.ok(!refused.includes(key));
     assert.equal(modelCalls, tried);
-  } finally { await l.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

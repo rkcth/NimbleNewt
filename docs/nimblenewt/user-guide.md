@@ -26,6 +26,8 @@ npx tsc --build
 
 `npm ci` downloads what NimbleNewt needs and `npx tsc --build` prepares it to run. Both take a few minutes the first time.
 
+The address in the first line is where the project is kept today. Whether it is open to everyone is decided at publication (card D03), which has not happened yet: until then it works only for people who have been given access, and if you were given another address or a downloaded copy, use that instead.
+
 Now tell NimbleNewt about your two model servers. Change the addresses and model names to your own:
 
 <!-- d01:install -->
@@ -36,7 +38,7 @@ node scripts/nimblenewt.mjs secret set backup-key
 ```
 
 - `init` writes a settings file in `~/.nimblenewt`. It never holds a password or key.
-- If a model server needs a key, give it a **name** (here `backup-key`) with `--backup-key-secret` or `--model-key-secret`, then run `secret set` with that name. It asks for the key without showing what you type and puts it in your computer's own secret store (the Linux Secret Service, the macOS Keychain or Windows' protected storage).
+- If a model server needs a key, give it a **name** (here `backup-key`) with `--backup-key-secret` or `--model-key-secret`, then run `secret set` with that name. It asks for the key without showing what you type and puts it in your computer's own secret store (the Linux Secret Service, the macOS Keychain or Windows' protected storage). A Linux computer without the Secret Service, such as a server with no desktop, gets files under `~/.nimblenewt/secrets` that only your user account can read instead; `start` says which one it uses ("Secrets are kept in: ..."). Anyone who can sign in as your user account can read either kind.
 
 ## Start, and talk
 
@@ -45,7 +47,7 @@ node scripts/nimblenewt.mjs secret set backup-key
 node scripts/nimblenewt.mjs start
 ```
 
-The first time, this makes **you the owner** (your sign-in is kept in the secret store, not in a file), shows a list of what is set up and what is still open, and opens the chat in your terminal. Each line of the list starts with `[x]` (done), `[-]` (a default that works) or `[ ]` (still open). To stop, press **Ctrl-D**; start again any time with the same command and you carry on where you left off.
+The first time, this makes **you the owner** (your sign-in is kept in the same secret store, never in the settings file), shows a list of what is set up and what is still open, and opens the chat in your terminal. Each line of the list starts with `[x]` (done), `[-]` (a default that works) or `[ ]` (still open). To stop, press **Ctrl-D**; start again any time with the same command and you carry on where you left off.
 
 From here you set everything up by chatting. Here is a whole first conversation, from an empty installation to a first task handed to an agent. "You" is what you type; "NimbleNewt" is part of what it answers ("..." marks words left out).
 
@@ -152,7 +154,7 @@ What the sandbox does **not** do, so you can judge how much to trust a machine:
 - **The worker host program runs as you, outside the box**, because it has to start the boxes. Only the agents' own programs are confined.
 - **Unconfined ("trusted-host") running is not offered.** The settings file has an option for it, which requires a named person and a reason, but the worker host that NimbleNewt starts does not use it: agents on this computer always run in the sandbox.
 - **Linux only, for now.** On macOS and Windows NimbleNewt says so at start-up, and tasks wait until a Linux machine can run them. The macOS sandbox exists but is not switched on yet, and the Windows one is not finished.
-- **Another machine is a separate decision.** You can let another computer run agents by asking the chat for a credential for it. That machine is trusted in the same way: it sees the work you send it.
+- **Another machine is a separate decision.** Letting another computer run agents takes more than this guide covers: a credential for it (you can ask the chat for one), rights for it, and the worker set up on that machine ([getting started, step 6](getting-started.md#step-6-hosts-and-workers)). That machine is trusted in the same way: it sees the work you send it.
 - **No outside security audit has been done yet.** See the [security guide](security-guide.md) for the full list of known limits.
 
 ## When the assistant is down: stopping and recovering without the model
