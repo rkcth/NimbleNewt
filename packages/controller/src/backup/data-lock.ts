@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { link, mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { hostname, platform, uptime } from "node:os";
 import { join, resolve } from "node:path";
 import { DomainError } from "../domain/errors.js";
+import { renameReplacing } from "../release/launcher.js";
 import { canon } from "./canon.js";
 
 /**
@@ -58,6 +59,10 @@ export interface LockEnv {
   readonly warn?: (message: string) => void;
   /** The hard link (tests inject one that fails the way some file systems do). */
   readonly link?: (existing: string, path: string) => Promise<void>;
+  /** The rename that puts a rewritten lock record in place, the platform it is judged by and the pause between tries (tests inject a rename that fails the way Windows does while a reader has the file open). */
+  readonly rename?: (from: string, to: string) => Promise<void>;
+  readonly platform?: NodeJS.Platform;
+  readonly pause?: (ms: number) => Promise<void>;
 }
 
 /** The locks this process holds, by nonce: a lock file of this very process that is not in the set was leaked by a start that failed, and is taken over. */
@@ -216,7 +221,11 @@ export async function acquireDataLock(dataDirectory: string, arg?: (() => Date) 
         if (!(await owns())) return;
         const next = join(dir, `${LOCK_FILE}.${nonce}.new`);
         await writeFile(next, record(), { mode: 0o600 });
-        await rename(next, path);
+        // On Windows a rename over a file another reader has open at that moment (this holder's own refresh, a keeper's check, another start reading the holder) fails with EPERM, EACCES or EBUSY
+        // until the reader closes it: it is tried again a few times (about half a second in all, the launcher's rule); elsewhere, and for any other error, it fails at once. The lock is this
+        // process's throughout (same nonce, same owner); a rename that still fails leaves the old record in place and removes the rewritten one.
+        try { await renameReplacing(next, path, { ...(e.platform === undefined ? {} : { platform: e.platform }), ...(e.rename === undefined ? {} : { rename: e.rename }), ...(e.pause === undefined ? {} : { pause: e.pause }) }); }
+        catch (error) { await rm(next, { force: true }).catch(() => undefined); throw error; }
       },
       release: async () => { if (released) return; released = true; if (timer !== undefined) clearInterval(timer); heldHere.delete(nonce); if (await owns()) await rm(path, { force: true }); },
     };

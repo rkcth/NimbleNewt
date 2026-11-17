@@ -312,6 +312,59 @@ test("a stale lock is taken over by exactly one of two starts that find it at on
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+test("the owner's stale minutes reach the lock file on Windows while a reader has it open: the rename over it is tried again on EPERM, EACCES, EBUSY, bounded; the lock stays this holder's; elsewhere and for other errors it fails at once (CI repair)", async () => {
+  const d = tmp();
+  try {
+    const record = (dir: string) => JSON.parse(readFileSync(join(dir, LOCK_FILE), "utf8")) as { nonce: string; staleMinutes: unknown };
+    const leftovers = (dir: string) => readdirSync(dir).filter((n) => n.endsWith(".new"));
+    // A rename that fails `fails` times with `code` (the way Windows answers while another process has the target open), then renames for real.
+    const failing = (code: string, fails: number) => {
+      const w = { calls: 0, pauses: [] as number[] };
+      return Object.assign(w, {
+        rename: async (from: string, to: string) => { w.calls += 1; if (w.calls <= fails) throw Object.assign(new Error(`${code}: rename`), { code }); renameSync(from, to); },
+        pause: async (ms: number) => { w.pauses.push(ms); },
+      });
+    };
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      const dir = join(d, `ok-${code}`); mkdirSync(dir);
+      const w = failing(code, 2);
+      const lock = await acquireDataLock(dir, { platform: "win32", rename: w.rename, pause: w.pause, heartbeatMs: 3_600_000 });
+      const nonce = record(dir).nonce;
+      await lock.setStaleMinutes(null);
+      assert.equal(w.calls, 3, `${code}: two refusals, then it went through`);
+      assert.deepEqual(w.pauses, [10, 20]);
+      assert.equal(record(dir).staleMinutes, null, "the owner's setting reached the file");
+      assert.equal(record(dir).nonce, nonce, "the lock is still this holder's");
+      assert.equal(await lock.isHeld(), true);
+      assert.deepEqual(leftovers(dir), []);
+      await lock.release();
+      assert.equal(existsSync(join(dir, LOCK_FILE)), false);
+    }
+    // A reader that never lets go: bounded (ten tries), the error is the rename's, the old record stays and the rewritten one is removed.
+    const held = join(d, "held"); mkdirSync(held);
+    const w = failing("EPERM", Number.MAX_SAFE_INTEGER);
+    const lock = await acquireDataLock(held, { platform: "win32", rename: w.rename, pause: w.pause, heartbeatMs: 3_600_000, staleMinutes: 15 });
+    const nonce = record(held).nonce;
+    await assert.rejects(lock.setStaleMinutes(null), (e: NodeJS.ErrnoException) => e.code === "EPERM");
+    assert.equal(w.calls, 10, "bounded: ten tries");
+    assert.equal(record(held).staleMinutes, 15, "the old record is left in place");
+    assert.equal(record(held).nonce, nonce);
+    assert.equal(await lock.isHeld(), true, "the lock is still held");
+    assert.deepEqual(leftovers(held), [], "the rewritten record is removed");
+    await lock.release();
+    // Elsewhere a rename does not fail for that reason: EPERM is not retried; nor is any other error on Windows.
+    for (const [platform, code] of [["linux", "EPERM"], ["darwin", "EBUSY"], ["win32", "ENOENT"], ["win32", "EXDEV"]] as const) {
+      const dir = join(d, `once-${platform}-${code}`); mkdirSync(dir);
+      const v = failing(code, Number.MAX_SAFE_INTEGER);
+      const l = await acquireDataLock(dir, { platform, rename: v.rename, pause: v.pause, heartbeatMs: 3_600_000 });
+      await assert.rejects(l.setStaleMinutes(null), (e: NodeJS.ErrnoException) => e.code === code);
+      assert.equal(v.calls, 1, `${platform} ${code}: one try`);
+      assert.deepEqual(leftovers(dir), []);
+      await l.release();
+    }
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test("the offline restore command takes the folders' lock: a controller holding the folder refuses it, and the lock is let go afterwards (finding 12)", async () => {
 
   const root = tmp(); const target = tmp();
