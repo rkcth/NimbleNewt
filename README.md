@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **278 of 362 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **279 of 362 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -126,7 +126,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `▓▓▓▓▓▓▓▓▓░░░` 77% | 14 of 18 |
 | Test campaigns and platforms | `▓▓░░░░░░░░░░` 18% | 3 of 16 |
-| Release | `░░░░░░░░░░░░` 0% | 0 of 6 |
+| Release | `▓▓░░░░░░░░░░` 16% | 1 of 6 |
 
 ### The parts in detail
 
@@ -655,11 +655,11 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 </details>
 
 <details>
-<summary><strong>Release</strong> — ░░░░░░░░░░░░ 0 of 6</summary>
+<summary><strong>Release</strong> — ▓▓░░░░░░░░░░ 1 of 6</summary>
 
 Installation, documentation, QA on real machines, the release decision and closing the plan.
 
-- [ ] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
+- [x] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
 - [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
 - [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
