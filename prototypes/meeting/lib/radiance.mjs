@@ -18,6 +18,18 @@ export function radianceConfig(home = homedir()) {
 // The server root: the OpenAI base URL without its trailing /v1.
 export const serverRoot = (baseUrl) => String(baseUrl).replace(/\/+$/, "").replace(/\/v1$/, "");
 
+// Whether an OpenAI base URL names the Radiance server in Pi's config (same port, same host, any loopback spelling counting as one).
+// No Pi config (or an unreadable URL) means no known Radiance address, so false.
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+export function isRadianceAddress(baseUrl, home = homedir()) {
+  if (typeof baseUrl !== "string") return false;
+  let target, mine;
+  try { target = new URL(serverRoot(baseUrl)); mine = new URL(serverRoot(radianceConfig(home).baseUrl)); } catch { return false; }
+  const host = (u) => (LOOPBACK.has(u.hostname) ? "loopback" : u.hostname);
+  const port = (u) => u.port || (u.protocol === "https:" ? "443" : "80");
+  return host(target) === host(mine) && port(target) === port(mine);
+}
+
 const PICK = ["version", "in_flight", "running", "waiting", "max_num_seqs", "total_requests", "kv_tokens_used", "kv_tokens_total", "kv_tokens_cached", "prefix_evictions", "checkpoints_written", "ckpt_evictions", "ckpt_refused", "hit_cuts", "hit_cut_tokens", "linear_cached_tokens"];
 export const statsOf = (s) => (s && typeof s === "object" ? Object.fromEntries(PICK.map((k) => [k, s[k]])) : {});
 

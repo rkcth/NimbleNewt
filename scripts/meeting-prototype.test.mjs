@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -434,7 +434,7 @@ globalThis.fetch = (url, { method = "GET", headers = {}, body } = {}) => new Pro
 `);
   return { server, seen, home, KEY, chat };
 }
-const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--quiet", ...extra], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
+const runRadiance = (home, budget, extra = []) => new Promise((resolve) => execFile(process.execPath, ["--import", pathToFileURL(join(home, "loopback-fetch.mjs")).href, fileURLToPath(new URL("../prototypes/meeting/run.mjs", import.meta.url)), "--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "radiance", "--model", "m", "--budget", budget, "--runs-dir", join(home, "runs"), "--quiet", ...extra], { timeout: 120000, env: { ...process.env, HOME: home } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })));
 
 test("Radiance runner: a busy server is refused before any chat request, with exit code 3 and the budget file untouched", async () => {
   const { server, seen, home } = await radianceStandIn({ in_flight: 0, running: 1, waiting: 0 });
@@ -487,6 +487,8 @@ test("Radiance idle check on the other routes: checkpoint.mjs --spec radiance: a
       ["checkpoint.mjs", ["--spec", "radiance:m", "--budget", budget]],
       ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "radiance:m", "--budget", budget, "--quiet"]],
       ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--chair", "pi:none", "--members", "a1=radiance:m", "--budget", budget, "--quiet"]],
+      // the generic OpenAI-compatible route pointed at the same server, with another spelling of the loopback host
+      ["run.mjs", ["--scenario", "ship-or-delay", "--variant", "m00-one-round-p1", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${server.address().port}/v1`, "--no-auth", "--budget", budget, "--quiet"]],
     ];
     for (const [script, argv] of runs) {
       const { code, stdout, stderr } = await runProto(home, script, argv);
@@ -502,12 +504,40 @@ test("Radiance calls go one at a time even when the variant asks for parallel ca
   const { server, seen, home, chat } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 }, { delayMs: 40 });
   let outDir;
   try {
-    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "radiance", "--model", "m", "--budget", join(home, "budget.json"), "--quiet"]);
+    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "radiance", "--model", "m", "--budget", join(home, "budget.json"), "--runs-dir", join(home, "runs"), "--quiet"]);
     assert.equal(code, 0, stderr);
     outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
     assert.ok(seen.filter((r) => r.url === "/v1/chat/completions").length > 3);
     assert.equal(chat.maxInFlight, 1);
   } finally { server.close(); if (outDir) rmSync(outDir, { recursive: true, force: true }); }
+});
+
+test("Radiance runs are written under --runs-dir, never among the real runs; the OpenAI route to the Radiance address is idle-checked and serialized; isRadianceAddress matches only that server", async () => {
+  const { isRadianceAddress } = radianceLib;
+  const { server, seen, home, chat } = await radianceStandIn({ in_flight: 0, running: 0, waiting: 0 }, { delayMs: 40 });
+  const realRuns = fileURLToPath(new URL("../prototypes/meeting/runs/", import.meta.url));
+  const { readdirSync } = await import("node:fs");
+  const before = existsSync(realRuns) ? readdirSync(realRuns).length : 0;
+  try {
+    const port = server.address().port;
+    assert.equal(isRadianceAddress(`http://localhost:${port}/v1`, home), true);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port}`, home), true);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port + 1}/v1`, home), false);
+    assert.equal(isRadianceAddress("https://openrouter.ai/api/v1", home), false);
+    assert.equal(isRadianceAddress(undefined, home), false);
+    assert.equal(isRadianceAddress(`http://127.0.0.1:${port}/v1`, join(home, "no-such-home")), false);
+    const runsDir = join(home, "runs");
+    const { code, stdout, stderr } = await runProto(home, "run.mjs", ["--scenario", "ship-or-delay", "--variant", "blind-first", "--provider", "openai", "--model", "m", "--base-url", `http://localhost:${port}/v1`, "--no-auth", "--runs-dir", runsDir, "--budget", join(home, "budget.json"), "--quiet"]);
+    assert.equal(code, 0, stderr);
+    assert.match(stdout, /Radiance check: idle/);
+    const outDir = /Output: (.*)$/m.exec(stdout)[1].trim();
+    assert.equal(dirname(outDir), runsDir);
+    assert.ok(existsSync(join(outDir, "server.json")));
+    assert.equal(seen[0].url, "/stats", "the idle check comes before any chat request");
+    assert.ok(seen.filter((r) => r.url === "/v1/chat/completions").length > 3);
+    assert.equal(chat.maxInFlight, 1);
+    assert.equal(existsSync(realRuns) ? readdirSync(realRuns).length : 0, before, "nothing written among the real runs");
+  } finally { server.close(); }
 });
 
 test("oneAtATime: a second call starts only after the first has ended, and a failed call does not stop the next one", async () => {

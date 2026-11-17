@@ -39,7 +39,11 @@ if (args["check-slots"]) {
 // before it builds any Radiance provider, so a route this test misses still cannot reach the server without it.
 let radiance;
 const radianceSpec = (s) => typeof s === "string" && /(^|[=,])radiance:/.test(s);
-if (kind === "radiance" || radianceSpec(args.chair) || radianceSpec(args.members)) {
+// The generic OpenAI-compatible route (--provider openai --base-url ...) pointed at the Radiance address in Pi's config is the same
+// server, so it gets the same idle check and the same one-at-a-time calls.
+const { isRadianceAddress } = await import("./lib/radiance.mjs");
+const openaiToRadiance = kind === "openai" && isRadianceAddress(args["base-url"]);
+if (kind === "radiance" || openaiToRadiance || radianceSpec(args.chair) || radianceSpec(args.members)) {
   const { radianceGate, readRadiance, RadianceRefused } = await import("./lib/radiance.mjs");
   let g;
   try { g = await radianceGate(); } catch (e) { if (!(e instanceof RadianceRefused)) throw e; console.log(e.message); process.exit(3); }
@@ -55,6 +59,7 @@ else if (kind === "pi") {
   provider = await piProvider({ model: args.model ?? "gpt-6.1-sol", reasoningEffort: args.effort ?? "low", sessionId: args.session });
 } else if (kind === "openai") {
   provider = makeProvider({ kind: "openai", model: args.model, baseUrl: args["base-url"], envFile: args["env-file"], fixedMaxTokens: args["fixed-max"] ? Number(args["fixed-max"]) : undefined, noAuth: args["no-auth"] === "true", maxTokensParam: args["max-param"], extraBody: args["extra-body"] ? JSON.parse(args["extra-body"]) : undefined });
+  if (openaiToRadiance) { const { oneAtATime } = await import("./lib/radiance.mjs"); provider = oneAtATime(provider); }
 } else provider = makeProvider({ kind: "fake" });
 
 // Mixed roster: --chair pi:gpt-6.1-sol --members a1=pi:gpt-6-astra,a2=or:z-ai/glm-5.3-prime,a3=or:qwen/qwen3.8-max-prime
@@ -82,7 +87,9 @@ const saveBudget = () => { if (budgetFile) writeFileSync(budgetFile, JSON.string
 process.on("exit", saveBudget);
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-const outDir = join(here, "runs", `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);
+// --runs-dir <dir>: where the run directory is written (default prototypes/meeting/runs); the tests use a temporary folder so that a
+// stand-in run never lands among the real runs that radiance-report.mjs and analyze.mjs read.
+const outDir = join(args["runs-dir"] ?? join(here, "runs"), `${stamp}-${slug(scenario.title.split(" ")[0])}-${variant.name}-${kind}`);
 const headroom = Number(args.headroom ?? (kind === "pi" || kind === "mixed" ? 800 : 0));
 let summary;
 try { summary = await runMeeting({ scenario, variant, provider, providers, ledger, outDir, headroom, log: args.quiet ? () => {} : (m) => console.log(m) }); } catch (e) { console.error(`RUN FAILED: ${e.message}`); process.exit(2); }
