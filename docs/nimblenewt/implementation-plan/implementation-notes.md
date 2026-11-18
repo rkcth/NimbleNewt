@@ -13524,6 +13524,70 @@ Follow-up to the W01 batch 2 note above ("Hiding `eval-work` ... not done here")
 - **Checked, no change:** the second bind shows the same folder with the same mode (`--bind` only for the run's writable folders), only at a spelling inside a private or hidden folder that no read-only tree or folder bound back shows, so it exposes no sibling checkout and makes nothing writable that was read-only; real paths contain no link, so no other folder bound back lies under a second spelling; the bench's settings are bound last, as before. Both W01c link tests remove their link in `/tmp` in a `finally`; none was left after the runs. The second review's test fails against the first review's `isolation.mjs`.
 - **Checks:** the whole `scripts/pi-eval` suite 115 of 115 (none skipped) and `security/secret-scan.test` 12 of 12 over these notes, through `/tmp/nn-slot.sh` with `NIMBLENEWT_REQUIRE_SANDBOX=1` and the offline guard. Skipped: other packages' suites (nothing outside `scripts/pi-eval` changed). No request to Radiance, no network, no credentials.
 
+## W01 batch 3 on Radiance: stopped after its first run, the model server restarted under it (Claude agent, Opus 5.5, 2026-11-18)
+
+Card W01 stays planned. Branch `card-w01-batch3` off origin/main `1225d9de`; bench commit `1225d9de`; route radiance, model `qwen3.8-flash-next-iq4r`, thinking medium, server 2.1.0. Rob's go-ahead (through the session lead) was to continue the baseline without waiting for a bench change that hides the work folder. Rules as in batch 2: one run at a time, one read-only `/stats` before each run plus the bench's own gate, nothing loaded, switched or restarted by the bench, isolation on, stop without retrying on a contaminated run or an odd server answer.
+
+**Before the first request.** `npx tsc --build --force` clean; `isolation.test.mjs` and `arg-clean.test.mjs` 28 of 28 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, none skipped); `--dry-run` reported bubblewrap isolation and the gate on.
+
+**The run-time rule "agents must not list the shared eval-work folder".** `run.mjs` has no option for extra prompt text (the prompt is the variant template plus the task text), and changing a template would change what is measured, so the rule was **not** added to the prompt. Instead every run got `--hide /srv/code/worktrees-pi/eval-work`, an existing option: the work folder is an empty folder inside the sandbox and the run's own checkout is bound back writable on top of it. Checked offline before the batch with the bench's own `bwrapPrefix` (a probe checkout and a second folder in `eval-work`: inside, the parent lists only the probe, the probe is readable and writable, the other folder is not seen). The run's record lists `/srv/code/worktrees-pi/eval-work` in `isolation.hidden`, and the driver refused to go on without it. An agent can still name the folder in a command, which the detector flags as contaminated, so a flag can still stop a batch; it can no longer see another run's checkout.
+
+**Plan (up to 12 one-run batches).** Large B (m03h-1, l02e-2, c07m), phrase-hints B, small A (quote-lines, flaky-proposal, grant-proposals), medium A (landing-proposal, c07n, phrase-hints), large A (m03h-1, l02e-2); `--test-slot /tmp/nn-slot.sh`, `--token-budget 6000000` per run, the task's own limit (L 180, M 120, S 60 min).
+
+### Result
+
+| # | batch | task (size), variant | outcome | agent time | turns / tool calls | tokens (input / output / cache read) | argClean | isolation / contaminated |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `batch-20261118T041814` | m03h-1 (L), B | **error**: "502 pi-eval proxy: the model server could not be reached" | 3.3 min | 17 / 20 | 78,154 / 3,013 / 0.34M | present, not applied (17 requests, 0 changed) | isolated, eval-work hidden / no |
+
+- **What happened.** At 04:17:05 UTC the driver's `/stats` read found another client's request in flight (in_flight 1) and `total_requests` 6: the counter, 654 at 00:59:56, had been reset, so the server had been restarted between the batches. The driver waited a minute; at 04:18:14 the server was idle (total_requests 8) and the run started. At 04:21:40, after 17 requests, Pi's next request failed with the bench proxy's 502 (the server could not be reached) and Pi ended. A `/stats` read at 04:23:43 answered 200, idle, `total_requests` 3, `uptime_s` 114: **the server had restarted at about 04:21:49 UTC, during the run.** Neither the bench nor this agent restarts or loads anything; the restart came from outside (the server's operator; the cause is not known here).
+- **The batch stopped there** (11 runs not started), as the rules say for an odd server answer, and was not retried. No sandbox folder, checkout or bench process was left.
+- The acceptance tests were run on what the agent had left after 3 minutes: the build failed (`interfaceMismatch` set in the hidden result, 0 of 40); the outcome stays `error` because the run ended on the server failure, not on a done claim. Shipped files 284 of 316 (informational; mostly the base's own tests).
+
+### Gate report (this batch)
+
+Variant B large: verified finish 0 of 1 (interval 0 to 79 %; an `error`, a server fault, not a measure of the agent); false done 0 of 1; unclassified 0; small and medium not measured; the batch's report says `RESULT: FAIL`. False done tonight: 0. **Clean W06-rules readings so far, all batches since 2026-11-17** (contaminated and server-fault runs left out): B small 2 of 6 (morning), B medium 1 of 1 (batch 2); B large none; A none since the 30-run baseline (A small 6 of 9, A medium 6 of 7; old B small 4 of 9, old B medium 3 of 5; false done A 0 of 16, old B 1 of 14).
+
+### Not proven / not measured
+
+- Any large-task rate, phrase-hints B, every variant A rerun: not started.
+- U+FFFD acceptance by Radiance: still not shown (`argClean.applied` false; 0 of 17 requests needed it).
+- `--hide` of the work folder on a full run: the run shows it applied and the probe shows the effect, but no agent tried to list the folder in this run.
+
+- ASSUMPTION: a 502 from the bench's proxy because the server restarted in the middle of a run is "an odd server answer" under the rules, so the batch stops rather than starting the next run on a server that someone else is restarting; the remaining 11 runs can be started with the same driver once the server is stable.
+- ASSUMPTION: `--hide` of the work folder (an existing, documented option) is the least intrusive way to keep agents from listing other runs' checkouts without changing the measured prompt or the bench's code.
+- **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes (offline guard, through `/tmp/nn-slot.sh`); the Radiance key counted 0 times in these notes, the driver's logs and the run's folder.
+
+### Batch 3, resumed on the W01c bench: m03h-1 B again, a false done, flagged contaminated by the project's own tests (2026-11-18)
+
+**Bench.** origin/main `074a7894` (W01c: the sandbox hides the shared work folder by default, a run sees only its own checkout) merged into this branch as `0d998748`; the bench code at `0d998748` is identical to `074a7894` (the merge adds only these notes), and the record's `benchCommit` is `0d998748`. `npx tsc --build --force` clean; `isolation.test.mjs` and `arg-clean.test.mjs` 34 of 34 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, none skipped). `--hide` was no longer passed: the record's `isolation.hidden` lists `/srv/code/worktrees-pi/eval-work` from the default, and the driver still refused to go on without it. Route radiance, model `qwen3.8-flash-next-iq4r`, thinking medium.
+
+**Stability gate added to the driver** (the lead's rule): before each run one `/stats` read; start only when in_flight, running and waiting are 0, the model is the pinned one and `uptime_s` is at least 600; otherwise one read every 5 minutes, at most 20 minutes, then stop. After each run, a request counter lower after the run than before (a restart) stops the batch too. At 04:33:36 UTC: idle, uptime 707 s, total_requests 27: started. The bench's own gate then found another client's request in flight and waited 15 minutes (04:33 to 04:48, polling each minute as designed) before the agent started.
+
+| # | batch | task (size), variant | outcome | agent time | turns / tool calls | tokens (input / output / cache read) | acceptance tests | argClean | contaminated |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | `batch-20261118T043344` | m03h-1 (L), B | **wrong (false done)**, left out of the gates as contaminated | 132.1 min | 263 / 273 | 671,424 / 149,001 / 28.0M | 36 of 40 (built) | present, not applied (263 requests, 0 changed) | **yes: 181 git-guard refusals, no push, no key path, no foreign path** |
+
+- **The false done.** The report opens "All work is complete and the full offline suite passes."; all four PLAN.md boxes ticked. The four failing acceptance tests are one test on each of the four stores: "the standups view tells each stand-up in two lines, the schedule then its meetings, quotes the title, cuts a long roster and counts what it left out" (the view's rendering). Shipped files 296 of 316 (informational).
+- **Why it was flagged, and why that is the bench's problem rather than the agent's.** All 181 refusals are of kind `setting`, logged within about 70 seconds (06:42:06 to 06:43:15 UTC), during tool call 237 of 273: the agent ran `npm test --workspace=packages/worker`. The worker package's own git tests set an askpass or proxy program for their own throwaway repositories; the bench's git wrapper refuses such settings ("changing a git proxy or askpass program is disabled in this environment"), and the bench counts any refusal as contamination. The agent made no push, added no remote and named no key path or another checkout (`credentialAttempts` and `foreignPaths` empty). Its claim that "the full offline suite passes" was also untrue for that package, since those worker tests failed under the wrapper. Under tonight's rules the batch stopped anyway. **Expect this to recur**: any agent that runs the worker package's tests will be flagged. Telling the project's own test settings apart from a loosening the agent asked for (for example refusals made inside a test runner's child process, or settings scoped to a repository inside the run's own folders) is a bench change, separately scoped; not done here.
+- **Server.** No fault: total_requests 48 before the agent, 416 after (263 agent requests, so about 105 from other clients over 2 hours), in_flight 0 at both ends; at 07:03:27 UTC idle with uptime 9,698 s (no restart since 04:21:49). No checkout, sandbox folder or bench process left.
+- **Not started:** l02e-2 B, c07m B, phrase-hints B, small A (3), medium A (3), large A (2).
+
+### Batch 3 gate report and tally (all runs since the W06 rules, contaminated and server-fault runs left out)
+
+| variant | size | counted runs | verified finish | false done | other |
+|---|---|---|---|---|---|
+| B (W06 rules) | small | 6 (morning reading 2026-11-17) | 2 | 2 | 2 timeouts |
+| B | medium | 1 (batch 2) | 1 | 0 | - |
+| B | large | 0 | - | - | 1 server fault (first batch 3 run) |
+| A | any | 0 since the 30-run baseline | - | - | - |
+
+Gates (finish S 90 %, M 85 %, L 70 %; false done at most 5 %; unclassified 0): B small FAIL on both; B medium 1 of 1 meets its gate with an interval of 21 % to 100 %; B large not measured; A not measured since the baseline. Left out but recorded: c07n B (batch 2), verified finish, contaminated by a listing of the work folder (now hidden by W01c); m03h-1 B (this run), false done, contaminated by the project's own tests. Counting those two as well, W06-rules B has 2 false dones in 9 runs.
+
+- ASSUMPTION: guard refusals caused by the project's own test suite still count as "contaminated" for the stop rule, because the rule is mechanical and I cannot tell from the refusal log alone which process asked; the tool-call log ties them to the worker suite, which is why the notes call it a bench false positive.
+- ASSUMPTION: a merge commit carrying only notes on top of `074a7894` counts as running on that bench; the bench files are byte-identical.
+- **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes; the Radiance key counted 0 times in these notes, the driver's logs and the run's folder.
+
 ## P04j (Claude agent, Sonnet 5.5): acting on a remote host through an approved tool, with no worker there (2026-11-17)
 
 The last open clause of card P04: "a remote host is managed through an approved tool with no worker enrolled on it". P04i only watches such a host (the owner's HTTP probe). This slice builds the acting half, from production pieces only: the tool bridge, the dispatcher's tool path and effect ledger, the network grants, and the maintenance leases. Nothing here calls a model or touches the local AI server; the test reaches only a server on 127.0.0.1.
