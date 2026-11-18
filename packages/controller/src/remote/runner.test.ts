@@ -216,3 +216,18 @@ test("catalogue scripts (card T02d): the control messages run, abort and revoke 
   await doneG;
   assert.match(String((failed[0] as { error: string }).error), /no script sandbox/);
 });
+
+test("an offer's selected updates reach the host's start as given; updates out of shape or bounds start nothing and are reported failed (card G09, remote path)", async () => {
+  const updates = [{ requestId: "upd:cbr-1:2", text: "Owner correction: use plan B.", origin: "side line cbr-1, desk record dsk-2, update 2" }];
+  const f = fake();
+  const given: WorkOrder[] = [];
+  assert.equal(await new RemoteOfferRunner({ ...base, client: f.client, host: { start: async (o) => { given.push(o); return handle(); } } }).run({ placement: 3, order: { ...order, contextUpdates: updates } as WorkOrder }), "completed");
+  assert.deepEqual(given[0]!.contextUpdates, updates);
+  for (const bad of [[{ ...updates[0]!, text: 7 }], [{ ...updates[0]!, requestId: "" }], "text"]) {
+    const g = fake();
+    let started = 0;
+    assert.equal(await new RemoteOfferRunner({ ...base, client: g.client, host: { start: async () => { started++; return handle(); } } }).run({ placement: 3, order: { ...order, contextUpdates: bad } as unknown as WorkOrder }), "failed");
+    assert.equal(started, 0);
+    assert.match(String((g.log.completed[0] as { error: string }).error), /could not start the order: its contextUpdates /);
+  }
+});

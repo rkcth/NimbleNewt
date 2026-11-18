@@ -242,8 +242,8 @@ export class RemoteWorkerHost implements WorkerHost {
       return { workerVersion: "remote", run: async () => ({ status: "failed", error: why }), checkpoint: async () => judged.order.resumeFrom ?? {}, restart: async () => { throw new DomainError("fenced", "the attempt was refused before it was offered"); }, stop: async () => undefined };
     }
     // What the order's text is made of is the controller's own measure (card C07i): the host is not given it.
-    // Selected updates (card G09) are placed by the local host's process only: a remote host's channel does not carry them yet.
-    const { startParts: _sp, environmentRevision: _er, contextUpdates: _cu, ...offered } = judged.order; void _sp; void _er; void _cu;
+    // Selected updates (card G09) go with the offer: the remote worker's host process places them before the turn, under their request IDs, as a local host's does.
+    const { startParts: _sp, environmentRevision: _er, ...offered } = judged.order; void _sp; void _er;
     const order = await this.#carry(offered);
     const placed = await this.remote.place(this.by, { hostId: this.hostId, order, requirements: this.options.requirements(order), inputs: this.options.inputs?.(order) ?? [] });
     return new RemoteWorkerHandle(this.remote, this.by, order.attemptId, placed.placement, this.options);

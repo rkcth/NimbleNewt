@@ -3,6 +3,7 @@ import type { ArtifactService } from "../artifacts/index.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { DISPATCH_LIMITS } from "../dispatch/model.js";
+import { contextUpdatesProblem } from "../dispatch/context-updates.js";
 import { ModelStreamRefused, type ModelStreamCall, type ModelStreamEvent, type ModelStreamTap } from "../dispatch/model-stream.js";
 import type { CallMonitor, RelayMonitor } from "../dispatch/relay.js";
 import { StartRefused, turnEndKindOf, type DoneCheckRequest, type ToolCallRequest, type ToolGateway, type ToolResult, type TurnUsage, type WorkOrder, type WorkerTurnResult } from "../dispatch/ports.js";
@@ -927,6 +928,9 @@ export class RemoteWorkerService {
     // A remote placement is refused without a sealed contract: the gate on tool calls cannot be skipped by leaving the contract out.
     if (order.contract === undefined) throw new DomainError("invalid_command", `attempt ${attemptId} has no dispatch contract; a remote placement must carry one`, { field: "order.contract" });
     const sealed = checkContract(order);
+    // Card G09: the selected updates the host's process places before the turn, in the shape and bounds the dispatcher gives them (a remote worker applies the same rule before it starts the order).
+    const updatesProblem = contextUpdatesProblem(order.contextUpdates);
+    if (updatesProblem !== undefined) invalid("order.contextUpdates", updatesProblem);
     const contract: PlacementBody["contract"] = { digest: sealed.digest, recipe: { revision: order.recipe.revision, reach: [...order.recipe.reach], ...(order.recipe.limits === undefined ? {} : { limits: { ...order.recipe.limits } as JsonObject }) }, bestEffort: sealed.bestEffort, ...(sealed.limits === undefined ? {} : { limits: { ...sealed.limits } as JsonObject }), requires: [...sealed.requires] };
     // The dispatcher's own record decides whether this is the attempt's host: a placement cannot contradict it.
     const dispatch = await this.#deps.dispatch.get(by, attemptId);

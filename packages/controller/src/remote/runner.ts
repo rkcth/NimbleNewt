@@ -1,5 +1,6 @@
 import type { WorkOrder, WorkerHandle, WorkerHost, WorkerTurnResult } from "../dispatch/ports.js";
 import { ModelStreamRefused, type ModelStreamTap } from "../dispatch/model-stream.js";
+import { contextUpdatesProblem } from "../dispatch/context-updates.js";
 import type { JsonObject } from "../storage/types.js";
 import type { RemoteAttempt, RemoteWorkerClient } from "./client.js";
 import { WorkerRequestError } from "./client.js";
@@ -137,6 +138,12 @@ export class RemoteOfferRunner {
       await attempt.accept();
       const honored = await attempt.honorContract(order, this.#o.abilities, this.#o.now?.() ?? new Date().toISOString());
       if (!honored.ok) return "refused";
+      // Card G09: the selected updates go to this machine's process exactly as given (it places them before the turn, once per request ID); an offer whose updates are not in the dispatcher's shape and bounds is not started.
+      const updatesProblem = contextUpdatesProblem(order.contextUpdates);
+      if (updatesProblem !== undefined) {
+        await attempt.complete({ status: "failed", error: `the worker could not start the order: its contextUpdates ${updatesProblem}` });
+        return "failed";
+      }
       try { handle = await this.#o.host.start(order); } catch (error) {
         await attempt.complete({ status: "failed", error: `the worker could not start the order: ${String((error as Error)?.message ?? error).slice(0, 400)}` });
         return "failed";

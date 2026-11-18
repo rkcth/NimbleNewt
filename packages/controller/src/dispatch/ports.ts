@@ -87,7 +87,7 @@ export interface WorkOrder {
   readonly contract?: DispatchContract;
   /**
    * Updates a side line of work selected for this task and brought back when it returned (card G09: C05 `applyUpdates` then `resume`), oldest first. The host places each in the task's conversation before the turn, as
-   * an update entry that keeps `origin`, under `requestId`, so a conversation that already holds one applies it once. Not sent to a remote host.
+   * an update entry that keeps `origin`, under `requestId`, so a conversation that already holds one applies it once. A remote host is offered them too (checked at `place`, and by the worker before it starts the order).
    */
   readonly contextUpdates?: readonly ContextUpdate[];
 }
