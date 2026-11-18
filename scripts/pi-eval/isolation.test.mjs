@@ -1016,3 +1016,22 @@ test("W01c: a work root reached through a link, with spaces and other characters
   assert.equal(s.ownGit.status, 0, JSON.stringify(s.ownGit));
   assert.ok(r.isolation.hidden.includes(realpathSync(real)), JSON.stringify(r.isolation));
 });
+
+test("W01c: a work root given as a link that lies directly in /tmp (no folder around it shown again): the run's own checkout is still reached by the link", { ...needsSandbox, skip: needsSandbox.skip || (!existsSync("/tmp") ? "no /tmp here" : false) }, async () => {
+  const real = join(root, "w01c-tmp-link-target");
+  mkdirSync(real, { recursive: true });
+  const link = `/tmp/pi-eval-w01c-link-${process.pid}`;
+  symlinkSync(real, link);
+  try {
+    const { r, s } = await peekRun(link);
+    const listed = s.listWork.stdout.split("\n").filter(Boolean);
+    assert.equal(listed.length, 1, JSON.stringify(s.listWork));
+    assert.match(listed[0], /^eval-/);
+    assert.notEqual(s.readSibling.status, 0, JSON.stringify(s.readSibling));
+    assert.equal(s.ownWrite.stdout, "own-work\n", JSON.stringify(s.ownWrite));
+    assert.equal(s.ownGit.status, 0, JSON.stringify(s.ownGit));
+    assert.ok(r.isolation.hidden.includes(realpathSync(real)), JSON.stringify(r.isolation));
+  } finally {
+    rmSync(link, { force: true });
+  }
+});

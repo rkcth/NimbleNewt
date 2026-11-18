@@ -387,9 +387,14 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
   // Bound back at where each folder really is: bubblewrap cannot make a mount point through an absolute link whose target
   // lies under a covered folder (a work root given as a link, hidden by card W01c), and the link still leads there.
   const back = [...writable.map((p) => [p, "--bind"]), ...readable.filter((p) => isHidden(p) || isPrivate(p)).map((p) => [p, "--ro-bind"])]
-    .filter(([p]) => existsSync(p)).map(([p, how]) => [real(p), how])
+    .filter(([p]) => existsSync(p)).map(([p, how]) => [real(p), how, resolve(p)])
     .sort((a, b) => a[0].length - b[0].length);
   for (const [p, how] of back) argv.push(how, p, p);
+  // A folder named through a link that itself lies in a covered place (a private or hidden folder that no tree or folder
+  // bound back shows again, such as a work root given as a link directly in /tmp) is also bound at that spelling: the link
+  // is not there inside, and the agent is given that spelling (its working folder, its log file).
+  const covered = (q) => [...privateDirs, ...hidden].some((h) => under(q, h)) && ![...trees, ...back.map(([p]) => p)].some((t) => under(q, t));
+  for (const [p, how, given] of back) if (given !== p && covered(given)) argv.push(how, p, given);
   // A hidden place inside a folder bound back (a later mount shows what was covered under it) is covered again.
   for (const h of hidden) {
     if (!back.some(([p]) => h !== resolve(p) && h !== real(p) && (under(h, resolve(p)) || under(h, real(p))))) continue;
