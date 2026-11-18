@@ -61,27 +61,29 @@ test("SQLite: the composed observation reads the resource again beside the host'
   const root = mkdtempSync(join(tmpdir(), "nn-obs-wire-"));
   const dir = join(root, "checkout");
   mkdirSync(dir, { recursive: true });
-  const c = await startController({
-    storage: { kind: "sqlite", path: join(root, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-    resumeReview: { model: reviewer(asked) as never, routes: ["m/reviewer"] },
-    resume: { observe: async (taskId: string) => { hostCalls.push(taskId); return hostSays; } },
-    dispatch: {
-      timer: new ManualTimer(), manual: true,
-      local: { window: () => 32768, acceptUnenforcedLimits: true, build: () => new ScriptedWorker("host:w1", async () => ({ status: "completed", text: "done" })) },
-      network: { resolve: async (h: string) => (h === "docs.example.com" ? [PUBLIC] : []), dial: () => netConnect({ host: "127.0.0.1", port: site.port }), secret: async () => undefined },
-    },
-  } as never);
+  let c: Awaited<ReturnType<typeof startController>> | undefined;
   try {
-    const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
-    const rob = await c.services.principals.authenticate(boot.token);
-    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string): Promise<any> => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    c = await startController({
+      storage: { kind: "sqlite", path: join(root, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+      resumeReview: { model: reviewer(asked) as never, routes: ["m/reviewer"] },
+      resume: { observe: async (taskId: string) => { hostCalls.push(taskId); return hostSays; } },
+      dispatch: {
+        timer: new ManualTimer(), manual: true,
+        local: { window: () => 32768, acceptUnenforcedLimits: true, build: () => new ScriptedWorker("host:w1", async () => ({ status: "completed", text: "done" })) },
+        network: { resolve: async (h: string) => (h === "docs.example.com" ? [PUBLIC] : []), dial: () => netConnect({ host: "127.0.0.1", port: site.port }), secret: async () => undefined },
+      },
+    } as never);
+    const ctl = c;
+    const boot = await ctl.services.principals.bootstrapOwner({ name: "rob" });
+    const rob = await ctl.services.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string): Promise<any> => (await ctl.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
     const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;
     assert.ok((await call(boot.token, "resource.bind", { projectId: project, kind: "repository", label: "src", locator: dir, repositoryId: "repo-main" }, "b1")).ok);
     const task = (await call(boot.token, "task.create", { projectId: project, title: "write the planting guide", repositoryId: "repo-main" }, "t1")).result.id as string;
-    await c.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "task.read", project }, { action: "attempt.work", project }] });
-    const ann = (await c.services.principals.issueCredential(rob, "agent:ann")).token;
+    await ctl.services.principals.enroll(rob, { commandId: "e-ann", kind: "agent", name: "ann", grants: [{ action: "task.read", project }, { action: "attempt.work", project }] });
+    const ann = (await ctl.services.principals.issueCredential(rob, "agent:ann")).token;
     assert.ok((await call(boot.token, "continuation.capture", { taskId: task, ...capture }, "cap1")).ok);
-    await c.services.configuration.change(rob, { commandId: "s1", layer: "installation", set: { "resume.externalReads": true } } as never);
+    await ctl.services.configuration.change(rob, { commandId: "s1", layer: "installation", set: { "resume.externalReads": true } } as never);
     assert.ok((await call(boot.token, "network.grant", { taskId: task, host: "docs.example.com", port: 80 }, "g1")).ok);
     const start = async (id: string): Promise<any> => {
       const r = await call(boot.token, "resume.start", { taskId: task, model: { provider: "local", id: "m1" }, after: "restart" }, id); assert.ok(r.ok, JSON.stringify(r));
@@ -103,7 +105,7 @@ test("SQLite: the composed observation reads the resource again beside the host'
     let seen = site.seen.length;
     const other = await start("r1");
     assert.ok(hostCalls.length > 0, "the host's own observe port is asked");
-    assert.ok(site.seen.length > seen, "the resource is read again beside the host's port");
+    assert.equal(site.seen.length, seen + 1, "the resource is read again beside the host's port, once");
     assert.deepEqual(other.delta.changed.map((x: { key: string; status: string }) => [x.key, x.status]), [[url, "changed"]], JSON.stringify(other.delta));
     let prompt = asked.join("\n");
     assert.ok(asked.length > 0, "the change is put to the reviewer");
@@ -114,20 +116,22 @@ test("SQLite: the composed observation reads the resource again beside the host'
     hostSays = { [entry.id]: { exists: true, hash: sha(page.text), etag: "\"v2\"" } };
     asked.length = 0; seen = site.seen.length;
     const same = await start("r2");
-    assert.ok(site.seen.length > seen);
+    assert.equal(site.seen.length, seen + 1);
     assert.deepEqual(same.delta.changed.map((x: { key: string; status: string }) => [x.key, x.status]), [[url, "changed"]], JSON.stringify(same.delta));
     prompt = asked.join("\n");
     assert.match(prompt, /change="@@ line 1 @@\\n-Plant after the last frost\.\\n\+Plant two weeks after the last frost\./);
 
     // The host reports the recorded hash: the entry is unchanged, nothing about it is put to the reviewer, although the read found a new text.
     hostSays = { [entry.id]: { exists: true, hash: entry.hash.replace(/^sha256:/, ""), etag: "\"v1\"" } };
-    asked.length = 0;
+    // The read is still made (one bounded request per resource per observation, card L04g): "unchanged" here means nothing reaches the reviewer, not that nothing is fetched.
+    asked.length = 0; seen = site.seen.length;
     const kept = await start("r3");
+    assert.equal(site.seen.length, seen + 1, "the resource is still read once beside the host's port");
     assert.deepEqual(kept.delta.changed, [], JSON.stringify(kept.delta));
     assert.equal(kept.delta.unchanged, 1);
     assert.equal(asked.join("\n").includes("Plant two weeks"), false);
   } finally {
-    await c.close();
+    await c?.close();
     await site.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
