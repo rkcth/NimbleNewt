@@ -113,7 +113,11 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     host.writeText(jobFile(jobDir), JSON.stringify(job));
     const passed: Record<string, string> = {};
     for (const name of ENV_PASSED) { const v = env(name); if (v !== undefined) passed[name] = v; }
-    return { file: node, args: [runnerScript, jobFile(jobDir)], env: { ...passed, NIMBLENEWT_WSB_JOB: jobDir }, cwd: controlDir };
+    // The runner's PowerShell probes compile a small type (Add-Type), which needs a temporary folder. The launcher starts the runner with this environment only, so without
+    // TEMP and TMP Windows falls back to its own directory, which an ordinary account cannot write. The folder is the supervisor's (inside the control directory), never shared.
+    const runnerTemp = `${controlDir}\\tmp`;
+    host.mkdirp(runnerTemp);
+    return { file: node, args: [runnerScript, jobFile(jobDir)], env: { ...passed, TEMP: runnerTemp, TMP: runnerTemp, NIMBLENEWT_WSB_JOB: jobDir }, cwd: controlDir };
   };
 
   const checkHealth = async (): Promise<BackendHealth> => {

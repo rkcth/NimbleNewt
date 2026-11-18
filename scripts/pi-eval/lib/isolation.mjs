@@ -272,6 +272,28 @@ export function defaultHidden({ ownerHome = homedir(), extra = [] } = {}) {
   return [...new Set(list.filter((p) => typeof p === "string" && isAbsolute(p) && existsSync(p)).map((p) => real(resolve(p))))].filter((p) => p !== sep);
 }
 
+/**
+ * What to hide of the shared work root, which holds every run's checkout (card W01c): the work root itself, so a run sees
+ * only its own checkout (bound back writable by bwrapPrefix, after the work root's empty tmpfs). When a folder the agent
+ * must still read (`keep`: the reference repositories, the bench, other read-only trees) is the work root or lies inside
+ * it, hiding the whole of it would hide that too: then each other entry present now (the siblings' checkouts) is hidden
+ * instead, leaving the run's own checkout and the entries holding a kept folder. Nothing without a work root.
+ */
+export function workRootHidden({ workRoot, ownDir, keep = [] }) {
+  if (typeof workRoot !== "string" || !existsSync(workRoot)) return [];
+  const wr = real(resolve(workRoot));
+  if (wr === sep) return [];
+  const kept = keep.filter((p) => typeof p === "string").map((p) => real(resolve(p))).filter((p) => under(p, wr));
+  if (kept.length === 0) return [wr];
+  const own = typeof ownDir === "string" ? real(resolve(ownDir)) : null;
+  let names;
+  try { names = readdirSync(wr); } catch { return []; }
+  // Each entry by where it really is: a link in the work root to the run's own checkout or to a kept folder (the hidden
+  // list is resolved again later) must not hide that; a link leading out of the work root is not a sibling's checkout.
+  const entries = [...new Set(names.map((n) => real(join(wr, n))))].filter((p) => p !== wr && under(p, wr));
+  return entries.filter((p) => !(own && (under(own, p) || under(p, own))) && !kept.some((k) => under(k, p)));
+}
+
 /** File names that hold keys and logins by convention (a `.env` but not its `.example`, key files, login files). */
 const CREDENTIAL_FILE = /^(?:\.env(?:\.(?!(?:example|sample|template|dist)$)[\w.-]+)?|.+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|ppk)|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.npmrc|\.pypirc|\.pgpass|\.htpasswd|credentials(?:\.json)?|.+\.credentials\.json|secrets?\.(?:json|ya?ml|toml|env)|.+-token|service-account.*\.json)$/i;
 /** Folder names that hold keys and logins by convention. */
@@ -362,8 +384,10 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
     try { isDir = statSync(h).isDirectory(); } catch { continue; }
     argv.push(...(isDir ? ["--tmpfs", h] : ["--ro-bind", "/dev/null", h]));
   }
+  // Bound back at where each folder really is: bubblewrap cannot make a mount point through an absolute link whose target
+  // lies under a covered folder (a work root given as a link, hidden by card W01c), and the link still leads there.
   const back = [...writable.map((p) => [p, "--bind"]), ...readable.filter((p) => isHidden(p) || isPrivate(p)).map((p) => [p, "--ro-bind"])]
-    .filter(([p]) => existsSync(p))
+    .filter(([p]) => existsSync(p)).map(([p, how]) => [real(p), how, resolve(p)])
     .sort((a, b) => a[0].length - b[0].length);
   for (const [p, how] of back) argv.push(how, p, p);
   // A hidden place inside a folder bound back (a later mount shows what was covered under it) is covered again.
@@ -372,6 +396,22 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
     let isDir = true;
     try { isDir = statSync(h).isDirectory(); } catch { continue; }
     argv.push(...(isDir ? ["--tmpfs", h] : ["--ro-bind", "/dev/null", h]));
+  }
+  // A folder named through a link that itself lies in a covered place (a private or hidden folder that no tree or folder
+  // bound back shows again, such as a work root given as a link directly in /tmp) is also bound at that spelling: the link
+  // is not there inside, and the agent is given that spelling (its working folder, its log file). bubblewrap binds from the
+  // host's side, so a hidden place inside that folder is covered again at that spelling as well.
+  const covered = (q) => [...privateDirs, ...hidden].some((h) => under(q, h)) && ![...trees, ...back.map(([p]) => p)].some((t) => under(q, t));
+  for (const [p, how, given] of [...back].sort((a, b) => a[2].length - b[2].length)) {
+    if (given === p || !covered(given)) continue;
+    argv.push(how, p, given);
+    for (const h of hidden) {
+      if (h === p || !under(h, p)) continue;
+      let isDir = true;
+      try { isDir = statSync(h).isDirectory(); } catch { continue; }
+      const at = given + h.slice(p.length);
+      argv.push(...(isDir ? ["--tmpfs", at] : ["--ro-bind", "/dev/null", at]));
+    }
   }
   for (const p of readOnly) if (existsSync(p)) argv.push("--ro-bind", p, p);
   argv.push("--");

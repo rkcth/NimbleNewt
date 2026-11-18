@@ -132,6 +132,10 @@ test("the platform-specific files are part of what a report must have run", () =
   assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-real"));
   assert.ok(!filesFor(map.scenarios[0], "linux").includes("worker/sandbox/windows-real"));
   assert.ok(filesFor(map.scenarios[0], "darwin").includes("worker/sandbox/seatbelt"));
+  // On a machine WITH a Windows Sandbox client (where Y02 must pass) the host checks skip their two no-client tests; that exact reason is named as not applicable.
+  assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-host-real"));
+  const present = /const PRESENT = "([^"]+)";/.exec(readFileSync(join(here, "..", "packages", "worker", "src", "sandbox", "windows-host-real.test.ts"), "utf8"))?.[1];
+  assert.ok(present !== undefined && map.scenarios[0].notApplicable.win32.includes(present), "the no-client skip reason of windows-host-real is named for win32");
   const v = judgeAltered((raws) => { const r = JSON.parse(raws[evidenceNames("win32").scenarios]); r.scenarios[0].files = filesFor(map.scenarios[0], "linux"); raws[evidenceNames("win32").scenarios] = JSON.stringify(r); });
   blocked(v, /win32: scenarios: scenario sandbox-escape-refused: ran other test files/);
 });
