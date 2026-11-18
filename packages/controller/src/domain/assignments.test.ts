@@ -34,6 +34,9 @@ test("isAgentOwner: an agent owner in bare or prefixed spelling is the agent pri
   assert.equal(isAgentOwner(undefined, cal), false);
   assert.equal(isAgentOwner({ kind: "agent", id: "ann" }, cal), false);
   assert.equal(isAgentOwner({ kind: "agent", id: "agent:agent:cal" }, cal), false);
+  // Whole IDs only: an agent whose name contains, ends or starts with the owner's ID is someone else.
+  for (const name of ["pascal", "cal-2", "xcalx"]) for (const id of ["cal", "agent:cal"]) assert.equal(isAgentOwner({ kind: "agent", id }, { kind: "agent", id: `agent:${name}` }), false, `${name} ${id}`);
+  assert.equal(isAgentOwner({ kind: "agent", id: "cal-2" }, cal), false);
   for (const kind of ["person", "role", "team", "owner"]) for (const id of ["cal", "agent:cal"]) assert.equal(isAgentOwner({ kind, id }, cal), false, `${kind} ${id}`);
   // Only an agent principal: a host, client, service or owner principal whose ID an agent owner happens to carry is not that owner.
   for (const kind of ["host", "client", "service", "owner"]) assert.equal(isAgentOwner({ kind: "agent", id: `${kind}:cal` }, { kind, id: `${kind}:cal` }), false, kind);
