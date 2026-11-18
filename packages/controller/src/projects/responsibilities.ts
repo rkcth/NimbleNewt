@@ -65,6 +65,8 @@ export interface ObservationBody {
 }
 
 interface LogBody { readonly n: number; readonly lastCheckAt?: string; readonly lastCheckOutcome?: string; /** When a check last found the responsibility ok (card P04): kept when later checks fail. */ readonly lastOkAt?: string }
+/** The last ok check of a log: a log written before `lastOkAt` was kept has none, and then its last check is the last ok one when it was ok (card P04 review: such a record would otherwise read as never ok). */
+const okAtOf = (log: LogBody | undefined): string | undefined => log?.lastOkAt ?? (log?.lastCheckOutcome === "ok" ? log.lastCheckAt : undefined);
 
 export interface ResponsibilityStatus {
   readonly responsibilityId: string;
@@ -273,7 +275,7 @@ export class ResponsibilityService {
           const seq = (before?.n ?? 0) + 1;
           const at = this.#runner.now();
           const entry: ObservationBody = { responsibilityId: id, projectId: body.projectId, seq, kind, summary, ...(outcome === undefined ? {} : { outcome }), ...(taskId === undefined ? {} : { taskId }), at, by: by.id };
-          const lastOkAt = kind === "check" && outcome === "ok" ? at : before?.lastOkAt;
+          const lastOkAt = kind === "check" && outcome === "ok" ? at : okAtOf(before);
           const nextLog: LogBody = { n: seq, ...(kind === "check" ? { lastCheckAt: at, ...(outcome === undefined ? {} : { lastCheckOutcome: outcome }) } : before?.lastCheckAt === undefined ? {} : { lastCheckAt: before.lastCheckAt, ...(before.lastCheckOutcome === undefined ? {} : { lastCheckOutcome: before.lastCheckOutcome }) }), ...(lastOkAt === undefined ? {} : { lastOkAt }) };
           const ref: AggregateRef = { kind: EVENT, id: `${id}.${seq}` };
           const logRef: AggregateRef = { kind: LOG, id };
@@ -348,7 +350,7 @@ export class ResponsibilityService {
     const hhmm = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
     return {
       responsibilityId: id, state: body.state, asOf, events: log?.n ?? 0,
-      ...(log?.lastCheckAt === undefined ? {} : { lastCheckAt: log.lastCheckAt }), ...(log?.lastCheckOutcome === undefined ? {} : { lastCheckOutcome: log.lastCheckOutcome }), ...(log?.lastOkAt === undefined ? {} : { lastOkAt: log.lastOkAt }),
+      ...(log?.lastCheckAt === undefined ? {} : { lastCheckAt: log.lastCheckAt }), ...(log?.lastCheckOutcome === undefined ? {} : { lastCheckOutcome: log.lastCheckOutcome }), ...(okAtOf(log) === undefined ? {} : { lastOkAt: okAtOf(log)! }),
       ...(due === undefined ? {} : { nextCheckDue: due }),
       checkOverdue: body.state === "active" && due !== undefined && Date.parse(due) < now,
       inMaintenanceWindow: body.maintenanceWindows.some((w) => w.days.includes(d.getUTCDay()) && w.start <= hhmm && hhmm < w.end),
