@@ -367,6 +367,23 @@ describe("G05 Windows network case and the trusted-host program path (review)", 
       await assert.rejects(posix.launch({ recipe, command: program, timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "invalid_recipe");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  test("the drive-path exception is decided on the normalized recipe: a mode that reads trusted-host first and sandboxed after never reaches a confined plan", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nn-g05-win-"));
+    try {
+      const d = (n: string): string => { const p = join(dir, n); mkdirSync(p); return p; };
+      const planned: string[] = [];
+      const healthy: SandboxBackend = {
+        name: "recorded", health: async () => ({ healthy: true, backend: "recorded" }),
+        plan: (_recipe, command) => { planned.push(command[0]!); return { file: "/bin/true", args: [], env: {} }; },
+        guestView: (r) => ({ workdir: r.workdir, home: r.home, scratch: r.scratch, tmp: r.scratch, inputs: [] }),
+      };
+      let reads = 0;
+      const recipe = { get mode() { reads += 1; return reads === 1 ? "trusted-host" : "sandboxed"; }, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] } as unknown as LaunchRequest["recipe"];
+      const win = await SandboxLauncher.create({ platform: "win32", backend: healthy, protectedPaths: [], trustedHost: { authority: "t" }, audit: () => undefined });
+      await assert.rejects(win.launch({ recipe, command: ["C:\\Windows\\System32\\cmd.exe", "/d", "/c", "exit 0"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "invalid_recipe");
+      assert.deepEqual(planned, []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe("G05 run outcome (the exit status of `containment-evidence.mjs run`)", () => {
