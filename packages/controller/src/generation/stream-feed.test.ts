@@ -48,7 +48,7 @@ const request = { url: "http://relay.invalid/m0/chat/completions", method: "POST
 const drain = async (body: AsyncIterable<Uint8Array> | null): Promise<string> => { let out = ""; if (body !== null) for await (const p of body) out += Buffer.from(p).toString("utf8"); return out; };
 
 for (const backend of backends) {
-  interface Ctx { owner: Principal; dispatcher: Principal; task: string; attemptId: string; gen: GenerationService; relayFor(e: ReturnType<typeof endpoint>, settings?: Record<string, unknown>, errors?: unknown[], extra?: Extra): ReturnType<ModelRelay["forAttempt"]>; projects: ProjectService; mk(deps: { pauses?: unknown; decisions?: unknown }): GenerationService }
+  interface Ctx { owner: Principal; dispatcher: Principal; task: string; attemptId: string; gen: GenerationService; relayFor(e: ReturnType<typeof endpoint>, settings?: Record<string, unknown>, errors?: unknown[], extra?: Extra): ReturnType<ModelRelay["forAttempt"]>; projects: ProjectService; principals: PrincipalService; project: string; assignments: AssignmentService; mk(deps: { pauses?: unknown; decisions?: unknown }): GenerationService }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -72,10 +72,36 @@ for (const backend of backends) {
           ...(extra.monitor === undefined ? {} : { monitor: extra.monitor }),
           stream: streamTapFor({ generation: extra.gen ?? gen, principal: dispatcher, settings: async () => settings as never, onError: (x) => errors.push(x), nonce: () => `n${++taps}` }, extra.attempt ?? { attemptId, taskId: task, generation: 1 }),
         });
-      await body({ owner, dispatcher, task, attemptId, gen, relayFor, projects, mk: (deps) => GenerationService.withEpoch(world.storage, projects.epoch, { assignments, effects, ...deps as object }, options) });
+      await body({ owner, dispatcher, task, attemptId, gen, relayFor, projects, principals, project, assignments, mk: (deps) => GenerationService.withEpoch(world.storage, projects.epoch, { assignments, effects, ...deps as object }, options) });
     } finally { await world.close(); }
   });
   const run = async (c: Ctx, n: number) => (await c.gen.view(c.owner, GenerationService.runIdOf(c.task, n)))!.run;
+
+  suite("the agent a real assignment names by its bare ID reads the generation the dispatcher streams for it; a person owner with the same name does not", async (c) => {
+    // The task is assigned to `{ kind: "agent", id: "ann" }` through the assignment service (the shape the chat, check runs and meetings use); Ann signs in as `agent:ann`. The dispatcher streams the
+    // generation, so Ann reads it only as the task's assigned agent.
+    const agent = async (nm: string) => {
+      await c.principals.enroll(c.owner, { commandId: `e-${nm}`, kind: "agent", name: nm, grants: [{ action: "assignment.read", project: c.project }, { action: "attempt.work", project: c.project }] });
+      return c.principals.authenticate((await c.principals.issueCredential(c.owner, `agent:${nm}`)).token);
+    };
+    const ann = await agent("ann"); const bob = await agent("bob");
+    assert.deepEqual((await c.assignments.getAssignment(c.task))!.owner, { kind: "agent", id: "ann" });
+    await drain((await c.relayFor(endpoint([[sse(chunk({ content: "plan" }), chunk({}, "stop")) + "data: [DONE]\n\n"]])).relay(request as never)).body);
+    const id = GenerationService.runIdOf(c.task, 1);
+    assert.equal((await run(c, 1)).owner, c.dispatcher.id);
+    assert.equal((await c.gen.view(ann, id))?.run.text, "plan", "the assigned agent reads it");
+    assert.equal(await c.gen.view(bob, id), undefined, "another agent of the project does not");
+    // A person owner named like the agent, in either spelling, is not the agent.
+    for (const [n, owner] of [[0, { kind: "person", id: "ann" }], [1, { kind: "person", id: "agent:ann" }]] as const) {
+      const a = (await c.assignments.getAssignment(c.task))!;
+      await c.assignments.transferTask({ commandId: `tr-${n}`, actor: c.owner.id, taskId: c.task, expectedRevision: a.revision, to: owner });
+      assert.equal(await c.gen.view(ann, id), undefined, `${owner.kind} ${owner.id}`);
+    }
+    // The prefixed spelling of the agent still reads.
+    const a = (await c.assignments.getAssignment(c.task))!;
+    await c.assignments.transferTask({ commandId: "tr-2", actor: c.owner.id, taskId: c.task, expectedRevision: a.revision, to: { kind: "agent", id: "agent:ann" } });
+    assert.ok(await c.gen.view(ann, id));
+  });
 
   suite("a streamed reply is recorded as a generation bound to the revision it began under, and reaches the worker unchanged", async (c) => {
     const reply = sse(chunk({ role: "assistant", content: "" }), chunk({ content: "Hello, " }), chunk({ content: "world" }),

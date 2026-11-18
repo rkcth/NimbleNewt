@@ -88,6 +88,12 @@ export function owner(value: unknown, field = "owner"): Owner {
 }
 
 export const sameOwner = (a: Owner, b: Owner): boolean => a.kind === b.kind && a.id === b.id;
+/**
+ * Whether the signed-in principal is the agent this owner names. An assignment names an agent by its bare ID (`{ kind: "agent", id: "ann" }`, as the chat, check runs and meetings assign) while the agent
+ * signs in as `agent:ann`; the prefixed spelling (`id: "agent:ann"`) is the same agent. Only an agent owner and an agent principal: a person, role or team owner with the same name is someone else.
+ */
+export const isAgentOwner = (owner: Owner | undefined, principal: { readonly kind: string; readonly id: string }): boolean =>
+  owner !== undefined && owner.kind === "agent" && principal.kind === "agent" && (principal.id === `agent:${owner.id}` || principal.id === owner.id);
 
 export function generation(value: unknown, field = "generation"): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return invalid(field, "must be a whole number of at least 1");
