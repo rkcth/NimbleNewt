@@ -503,7 +503,8 @@ export class ToolPath {
       await this.#deps.effects.intend({ commandId: `tool:${ready.opId}`, actor: d.agentId, kind: executor.effectKind, target: executor.target, input: executor.input, taskId: d.taskId, fence: { generation: d.generation, attemptId: d.attemptId } });
       const outcome = await this.#deps.effects.run(effectId, executor.bridge, { beforeStart: () => this.#beforeStart(d.taskId) });
       if (outcome.status === "confirmed") return await this.#finalize(d, ready.opId, "confirmed", { text: `the effect was applied${outcome.note === undefined ? "" : ` (${outcome.note})`}` });
-      if (outcome.status === "failed") return await this.#finalize(d, ready.opId, "failed", { error: outcome.note ?? "the target refused the effect" });
+      // The bridge's own reason for a refusal (card P04j: a built-in effect tool says why nothing was done), cleaned and cut short; without one, the general words.
+      if (outcome.status === "failed") return await this.#finalize(d, ready.opId, "failed", { error: outcome.note ?? (typeof outcome.evidence?.["reason"] === "string" ? `the target refused the effect: ${clip(redactText(outcome.evidence["reason"]), DISPATCH_LIMITS.diagnostic)}` : "the target refused the effect") });
       if (outcome.status === "uncertain") return await this.#finalize(d, ready.opId, "uncertain", { error: outcome.note ?? "the effect may or may not have been applied" });
       return { state: "in-progress", operationId: ready.opId, reason: "the target could not be reached; asking again with the same call ID tries it again safely" };
     } catch (error) {

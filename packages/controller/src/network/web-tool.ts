@@ -109,17 +109,29 @@ export class WebFetch {
     return { status: got.status, ...(theirs === undefined ? {} : { etag: theirs }), ...(whole ? { hash: createHash("sha256").update(got.body).digest("hex"), body: got.body } : {}), tooBig };
   }
 
+  /**
+   * Card P04 (remote host acted on with no worker there): one request that may change something, under exactly the web tool's rules (a live grant of the task for that host and port, the one checked address, private addresses only when
+   * the grant names them, no credential but the grant's own header, no redirect followed, logged in the task's connection log as `remote-action`). The body, when given, is sent as JSON. Only the status comes back: the answer's
+   * text is read (at most 4 KiB) and dropped, never handed to anyone. A refusal (`NetworkRefused`, `DomainError`) says why nothing was sent.
+   */
+  async act(ctx: NetworkContext, rawUrl: string, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body: unknown, signal?: AbortSignal): Promise<{ readonly status: number }> {
+    const url = webUrl(rawUrl);
+    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
+    const got = await this.#fetch(ctx, url, method, 4096, payload === undefined ? {} : { "content-type": "application/json" }, "remote-action", signal, payload);
+    return { status: got.status };
+  }
+
   /** One request through admission: the checked address, the grant's own credential header, no redirect followed, at most `maxBytes` kept, the time bound, the log written. */
-  async #fetch(ctx: NetworkContext, url: URL, method: "GET" | "HEAD", maxBytes: number, extra: Readonly<Record<string, string>>, via: "web-tool" | "resume-check", signal?: AbortSignal): Promise<{ readonly status: number; readonly headers: IncomingMessage["headers"]; readonly body: Buffer; readonly truncated: boolean }> {
+  async #fetch(ctx: NetworkContext, url: URL, method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE", maxBytes: number, extra: Readonly<Record<string, string>>, via: "web-tool" | "resume-check" | "remote-action", signal?: AbortSignal, payload?: Buffer): Promise<{ readonly status: number; readonly headers: IncomingMessage["headers"]; readonly body: Buffer; readonly truncated: boolean }> {
     const o = this.#o;
     const secure = url.protocol === "https:";
     const port = url.port === "" ? (secure ? 443 : 80) : Number(url.port);
     // The URL parser has already put the host in its canonical form (a number or an odd spelling of an address is an address; admission reads the form again).
     const host = url.hostname.replace(/^\[|\]$/g, "");
     const admitted = await admit(o.grants, ctx, host, port, { resolve: o.resolve, via, ...(o.maxLogged === undefined ? {} : { maxLogged: o.maxLogged }) });
-    const headers: Record<string, string> = { accept: "text/*, application/json;q=0.9, */*;q=0.1", "user-agent": "NimbleNewt-web-fetch/1", "accept-encoding": "identity", connection: "close", ...extra };
+    const headers: Record<string, string> = { accept: "text/*, application/json;q=0.9, */*;q=0.1", "user-agent": "NimbleNewt-web-fetch/1", "accept-encoding": "identity", connection: "close", ...extra, ...(payload === undefined ? {} : { "content-length": String(payload.length) }) };
     let bytesFrom = 0;
-    const end = (outcome: "closed" | "failed", endedBy: "client" | "target" | "error", reason?: string): Promise<void> => o.grants.logClose(ctx.taskId, admitted.recordId, { outcome, endedBy, bytesToTarget: 0, bytesFromTarget: bytesFrom, ...(reason === undefined ? {} : { reason }) }).catch(() => undefined);
+    const end = (outcome: "closed" | "failed", endedBy: "client" | "target" | "error", reason?: string): Promise<void> => o.grants.logClose(ctx.taskId, admitted.recordId, { outcome, endedBy, bytesToTarget: payload?.length ?? 0, bytesFromTarget: bytesFrom, ...(reason === undefined ? {} : { reason }) }).catch(() => undefined);
     try {
       if (admitted.grant.credential !== undefined) {
         // Checked at every use (task T4b), whoever wrote the grant or supplied `secret`: the name, never a value, is in the message.
@@ -143,7 +155,7 @@ export class WebFetch {
           },
         } as never, (res: IncomingMessage) => resolve({ res, close: () => { res.destroy(); req.destroy(); } }));
         req.on("error", reject);
-        req.end();
+        if (payload === undefined) req.end(); else req.end(payload);
       });
       const chunks: Buffer[] = []; let kept = 0; let truncated = false;
       try {
