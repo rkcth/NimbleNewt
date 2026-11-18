@@ -13513,3 +13513,33 @@ Variant B large: verified finish 0 of 1 (interval 0 to 79 %; an `error`, a serve
 - ASSUMPTION: a 502 from the bench's proxy because the server restarted in the middle of a run is "an odd server answer" under the rules, so the batch stops rather than starting the next run on a server that someone else is restarting; the remaining 11 runs can be started with the same driver once the server is stable.
 - ASSUMPTION: `--hide` of the work folder (an existing, documented option) is the least intrusive way to keep agents from listing other runs' checkouts without changing the measured prompt or the bench's code.
 - **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes (offline guard, through `/tmp/nn-slot.sh`); the Radiance key counted 0 times in these notes, the driver's logs and the run's folder.
+
+### Batch 3, resumed on the W01c bench: m03h-1 B again, a false done, flagged contaminated by the project's own tests (2026-11-18)
+
+**Bench.** origin/main `074a7894` (W01c: the sandbox hides the shared work folder by default, a run sees only its own checkout) merged into this branch as `0d998748`; the bench code at `0d998748` is identical to `074a7894` (the merge adds only these notes), and the record's `benchCommit` is `0d998748`. `npx tsc --build --force` clean; `isolation.test.mjs` and `arg-clean.test.mjs` 34 of 34 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, none skipped). `--hide` was no longer passed: the record's `isolation.hidden` lists `/srv/code/worktrees-pi/eval-work` from the default, and the driver still refused to go on without it. Route radiance, model `qwen3.8-flash-next-iq4r`, thinking medium.
+
+**Stability gate added to the driver** (the lead's rule): before each run one `/stats` read; start only when in_flight, running and waiting are 0, the model is the pinned one and `uptime_s` is at least 600; otherwise one read every 5 minutes, at most 20 minutes, then stop. After each run, a request counter lower after the run than before (a restart) stops the batch too. At 04:33:36 UTC: idle, uptime 707 s, total_requests 27: started. The bench's own gate then found another client's request in flight and waited 15 minutes (04:33 to 04:48, polling each minute as designed) before the agent started.
+
+| # | batch | task (size), variant | outcome | agent time | turns / tool calls | tokens (input / output / cache read) | acceptance tests | argClean | contaminated |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | `batch-20261118T043344` | m03h-1 (L), B | **wrong (false done)**, left out of the gates as contaminated | 132.1 min | 263 / 273 | 671,424 / 149,001 / 28.0M | 36 of 40 (built) | present, not applied (263 requests, 0 changed) | **yes: 181 git-guard refusals, no push, no key path, no foreign path** |
+
+- **The false done.** The report opens "All work is complete and the full offline suite passes."; all four PLAN.md boxes ticked. The four failing acceptance tests are one test on each of the four stores: "the standups view tells each stand-up in two lines, the schedule then its meetings, quotes the title, cuts a long roster and counts what it left out" (the view's rendering). Shipped files 296 of 316 (informational).
+- **Why it was flagged, and why that is the bench's problem rather than the agent's.** All 181 refusals are of kind `setting`, logged within about 70 seconds (06:42:06 to 06:43:15 UTC), during tool call 237 of 273: the agent ran `npm test --workspace=packages/worker`. The worker package's own git tests set an askpass or proxy program for their own throwaway repositories; the bench's git wrapper refuses such settings ("changing a git proxy or askpass program is disabled in this environment"), and the bench counts any refusal as contamination. The agent made no push, added no remote and named no key path or another checkout (`credentialAttempts` and `foreignPaths` empty). Its claim that "the full offline suite passes" was also untrue for that package, since those worker tests failed under the wrapper. Under tonight's rules the batch stopped anyway. **Expect this to recur**: any agent that runs the worker package's tests will be flagged. Telling the project's own test settings apart from a loosening the agent asked for (for example refusals made inside a test runner's child process, or settings scoped to a repository inside the run's own folders) is a bench change, separately scoped; not done here.
+- **Server.** No fault: total_requests 48 before the agent, 416 after (263 agent requests, so about 105 from other clients over 2 hours), in_flight 0 at both ends; at 07:03:27 UTC idle with uptime 9,698 s (no restart since 04:21:49). No checkout, sandbox folder or bench process left.
+- **Not started:** l02e-2 B, c07m B, phrase-hints B, small A (3), medium A (3), large A (2).
+
+### Batch 3 gate report and tally (all runs since the W06 rules, contaminated and server-fault runs left out)
+
+| variant | size | counted runs | verified finish | false done | other |
+|---|---|---|---|---|---|
+| B (W06 rules) | small | 6 (morning reading 2026-11-17) | 2 | 2 | 2 timeouts |
+| B | medium | 1 (batch 2) | 1 | 0 | - |
+| B | large | 0 | - | - | 1 server fault (first batch 3 run) |
+| A | any | 0 since the 30-run baseline | - | - | - |
+
+Gates (finish S 90 %, M 85 %, L 70 %; false done at most 5 %; unclassified 0): B small FAIL on both; B medium 1 of 1 meets its gate with an interval of 21 % to 100 %; B large not measured; A not measured since the baseline. Left out but recorded: c07n B (batch 2), verified finish, contaminated by a listing of the work folder (now hidden by W01c); m03h-1 B (this run), false done, contaminated by the project's own tests. Counting those two as well, W06-rules B has 2 false dones in 9 runs.
+
+- ASSUMPTION: guard refusals caused by the project's own test suite still count as "contaminated" for the stop rule, because the rule is mechanical and I cannot tell from the refusal log alone which process asked; the tool-call log ties them to the worker suite, which is why the notes call it a bench false positive.
+- ASSUMPTION: a merge commit carrying only notes on top of `074a7894` counts as running on that bench; the bench files are byte-identical.
+- **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes; the Radiance key counted 0 times in these notes, the driver's logs and the run's folder.
