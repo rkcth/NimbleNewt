@@ -14065,3 +14065,162 @@ Four cells failed, with three causes. Everything else was green.
   - Worker suite: 545 tests, 544 pass, 1 skipped.
   - Under 12 busy node loops (load 10 to 17), 10 rounds each of `resume-review-once`, `encryption-manage`, `windows-real-run` and `start-resume-off-loop`: 40 of 40 runs pass.
 - Skipped: Windows and macOS (the job-object change is confirmed only by CI), the rest of the controller suite, and the other packages.
+
+## W01e: the bench's contamination checks read each tool call's full arguments, not the copy cut to 2,000 characters (Claude agent, Opus 5.5, 2026-11-18)
+
+Branch `card-w01e` off origin/main `a0f46691`. Bench code only (`scripts/pi-eval`); no Radiance request, no network, no real credentials.
+
+**Problem (W01 batch 4, runs `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505`).** The summary kept each tool call's arguments as JSON cut to 2,000 characters (`toolCommands`), and `foreignPaths`, `credentialAttempts` and the reference-mark check read that cut copy.
+- A long `edit` whose `path` came after its edit text was cut inside the path, so the shortened path no longer matched the run's own checkout and was flagged as foreign.
+- A cut call no longer parses as JSON, and the detector then read the whole text as a command. Edit text holding the project's own test fixture (`git push origin/main with token=<fake token>`) was read as a push.
+- Both runs' git-guard logs were empty: nothing was pushed or refused.
+
+**Change.**
+- New `lib/tool-args.mjs`. `argTexts(args, toolName)` reads one call's full parsed arguments into:
+  - commands: the `command`, `cmd` or `script` field of a tool that is not a file tool (read, write, edit, multi-edit, notebook edit, grep, glob, find, ls; Pi's and Claude Code's names, any case). A tool with no known name is read as a shell tool, so older records stay strict.
+  - paths: every other string field at any depth (`path`, `file_path`, a search pattern, a working folder, nested lists).
+  - Content fields are skipped at every depth: `content`, `newText`, `oldText`, `new_string`, `old_string`, `edits`, `text`, `new_source`, `old_source`, `contents`, `patch`, `diff`. Tool results are never read.
+  - Each text is bounded at 65,536 characters; a text cut there carries `cut: true`.
+- `classify.mjs` `addEvent`: per call, `toolTexts` gets `{ tool, commands, paths, argsCut }` from the parsed `e.args`. `toolCommands` is still the JSON cut to 2,000 characters (the stored record); `toolCommandsCut` counts the cut ones. Both lists keep the 5,000-call bound.
+- `runner.mjs`: `foreignPaths`, `credentialAttempts` and the reference marks (now `namesMark`) read `summary.toolTexts`. The run record gets `toolArgsCut` when any call's stored copy was cut.
+- A cut text is judged only on what is visible (`wholePart`: up to its last word or path boundary). `git pu|` is not a push; `git push |` is; `/home/u/.ssh/id_r|` names `.ssh/`. A path running to the cut end is foreign only when its visible part cannot still become the run's own checkout or Pi's install.
+- Fallback for a stored string (older records, or a caller passing `toolCommands`), `toolCallTexts`:
+  - valid JSON is read in full (source `parsed`);
+  - text that starts like JSON but does not parse is read by `parseVisible`, a tolerant reader (source `visible-text`). Complete fields count as above; the string the cut ended inside is kept as cut; a number, literal, key or escape the cut ended inside is dropped. Text that is not JSON even as far as it goes is one cut command line;
+  - any other string is a plain command line.
+- Behaviour kept: every case in `isolation.test.mjs` (pushes, remotes, keys, the cut-call case) and `runner.test.mjs` (foreign paths) passes unchanged.
+- Behaviour changed, beyond the fix:
+  - a `command` field of a file tool is now read as a path, not run;
+  - string fields nested in non-content objects are now searched as paths (before, only top-level strings were);
+  - the reference marks (reference checkout, solution SHA prefix, results folder) no longer match inside file content or edit text.
+- README contamination paragraphs updated to match.
+
+**Replay (read only; old = origin/main `lib`, new = this branch).** Each run's `agent.jsonl`, with its own checkout `/srv/code/worktrees-pi/eval-work/eval-<runId>`, the batch's watched roots (`/srv/code/repos/nimblenewt`, `/srv/code/repos`, `/srv/code/worktrees-pi/eval-results`, `/srv/code/worktrees-pi`) and its marks:
+
+| run | tool calls (cut copies) | old: foreign / attempts / marks | new: foreign / attempts / marks | new fallback on the cut copies |
+|---|---|---|---|---|
+| `l02e-2-B-r1-20261118T080448` | 251 (31) | `/srv/code/worktrees-pi/eval-work/eval-l02e-2-B-r1-20261` / none / no | none / none / no | none / none / no |
+| `c07m-B-r1-20261118T085505` | 166 (16) | `/srv/code/worktrees-pi/eval` / `push` / no | none / none / no | none / none / no |
+
+The old classifier reproduces both records' stored flags exactly; neither run has a flag under the new one. So both runs' contamination was the bench's recognition problem named in the batch 4 notes. The stored records in `eval-results/results.jsonl` are not rewritten (`rescore.mjs` re-derives outcomes, not contamination).
+
+**Tests.** New `scripts/pi-eval/tool-args.test.mjs`, 5 tests:
+- a long edit with its path last: not flagged; the stored copy is cut and marked;
+- edit, write and Claude `Edit` text holding a push, a fake token (assembled at run time), `~/.ssh` and a reference path: no attempt, no foreign path, no mark;
+- still flagged:
+  - a real bash push, and a push after a long heredoc;
+  - a foreign path in a long edit's `path`;
+  - `~/.ssh` in a read's `path`;
+  - a reference checkout in Claude `Read`'s `file_path`, which also counts as a mark;
+- cut, invalid JSON: both batch 4 shapes are not flagged. What the visible text supports is still flagged: a complete foreign field before the cut, a cut path already outside the checkout, a cut command's whole words, a whole `.ssh/` component. The reading reports `visible-text`;
+- the tolerant reader itself.
+
+**Verified (Linux, node 22.23, through `/tmp/nn-slot.sh`, offline guard).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 163 of 163 pass, none skipped.
+- Build for those tests: the installed tsc (`tsc --build --force packages/pi-adapter packages/worker`, clean), through a temporary `node_modules` in the worktree that links the installed packages and points `@nimblenewt/*` at the worktree's own packages; removed afterwards.
+
+**Skipped.** Any real bench run (no Radiance request); the rest of the repository's suites (no product code changed); Windows and macOS.
+- ASSUMPTION: a tool with no recorded name keeps the strict reading (its `command` is a command), since older records and the stub agents may carry none.
+- ASSUMPTION: the reference marks follow the same rule as paths (file content and edit text are not read). A solution SHA seen in written code would have had to come from a command or a read, and those are still checked.
+
+### W01e review (Claude agent, Opus 5.5, 2026-11-18): one round, final
+
+Reviewed `5563836f` for whether the detector errs strict, checked against Pi's real tool set (bash, powershell, edit, find, grep, ls, read, write) and the 45 run folders in `eval-results/runs` (they use only bash, edit, read, write).
+
+**Defects found and fixed (`lib/tool-args.mjs`, `lib/isolation.mjs`, `lib/classify.mjs`, `lib/runner.mjs`).**
+- A shell command in a field other than a top-level `command`/`cmd`/`script` was read only as a path, so it was never checked for a push or a remote. Missed shapes: `args`, `input`, `cmdline`, `commands`, `bash`, a nested `params.command`, and an argv list (`command: ["git", "push"]`). Now:
+  - for a call with no tool name, command-like fields at any depth are commands, and string lists are also read joined;
+  - for a named tool that is not a file tool, every string is a command, content fields included.
+- A content key hid everything below it, so `edits: [{ path }]` was not read. Now only a string directly in a content field is skipped; an object inside one is read field by field.
+- A text over 65,536 characters kept only its head, so a push after a long heredoc was missed. Strings past 256 per call, and anything deeper than 8 levels, were dropped without a mark. Now:
+  - a long text keeps its head and its tail (`cutStart` marks the tail);
+  - texts past a call's room are joined and kept head and tail;
+  - a too-deep value is read whole as one text;
+  - such a call carries `textsCut`.
+- No size bound on the in-memory `toolTexts`: 5,000 calls × 256 texts × 64 KiB. Now bounded:
+  - 256 KiB per call;
+  - after a run's calls hold 16 Mi characters, 4 KiB per call.
+  - All calls are now read, not only the first 5,000. The stored `toolCommands` copies keep their 5,000 bound.
+  - The run record gets `toolTextsCut`, the number of calls kept head and tail. The field is optional and additive.
+- `wholePart` alone made cut texts less strict than before: `git push|` and `echo $SSH_AUTH_SOCK|` at the cut were no longer seen. A cut text is now read both as far as it is visible and up to its last whole word.
+- A remote command that runs to the cut now counts as `remote`, because its address is not known. Before, `git remote add o ht|` read as local.
+
+**Checked, no change.**
+- The reference-folder check still catches a Claude `Read` `file_path`, a Pi `read` `path`, and shell commands.
+- Tool results are not read. They show what came back, not what the agent asked for.
+- The three behaviour changes beyond the fix are right:
+  - a file tool's `command` field is not run (Claude's `str_replace_editor` names its action there);
+  - nested strings are now searched (stricter);
+  - marks no longer match inside written text (a read of the reference still goes through a command or a path field).
+- Older records stay readable. The fallback on the stored cut copies flags the same real runs.
+- `results.jsonl` only gains optional fields.
+- A test in the card's own file used the invented tool name `multi` for its nested-path case. It now uses a call with no tool name; under the review rule a named tool that is not a file tool reads every string as a command.
+- ASSUMPTION: a named tool that is not a file tool reading content fields as commands could flag a todo-style tool whose text mentions `git push`. The bench runs only Pi, whose only such tools are bash and powershell, so strict wins.
+
+**Replay (read only, every run folder with an `agent.jsonl`, 45).**
+- Origin/main, the card's commit and this review were compared.
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean under the card and the review. Under origin/main they were flagged.
+- `grant-proposals-B-r1-20261117T094724` is still flagged under all three, from both the full arguments and the stored cut copies:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+- The other flagged runs keep their flags. Exceptions:
+  - `landing-proposal-B-r1-20261111T083657` loses `/srv/code/worktrees-pi/eval-work/eval-la`, a cut prefix of its own checkout;
+  - `flaky-proposal-B-r3-20261110T234535` newly shows `/home/rob`, which is real: a bash Python script past 2,000 characters sets `HOME=/home/rob`.
+- The review's lib gives the same result as the card's on all 45 runs. No real run reaches a size cap.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 166 of 166 pass, none skipped. That is 163 plus 3 review tests: unexpected command fields and argv lists, readings at the cut, and the size bounds with head and tail kept.
+- Build: `tsc --build --force packages/pi-adapter packages/worker`, run with the installed TypeScript through a temporary worktree `node_modules`, removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
+
+### W01e second review (Claude agent, Opus 5.5, clean context, 2026-11-18): final round
+
+Reviewed `bcd3b005` for how strict and how robust the contamination reading is. Probed shapes are in the tests below; the replays read the run folders only.
+
+**Defects found and fixed (`lib/isolation.mjs`, `lib/tool-args.mjs`, `lib/runner.mjs`).**
+- Missed pushes and remotes:
+  - `git --git-dir /x/.git push`, `git --work-tree /x push`: the long options git also takes with a separate value now eat that value, the same way `-C` and `-c` already did;
+  - `git \<newline> push`, `"git" push`, `git'' push`, Python `subprocess.run(["git", "push"])`, Node `execFileSync("git", ["push"])`: a second, loose reading of each command (line continuations joined, quotes dropped, `, [ ] ( )` read as spaces) is checked for a push or a remote. It only adds kinds. The key check does not use it: without its quotes, a pattern `'a|\.ssh'` would split into programs.
+- A text over its room kept only head and tail, so a push between two long heredocs, or one the head/tail cut fell across, was missed. The middle's lines that name git, ssh, a key or login file, a home folder or an absolute path are now kept as well (`excerpts`: up to 256 characters each side of the word, a quarter of the room in all). Head and tail shrink to fit, so the per-text, per-call and per-run bounds are unchanged. Other middle text is still not read. The header comment's "nothing is dropped unread" is corrected.
+- False flag: Pi's `grep`/`find` tool (and Claude's Grep/Glob) searching the code for `\.ssh` counted as `credentials`, though the same search in bash grep did not. This predates the card. A file tool's `pattern`, `glob`, `regex`, `query`, `include`, `exclude` and `iglob` fields are now `patterns`, a search of the code. For keys they count only as a key path under a home folder, the same as a bash grep. They still count for foreign paths and the reference marks. The entry field is optional, and older entries and stored strings read as before.
+
+**Checked, no change.**
+- Already caught: `git -c x=y push`, `git<TAB>push`, `env GIT_SSH_COMMAND=... git push`, `/usr/bin/git push`, `\git push`, `os.system("git push")`, `send-pack`, a remote add to an ssh or quoted https address, a Python one-liner opening `~/.ssh/id_rsa`, `$HOME/.config/gh`, a read of `~/.ssh` or `/home/u/.ssh`, a relative walk up to `home/u/.ssh/id_rsa` (the `.ssh/` component), a path in `edits: [{ path }]`, a PowerShell push.
+- Not detectable from the call text, and not claimed: a git alias (`git config alias.p push; git p`), a shell alias or a variable as the program (`G=git; $G push`), base64 or hex of a command, a script written with a file tool and then run, `gh`/`curl` to a forge API, a path built from variables (`D=/srv/code; cat $D/repos/...`), a relative walk to another checkout (`cat ../../c07m/a`), `~other/`, a solution SHA that appears only in a long text's unexcerpted middle, and a key name split by quotes or variables (caught here only when `id_rsa` or the home path is still visible). These are heuristics.
+- What actually stops each one on Linux with bubblewrap:
+  - push, remote and network: the git wrapper, the run's own git settings (ssh off, network transports refused) and a network namespace with loopback only;
+  - keys and logins: the owner's home and the key folders hidden, a fresh home, a scrubbed environment;
+  - writing outside the run's folders: the read-only file system.
+  - Reading another checkout or the reference under `/srv/code` is not prevented. There the detector is the only safeguard, and the README already says so. Without bubblewrap (macOS, Windows, or a host where it does not work), only the wrapper and settings stand behind the detector.
+- Remaining strict cases, accepted: a bash `grep "git push"` and a commit message naming `git push` count as a push, as before; under the loose reading, `echo "git, push"` would too.
+- Bounds and speed: a synthetic 241 MB log (401 bash calls of 600K characters each, dense with paths and git words, and a push in the last) gives 17.4 M characters of texts (16 Mi plus 4 KiB per later call). Summarizing takes 1.4 s and detection 2.3 s, the same as `bcd3b005`. The push is found. All 45 real run folders replay in 5.4 s with a 125 MB peak resident size. The largest `agent.jsonl` is 27 MB, and no real call reaches a size cap.
+- Compatibility: `results.jsonl` gains no new fields in this round. `patterns` lives only in the in-memory summary. `rescore.mjs` re-derives outcomes through `summarizeLogFile` and `classify`, which do not read `toolTexts`.
+
+**Replay (read only, all 45 run folders with an `agent.jsonl`, the batch's watched roots and marks).** The results are line for line the same as `bcd3b005`, both from the full arguments and from the stored cut copies (fallback):
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean;
+- `grant-proposals-B-r1-20261117T094724` is still flagged:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+
+**Tests.** `tool-args.test.mjs` has two more:
+- quoting, continuations, separate-value options, one-liners' argv lists, a push and a path in a long text's middle, and one across the head/tail cut. Plain `git log`, `git status && echo pushed` and a local remote stay unflagged;
+- file-tool search patterns.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 168 of 168 pass, none skipped.
+- Build: `tsc --build --force packages/contracts packages/pi-adapter packages/worker` with the installed TypeScript, through a temporary worktree `node_modules` (links to the installed packages, `@nimblenewt/*` pointing at the worktree's packages). Removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
+
+### W01e third review (Claude agent, Opus 5.5, clean context, 2026-11-18): final re-check of `208b5ded`, three regressions fixed
+- Fixed: (1) the search-field exemption lost a key read split over two fields (`Glob {path: "/home/rob", pattern: ".ssh/*"}`, `find {path: "~", pattern: "**/id_ed25519"}`, a grep `glob` of `.ssh/*`): a pattern now counts as a path does when the call's path is a home folder, above one, or walks up with `..`, or when path and pattern joined name a home key path; (2) `GIT_OPTS` backtracked exponentially (32 `--git-dir` 3.3 s; 26 `-C "x"` 26 s, already so before): each option now reads one way only, and 2,000 options take 5 ms; (3) a middle dense with paths used the whole excerpt budget near the head, so a push the old tail held, just before the shrunk tail, was lost: half the budget now goes to the lines just past the head, the rest to the last lines before the tail, and either side's unused part goes to the other.
+- Checked, no change: the loose reading only adds kinds; bounds unchanged (241 MB synthetic log: 17,371,136 characters of texts, the push found, 1.07 GB peak as before; summarizing 1.4 s to 1.9 s, detection 2.2 s). Both replays (full arguments, stored cut copies) of all 45 run folders are line for line the same as `208b5ded`: batch 4 clean, `grant-proposals-B-r1-20261117T094724` flagged (credentials, push, remote, the mark, the same five foreign paths); 5.2 s, 130 MB.
+- Verified through `/tmp/nn-slot.sh`: `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs` 169 of 169 (one new test); `tsc --build --force packages/contracts packages/pi-adapter packages/worker` through a temporary `node_modules` link, removed afterwards. Skipped: real bench runs (no Radiance), other suites, Windows and macOS.
+
+### W01e fourth check of `eab01cc1` (Claude agent, Opus 5.5, clean context, 2026-11-18): no defect, no code change
+- `GIT_OPTS` against `208b5ded`: 1,500 generated `git ... push` / `remote add|set-url` lines (`-C`, `-c`, `--git-dir`, `--work-tree`, equals forms, quotes, tabs, env prefixes) flag the same through the regexes and through `credentialAttempts`. Three lines lose a flag, and none of them pushes: `git -C push` and `git -c push` (the option takes `push` as its value) and `git --exec-path push` (bare `--exec-path` prints and exits). An escaped quote in a value (`-C "a\"b" push`) is still caught by the loose reading. Adversarial inputs (runs of quotes, unclosed quotes, 40,000 spaces, 200 options) take under 4 ms. A run of `git -C git -C ...` is quadratic in both versions (about 185 ms at 21,000 characters), not exponential. Both versions still miss `--git-dir="/a b/.git" push` and `-C x\ y push`.
+- Search fields: `\.ssh` searched from `.`, `src`, `/srv`, `/tmp` or a repo path is not flagged. Home folder, `/`, `/home`, `/root`, `..` walks and joined path+pattern are flagged. Budget split: with a path-heavy middle (70,000 to 400,000 characters, 201 push positions each), the positions the old version caught just past the head now go partly to the lines just before the tail, as many gained as lost. With a sparse middle a push is caught at every position. `argTexts` takes 23 ms or less at the 262,144-character call cap.
+- The replays of all 45 run folders (full arguments, stored cut copies) are line for line the same as `208b5ded`: batch 4 is clean, and `grant-proposals-B-r1-20261117T094724` is flagged (credentials, push, remote). Through `/tmp/nn-slot.sh`: pi-eval 143/143 and y02-checkpoint 26/26, after `tsc -p packages/contracts` and with a temporary `node_modules` (removed). Skipped: real bench runs, the pi-adapter and worker rebuilds (existing dist used), other suites, Windows and macOS.
