@@ -5,6 +5,7 @@ import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/n
 import type { Storage } from "@earendil-works/pi-durable";
 import { CHECKPOINT_DURABILITY_ERROR, ChannelError, safeText, findAnchors, stripAnchors, verifyAnchor, LeaseWatchdog, LineDecoder, WORKER_CHANNEL_VERSION, encodeMessage, parseToChild, requestId, type ChannelStart, type CheckpointDurability, type FromChild, type LossReason, type ToChild, type WatchdogClock } from "@nimblenewt/contracts";
 import { PiAdapter } from "../adapter.js";
+import { RequestIdConflictError } from "../errors.js";
 import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
 import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
@@ -345,8 +346,13 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     // the start after the review places them.
     const updates = start.updates ?? [];
     const held = updates.length > 0 && (await adapter.interrupted()).held;
+    // The request ID names the original and its content, not the wording of where it came from: an ID this conversation already holds with other wording (the branch that first selected it is no longer
+    // the one the controller names) is that update already placed, so it is left as it is.
     for (const u of held ? [] : updates) {
-      const placed = await (await adapter.root().submit({ kind: "update", requestId: requestId(u.requestId), content: `[An update selected for this task in a side line of work (${u.origin}):]\n${u.text}`, origin: u.origin, run: false })).result();
+      let handle;
+      try { handle = await adapter.root().submit({ kind: "update", requestId: requestId(u.requestId), content: `[An update selected for this task in a side line of work (${u.origin}):]\n${u.text}`, origin: u.origin, run: false }); }
+      catch (error) { if (error instanceof RequestIdConflictError) continue; throw error; }
+      const placed = await handle.result();
       if (placed.status !== "placed" && placed.status !== "completed") throw new Error(`the selected update ${u.requestId} was not placed (${placed.status})`);
     }
     // Pi Durable renders no system text of its own; the system prompt is the layout's sections (card W06: the completion rules), measured as Pi renders them.

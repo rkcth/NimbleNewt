@@ -103,7 +103,7 @@ export interface DelegatedItem { readonly source: SourceRef; readonly state: "cu
 
 /**
  * An update a returned branch selected for its destination task (card G09), as the destination's next attempt is given it: the text of the original as it was when it was applied, the link it came from, and a request ID
- * that names exactly this branch, original and content, so the task's conversation applies it once however often it is offered.
+ * that names exactly this original and content (whichever branch selected it), so the task's conversation applies it once however often it is offered.
  */
 export interface SelectedUpdate {
   readonly branchId: string;
@@ -400,8 +400,9 @@ export class ContextBranchService {
   /**
    * The updates the branches that returned to this task selected (card G09), for the task's next attempt to be given, read with the viewer's own rights (the attempt's task credential). Only an update whose original is
    * still as it was when it was applied is given: one that changed since, is gone or is not readable by the viewer is left out (a later application of the changed original is its own update). The same original with the
-   * same content selected by two branches is given once, named after the first of them (so its request ID does not change when a later branch selects it again). At most `BRANCH_LIMITS.deliveredPerStart`, the newest; in the order they were applied. Each carries a request ID derived from the branch,
-   * the original's link and its digest, so a conversation that was already given it applies it once.
+   * same content selected by two branches is given once, named after the first of them still listed. At most `BRANCH_LIMITS.deliveredPerStart`, the newest; in the order they were applied. Each carries a request ID derived
+   * from the original's link and its digest only (not the branch), so it stays the same whichever branch names it, also after the first falls off the task's list: a conversation that was already given it applies it
+   * once (the worker process takes an ID it holds under other wording as already placed).
    */
   async returnedUpdates(viewer: Principal, taskId: string): Promise<SelectedUpdate[]> {
     const tid = checkTaskId(taskId);
@@ -414,8 +415,8 @@ export class ContextBranchService {
       if (b === undefined || b.state !== "returned" || b.returnedTo?.taskId !== tid || b.projectId !== task.projectId) continue;
       listed.push({ branchId, body: b });
     }
-    // The same original with the same content is named after the FIRST listed branch that returned with it (and that branch's update revision), so a later branch that selects it again does not change its request
-    // ID: a conversation that was already given it under the first branch's ID applies nothing twice.
+    // The same original with the same content is named after the FIRST listed branch that returned with it (and that branch's update revision), so a later branch that selects it again does not change its wording.
+    // The request ID does not name the branch at all: when the first branch falls off the list of 50, the next one names it, and the ID (what the conversation applies once by) is still the same.
     const first = new Map<string, { branchId: string; revision: number }>();
     for (const { branchId, body } of listed) for (const u of body.applied) { const named = `${keyOf(u.source)}|${u.digest}`; if (!first.has(named)) first.set(named, { branchId, revision: u.revision }); }
     const picked: SelectedUpdate[] = [];
@@ -428,7 +429,7 @@ export class ContextBranchService {
         const original = await this.#retrieval.fetch(viewer, u.source);
         if (original === undefined || original.digest !== u.digest || original.projectId !== b.projectId) continue;
         const by = first.get(named)!;
-        const requestId = `upd:${by.branchId}:${createHash("sha256").update(named).digest("hex").slice(0, 24)}`;
+        const requestId = `upd:${createHash("sha256").update(named).digest("hex").slice(0, 32)}`;
         picked.push({ branchId: by.branchId, source: u.source, revision: by.revision, text: original.text, requestId, origin: `side line ${by.branchId}, ${sourceWords(u.source)}, update ${by.revision}` });
         if (picked.length >= BRANCH_LIMITS.deliveredPerStart) break outer;
       }

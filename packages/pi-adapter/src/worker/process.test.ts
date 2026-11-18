@@ -841,6 +841,39 @@ test("G09: a start's selected updates are placed before the turn, once by reques
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("G09: an update whose request ID the conversation already holds under other wording (another branch now names it) is left as placed, not refused and not placed twice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-g09b-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const base: ChannelStart = { ...relayed, model: { ...relayed.model, contextWindow: 131072 } };
+    const update = { requestId: "upd:0123456789abcdef0123456789abcdef", text: "Owner correction: use plan B.", origin: "side line cbr-first, desk record dsk-y, update 2" };
+    const messagesOf = (f: Extract<FromChild, { t: "fetch" }>): string => JSON.stringify((JSON.parse(Buffer.from(f.body ?? "", "base64").toString("utf8")) as { messages: unknown }).messages);
+    const count = (text: string, part: string): number => text.split(part).length - 1;
+    const first = host({ storage });
+    first.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await first.next("ready");
+    first.send({ t: "close" });
+    await first.done;
+    // The same request ID, the origin naming another branch: the start is ready with no fault and the model sees the update once, in its first wording.
+    const second = host({ storage });
+    second.send({ t: "start", v: 1, start: { ...base, updates: [{ ...update, origin: "side line cbr-second, desk record dsk-y, update 1" }] } });
+    await second.next("ready");
+    assert.ok(!second.seen.some((m) => m.t === "fault"), JSON.stringify(second.seen));
+    second.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const fetch = await second.next("fetch");
+    const call = messagesOf(fetch);
+    assert.equal(count(call, update.text), 1, call);
+    assert.equal(count(call, "cbr-first"), 1);
+    assert.equal(count(call, "cbr-second"), 0);
+    second.send({ t: "fetch.head", id: fetch.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+    for (const c of sseReply("thinking")) second.send({ t: "fetch.chunk", id: fetch.id, data: Buffer.from(c).toString("base64") });
+    second.send({ t: "fetch.end", id: fetch.id });
+    assert.equal((await second.next("result")).status, "completed");
+    second.send({ t: "close" });
+    await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // Card W06: every Pi agent this process runs carries the completion rules as its system text, the same bytes for every task, role and context switch.
 test("W06: the first model call of every agent carries the completion rules as its system text, the same bytes across agents, tasks, a readmit, a wake and a restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-w06-"));

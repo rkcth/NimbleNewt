@@ -9,7 +9,7 @@ import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextBranchService } from "./index.js";
+import { BRANCH_LIMITS, ContextBranchService, type SelectedUpdate } from "./index.js";
 
 after(stopServer);
 
@@ -355,7 +355,7 @@ for (const backend of backends) {
     // Decision A was superseded after it was applied (it is no longer as it was), so only the correction is given, with where it came from.
     assert.deepEqual(given.map((u) => [u.branchId, u.source, u.revision, u.text]), [[first.id, { kind: "desk-record", id: decisionB.id }, 2, "Owner correction: use plan B."]]);
     assert.match(given[0]!.origin, new RegExp(`${first.id}.*desk record ${decisionB.id}.*update 2`));
-    assert.match(given[0]!.requestId, new RegExp(`^upd:${first.id}:[0-9a-f]{24}$`));
+    assert.match(given[0]!.requestId, /^upd:[0-9a-f]{32}$/);
     // The same answer every time, from a fresh service too: the request ID is what makes the conversation apply it once.
     assert.deepEqual(await reopen().returnedUpdates(ann, task), given);
     assert.deepEqual(await branches.returnedUpdates(owner, task), given);
@@ -389,6 +389,27 @@ for (const backend of backends) {
     // The correction is itself corrected after the branches returned: what they selected is no longer as it was, so nothing is given.
     await write(ann, "Owner correction: use plan C.", decisionB.id);
     assert.deepEqual(await branches.returnedUpdates(ann, task), []);
+  });
+
+  suite("when the first branch that selected an update falls off the task's list of 50, the next one names it under the same request ID (card G09)", async ({ branches, desks, task, ann, a }) => {
+    const rec = await desks.write(ann, { commandId: cid("w"), projectId: a, kind: "note", title: "N", body: "Owner correction: use plan B.", visibility: "shared", status: "accepted" });
+    const returned: string[] = [];
+    let before: SelectedUpdate[] = [];
+    for (let i = 0; i <= BRANCH_LIMITS.returnsPerTask; i++) {
+      const opened = await open(branches, ann, task);
+      let v = (await branches.view(ann, opened.id))!;
+      await branches.applyUpdates(ann, { commandId: cid("u"), branchId: opened.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: rec.id }] });
+      v = (await branches.view(ann, opened.id))!;
+      await branches.resume(ann, { commandId: cid("r"), branchId: opened.id, expectedRevision: v.branch.revision });
+      returned.push(opened.id);
+      if (i === 0) before = await branches.returnedUpdates(ann, task);
+    }
+    const after = await branches.returnedUpdates(ann, task);
+    assert.equal(after.length, 1);
+    // The wording now names the second branch (the first is no longer listed), but the request ID the conversation applies it once by is the same.
+    assert.equal(after[0]!.branchId, returned[1]);
+    assert.match(after[0]!.origin, new RegExp(returned[1]!));
+    assert.equal(after[0]!.requestId, before[0]!.requestId);
   });
 
   suite("two branches returning to one task at once are both listed for it (card G09)", async ({ branches, desks, task, ann, ben, a }) => {
