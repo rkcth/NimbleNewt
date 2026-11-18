@@ -328,6 +328,19 @@ test("a place-only update is added to the transcript without asking the model an
   await assert.rejects(parent.submit({ kind: "update", requestId: requestId("place-1"), content: "Decision: use plan B." }), RequestIdConflictError, "run: false is part of the request's identity");
 });
 
+test("a place-only update keeps its origin on the entry, and the origin is part of the request's identity (card G09)", async () => {
+  const { adapter } = await finishedTask();
+  const parent = adapter.root();
+  const origin = "side line cbr-x, desk record dsk-y, update 2";
+  const first = await (await parent.submit({ ...placed("origin-1", "Decision: use plan B."), origin })).result();
+  assert.equal(first.status, "placed");
+  assert.deepEqual(await (await parent.submit({ ...placed("origin-1", "Decision: use plan B."), origin })).result(), first, "the same update again is the recorded one");
+  const updates = (await parent.transcript()).filter((e) => e.kind === "nimblenewt.update");
+  assert.deepEqual(updates.map((e) => e.data), [{ source: null, run: false, origin }]);
+  await assert.rejects(parent.submit({ ...placed("origin-1", "Decision: use plan B."), origin: "another" }), RequestIdConflictError);
+  await assert.rejects(parent.submit(placed("origin-1", "Decision: use plan B.")), RequestIdConflictError);
+});
+
 test("a place-only update that arrives mid-run waits for the boundary and does not take over the run's tool calls", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });

@@ -9,7 +9,7 @@ import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { InquiryService } from "../inquiries/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextBranchService } from "./index.js";
+import { BRANCH_LIMITS, ContextBranchService, type SelectedUpdate } from "./index.js";
 
 after(stopServer);
 
@@ -333,5 +333,96 @@ for (const backend of backends) {
     await branches.resume(owner, { commandId: cid("r"), branchId: opened.id, expectedRevision: v.branch.revision });
     await refuses("invalid_command", () => branches.delegate(ann, { commandId: cid("dl"), branchId: opened.id, childTaskId: child, refs: [{ kind: "desk-record", id: rec.id }] }), (e) => assert.match(e.message, /returned/));
     await refuses("invalid_command", () => branches.append(ann, { commandId: cid("b"), branchId: opened.id, text: "late" }));
+  });
+
+  suite("a returned branch's selected updates are given to its destination once: current originals only, read with the reader's rights, the same original from two branches once (card G09)", async ({ branches, reopen, desks, task, urgent, ann, ben, eve, owner, a }) => {
+    const write = (p: Principal, body: string, supersedes?: string) => desks.write(p, { commandId: cid("w"), projectId: a, kind: "decision", title: "Plan", body, visibility: "shared", status: "accepted", ...(supersedes === undefined ? {} : { supersedes }) } as never);
+    const decisionA = await write(ann, "Owner decision: use plan A.");
+    const first = await open(branches, ann, task);
+    let v = (await branches.view(ann, first.id))!;
+    await branches.applyUpdates(ann, { commandId: cid("u"), branchId: first.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: decisionA.id }] });
+    const decisionB = await write(ann, "Owner correction: use plan B.", decisionA.id);
+    v = (await branches.view(ann, first.id))!;
+    await branches.applyUpdates(ann, { commandId: cid("u"), branchId: first.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: decisionB.id }] });
+    // Nothing is given before the branch returns.
+    assert.deepEqual(await branches.returnedUpdates(ann, task), []);
+    v = (await branches.view(ann, first.id))!;
+    const resumeCommand = cid("r");
+    await branches.resume(ann, { commandId: resumeCommand, branchId: first.id, expectedRevision: v.branch.revision });
+    // A repeat of the resume is its recorded result and lists the branch once.
+    await branches.resume(ann, { commandId: resumeCommand, branchId: first.id, expectedRevision: v.branch.revision });
+    const given = await branches.returnedUpdates(ann, task);
+    // Decision A was superseded after it was applied (it is no longer as it was), so only the correction is given, with where it came from.
+    assert.deepEqual(given.map((u) => [u.branchId, u.source, u.revision, u.text]), [[first.id, { kind: "desk-record", id: decisionB.id }, 2, "Owner correction: use plan B."]]);
+    assert.match(given[0]!.origin, new RegExp(`${first.id}.*desk record ${decisionB.id}.*update 2`));
+    assert.match(given[0]!.requestId, /^upd:[0-9a-f]{32}$/);
+    // The same answer every time, from a fresh service too: the request ID is what makes the conversation apply it once.
+    assert.deepEqual(await reopen().returnedUpdates(ann, task), given);
+    assert.deepEqual(await branches.returnedUpdates(owner, task), given);
+    // Someone who may not work on the task is given nothing; a task nothing returned to has nothing.
+    assert.deepEqual(await branches.returnedUpdates(eve, task), []);
+    assert.deepEqual(await branches.returnedUpdates(ann, urgent), []);
+
+    // A second branch selects the same correction and returns too: it is given once, still under the first branch and its request ID, so a conversation that already holds it is not given a second copy.
+    const second = await open(branches, ben, task);
+    let w = (await branches.view(ben, second.id))!;
+    await branches.applyUpdates(ben, { commandId: cid("u"), branchId: second.id, expectedRevision: w.branch.revision, updates: [{ kind: "desk-record", id: decisionB.id }] });
+    w = (await branches.view(ben, second.id))!;
+    await branches.resume(ben, { commandId: cid("r"), branchId: second.id, expectedRevision: w.branch.revision });
+    assert.deepEqual(await branches.returnedUpdates(ann, task), given, "the same update, request ID and origin as before the second branch returned");
+
+    // A branch redirected elsewhere is given there, not to the task it began from; one that applied nothing is listed nowhere.
+    const third = await open(branches, ann, task);
+    const note = await desks.write(ann, { commandId: cid("w"), projectId: a, kind: "note", title: "N", body: "urgent context", visibility: "shared", status: "accepted" });
+    let x = (await branches.view(ann, third.id))!;
+    await branches.applyUpdates(ann, { commandId: cid("u"), branchId: third.id, expectedRevision: x.branch.revision, updates: [{ kind: "desk-record", id: note.id }] });
+    x = (await branches.view(ann, third.id))!;
+    await branches.redirect(ann, { commandId: cid("rd"), branchId: third.id, expectedRevision: x.branch.revision, returnTo: { taskId: urgent } });
+    x = (await branches.view(ann, third.id))!;
+    await branches.resume(ann, { commandId: cid("r"), branchId: third.id, expectedRevision: x.branch.revision });
+    assert.deepEqual((await branches.returnedUpdates(owner, urgent)).map((u) => u.text), ["urgent context"]);
+    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.text), ["Owner correction: use plan B."]);
+    const empty = await open(branches, ann, task);
+    await branches.resume(ann, { commandId: cid("r"), branchId: empty.id, expectedRevision: (await branches.view(ann, empty.id))!.branch.revision });
+    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.branchId), [first.id]);
+
+    // The correction is itself corrected after the branches returned: what they selected is no longer as it was, so nothing is given.
+    await write(ann, "Owner correction: use plan C.", decisionB.id);
+    assert.deepEqual(await branches.returnedUpdates(ann, task), []);
+  });
+
+  suite("when the first branch that selected an update falls off the task's list of 50, the next one names it under the same request ID (card G09)", async ({ branches, desks, task, ann, a }) => {
+    const rec = await desks.write(ann, { commandId: cid("w"), projectId: a, kind: "note", title: "N", body: "Owner correction: use plan B.", visibility: "shared", status: "accepted" });
+    const returned: string[] = [];
+    let before: SelectedUpdate[] = [];
+    for (let i = 0; i <= BRANCH_LIMITS.returnsPerTask; i++) {
+      const opened = await open(branches, ann, task);
+      let v = (await branches.view(ann, opened.id))!;
+      await branches.applyUpdates(ann, { commandId: cid("u"), branchId: opened.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: rec.id }] });
+      v = (await branches.view(ann, opened.id))!;
+      await branches.resume(ann, { commandId: cid("r"), branchId: opened.id, expectedRevision: v.branch.revision });
+      returned.push(opened.id);
+      if (i === 0) before = await branches.returnedUpdates(ann, task);
+    }
+    const after = await branches.returnedUpdates(ann, task);
+    assert.equal(after.length, 1);
+    // The wording now names the second branch (the first is no longer listed), but the request ID the conversation applies it once by is the same.
+    assert.equal(after[0]!.branchId, returned[1]);
+    assert.match(after[0]!.origin, new RegExp(returned[1]!));
+    assert.equal(after[0]!.requestId, before[0]!.requestId);
+  });
+
+  suite("two branches returning to one task at once are both listed for it (card G09)", async ({ branches, desks, task, ann, ben, a }) => {
+    const ready = async (p: Principal, body: string) => {
+      const rec = await desks.write(p, { commandId: cid("w"), projectId: a, kind: "note", title: "N", body, visibility: "shared", status: "accepted" });
+      const opened = await open(branches, p, task);
+      const v = (await branches.view(p, opened.id))!;
+      await branches.applyUpdates(p, { commandId: cid("u"), branchId: opened.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: rec.id }] });
+      return { id: opened.id, revision: (await branches.view(p, opened.id))!.branch.revision };
+    };
+    const x = await ready(ann, "from ann");
+    const y = await ready(ben, "from ben");
+    await Promise.all([branches.resume(ann, { commandId: cid("r"), branchId: x.id, expectedRevision: x.revision }), branches.resume(ben, { commandId: cid("r"), branchId: y.id, expectedRevision: y.revision })]);
+    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.text).sort(), ["from ann", "from ben"]);
   });
 }

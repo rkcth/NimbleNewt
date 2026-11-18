@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, MAX_TURN_NUDGES, THINKING_REPORT, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
+import { CHANNEL_UPDATES, ChannelError, LineDecoder, MAX_CHANNEL_LINE_BYTES, MAX_TURN_NUDGES, THINKING_REPORT, TURN_END_KINDS, encodeMessage, endKindOf, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "./index.js";
 
 const start: ChannelStart = {
   attemptId: "att-1", agentId: "agent:ann", namespaceId: "abcdef0123456789", credential: "tok", storeDir: "/home/agent/pi", relayBase: "http://relay.invalid",
@@ -144,4 +144,15 @@ test("H12i: the network messages of both directions round-trip, and what does no
   assert.deepEqual((parseToChild({ t: "start", v: 1, start: { ...start, network: { proxyPort: 3128, host: "10.0.0.1" } } }) as { start: ChannelStart }).start.network, { proxyPort: 3128 });
   // A line that holds one largest piece fits the channel's line limit.
   assert.ok(encodeMessage({ t: "net.data", id: 1, data }).length < MAX_CHANNEL_LINE_BYTES);
+});
+
+test("a start may carry selected updates (card G09): kept as given, bounded, and refused when malformed", () => {
+  const base = { attemptId: "a", agentId: "g", namespaceId: "abcdef0123456789", credential: "c", storeDir: "/s", relayBase: "http://relay.invalid", model: { alias: "m0", provider: "p", api: "openai-completions", modelId: "m", contextWindow: 10, maxTokens: 10, reasoning: false, input: ["text"] } };
+  const updates = [{ requestId: "upd:cbr-x:1", text: "Owner correction: use plan B.", origin: "side line cbr-x, desk record dsk-y, update 2" }];
+  assert.deepEqual(parseToChild({ t: "start", v: 1, start: { ...base, updates } }), { t: "start", v: 1, start: { ...base, updates } });
+  assert.deepEqual(parseToChild({ t: "start", v: 1, start: { ...base, updates: [] } }), { t: "start", v: 1, start: base }, "an empty list is no list");
+  const one = updates[0]!;
+  for (const bad of [Array.from({ length: CHANNEL_UPDATES.items + 1 }, () => one), [{ ...one, requestId: "" }], [{ ...one, text: "x".repeat(CHANNEL_UPDATES.text + 1) }], [{ ...one, origin: 7 }], ["text"], "text"]) {
+    assert.throws(() => parseToChild({ t: "start", v: 1, start: { ...base, updates: bad } }), ChannelError, JSON.stringify(bad).slice(0, 80));
+  }
 });

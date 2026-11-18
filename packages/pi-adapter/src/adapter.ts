@@ -231,7 +231,7 @@ function placedUpdateDraft(request: Extract<AdapterRequest, { kind: "update" }>)
     entry: {
       kind: "nimblenewt.update",
       model: [{ role: "user", content: request.content, timestamp: Date.now() }],
-      data: { source: sourceData(request.source), run: false },
+      data: { source: sourceData(request.source), run: false, ...(request.origin === undefined ? {} : { origin: request.origin }) },
     },
   };
 }
@@ -329,7 +329,7 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
           requestId: request.requestId,
           ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }),
           // An update is placed as its own kind of entry, so provenance is in the transcript; the model still sees the text.
-          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: sourceData(request.source), run: true } } } : {}),
+          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: sourceData(request.source), run: true, ...(request.origin === undefined ? {} : { origin: request.origin }) } } } : {}),
         },
         context,
       );
@@ -600,6 +600,15 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
     const existing = await this.record(request.requestId);
     if (existing === undefined) return "unused";
     return fingerprintsMatch(existing.fingerprint, fingerprintOf(request)) ? "same" : "different";
+  }
+
+  /**
+   * The request as first submitted under this ID while it has no recorded result yet (card G09: a selected update offered again under other wording is resubmitted as first given, so one whose admission a crash
+   * interrupted is still placed); `undefined` otherwise. Read-only.
+   */
+  async pendingRequest(id: RequestId): Promise<RetainedRequest["request"] | undefined> {
+    const record = await this.record(id);
+    return record?.result === undefined ? record?.request : undefined;
   }
 
   /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */

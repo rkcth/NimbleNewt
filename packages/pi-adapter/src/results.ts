@@ -16,7 +16,8 @@ export function mapReason(reason: string): UnansweredReason {
  */
 export function fingerprintOf(request: FingerprintedRequest): string {
   const payload = request.kind === "update"
-    ? JSON.stringify(["update", request.content, request.whenBusy ?? null, request.source?.conversationId ?? null, request.source?.entryId ?? null, request.run ?? true])
+    // `origin` (card G09) is covered only when given, so the fingerprints of updates without one are as they were.
+    ? JSON.stringify(["update", request.content, request.whenBusy ?? null, request.source?.conversationId ?? null, request.source?.entryId ?? null, request.run ?? true, ...(request.origin === undefined ? [] : [request.origin])])
     : JSON.stringify([request.content, request.whenBusy ?? null]);
   return `v1:sha256:${createHash("sha256").update(payload).digest("hex")}`;
 }

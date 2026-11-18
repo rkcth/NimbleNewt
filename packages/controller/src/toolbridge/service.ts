@@ -183,8 +183,14 @@ export interface BuiltinTool {
   readonly purpose: string;
   readonly input: JsonObject;
   readonly output: JsonObject;
+  /**
+   * Set for a tool that acts on the outside (an approval class that is not local, such as `mutate`): the dispatcher's tool path then runs it through the effect ledger (card S05), never as a local call. `kind` is the effect's kind
+   * and `target` names what it acts on (from the arguments). The run is the effect: a `DomainError` it throws means nothing was done (a failed effect); anything else leaves the effect uncertain, never run again blindly.
+   * Its result is the effect's evidence, and is handed back to the agent as the call's text; a call asked again after it ended is answered from the operation's kept summary of that text (its first 300 characters).
+   */
+  readonly effect?: { readonly kind: string; target(input: JsonObject): string };
   /** Runs the tool for the attempt. A refusal is thrown (a `DomainError` becomes the call's failure with its message). The result must fit `output`. */
-  run(call: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agent: Principal }, input: JsonObject, signal: AbortSignal): Promise<JsonObject>;
+  run(call: { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agent: Principal; /** The model's call ID (the same when the call is asked again). */ readonly callId: string }, input: JsonObject, signal: AbortSignal): Promise<JsonObject>;
 }
 
 /** The bound gateway of the attempt the request came through. */
@@ -991,13 +997,37 @@ export class ToolExecutionService {
     if (!isObject(input)) return invalid("input", "must be a JSON object");
     const problems = checkValue(tool.input, input);
     if (problems.length > 0) throw new DomainError("invalid_command", `the arguments do not match ${tool.name} ${tool.version}: ${problems.slice(0, 5).join("; ")}`, { field: "input" });
+    // The arguments of an effect are kept whole on the effect ledger (its intent is recorded before it runs): text that would be redacted as a credential is refused here, before anything is recorded.
+    if (tool.effect !== undefined && redactText(JSON.stringify(input)) !== JSON.stringify(input)) throw new DomainError("invalid_command", `the arguments of ${tool.name} look like they carry a credential; they are kept on the effect ledger, so a credential belongs in the network grant, never in a call`, { field: "input" });
     const key = `${c.attemptId}\0${c.callId}`;
     this.#bridgeCalls.add(key);
+    const call = { attemptId: c.attemptId, taskId: c.taskId, projectId: c.projectId, agent: c.agent, callId: c.callId };
+    if (tool.effect !== undefined) {
+      const effect = tool.effect;
+      try {
+        const result = await gateway.call(
+          { callId: c.callId, tool: { name: tool.name, version: tool.version, kind: "catalog" }, args: input },
+          { kind: "effect", effectKind: effect.kind, target: effect.target(input), input, evidenceIsResult: true, bridge: { idempotent: false, execute: async () => {
+            let out: JsonObject;
+            try { out = await tool.run(call, input, guardedSignal(new AbortController().signal)); } catch (error) {
+              // A typed refusal: nothing was done. Anything else may have acted, and stays uncertain.
+              if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code });
+              throw error;
+            }
+            if (Buffer.byteLength(JSON.stringify(out), "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
+            const bad = checkValue(tool.output, out);
+            if (bad.length > 0) throw new Error(`the tool's output does not match its manifest: ${bad.slice(0, 3).join("; ")}`);
+            return out;
+          } } },
+        );
+        return ok({ ...(result as unknown as JsonObject), tool: tool.name, version: tool.version });
+      } finally { this.#bridgeCalls.delete(key); }
+    }
     try {
       const result = await gateway.call(
         { callId: c.callId, tool: { name: tool.name, version: tool.version, kind: "catalog" }, args: input },
         { kind: "local", run: async (signal) => {
-          const out = await tool.run({ attemptId: c.attemptId, taskId: c.taskId, projectId: c.projectId, agent: c.agent }, input, guardedSignal(signal));
+          const out = await tool.run(call, input, guardedSignal(signal));
           const text = JSON.stringify(out);
           if (Buffer.byteLength(text, "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
           const bad = checkValue(tool.output, out);

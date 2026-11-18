@@ -125,3 +125,27 @@ test("H12i: a route must be exactly a loopback port of the process; a trusted-ho
   assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 1024 } }, []).route?.proxyPort, 1024);
   assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 65535 } }, []).route?.proxyPort, 65535);
 });
+
+test("G05 review: the mode and the lists are read once, so what is checked is what is returned", () => {
+  let reads = 0;
+  const shifting = { ...base(), get mode() { reads += 1; return reads === 1 ? "sandboxed" : "other"; } } as unknown as SandboxRecipe;
+  assert.equal(normalizeRecipe(shifting, []).mode, "sandboxed");
+  const mounts = [] as unknown as { map: unknown };
+  mounts.map = () => [{ host: "/etc", guest: "/inputs/etc" }];
+  assert.deepEqual(normalizeRecipe({ ...base(), readOnly: mounts } as unknown as SandboxRecipe, []).readOnly, []);
+  const names = [".git"] as unknown as { [Symbol.iterator]: unknown };
+  let pass = 0;
+  names[Symbol.iterator] = function* () { pass += 1; yield pass === 1 ? ".git" : ".."; };
+  assert.deepEqual(normalizeRecipe({ ...base(), protectedSubpaths: names } as unknown as SandboxRecipe, []).protectedSubpaths, [".git"]);
+  // The copy is a plain array, not one made by the list's own species constructor (which could hand back unchecked mounts or names).
+  const speciesMounts = [] as unknown as { constructor: unknown };
+  speciesMounts.constructor = { [Symbol.species]: function () { return { map: () => [{ host: "/etc", guest: "relative/x" }] }; } };
+  assert.deepEqual(normalizeRecipe({ ...base(), readOnly: speciesMounts } as unknown as SandboxRecipe, []).readOnly, []);
+  const speciesNames = [".git"] as unknown as { constructor: unknown };
+  speciesNames.constructor = { [Symbol.species]: function () { let pass = 0; return { length: 0, *[Symbol.iterator]() { pass += 1; yield pass === 1 ? ".git" : ".."; } }; } };
+  assert.deepEqual(normalizeRecipe({ ...base(), protectedSubpaths: speciesNames } as unknown as SandboxRecipe, []).protectedSubpaths, [".git"]);
+  // A hole is refused as before; frozen and empty lists are taken as before.
+  const holey = [".git"]; holey[2] = ".hg";
+  refused({ ...base(), protectedSubpaths: holey }, [], /protectedSubpaths: undefined/);
+  assert.deepEqual(normalizeRecipe({ ...base(), protectedSubpaths: Object.freeze([".hg", ".git"]) as unknown as string[], readOnly: Object.freeze([]) as unknown as SandboxRecipe["readOnly"] }, []).protectedSubpaths, [".git", ".hg"]);
+});

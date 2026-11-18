@@ -68,3 +68,48 @@ jobs:
           sudo unshare --net -- sh -c
           'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --clear-groups env "PATH=$3" "HOME=$4" CI=true node scripts/test-shard.mjs "$5"/3'
           sh "$(id -u)" "$(id -g)" "$PATH" "$HOME" ${{ matrix.shard }}
+
+  # Card G05: the isolation-boundary proof on each operating system's hosted runner (Rob, 2026-11-18: GitHub Actions runners count as the real OS runs). It runs the containment
+  # suite through the production launcher and uploads containment-<platform>.json (schema nimblenewt.containment/1, read by `containment-evidence.mjs gate` and Y02's gate).
+  # Linux (bubblewrap) and macOS (Seatbelt) must hold every case. A hosted Windows runner cannot run Windows Sandbox (a client feature that needs nested virtualization), so that
+  # cell records every case not_run with the reason and passes as an honest skip (--allow-unavailable); the release gate still blocks Windows until a host with Windows Sandbox runs it.
+  containment:
+    name: G05 containment / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19.0"
+      - name: Install bubblewrap and allow user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative.
+      - run: npm ci
+      - name: Run the containment suite
+        shell: bash
+        run: |
+          set -o pipefail
+          ALLOW=""; if [ "$RUNNER_OS" = "Windows" ]; then ALLOW="--allow-unavailable"; fi
+          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/g05" $ALLOW 2>&1 | tee "$RUNNER_TEMP/g05.log"
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          { echo "## G05 containment, ${{ matrix.os }}"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: containment-${{ runner.os }}
+          path: ${{ runner.temp }}/g05/containment-*.json
+          if-no-files-found: warn
+          retention-days: 90

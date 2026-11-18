@@ -5,11 +5,12 @@ import { test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { LeaseWatchdog, LineDecoder, findAnchors, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
-import { createOfflineModels } from "../testing/offline.js";
+import { OFFLINE_MODEL_REF, createOfflineModels } from "../testing/offline.js";
 import { rig, wireBody } from "../testing/wire.js";
 import { COMPLETION_RULES } from "../prompt-layout.js";
 import { WORK_END_TOOL } from "../bridge.js";
-import { durabilityOf, runWorker, type WorkerHooks } from "./process.js";
+import { durabilityOf, placeSelectedUpdate, runWorker, type WorkerHooks } from "./process.js";
+import { PiAdapter } from "../adapter.js";
 import { LENGTH_NUDGE_LEAD, NUDGE_TEXT } from "./nudge.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -793,6 +794,101 @@ test("W04: a restart between nudges resumes the count from the conversation's do
     second.send({ t: "close" });
     await second.done;
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("G09: a start's selected updates are placed before the turn, once by request ID across processes; while earlier work is held nothing is placed and the turn fails on the held work as before", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-g09-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const base: ChannelStart = { ...relayed, model: { ...relayed.model, contextWindow: 131072 } };
+    const update = { requestId: "upd:cbr-x:1", text: "Owner correction: use plan B.", origin: "side line cbr-x, desk record dsk-y, update 2" };
+    const messagesOf = (f: Extract<FromChild, { t: "fetch" }>): string => JSON.stringify((JSON.parse(Buffer.from(f.body ?? "", "base64").toString("utf8")) as { messages: unknown }).messages);
+    const count = (text: string, part: string): number => text.split(part).length - 1;
+    // The first process: the update is in the turn's first model call once, with where it came from, before the turn's own input; the process goes away while that call is in flight.
+    const first = host({ storage });
+    first.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await first.next("ready");
+    first.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const call1 = messagesOf(await first.next("fetch"));
+    assert.equal(count(call1, update.text), 1, call1);
+    assert.equal(count(call1, update.origin), 1);
+    assert.ok(call1.indexOf(update.text) < call1.indexOf("do the plan"), "the update comes before the turn's input");
+    first.end();
+    await first.done;
+
+    // The second process is not told the held work was reviewed: it still says it is ready (no fault from the updates), and the turn fails on the held work as it would without them.
+    const second = host({ storage });
+    second.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await second.next("ready");
+    assert.ok(!second.seen.some((m) => m.t === "fault"), JSON.stringify(second.seen));
+    second.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    assert.equal((await second.next("result")).status, "failed");
+    second.send({ t: "close" });
+    await second.done;
+
+    // The third process is told it was reviewed: the same update again is the recorded one, so the resumed call still holds it once.
+    const third = host({ storage });
+    third.send({ t: "start", v: 1, start: { ...base, recover: { reason: "test restart" }, updates: [update] } });
+    await third.next("ready");
+    third.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const fetch3 = await third.next("fetch");
+    assert.equal(count(messagesOf(fetch3), update.text), 1);
+    third.send({ t: "fetch.head", id: fetch3.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+    for (const c of sseReply("thinking")) third.send({ t: "fetch.chunk", id: fetch3.id, data: Buffer.from(c).toString("base64") });
+    third.send({ t: "fetch.end", id: fetch3.id });
+    assert.equal((await third.next("result")).status, "completed");
+    third.send({ t: "close" });
+    await third.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("G09: an update whose request ID the conversation already holds under other wording (another branch now names it) is left as placed, not refused and not placed twice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-g09b-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const base: ChannelStart = { ...relayed, model: { ...relayed.model, contextWindow: 131072 } };
+    const update = { requestId: "upd:0123456789abcdef0123456789abcdef", text: "Owner correction: use plan B.", origin: "side line cbr-first, desk record dsk-y, update 2" };
+    const messagesOf = (f: Extract<FromChild, { t: "fetch" }>): string => JSON.stringify((JSON.parse(Buffer.from(f.body ?? "", "base64").toString("utf8")) as { messages: unknown }).messages);
+    const count = (text: string, part: string): number => text.split(part).length - 1;
+    const first = host({ storage });
+    first.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await first.next("ready");
+    first.send({ t: "close" });
+    await first.done;
+    // The same request ID, the origin naming another branch: the start is ready with no fault and the model sees the update once, in its first wording.
+    const second = host({ storage });
+    second.send({ t: "start", v: 1, start: { ...base, updates: [{ ...update, origin: "side line cbr-second, desk record dsk-y, update 1" }] } });
+    await second.next("ready");
+    assert.ok(!second.seen.some((m) => m.t === "fault"), JSON.stringify(second.seen));
+    second.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const fetch = await second.next("fetch");
+    const call = messagesOf(fetch);
+    assert.equal(count(call, update.text), 1, call);
+    assert.equal(count(call, "cbr-first"), 1);
+    assert.equal(count(call, "cbr-second"), 0);
+    second.send({ t: "fetch.head", id: fetch.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+    for (const c of sseReply("thinking")) second.send({ t: "fetch.chunk", id: fetch.id, data: Buffer.from(c).toString("base64") });
+    second.send({ t: "fetch.end", id: fetch.id });
+    assert.equal((await second.next("result")).status, "completed");
+    second.send({ t: "close" });
+    await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("G09: an update whose ID was recorded but whose admission a crash interrupted is placed once, as first given, when it is offered again under other wording", async () => {
+  let crash = true;
+  const offline = createOfflineModels();
+  const adapter = await PiAdapter.open({ storage: new MemoryStorage(), models: offline.models, model: OFFLINE_MODEL_REF, testHooks: { beforeAdmission: async () => { if (crash) { crash = false; throw new Error("crash before admission"); } } } });
+  try {
+    const root = adapter.root();
+    const update = { requestId: "upd:fedcba9876543210fedcba9876543210", text: "Owner correction: use plan B.", origin: "side line cbr-first, desk record dsk-y, update 2" };
+    await assert.rejects(placeSelectedUpdate(root, update), /crash before admission/);
+    await placeSelectedUpdate(root, { ...update, origin: "side line cbr-second, desk record dsk-y, update 1" });
+    await placeSelectedUpdate(root, { ...update, origin: "side line cbr-third, desk record dsk-y, update 1" });
+    const placed = (await root.transcript()).filter((e) => e.kind === "nimblenewt.update");
+    assert.equal(placed.length, 1);
+    assert.deepEqual(placed[0]!.data, { source: null, run: false, origin: update.origin });
+  } finally { await adapter.close(); }
 });
 
 // Card W06: every Pi agent this process runs carries the completion rules as its system text, the same bytes for every task, role and context switch.

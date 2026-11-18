@@ -11,3 +11,4 @@ export { noteSuspendedResponsibilities, type SuspendNoted, type SuspendNotePorts
 export { CoverageGapService, gapAppliesTo, routeUseOf, dispatchRoutesOf, type RouteUse, type RouteNames, DOWNTIME_MINUTES, GAP_KEEP_DAYS, GAP_LIMITS, GAP_REASONS, type GapBody, type GapReason } from "./coverage-gaps.js";
 export { CHECK_RUN_LIMITS, CheckRunService, CheckRunSettingsService, type CheckPassResult, type CheckProbe, type CheckRunDeps, type CheckRunSettings, type CheckProbeResult } from "./check-runner.js";
 export { PROBE_LIMITS, ResponsibilityProbeService, httpCheckProbe, nodeProbeRequest, probeResult, probeUrl, shownUrl, type ProbeAnswer, type ProbeRequest, type ProbeSetting, type ProbeView } from "./probes.js";
+export { REMOTE_ACTION_LIMITS, REMOTE_ACTION_TOOL, remoteActionTool, type RemoteActionDeps, type RemoteActionTool } from "./remote-action.js";
