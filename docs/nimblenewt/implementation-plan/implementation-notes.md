@@ -14021,3 +14021,294 @@ Reviewed `8b76d607..c2eb2336` independently. **One defect fixed. Everything else
 
 **Re-check of `7e595f7f` (Claude agent, Opus 5.5, clean context, 2026-11-18; final, no change to code).** The per-author index holds exactly the waiting proposals: `#create` adds the ID and every move to accepted, rejected or withdrawn (`#update` with `final`, and the accept-with-version callback in `releaseProposal`) removes it in the same guarded write. Revise, rebase, request changes, defer and reopen stay waiting and leave it alone. No other code writes proposals. A temporary differential test (deleted, not committed) built 120 proposals from 4 authors on 2 tools in every state, then compared against the `state: "all"` scan filtered and chunked the same way. Viewers: owner, a maintainer of all, a maintainer of one project, an outsider, a non-proposer and each author. Queries: default, each waiting state, `mine`, `name`, and limits 1/3/7/50 with `after`/`next`. Items and page boundaries matched exactly on all 4 backends, and each stored index equalled its author's waiting set. Cost: the owner's or a maintainer's waiting listing reads every author index (empty ones are kept), so at most 20 proposals per agent that ever proposed. That is bounded and below the old 5000 scan.
 **Verified (Linux, through `/tmp/nn-slot.sh`).** `tsc --build`. Controller `catalog/{catalog,toolbox,toolbox-proposals}`, `status/{status,agents-view,shown}`, `api/start-toolbox{,-proposals}`: 317/317 (backend-looped suites on all four backends). **Skipped:** other controller, integration and package suites, and Windows/macOS (CI).
+
+## W01 batch 4 on Radiance (bench with W01d): l02e-2 B a false done, c07m B ended when the agent process was killed; stopped (Claude agent, Opus 5.5, 2026-11-18)
+
+Card W01 stays planned. Branch `card-w01-batch4` off origin/main `2689c14c` (W01d: git-guard refusals inside the project's own tests are tagged `in-project-tests` and not counted); bench commit `2689c14c` in both records. Route radiance, model `qwen3.8-flash-next-iq4r`, thinking medium, server 2.1.0. Built with the checkout's own TypeScript (`node node_modules/typescript/bin/tsc --build --force`, clean; no npx, nothing downloaded). Before any request: `isolation.test.mjs`, `guard-context.test.mjs` and `arg-clean.test.mjs` 51 of 51 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, none skipped). Rules: one run at a time; before each run one `/stats` read requiring idle, the pinned model and uptime at least 600 s (else one read every 5 minutes, at most 20 minutes); the bench's own gate; stop on a server fault, an error that is not a normal task ending, or a contamination flag that cannot be named as a bench recognition problem. Per-run `--test-slot /tmp/nn-slot.sh`, `--token-budget 6000000`, the task's own limit; the work folder hidden by the bench's default (in each record's `isolation.hidden`).
+
+| # | batch | task (size), variant | outcome | agent time | turns / tool calls | tokens (input / output / cache read) | acceptance tests | argClean | flag |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `batch-20261118T080448` | l02e-2 (L), B | **wrong (false done)** | 47.5 min | 247 / 251 | 671,244 / 172,532 / 25.1M | 24 of 28 (built) | present, not applied (247 requests) | contaminated: a foreign path that is the run's own checkout, cut short (below) |
+| 2 | `batch-20261118T085505` | c07m (L), B | **error: the agent process exited null** (killed by a signal) | 13.5 min | 159 / 166 | 394,304 / 78,048 / 16.4M | 66 of 66 pass but the build failed with them (3 type errors in `enforcement.test.ts`); not a finish | present, not applied (160 requests) | contaminated: `push` and a foreign path, both from cut-short arguments (below) |
+
+- **Run 1, the false done.** The report claimed done with all 11 PLAN.md boxes ticked; the four failing tests are one test on each store: "2000 settled entries listing only a blocked Stop do not keep a later unpaid charge from being paid by the sweep". Shipped files 180 of 189.
+- **Run 1, the flag.** No guard refusal (the guard log is empty), no credential attempt. `foreignPaths` holds `/srv/code/worktrees-pi/eval-work/eval-l02e-2-B-r1-20261`: the bench keeps each tool call's arguments as JSON cut to 2,000 characters (`lib/classify.mjs`, `toolCommands`), and one long `edit` call had its `path` (the run's own checkout) after its edit text, so the cut fell inside that path, which then no longer matches the run's own folder. **A bench recognition problem**: recorded, and the batch went on.
+- **Run 2, the ending.** Pi's log stops in the middle of a streamed thinking reply; Pi wrote nothing to stderr; the agent process ended without an exit code (a signal). The bench did not stop it (no timeout; the time limit was 180 minutes), the server did not restart (requests 665 before, 826 after, uptime 17,436 s at 09:12 UTC, idle), no other bench run was going, and the agent's last commands were reads and a `tsc --build`. The cause is not known (the machine's memory was under pressure earlier in the day: 6 GB free of 184, 37 GB available at 09:12; kernel logs are not readable from this account). As an error that is not a normal task ending, it stops the batch.
+- **Run 2, the flag.** Both kinds come from the same 2,000-character cut: a cut call's JSON does not parse, so the detector reads the whole text as a command. One such call was an edit of `enforcement.test.ts` whose new text holds the project's own test fixture (`summary: "git push origin/main with token=ghp_abc…"`, a fake token), read as a `push`; another was cut inside the path of the run's own checkout (`/srv/code/worktrees-pi/eval`). The guard log is empty: nothing was pushed or refused. Also a bench recognition problem; the run would still have stopped the batch for its ending.
+- **Proposed bench fix (not done here, separately scoped):** match foreign paths and pushes against the full arguments (or parse before cutting), so a long edit no longer makes a cut path or reads file content as a command.
+- **Not started:** phrase-hints B; variant A on quote-lines, flaky-proposal, grant-proposals, landing-proposal, c07n, phrase-hints, m03h-1, l02e-2, c07m.
+- No checkout, sandbox folder or bench process left after either run. The Radiance key counted 0 times in these notes, the driver's files and both run folders.
+
+### Tally since the W06 completion rules (variant B; variant A has no run since the 30-run baseline)
+
+"Clean" = what the bench's report counts (not contaminated). "In substance" also counts runs whose only flag is a named bench recognition problem (cut-short own path or fixture text, the project's own test refusals before W01d), and leaves out server faults and the killed agent.
+
+| variant | size | clean runs: verified / false done / other | in substance: verified / false done / other | not counted |
+|---|---|---|---|---|
+| B | small | 6: 2 / 2 / 2 timeouts | same | - |
+| B | medium | 1: 1 / 0 / 0 | 2: 2 / 0 / 0 (adds c07n, whose flag was a real listing of the work folder, now hidden by W01c; it saw only its own checkout) | 1 server-rejected history (night batch, before W01b) |
+| B | large | 0 | 2: 0 / 2 / 0 (m03h-1, l02e-2) | 1 server restart (m03h-1), 1 agent killed (c07m) |
+| A | all | 0 | 0 | - |
+
+Gates (finish S 90 %, M 85 %, L 70 %; false done at most 5 %; unclassified 0):
+
+| variant | S finish | M finish | L finish | false done | unclassified | result |
+|---|---|---|---|---|---|---|
+| B, clean | 2 of 6 (33 %): FAIL | 1 of 1 (interval 21-100 %): met, unproven | not measured | 2 of 7 (29 %): FAIL | 0 | FAIL |
+| B, in substance | 2 of 6: FAIL | 2 of 2 (interval 34-100 %): met, unproven | 0 of 2: FAIL | 4 of 10 (40 %): FAIL | 0 | FAIL |
+| A (since 30-run baseline) | not measured | not measured | not measured | - | - | not measured |
+
+The 30-run baseline of 2026-11-10/11 is unchanged: A small 6 of 9, A medium 6 of 7, old B small 4 of 9, old B medium 3 of 5; false done A 0 of 16, old B 1 of 14. What the W06-rules runs show so far: medium tasks finish; small and large tasks end in false dones (agents claim done with one behaviour test failing on every store), and no run has stopped early.
+
+- ASSUMPTION: a flag whose every flagged line I could trace to a cut-short own path or to the project's own fixture text is "a bench recognition problem I can name", so after run 1 the batch went on; the lead's instruction allowed that and nothing in the guard log said otherwise.
+- ASSUMPTION: an agent process killed by an unknown signal is an error that is not a normal task ending even though the server was healthy, so the batch stops rather than starting the next run; another batch can resume at phrase-hints B with the same driver.
+- **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes (offline guard, through `/tmp/nn-slot.sh`); the Radiance key counted 0 times in these notes, the driver's files and both run folders.
+
+## CI fix after exhaustive run 44258423696 on e94e7d8d: Windows runBounded tests, a recovery-code test that could fail by chance, a resume reviewer asked twice (Claude agent, Opus 5.5, 2026-11-18)
+
+Four cells failed, with three causes. Everything else was green.
+
+**Windows, shard 1, both nodes: `windows-real-run.test.ts` tests 2 and 5 (test defect).**
+- Cause: the test's descendant is a node program started by the node program under test. On Windows, node (libuv) puts every child it starts without `detached` into a job object of the starting process. That job is created with kill-on-job-close, and with silent breakaway so it does not reach a non-node program's own children. So the descendant ended as soon as the program ended.
+  - Test 2: `child.kill()` ended the program and the job took the descendant with it, so "the descendant is still alive" was false.
+  - Test 5: the program exited at once, the descendant went with it, the pipes closed and the run ended normally in 63 ms (timedOut false).
+  - On Linux and macOS a node child outlives its parent, which is why the tests passed there. The earlier note that these tests "mean the same on Linux, macOS and Windows" was wrong on this point.
+- Change: the descendant is started with `detached: true` (and `windowsHide`), keeping `stdio: 'inherit'`. On Windows that keeps it out of the job, and it still writes to the program's pipes. On Linux and macOS it only gets its own process group; its pid is still killed in `finally`. Test 5 now asserts its premise (the descendant is still alive when the result comes back) before `timedOut`, so a broken premise names itself. The assertions are otherwise unchanged. Test 2 still proves that the stand-in tree stop ends nothing, so only runBounded's pipe close lets the result through.
+- `runBounded` (`windows-real.ts`): no Windows-only defect found behind these failures. The real program is powershell.exe. It is in the worker's libuv job, but its own children are not (silent breakaway), so `taskkill /T /F` is still what ends its tree; nothing changes there. Observation, not changed: a tree stop that takes long holds the result back for its duration plus the 5 s fallback (the shipped taskkill has its own 15 s limit, so at most about 20 s past the limit).
+- Unverified (needs a Windows CI run): the libuv job behaviour as described (taken from node's documentation of `detached` on Windows and libuv's spawn code as remembered; libuv's Windows source is not on this machine). Also: that a detached descendant keeps the inherited pipes open there, and that closing the parent's pipe ends on Windows return the result within the test's 4 s margin. If that last point fails, it is a real runBounded finding on Windows (the 5 s fallback would answer), not a test flake.
+
+**macOS node 22, shard 1: `encryption-manage.test.ts` "only the canonical recovery code is accepted" (test defect; the parser is correct).**
+- Cause: the test drew 8 fresh random keys per run and required each of the 13,888 single-character changes (8 x 56 x 31) to be refused. The checksum is 20 bits of a SHA-256 of the key (4 base32 characters), not an error-detecting code. About one change in 2^20 passes it, decoding to a different key, so a run failed about once in 75.
+- Reproduced on Linux: 5,208,000 changes over 3,000 random keys gave 1 accepted change, and it decoded to a different key. Over all 5.2 million, no non-canonical spelling read as the same key, so the padding check from the K01b review holds.
+- Decision (ASSUMPTION): the code format and checksum are not changed. A different checksum would invalidate every recovery code already printed. A change the checksum misses opens nothing: it is another key, so unlock fails with `UnlockFailed`.
+- Test change: fixed keys (SHA-256 of `nn-recovery-code-test-<n>`, n = 0..7 and 91), with every substitution enumerated, so the run is the same every time.
+  - Every change of the last data character that alters only the 4 padding bits must be refused as `RecoveryCodeInvalid`. Checked by removing the padding check from the built file: the test fails ("key 0 position 63 H (padding)").
+  - Every other change is either refused or reads as a different key, never the same one.
+  - Exactly the one known change (key 91, position 36, 8 to G) passes the checksum.
+- The first recovery-code test had the same flaw at about 56 / 2^20 per run. A changed code that passes the checksum there must now fail to unlock (`UnlockFailed`).
+- `crypto.ts`: comment only. It now says the checksum catches all but about one change in 2^20.
+
+**macOS node 22, shard 2: `start-resume-off-loop.test.ts`, PostgreSQL, "still asked once" got two asks (product defect, fixed).**
+- Cause: in `ResumeCheckService.advance` (`continuation/resume.ts`), the "reviewing" step checked the in-process guard against a check body read just before. A second advance of the same check reads it while it is still "reviewing" (the resume sweep runs apart beside the dispatcher's own job). If that read came back only after the first advance had written its verdict and let go of the guard (a slow read on a loaded runner), the second advance saw a stale "reviewing" with no guard and asked the reviewer again. Its own write was then refused by the phase guard, but the model call, with its tokens, had already been made twice. The CI repair round 7 guard covers the gap between the answer and the write, but not this stale read.
+- Fix: after taking the guard, the check is read again, and the reviewer is asked only if it is still "reviewing" (the rest of the step uses that fresh body). A read started after the guard is taken sees any verdict written before the guard was free, because an advance holds the guard until its write has gone through. Scope: one process, as before. Two controllers on one store were never covered by this guard.
+- Test (`resume-review-once.test.ts`, 4 new: reference store, SQLite, SQLite on a worker thread, PostgreSQL): a storage proxy takes the second advance's read of the check while it is "reviewing" and hands it over only after the first advance has finished. Before the fix all 4 failed (reviewer asked twice); after it all pass.
+
+**Verified (Linux, node 22.23, all through `/tmp/nn-slot.sh`):** `tsc --build`; worker suite (545 tests, 544 pass, 1 skipped, 0 failed); 21 controller files touching resume checks, the reviewer wiring and backup crypto (499 tests, 499 pass); under load (12 busy processes on 32 cores, load about 19), 20 rounds each of `start-resume-off-loop.test.js` (4 tests: SQLite and PostgreSQL), the two recovery-code tests and `resume-review-once.test.js` (8 tests): 0 failures.
+**Skipped:** the full controller suite and the other packages (no other code changed); the Windows-only real-host tests (they need Windows); a macOS run.
+
+### Review of the CI fix after run 44258423696 (Claude agent, Opus 5.5, 2026-11-18; final round)
+
+**`ResumeCheckService.advance` (`continuation/resume.ts`): correct, no change.**
+- The guard check and the guard taking have no `await` between them, so within one process only one advance holds a check's guard.
+- `finally` releases the guard on every path: each `continue`, a refused or failing fresh read (`#get` throws `not_found`), a reviewer failure, `#block` and `#update` throwing.
+- The fresh body (`fb`) is used for the rest of the step: the open changes, the verdicts kept, the task ID and both blocks. `#update` reads again and writes only from "reviewing", as before.
+- No double ask: a holder releases its guard only after its verdict write has resolved. The next holder's read starts after taking the guard, so it sees that write on all four backends. The reference store and SQLite (also on its worker thread) serialize, and PostgreSQL answers the write only after commit, with reads at read-committed.
+- No lost resume: a fresh body that is no longer "reviewing" makes the loop read the check again and act on its new phase. That costs one of the 10 advance steps, which leaves enough room for collecting, verifying, reviewing, the extra read and ready/executing.
+- One `ResumeCheckService` is built per controller (`api/start.ts`), so the sweep and the dispatcher share the guard. Two controllers on one store remain outside its scope, as documented.
+- Checked by putting back the old `resume.ts`, rebuilding and running the new test: it failed on all 4 backends ("the reviewer was asked once"). With the fix it passes.
+
+**Windows `windows-real-run.test.ts`: the reasoning holds, assertions are honest.**
+- Offline evidence: libuv's own header (`uv.h`, `UV_PROCESS_DETACHED`: "will effectively enable the child to keep running after the parent exits"; seen in the node-gyp 24.21 headers and the node 22.23 tarball headers).
+- From libuv's Windows spawn code (not on this machine): a global job object with kill-on-job-close and silent breakaway, which every spawned child joins unless it is detached.
+- Silent breakaway also means the detached descendant is not in the test runner's own job.
+- The CI logs match: test 2 failed with "the stand-in tree stop did not end the descendant" and test 5 came back in 64 ms.
+- Minor wording, not changed: on Linux and macOS `detached` calls `setsid`, a new session as well as a new process group. This makes no difference to the tests.
+- Test 2 still asserts that the descendant outlives the stand-in tree stop. Test 5 now asserts its premise before `timedOut`, so on Windows a descendant that dies again names itself rather than passing vacuously.
+
+**Recovery code: the decision is right; no follow-up card proposed.**
+- The unlock path fails closed, verified in `crypto.ts`. A changed code that passes the checksum decodes to another 32-byte key, and HKDF gives another key-encryption key. The AES-256-GCM tag check in `unwrap` then throws, and that becomes `UnlockFailed`. Even a tag collision would be refused by `privateFrom`, which compares the unwrapped key's public key with the keyring's.
+- A change only in the 4 checksum characters can never pass, because the key is unchanged and so is its checksum.
+- The only cost of a missed typo is a less specific message for about one single-character typo in 2^20 ("does not open this key" rather than "check what you typed"). That does not justify a format change that would invalidate printed codes.
+- If a recovery-code format v2 is ever made for another reason, a check designed to catch every single substitution and adjacent transposition belongs in it; it is not a card on its own.
+- The new test is fully deterministic: fixed keys, every substitution, and exact counts (9 x 56 x 31).
+
+**Determinism fix (this review).** Both tests in `resume-review-once.test.ts` waited at most 500 x 2 ms (about 1 s) for the first reviewer call. On a loaded runner, the PostgreSQL start (create, collecting, verifying, reviewing writes) can take longer, and the test would then fail with "the reviewer was asked" for reasons unrelated to the product. Both now poll to a 20 s deadline. The ordering inside the test (the held read and the order of answer and delivery) is fixed by promises, not timing.
+
+**Verified (Linux, node 22.23, `tsc --build` of the installed tsc, all tests through `/tmp/nn-slot.sh`):**
+- Worker suite: 545 tests, 544 pass, 1 skipped, 0 failed.
+- Controller `dist/continuation/*.test.js`, `dist/backup/*.test.js` and `dist/api/start-resume*.test.js` (48 files): 470 of 470 pass.
+- Under load (12 busy node loops on 32 cores, load about 18 to 20), 20 rounds of each:
+
+| Test file | Passed |
+| --- | --- |
+| `resume-review-once.test.js` | 160 of 160 |
+| the two recovery-code tests | 40 of 40 |
+| `windows-real-run.test.js` | 180 of 180 |
+| `start-resume-off-loop.test.js` | 80 of 80 |
+
+**Skipped:** the full controller suite and the other packages (no other code changed); the Windows-only real-host tests and any Windows or macOS run, so the libuv job behaviour itself is confirmed only by the next CI run. This round is final.
+
+**Clean-context second review of ci-fix2 (at d12bb74f): no defects found, so no code was changed.**
+- `resume.ts` `advance`, "reviewing" step:
+  - The guard is added with no await between `has` and `add`.
+  - Every exit after that goes through the `finally` that releases it: the `continue` when the fresh read is no longer "reviewing", the not-run write, both blocks, the verdict write, and a throw from the fresh `#get`, the reviewer or `#update`.
+  - Everything after the guard uses the fresh copy `fb`: the open changes, the base verdicts, the block's `blocks` count and the done test. Nothing still uses the stale `b`.
+- Step budget: a stale "reviewing" costs one of the 10 steps; the next step reads "ready" and returns. The phase guards in `#update` and `#block` are unchanged, so a write cannot land twice.
+- Read-after-write: `runner.get` reads storage directly with no cache. The other advance releases the guard only after its write has committed, so a read started after the guard is taken sees that write on all four backends.
+- Sweep and dispatcher: there is one production `ResumeCheckService` (`api/start.ts`), so the in-memory guard covers both within one process. The guard is still per process, as before (multi-process caveat unchanged).
+- Mutation check: with the fresh read replaced by the stale `b`, the new test fails on all 4 backends ("the reviewer was asked once"). After restoring, the `resume.ts` sha256 was 8b1665dd...2336, the same as before, and the build was redone.
+- Recovery-code test: checked the padding-only branch (the 52nd character's top bit is the key bit) and the 9 x 56 x 31 count.
+- Ran (Linux, installed tsc, through `/tmp/nn-slot.sh`):
+  - Controller `continuation`, `backup`, `api/start-resume*`, `dispatch/resume*` and `chat/resume*` (59 files): 863 of 863 pass.
+  - Worker suite: 545 tests, 544 pass, 1 skipped.
+  - Under 12 busy node loops (load 10 to 17), 10 rounds each of `resume-review-once`, `encryption-manage`, `windows-real-run` and `start-resume-off-loop`: 40 of 40 runs pass.
+- Skipped: Windows and macOS (the job-object change is confirmed only by CI), the rest of the controller suite, and the other packages.
+
+## W01e: the bench's contamination checks read each tool call's full arguments, not the copy cut to 2,000 characters (Claude agent, Opus 5.5, 2026-11-18)
+
+Branch `card-w01e` off origin/main `a0f46691`. Bench code only (`scripts/pi-eval`); no Radiance request, no network, no real credentials.
+
+**Problem (W01 batch 4, runs `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505`).** The summary kept each tool call's arguments as JSON cut to 2,000 characters (`toolCommands`), and `foreignPaths`, `credentialAttempts` and the reference-mark check read that cut copy.
+- A long `edit` whose `path` came after its edit text was cut inside the path, so the shortened path no longer matched the run's own checkout and was flagged as foreign.
+- A cut call no longer parses as JSON, and the detector then read the whole text as a command. Edit text holding the project's own test fixture (`git push origin/main with token=<fake token>`) was read as a push.
+- Both runs' git-guard logs were empty: nothing was pushed or refused.
+
+**Change.**
+- New `lib/tool-args.mjs`. `argTexts(args, toolName)` reads one call's full parsed arguments into:
+  - commands: the `command`, `cmd` or `script` field of a tool that is not a file tool (read, write, edit, multi-edit, notebook edit, grep, glob, find, ls; Pi's and Claude Code's names, any case). A tool with no known name is read as a shell tool, so older records stay strict.
+  - paths: every other string field at any depth (`path`, `file_path`, a search pattern, a working folder, nested lists).
+  - Content fields are skipped at every depth: `content`, `newText`, `oldText`, `new_string`, `old_string`, `edits`, `text`, `new_source`, `old_source`, `contents`, `patch`, `diff`. Tool results are never read.
+  - Each text is bounded at 65,536 characters; a text cut there carries `cut: true`.
+- `classify.mjs` `addEvent`: per call, `toolTexts` gets `{ tool, commands, paths, argsCut }` from the parsed `e.args`. `toolCommands` is still the JSON cut to 2,000 characters (the stored record); `toolCommandsCut` counts the cut ones. Both lists keep the 5,000-call bound.
+- `runner.mjs`: `foreignPaths`, `credentialAttempts` and the reference marks (now `namesMark`) read `summary.toolTexts`. The run record gets `toolArgsCut` when any call's stored copy was cut.
+- A cut text is judged only on what is visible (`wholePart`: up to its last word or path boundary). `git pu|` is not a push; `git push |` is; `/home/u/.ssh/id_r|` names `.ssh/`. A path running to the cut end is foreign only when its visible part cannot still become the run's own checkout or Pi's install.
+- Fallback for a stored string (older records, or a caller passing `toolCommands`), `toolCallTexts`:
+  - valid JSON is read in full (source `parsed`);
+  - text that starts like JSON but does not parse is read by `parseVisible`, a tolerant reader (source `visible-text`). Complete fields count as above; the string the cut ended inside is kept as cut; a number, literal, key or escape the cut ended inside is dropped. Text that is not JSON even as far as it goes is one cut command line;
+  - any other string is a plain command line.
+- Behaviour kept: every case in `isolation.test.mjs` (pushes, remotes, keys, the cut-call case) and `runner.test.mjs` (foreign paths) passes unchanged.
+- Behaviour changed, beyond the fix:
+  - a `command` field of a file tool is now read as a path, not run;
+  - string fields nested in non-content objects are now searched as paths (before, only top-level strings were);
+  - the reference marks (reference checkout, solution SHA prefix, results folder) no longer match inside file content or edit text.
+- README contamination paragraphs updated to match.
+
+**Replay (read only; old = origin/main `lib`, new = this branch).** Each run's `agent.jsonl`, with its own checkout `/srv/code/worktrees-pi/eval-work/eval-<runId>`, the batch's watched roots (`/srv/code/repos/nimblenewt`, `/srv/code/repos`, `/srv/code/worktrees-pi/eval-results`, `/srv/code/worktrees-pi`) and its marks:
+
+| run | tool calls (cut copies) | old: foreign / attempts / marks | new: foreign / attempts / marks | new fallback on the cut copies |
+|---|---|---|---|---|
+| `l02e-2-B-r1-20261118T080448` | 251 (31) | `/srv/code/worktrees-pi/eval-work/eval-l02e-2-B-r1-20261` / none / no | none / none / no | none / none / no |
+| `c07m-B-r1-20261118T085505` | 166 (16) | `/srv/code/worktrees-pi/eval` / `push` / no | none / none / no | none / none / no |
+
+The old classifier reproduces both records' stored flags exactly; neither run has a flag under the new one. So both runs' contamination was the bench's recognition problem named in the batch 4 notes. The stored records in `eval-results/results.jsonl` are not rewritten (`rescore.mjs` re-derives outcomes, not contamination).
+
+**Tests.** New `scripts/pi-eval/tool-args.test.mjs`, 5 tests:
+- a long edit with its path last: not flagged; the stored copy is cut and marked;
+- edit, write and Claude `Edit` text holding a push, a fake token (assembled at run time), `~/.ssh` and a reference path: no attempt, no foreign path, no mark;
+- still flagged:
+  - a real bash push, and a push after a long heredoc;
+  - a foreign path in a long edit's `path`;
+  - `~/.ssh` in a read's `path`;
+  - a reference checkout in Claude `Read`'s `file_path`, which also counts as a mark;
+- cut, invalid JSON: both batch 4 shapes are not flagged. What the visible text supports is still flagged: a complete foreign field before the cut, a cut path already outside the checkout, a cut command's whole words, a whole `.ssh/` component. The reading reports `visible-text`;
+- the tolerant reader itself.
+
+**Verified (Linux, node 22.23, through `/tmp/nn-slot.sh`, offline guard).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 163 of 163 pass, none skipped.
+- Build for those tests: the installed tsc (`tsc --build --force packages/pi-adapter packages/worker`, clean), through a temporary `node_modules` in the worktree that links the installed packages and points `@nimblenewt/*` at the worktree's own packages; removed afterwards.
+
+**Skipped.** Any real bench run (no Radiance request); the rest of the repository's suites (no product code changed); Windows and macOS.
+- ASSUMPTION: a tool with no recorded name keeps the strict reading (its `command` is a command), since older records and the stub agents may carry none.
+- ASSUMPTION: the reference marks follow the same rule as paths (file content and edit text are not read). A solution SHA seen in written code would have had to come from a command or a read, and those are still checked.
+
+### W01e review (Claude agent, Opus 5.5, 2026-11-18): one round, final
+
+Reviewed `5563836f` for whether the detector errs strict, checked against Pi's real tool set (bash, powershell, edit, find, grep, ls, read, write) and the 45 run folders in `eval-results/runs` (they use only bash, edit, read, write).
+
+**Defects found and fixed (`lib/tool-args.mjs`, `lib/isolation.mjs`, `lib/classify.mjs`, `lib/runner.mjs`).**
+- A shell command in a field other than a top-level `command`/`cmd`/`script` was read only as a path, so it was never checked for a push or a remote. Missed shapes: `args`, `input`, `cmdline`, `commands`, `bash`, a nested `params.command`, and an argv list (`command: ["git", "push"]`). Now:
+  - for a call with no tool name, command-like fields at any depth are commands, and string lists are also read joined;
+  - for a named tool that is not a file tool, every string is a command, content fields included.
+- A content key hid everything below it, so `edits: [{ path }]` was not read. Now only a string directly in a content field is skipped; an object inside one is read field by field.
+- A text over 65,536 characters kept only its head, so a push after a long heredoc was missed. Strings past 256 per call, and anything deeper than 8 levels, were dropped without a mark. Now:
+  - a long text keeps its head and its tail (`cutStart` marks the tail);
+  - texts past a call's room are joined and kept head and tail;
+  - a too-deep value is read whole as one text;
+  - such a call carries `textsCut`.
+- No size bound on the in-memory `toolTexts`: 5,000 calls × 256 texts × 64 KiB. Now bounded:
+  - 256 KiB per call;
+  - after a run's calls hold 16 Mi characters, 4 KiB per call.
+  - All calls are now read, not only the first 5,000. The stored `toolCommands` copies keep their 5,000 bound.
+  - The run record gets `toolTextsCut`, the number of calls kept head and tail. The field is optional and additive.
+- `wholePart` alone made cut texts less strict than before: `git push|` and `echo $SSH_AUTH_SOCK|` at the cut were no longer seen. A cut text is now read both as far as it is visible and up to its last whole word.
+- A remote command that runs to the cut now counts as `remote`, because its address is not known. Before, `git remote add o ht|` read as local.
+
+**Checked, no change.**
+- The reference-folder check still catches a Claude `Read` `file_path`, a Pi `read` `path`, and shell commands.
+- Tool results are not read. They show what came back, not what the agent asked for.
+- The three behaviour changes beyond the fix are right:
+  - a file tool's `command` field is not run (Claude's `str_replace_editor` names its action there);
+  - nested strings are now searched (stricter);
+  - marks no longer match inside written text (a read of the reference still goes through a command or a path field).
+- Older records stay readable. The fallback on the stored cut copies flags the same real runs.
+- `results.jsonl` only gains optional fields.
+- A test in the card's own file used the invented tool name `multi` for its nested-path case. It now uses a call with no tool name; under the review rule a named tool that is not a file tool reads every string as a command.
+- ASSUMPTION: a named tool that is not a file tool reading content fields as commands could flag a todo-style tool whose text mentions `git push`. The bench runs only Pi, whose only such tools are bash and powershell, so strict wins.
+
+**Replay (read only, every run folder with an `agent.jsonl`, 45).**
+- Origin/main, the card's commit and this review were compared.
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean under the card and the review. Under origin/main they were flagged.
+- `grant-proposals-B-r1-20261117T094724` is still flagged under all three, from both the full arguments and the stored cut copies:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+- The other flagged runs keep their flags. Exceptions:
+  - `landing-proposal-B-r1-20261111T083657` loses `/srv/code/worktrees-pi/eval-work/eval-la`, a cut prefix of its own checkout;
+  - `flaky-proposal-B-r3-20261110T234535` newly shows `/home/rob`, which is real: a bash Python script past 2,000 characters sets `HOME=/home/rob`.
+- The review's lib gives the same result as the card's on all 45 runs. No real run reaches a size cap.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 166 of 166 pass, none skipped. That is 163 plus 3 review tests: unexpected command fields and argv lists, readings at the cut, and the size bounds with head and tail kept.
+- Build: `tsc --build --force packages/pi-adapter packages/worker`, run with the installed TypeScript through a temporary worktree `node_modules`, removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
+
+### W01e second review (Claude agent, Opus 5.5, clean context, 2026-11-18): final round
+
+Reviewed `bcd3b005` for how strict and how robust the contamination reading is. Probed shapes are in the tests below; the replays read the run folders only.
+
+**Defects found and fixed (`lib/isolation.mjs`, `lib/tool-args.mjs`, `lib/runner.mjs`).**
+- Missed pushes and remotes:
+  - `git --git-dir /x/.git push`, `git --work-tree /x push`: the long options git also takes with a separate value now eat that value, the same way `-C` and `-c` already did;
+  - `git \<newline> push`, `"git" push`, `git'' push`, Python `subprocess.run(["git", "push"])`, Node `execFileSync("git", ["push"])`: a second, loose reading of each command (line continuations joined, quotes dropped, `, [ ] ( )` read as spaces) is checked for a push or a remote. It only adds kinds. The key check does not use it: without its quotes, a pattern `'a|\.ssh'` would split into programs.
+- A text over its room kept only head and tail, so a push between two long heredocs, or one the head/tail cut fell across, was missed. The middle's lines that name git, ssh, a key or login file, a home folder or an absolute path are now kept as well (`excerpts`: up to 256 characters each side of the word, a quarter of the room in all). Head and tail shrink to fit, so the per-text, per-call and per-run bounds are unchanged. Other middle text is still not read. The header comment's "nothing is dropped unread" is corrected.
+- False flag: Pi's `grep`/`find` tool (and Claude's Grep/Glob) searching the code for `\.ssh` counted as `credentials`, though the same search in bash grep did not. This predates the card. A file tool's `pattern`, `glob`, `regex`, `query`, `include`, `exclude` and `iglob` fields are now `patterns`, a search of the code. For keys they count only as a key path under a home folder, the same as a bash grep. They still count for foreign paths and the reference marks. The entry field is optional, and older entries and stored strings read as before.
+
+**Checked, no change.**
+- Already caught: `git -c x=y push`, `git<TAB>push`, `env GIT_SSH_COMMAND=... git push`, `/usr/bin/git push`, `\git push`, `os.system("git push")`, `send-pack`, a remote add to an ssh or quoted https address, a Python one-liner opening `~/.ssh/id_rsa`, `$HOME/.config/gh`, a read of `~/.ssh` or `/home/u/.ssh`, a relative walk up to `home/u/.ssh/id_rsa` (the `.ssh/` component), a path in `edits: [{ path }]`, a PowerShell push.
+- Not detectable from the call text, and not claimed: a git alias (`git config alias.p push; git p`), a shell alias or a variable as the program (`G=git; $G push`), base64 or hex of a command, a script written with a file tool and then run, `gh`/`curl` to a forge API, a path built from variables (`D=/srv/code; cat $D/repos/...`), a relative walk to another checkout (`cat ../../c07m/a`), `~other/`, a solution SHA that appears only in a long text's unexcerpted middle, and a key name split by quotes or variables (caught here only when `id_rsa` or the home path is still visible). These are heuristics.
+- What actually stops each one on Linux with bubblewrap:
+  - push, remote and network: the git wrapper, the run's own git settings (ssh off, network transports refused) and a network namespace with loopback only;
+  - keys and logins: the owner's home and the key folders hidden, a fresh home, a scrubbed environment;
+  - writing outside the run's folders: the read-only file system.
+  - Reading another checkout or the reference under `/srv/code` is not prevented. There the detector is the only safeguard, and the README already says so. Without bubblewrap (macOS, Windows, or a host where it does not work), only the wrapper and settings stand behind the detector.
+- Remaining strict cases, accepted: a bash `grep "git push"` and a commit message naming `git push` count as a push, as before; under the loose reading, `echo "git, push"` would too.
+- Bounds and speed: a synthetic 241 MB log (401 bash calls of 600K characters each, dense with paths and git words, and a push in the last) gives 17.4 M characters of texts (16 Mi plus 4 KiB per later call). Summarizing takes 1.4 s and detection 2.3 s, the same as `bcd3b005`. The push is found. All 45 real run folders replay in 5.4 s with a 125 MB peak resident size. The largest `agent.jsonl` is 27 MB, and no real call reaches a size cap.
+- Compatibility: `results.jsonl` gains no new fields in this round. `patterns` lives only in the in-memory summary. `rescore.mjs` re-derives outcomes through `summarizeLogFile` and `classify`, which do not read `toolTexts`.
+
+**Replay (read only, all 45 run folders with an `agent.jsonl`, the batch's watched roots and marks).** The results are line for line the same as `bcd3b005`, both from the full arguments and from the stored cut copies (fallback):
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean;
+- `grant-proposals-B-r1-20261117T094724` is still flagged:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+
+**Tests.** `tool-args.test.mjs` has two more:
+- quoting, continuations, separate-value options, one-liners' argv lists, a push and a path in a long text's middle, and one across the head/tail cut. Plain `git log`, `git status && echo pushed` and a local remote stay unflagged;
+- file-tool search patterns.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 168 of 168 pass, none skipped.
+- Build: `tsc --build --force packages/contracts packages/pi-adapter packages/worker` with the installed TypeScript, through a temporary worktree `node_modules` (links to the installed packages, `@nimblenewt/*` pointing at the worktree's packages). Removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
+
+### W01e third review (Claude agent, Opus 5.5, clean context, 2026-11-18): final re-check of `208b5ded`, three regressions fixed
+- Fixed: (1) the search-field exemption lost a key read split over two fields (`Glob {path: "/home/rob", pattern: ".ssh/*"}`, `find {path: "~", pattern: "**/id_ed25519"}`, a grep `glob` of `.ssh/*`): a pattern now counts as a path does when the call's path is a home folder, above one, or walks up with `..`, or when path and pattern joined name a home key path; (2) `GIT_OPTS` backtracked exponentially (32 `--git-dir` 3.3 s; 26 `-C "x"` 26 s, already so before): each option now reads one way only, and 2,000 options take 5 ms; (3) a middle dense with paths used the whole excerpt budget near the head, so a push the old tail held, just before the shrunk tail, was lost: half the budget now goes to the lines just past the head, the rest to the last lines before the tail, and either side's unused part goes to the other.
+- Checked, no change: the loose reading only adds kinds; bounds unchanged (241 MB synthetic log: 17,371,136 characters of texts, the push found, 1.07 GB peak as before; summarizing 1.4 s to 1.9 s, detection 2.2 s). Both replays (full arguments, stored cut copies) of all 45 run folders are line for line the same as `208b5ded`: batch 4 clean, `grant-proposals-B-r1-20261117T094724` flagged (credentials, push, remote, the mark, the same five foreign paths); 5.2 s, 130 MB.
+- Verified through `/tmp/nn-slot.sh`: `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs` 169 of 169 (one new test); `tsc --build --force packages/contracts packages/pi-adapter packages/worker` through a temporary `node_modules` link, removed afterwards. Skipped: real bench runs (no Radiance), other suites, Windows and macOS.
+
+### W01e fourth check of `eab01cc1` (Claude agent, Opus 5.5, clean context, 2026-11-18): no defect, no code change
+- `GIT_OPTS` against `208b5ded`: 1,500 generated `git ... push` / `remote add|set-url` lines (`-C`, `-c`, `--git-dir`, `--work-tree`, equals forms, quotes, tabs, env prefixes) flag the same through the regexes and through `credentialAttempts`. Three lines lose a flag, and none of them pushes: `git -C push` and `git -c push` (the option takes `push` as its value) and `git --exec-path push` (bare `--exec-path` prints and exits). An escaped quote in a value (`-C "a\"b" push`) is still caught by the loose reading. Adversarial inputs (runs of quotes, unclosed quotes, 40,000 spaces, 200 options) take under 4 ms. A run of `git -C git -C ...` is quadratic in both versions (about 185 ms at 21,000 characters), not exponential. Both versions still miss `--git-dir="/a b/.git" push` and `-C x\ y push`.
+- Search fields: `\.ssh` searched from `.`, `src`, `/srv`, `/tmp` or a repo path is not flagged. Home folder, `/`, `/home`, `/root`, `..` walks and joined path+pattern are flagged. Budget split: with a path-heavy middle (70,000 to 400,000 characters, 201 push positions each), the positions the old version caught just past the head now go partly to the lines just before the tail, as many gained as lost. With a sparse middle a push is caught at every position. `argTexts` takes 23 ms or less at the 262,144-character call cap.
+- The replays of all 45 run folders (full arguments, stored cut copies) are line for line the same as `208b5ded`: batch 4 is clean, and `grant-proposals-B-r1-20261117T094724` is flagged (credentials, push, remote). Through `/tmp/nn-slot.sh`: pi-eval 143/143 and y02-checkpoint 26/26, after `tsc -p packages/contracts` and with a temporary `node_modules` (removed). Skipped: real bench runs, the pi-adapter and worker rebuilds (existing dist used), other suites, Windows and macOS.

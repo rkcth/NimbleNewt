@@ -28,6 +28,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REFUSED_ADDRESS, splitAlias } from "./git-guard.mjs";
+import { toolCallTexts, wholePart } from "./tool-args.mjs";
 
 const IS_WIN = process.platform === "win32";
 /** The git wrapper program put first on the agent's PATH. */
@@ -504,7 +505,12 @@ export function findRealGit(pathValue = process.env.PATH ?? process.env.Path ?? 
 // ---- detection in the agent's log ----
 
 const GIT = String.raw`(?<![\w.-])git(?:\.exe)?`;
-const GIT_OPTS = String.raw`(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[A-Za-z][\w-]*(?:=\S+)?))*`;
+// Options before the subcommand: `-C`, `-c` and the long options git also takes with a separate value (`--git-dir <path>`)
+// eat that value (W01e second review: `git --git-dir /x/.git push` was not seen).
+// W01e third review: each option reads one way only (a value is quoted parts and other characters; a bare flag is never
+// one that takes a value), so a run of `-C "x"` or `--git-dir` no longer backtracks exponentially (26 `-C "x"` took 26 s).
+const VALUE_OPTS = "[Cc]|git-dir|work-tree|namespace|exec-path|config-env|super-prefix|list-cmds";
+const GIT_OPTS = String.raw`(?:\s+(?:(?:-[Cc]|--(?:${VALUE_OPTS}))\s+(?:"[^"]*"|'[^']*'|[^\s"'])+|--?(?!(?:${VALUE_OPTS})\s)[A-Za-z][\w-]*(?:=\S+)?))*`;
 const PUSH = new RegExp(`${GIT}${GIT_OPTS}\\s+(?:push|send-pack|http-push)\\b`);
 /** `git remote add|set-url ...` (the rest of the segment captured) and `git config remote.<name>.(push)url <value>`. */
 const REMOTE = new RegExp(`${GIT}${GIT_OPTS}\\s+remote(?:\\s+-\\S+)*\\s+(?:add|set-url)\\b([^;&|\\n]*)`, "i");
@@ -514,8 +520,9 @@ const CREDENTIALS = /(?:^|[^\w])\.ssh(?:[/\\"'\s]|$)|\.git-credentials\b|(?<![\w
 /** The same under a home folder only: what a search of the code (grep, rg, git grep) counts, since code may name `.ssh`. */
 const HOME_CREDENTIALS = /(?:~|\$HOME|\$\{HOME\}|\/home\/[^/\s"']+|\/root|\/Users\/[^/\s"']+)[/\\]\.(?:ssh|git-credentials|netrc|config[/\\]gh|pi[/\\]agent|aws|docker|kube|gnupg|codex|claude|paperclip|hermes)\b/;
 const SEARCH_TOOLS = /^(?:grep|egrep|fgrep|rg|ag|ack)$/;
-/** Fields of a tool call that hold file content, not a command or a path: never searched (code may talk about pushing). */
-const CONTENT_FIELDS = new Set(["content", "newText", "oldText", "new_string", "old_string", "edits", "text"]);
+/** A file tool's path that is a home folder or above one (`~`, `$HOME`, `/home/u`, `/home`, `/`), and one walking up. */
+const HOME_ROOT = /^\s*(?:~[/\\]?|\$\{?HOME\}?[/\\]?|\/(?:home|Users)?(?:\/[^/\\\s"']+)?\/?|\/root\/?)\s*$/;
+const UP_WALK = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
 
 /** Whether a remote address given on a command line is not plainly a local folder (unknown, a variable, a network address). */
 function nonLocalAddress(rest) {
@@ -553,13 +560,30 @@ function shellSegments(c) {
   return out;
 }
 
-/** The kinds seen in one shell command. */
-function commandKinds(c, found) {
+/**
+ * A second reading of a command for a push or a remote (W01e second review): line continuations joined, quotes dropped,
+ * and an argv list's punctuation (`,` `[` `]` `(` `)`) read as spaces, so `git \<newline> push`, `"git" push`, `git'' push`,
+ * Python's `subprocess.run(["git", "push"])` and Node's `execFileSync("git", ["push"])` read as `git push`. It only adds
+ * kinds. The key search does not use it: without its quotes a search pattern `'a|\.ssh'` would split into programs.
+ */
+const looseReading = (c) => c.replace(/\\\r?\n/g, " ").replace(/["'`]/g, "").replace(/[,[\]()]/g, " ");
+
+/** A push or a remote in one command text. */
+function gitKinds(c, found, cut) {
   if (PUSH.test(c)) found.add("push");
+  // In a text cut at a size limit, a remote command that runs to the cut has an address that is not known.
+  const toCut = (m) => cut && m.index + m[0].length === c.length;
   const r = REMOTE.exec(c);
-  if (r && nonLocalAddress(r[1] ?? "")) found.add("remote");
+  if (r && (nonLocalAddress(r[1] ?? "") || toCut(r))) found.add("remote");
   const rc = REMOTE_CONFIG.exec(c);
-  if (rc && nonLocalAddress(`x ${rc[1] ?? ""}`)) found.add("remote");
+  if (rc && (nonLocalAddress(`x ${rc[1] ?? ""}`) || toCut(rc))) found.add("remote");
+}
+
+/** The kinds seen in one shell command. */
+function commandKinds(c, found, cut = false) {
+  gitKinds(c, found, cut);
+  const loose = looseReading(c);
+  if (loose !== c) gitKinds(loose, found, cut);
   for (const segment of shellSegments(c)) {
     let prog = "";
     try { prog = programOf(segment); } catch { /* unbalanced quotes: searched in full */ }
@@ -568,27 +592,34 @@ function commandKinds(c, found) {
 }
 
 /**
- * What the agent's tool calls (summary.toolCommands: each the JSON of one call's arguments) show it tried: `push` (a git
- * push), `remote` (adding or changing a remote to an address that is not a local folder), `credentials` (a path or socket
- * of the owner's keys and logins: ~/.ssh, .git-credentials, id_*, .netrc, the gh token, SSH_AUTH_SOCK, Pi's own
- * configuration, the container engine, the team's key folder; a search of the code with grep, rg or git grep counts only
- * a path under a home folder, since code may name `.ssh`). Returns the kinds seen, sorted. Detection only: a command
- * assembled at run time is not seen.
+ * What the agent's tool calls show it tried: `push` (a git push), `remote` (adding or changing a remote to an address that
+ * is not a local folder), `credentials` (a path or socket of the owner's keys and logins: ~/.ssh, .git-credentials, id_*,
+ * .netrc, the gh token, SSH_AUTH_SOCK, Pi's own configuration, the container engine, the team's key folder; a search of
+ * the code with grep, rg or git grep counts only a path under a home folder, since code may name `.ssh`). Returns the
+ * kinds seen, sorted. Detection only: a command assembled at run time is not seen.
+ *   commands: one entry per call, either summary.toolTexts (read from the full parsed arguments) or an argument JSON
+ *   string (summary.toolCommands, older records). See lib/tool-args.mjs: only a shell tool's `command`/`cmd`/`script`
+ *   and the like are read as commands, a file tool's fields as paths, and file content and edit text not at all.
+ *   A text cut at a size limit is read as far as it is visible and up to its last whole word (`git pu|` is not a push,
+ *   `git push|` is).
  */
 export function credentialAttempts(commands) {
   const found = new Set();
-  for (const raw of commands) {
-    let args = null;
-    try { args = JSON.parse(raw); } catch { /* cut at its size limit: searched as it is */ }
-    const commandTexts = [], pathTexts = [];
-    if (args && typeof args === "object") {
-      for (const [k, v] of Object.entries(args)) {
-        if (typeof v !== "string" || CONTENT_FIELDS.has(k)) continue;
-        if (k === "command" || k === "cmd" || k === "script") commandTexts.push(v); else pathTexts.push(v);
-      }
-    } else commandTexts.push(String(raw));
-    for (const c of commandTexts) commandKinds(c, found);
-    for (const p of pathTexts) if (CREDENTIALS.test(p)) found.add("credentials");
+  for (const entry of commands) {
+    const t = toolCallTexts(entry);
+    // A cut text is read both as far as it is visible and up to its last whole word: each reading can see what the other
+    // misses (`git push|` or `$SSH_AUTH_SOCK|` at the cut); a remote command that runs to the cut has an unknown address.
+    for (const c of t.commands) { commandKinds(c.text, found, c.cut); if (c.cut) commandKinds(wholePart(c), found); }
+    for (const p of t.paths) if (CREDENTIALS.test(p.text) || (p.cut && CREDENTIALS.test(wholePart(p)))) found.add("credentials");
+    // A file tool's search pattern is a search of the code, read as a grep in bash is: only a key path under a home folder.
+    // W01e third review: a key name searched from a home folder (or above one, or up a `..` walk) is a key read split over
+    // two fields (`{ path: "/home/u", pattern: ".ssh/*" }`), counted as a path is.
+    const fromHome = t.paths.some((q) => HOME_ROOT.test(q.text) || UP_WALK.test(q.text));
+    for (const p of t.patterns ?? []) {
+      const whole = p.cut ? wholePart(p) : p.text;
+      if (HOME_CREDENTIALS.test(p.text) || HOME_CREDENTIALS.test(whole) || t.paths.some((q) => HOME_CREDENTIALS.test(`${q.text}/${p.text}`))
+        || (fromHome && (CREDENTIALS.test(p.text) || CREDENTIALS.test(whole)))) found.add("credentials");
+    }
   }
   return [...found].sort();
 }
