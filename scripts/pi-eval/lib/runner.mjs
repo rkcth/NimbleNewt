@@ -13,6 +13,7 @@ import { classify, planProgress, summarizeLogFile, testCounts } from "./classify
 import { guardLogCounts } from "./git-guard.mjs";
 import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable, workRootHidden } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
+import { toolCallTexts } from "./tool-args.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
 
@@ -245,25 +246,44 @@ export const killProcessesIn = async (dir) => killProcessesInSync(dir);
 const ABS_PATH = /(?:~\/|\/)[A-Za-z0-9._@+~-][^\s"'`;|&<>(){}\\,]*/g;
 
 /**
+ * Whether a call's command or path fields name one of the marks (a reference checkout, the solution commit's prefix, the
+ * results folder). File content and edit text are not read; a cut text only up to where it was cut.
+ */
+export function namesMark(commands, marks) {
+  return commands.some((entry) => { const t = toolCallTexts(entry); return [...t.commands, ...t.paths].some(({ text }) => marks.some((m) => text.includes(m))); });
+}
+
+/**
  * Absolute paths named in the agent's tool calls that lie where a solution can be: anywhere under the reference
  * repository, its checkouts' parent directories, the results, or the user's home (transcripts, other tools' runs), other
  * than the run's own checkout. Detection only: a path built at run time, a relative `../` walk or a search from `/`
  * is not seen here.
+ *   commands: one entry per call, summary.toolTexts (read from the full parsed arguments) or an argument JSON string
+ *   (older records); see lib/tool-args.mjs. Only commands and path fields are searched, never file content or edit text.
+ *   A path that runs to the end of a text cut at a size limit is only partly known: it is flagged only when what is
+ *   visible already lies outside the run's own checkout (a cut `/srv/.../eval-wor` could still be the checkout).
  */
 export function foreignPaths(commands, { ownDir, watched = [] }) {
   // The agent may name its checkout by its real path (pwd through a symlinked work root): both spellings are its own.
   const owns = [resolve(ownDir)];
   try { owns.push(realpathSync(owns[0])); } catch { /* removed already */ }
   const home = homedir();
+  const piInstall = join(home, ".local", "pi-cli", "node_modules");
   const roots = [...new Set([...watched, home].filter(Boolean).map((w) => resolve(w)))];
   const found = new Set();
-  for (const c of commands) {
-    for (const m of String(c).matchAll(ABS_PATH)) {
-      const raw = m[0].replace(/[.:]+$/, "");
-      const p = raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
-      if (owns.some((own) => p === own || p.startsWith(own + "/"))) continue;
-      if (p.startsWith(join(home, ".local", "pi-cli", "node_modules"))) continue; // Pi's own install
-      if (roots.some((r) => p === r || p.startsWith(r + "/")) || /^\/(?:srv|home|root)\/?$/.test(p)) found.add(p);
+  for (const entry of commands) {
+    const t = toolCallTexts(entry);
+    for (const { text, cut } of [...t.commands, ...t.paths]) {
+      for (const m of text.matchAll(ABS_PATH)) {
+        const partial = cut && m.index + m[0].length === text.length;
+        const raw = partial ? m[0] : m[0].replace(/[.:]+$/, "");
+        const p = raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
+        if (owns.some((own) => p === own || p.startsWith(own + "/"))) continue;
+        if (p.startsWith(piInstall)) continue; // Pi's own install
+        // A cut path that may still go on to be the run's checkout or Pi's install is not known to be foreign.
+        if (partial && (owns.some((own) => own.startsWith(p)) || piInstall.startsWith(p))) continue;
+        if (roots.some((r) => p === r || p.startsWith(r + "/")) || /^\/(?:srv|home|root)\/?$/.test(p)) found.add(p);
+      }
     }
   }
   return [...found].slice(0, 20);
@@ -378,15 +398,17 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     // Watched roots: the reference checkouts, the directory that holds them (sibling worktrees carry merged solutions),
     // the results, and the work root's siblings. The run's own checkout is never counted.
     const watched = [...(ctx.referenceDirs ?? [ctx.repo]).flatMap((d) => [d, dirname(d)]), ctx.resultsDir, dirname(ctx.workRoot)].filter(Boolean);
-    const foreign = foreignPaths(summary.toolCommands, { ownDir: dir, watched });
+    // Read from each call's full parsed arguments (summary.toolTexts, card W01e), not the stored copy cut for size.
+    const calls = summary.toolTexts;
+    const foreign = foreignPaths(calls, { ownDir: dir, watched });
     // Also a run whose agent tried to push, add a remote or reach the owner's keys and logins, seen in its tool calls or
     // in the git wrapper's refusals: blocked or not, it is not a run to score.
-    const attempts = credentialAttempts(summary.toolCommands);
+    const attempts = credentialAttempts(calls);
     // A refusal the guard tagged as a project test's own (an askpass or proxy program given by the project's code to a
     // repository its tests made in the temporary folder, card W01d) is still refused but reported apart, not counted.
     let guardRefusals = 0, guardRefusalsInTests = 0;
     try { ({ counted: guardRefusals, inProjectTests: guardRefusalsInTests } = guardLogCounts(readFileSync(join(artifacts, "git-guard.log"), "utf8"))); } catch { /* nothing refused */ }
-    const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m))) || attempts.length > 0 || guardRefusals > 0;
+    const contaminated = foreign.length > 0 || namesMark(calls, marks) || attempts.length > 0 || guardRefusals > 0;
     const verdict = classify({ summary, hidden, plan, changed: ch.changed, dirty: ch.dirty, timedOut: a.timedOut, exitCode: a.code });
     Object.assign(record, verdict, {
       stopReason: summary.last?.stopReason ?? null, visibleChars: summary.last?.visibleChars ?? 0, lastText: summary.last?.visibleTail.slice(-300) ?? "",
@@ -394,7 +416,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
       // The log shows no model reply, or a reply without token counts: the run's token use is not known (0 is not a reading).
       ...(summary.assistantMessages === 0 || summary.usageMissing > 0 ? { tokensUnknown: true } : {}),
       plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
-      credentialAttempts: attempts, guardRefusals, ...(guardRefusalsInTests > 0 ? { guardRefusalsInTests } : {}),
+      credentialAttempts: attempts, guardRefusals, ...(summary.toolCommandsCut > 0 ? { toolArgsCut: summary.toolCommandsCut } : {}), ...(guardRefusalsInTests > 0 ? { guardRefusalsInTests } : {}),
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });

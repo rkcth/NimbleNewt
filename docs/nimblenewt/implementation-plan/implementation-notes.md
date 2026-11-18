@@ -14023,3 +14023,60 @@ Four cells failed, with three causes. Everything else was green.
   - Worker suite: 545 tests, 544 pass, 1 skipped.
   - Under 12 busy node loops (load 10 to 17), 10 rounds each of `resume-review-once`, `encryption-manage`, `windows-real-run` and `start-resume-off-loop`: 40 of 40 runs pass.
 - Skipped: Windows and macOS (the job-object change is confirmed only by CI), the rest of the controller suite, and the other packages.
+
+## W01e: the bench's contamination checks read each tool call's full arguments, not the copy cut to 2,000 characters (Claude agent, Opus 5.5, 2026-11-18)
+
+Branch `card-w01e` off origin/main `a0f46691`. Bench code only (`scripts/pi-eval`); no Radiance request, no network, no real credentials.
+
+**Problem (W01 batch 4, runs `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505`).** The summary kept each tool call's arguments as JSON cut to 2,000 characters (`toolCommands`), and `foreignPaths`, `credentialAttempts` and the reference-mark check read that cut copy.
+- A long `edit` whose `path` came after its edit text was cut inside the path, so the shortened path no longer matched the run's own checkout and was flagged as foreign.
+- A cut call no longer parses as JSON, and the detector then read the whole text as a command. Edit text holding the project's own test fixture (`git push origin/main with token=<fake token>`) was read as a push.
+- Both runs' git-guard logs were empty: nothing was pushed or refused.
+
+**Change.**
+- New `lib/tool-args.mjs`. `argTexts(args, toolName)` reads one call's full parsed arguments into:
+  - commands: the `command`, `cmd` or `script` field of a tool that is not a file tool (read, write, edit, multi-edit, notebook edit, grep, glob, find, ls; Pi's and Claude Code's names, any case). A tool with no known name is read as a shell tool, so older records stay strict.
+  - paths: every other string field at any depth (`path`, `file_path`, a search pattern, a working folder, nested lists).
+  - Content fields are skipped at every depth: `content`, `newText`, `oldText`, `new_string`, `old_string`, `edits`, `text`, `new_source`, `old_source`, `contents`, `patch`, `diff`. Tool results are never read.
+  - Each text is bounded at 65,536 characters; a text cut there carries `cut: true`.
+- `classify.mjs` `addEvent`: per call, `toolTexts` gets `{ tool, commands, paths, argsCut }` from the parsed `e.args`. `toolCommands` is still the JSON cut to 2,000 characters (the stored record); `toolCommandsCut` counts the cut ones. Both lists keep the 5,000-call bound.
+- `runner.mjs`: `foreignPaths`, `credentialAttempts` and the reference marks (now `namesMark`) read `summary.toolTexts`. The run record gets `toolArgsCut` when any call's stored copy was cut.
+- A cut text is judged only on what is visible (`wholePart`: up to its last word or path boundary). `git pu|` is not a push; `git push |` is; `/home/u/.ssh/id_r|` names `.ssh/`. A path running to the cut end is foreign only when its visible part cannot still become the run's own checkout or Pi's install.
+- Fallback for a stored string (older records, or a caller passing `toolCommands`), `toolCallTexts`:
+  - valid JSON is read in full (source `parsed`);
+  - text that starts like JSON but does not parse is read by `parseVisible`, a tolerant reader (source `visible-text`). Complete fields count as above; the string the cut ended inside is kept as cut; a number, literal, key or escape the cut ended inside is dropped. Text that is not JSON even as far as it goes is one cut command line;
+  - any other string is a plain command line.
+- Behaviour kept: every case in `isolation.test.mjs` (pushes, remotes, keys, the cut-call case) and `runner.test.mjs` (foreign paths) passes unchanged.
+- Behaviour changed, beyond the fix:
+  - a `command` field of a file tool is now read as a path, not run;
+  - string fields nested in non-content objects are now searched as paths (before, only top-level strings were);
+  - the reference marks (reference checkout, solution SHA prefix, results folder) no longer match inside file content or edit text.
+- README contamination paragraphs updated to match.
+
+**Replay (read only; old = origin/main `lib`, new = this branch).** Each run's `agent.jsonl`, with its own checkout `/srv/code/worktrees-pi/eval-work/eval-<runId>`, the batch's watched roots (`/srv/code/repos/nimblenewt`, `/srv/code/repos`, `/srv/code/worktrees-pi/eval-results`, `/srv/code/worktrees-pi`) and its marks:
+
+| run | tool calls (cut copies) | old: foreign / attempts / marks | new: foreign / attempts / marks | new fallback on the cut copies |
+|---|---|---|---|---|
+| `l02e-2-B-r1-20261118T080448` | 251 (31) | `/srv/code/worktrees-pi/eval-work/eval-l02e-2-B-r1-20261` / none / no | none / none / no | none / none / no |
+| `c07m-B-r1-20261118T085505` | 166 (16) | `/srv/code/worktrees-pi/eval` / `push` / no | none / none / no | none / none / no |
+
+The old classifier reproduces both records' stored flags exactly; neither run has a flag under the new one. So both runs' contamination was the bench's recognition problem named in the batch 4 notes. The stored records in `eval-results/results.jsonl` are not rewritten (`rescore.mjs` re-derives outcomes, not contamination).
+
+**Tests.** New `scripts/pi-eval/tool-args.test.mjs`, 5 tests:
+- a long edit with its path last: not flagged; the stored copy is cut and marked;
+- edit, write and Claude `Edit` text holding a push, a fake token (assembled at run time), `~/.ssh` and a reference path: no attempt, no foreign path, no mark;
+- still flagged:
+  - a real bash push, and a push after a long heredoc;
+  - a foreign path in a long edit's `path`;
+  - `~/.ssh` in a read's `path`;
+  - a reference checkout in Claude `Read`'s `file_path`, which also counts as a mark;
+- cut, invalid JSON: both batch 4 shapes are not flagged. What the visible text supports is still flagged: a complete foreign field before the cut, a cut path already outside the checkout, a cut command's whole words, a whole `.ssh/` component. The reading reports `visible-text`;
+- the tolerant reader itself.
+
+**Verified (Linux, node 22.23, through `/tmp/nn-slot.sh`, offline guard).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 163 of 163 pass, none skipped.
+- Build for those tests: the installed tsc (`tsc --build --force packages/pi-adapter packages/worker`, clean), through a temporary `node_modules` in the worktree that links the installed packages and points `@nimblenewt/*` at the worktree's own packages; removed afterwards.
+
+**Skipped.** Any real bench run (no Radiance request); the rest of the repository's suites (no product code changed); Windows and macOS.
+- ASSUMPTION: a tool with no recorded name keeps the strict reading (its `command` is a command), since older records and the stub agents may carry none.
+- ASSUMPTION: the reference marks follow the same rule as paths (file content and edit text are not read). A solution SHA seen in written code would have had to come from a command or a read, and those are still checked.

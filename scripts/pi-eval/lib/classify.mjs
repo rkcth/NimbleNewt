@@ -3,6 +3,7 @@
 // Plain Node ESM, no dependencies; paths are never built here, so it is the same on every platform.
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
+import { STORED_ARGS_LIMIT, argTexts } from "./tool-args.mjs";
 
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
 export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "server-rejected-history", "error", "unclassified"]);
@@ -98,7 +99,10 @@ const textOf = (content, type, field) => (Array.isArray(content) ? content.filte
 export function newSummary() {
   return {
     sawSession: false, sessionId: null, agentStart: false, agentEnd: false, settled: false, aborted: false,
-    turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [],
+    // toolCommands: each call's argument JSON, cut to STORED_ARGS_LIMIT characters (a record kept for size; toolCommandsCut
+    // counts the cut ones). toolTexts: what each call names, read from its full parsed arguments (lib/tool-args.mjs), which
+    // is what the contamination checks read (card W01e: a cut record named a shortened path or read edit text as a command).
+    turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [], toolCommandsCut: 0, toolTexts: [],
     tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
     // Model replies that carried no input and output token counts: their use is unknown (a budgeted batch stops on it).
     usageMissing: 0,
@@ -121,7 +125,13 @@ export function addEvent(s, e) {
     case "tool_execution_start":
       s.toolCalls++;
       // Kept bounded: only used to look for a run that read the hidden solution from elsewhere.
-      if (s.toolCommands.length < 5000) s.toolCommands.push(JSON.stringify(e.args ?? {}).slice(0, 2000));
+      if (s.toolCommands.length < 5000) {
+        const json = JSON.stringify(e.args ?? {}) ?? "{}";
+        const argsCut = json.length > STORED_ARGS_LIMIT;
+        if (argsCut) s.toolCommandsCut++;
+        s.toolCommands.push(json.slice(0, STORED_ARGS_LIMIT));
+        s.toolTexts.push({ ...argTexts(e.args ?? {}, e.toolName), argsCut });
+      }
       if (typeof e.args?.command === "string" && TEST_COMMAND.test(e.args.command)) s.pendingTests.add(e.toolCallId);
       break;
     case "tool_execution_end": {

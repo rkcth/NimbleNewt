@@ -28,6 +28,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { REFUSED_ADDRESS, splitAlias } from "./git-guard.mjs";
+import { toolCallTexts, wholePart } from "./tool-args.mjs";
 
 const IS_WIN = process.platform === "win32";
 /** The git wrapper program put first on the agent's PATH. */
@@ -514,8 +515,6 @@ const CREDENTIALS = /(?:^|[^\w])\.ssh(?:[/\\"'\s]|$)|\.git-credentials\b|(?<![\w
 /** The same under a home folder only: what a search of the code (grep, rg, git grep) counts, since code may name `.ssh`. */
 const HOME_CREDENTIALS = /(?:~|\$HOME|\$\{HOME\}|\/home\/[^/\s"']+|\/root|\/Users\/[^/\s"']+)[/\\]\.(?:ssh|git-credentials|netrc|config[/\\]gh|pi[/\\]agent|aws|docker|kube|gnupg|codex|claude|paperclip|hermes)\b/;
 const SEARCH_TOOLS = /^(?:grep|egrep|fgrep|rg|ag|ack)$/;
-/** Fields of a tool call that hold file content, not a command or a path: never searched (code may talk about pushing). */
-const CONTENT_FIELDS = new Set(["content", "newText", "oldText", "new_string", "old_string", "edits", "text"]);
 
 /** Whether a remote address given on a command line is not plainly a local folder (unknown, a variable, a network address). */
 function nonLocalAddress(rest) {
@@ -568,27 +567,22 @@ function commandKinds(c, found) {
 }
 
 /**
- * What the agent's tool calls (summary.toolCommands: each the JSON of one call's arguments) show it tried: `push` (a git
- * push), `remote` (adding or changing a remote to an address that is not a local folder), `credentials` (a path or socket
- * of the owner's keys and logins: ~/.ssh, .git-credentials, id_*, .netrc, the gh token, SSH_AUTH_SOCK, Pi's own
- * configuration, the container engine, the team's key folder; a search of the code with grep, rg or git grep counts only
- * a path under a home folder, since code may name `.ssh`). Returns the kinds seen, sorted. Detection only: a command
- * assembled at run time is not seen.
+ * What the agent's tool calls show it tried: `push` (a git push), `remote` (adding or changing a remote to an address that
+ * is not a local folder), `credentials` (a path or socket of the owner's keys and logins: ~/.ssh, .git-credentials, id_*,
+ * .netrc, the gh token, SSH_AUTH_SOCK, Pi's own configuration, the container engine, the team's key folder; a search of
+ * the code with grep, rg or git grep counts only a path under a home folder, since code may name `.ssh`). Returns the
+ * kinds seen, sorted. Detection only: a command assembled at run time is not seen.
+ *   commands: one entry per call, either summary.toolTexts (read from the full parsed arguments) or an argument JSON
+ *   string (summary.toolCommands, older records). See lib/tool-args.mjs: only a shell tool's `command`/`cmd`/`script`
+ *   is read as a command, its other fields and a file tool's fields as paths, and file content and edit text not at all.
+ *   A text cut at a size limit counts only up to its last whole word (`git pu|` is not a push, `git push |` is).
  */
 export function credentialAttempts(commands) {
   const found = new Set();
-  for (const raw of commands) {
-    let args = null;
-    try { args = JSON.parse(raw); } catch { /* cut at its size limit: searched as it is */ }
-    const commandTexts = [], pathTexts = [];
-    if (args && typeof args === "object") {
-      for (const [k, v] of Object.entries(args)) {
-        if (typeof v !== "string" || CONTENT_FIELDS.has(k)) continue;
-        if (k === "command" || k === "cmd" || k === "script") commandTexts.push(v); else pathTexts.push(v);
-      }
-    } else commandTexts.push(String(raw));
-    for (const c of commandTexts) commandKinds(c, found);
-    for (const p of pathTexts) if (CREDENTIALS.test(p)) found.add("credentials");
+  for (const entry of commands) {
+    const t = toolCallTexts(entry);
+    for (const c of t.commands) commandKinds(wholePart(c), found);
+    for (const p of t.paths) if (CREDENTIALS.test(wholePart(p))) found.add("credentials");
   }
   return [...found].sort();
 }

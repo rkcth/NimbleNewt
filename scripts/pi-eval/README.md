@@ -188,7 +188,10 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   project's tests' own. Records carry `credentialAttempts` (the kinds seen), `guardRefusals` (counted),
   `guardRefusalsInTests` (tagged, not counted; the report prints "refused inside project tests: N, not counted") and
   `isolation` (what applied to the run). File
-  content the agent writes is not searched (code may talk about pushing). A contaminated run is left out of the report's
+  content the agent writes is not searched (code may talk about pushing). The checks read each call's full parsed
+  arguments (`lib/tool-args.mjs`, card W01e): only a shell tool's `command`/`cmd`/`script` is read as a command, a
+  file tool's `path`-like fields as paths, and edit text and file content not at all; the copy of each call kept in the
+  summary is still cut to 2,000 characters (records carry `toolArgsCut`, the number cut). A contaminated run is left out of the report's
   table and gates (`report.mjs`, the batch's own report) and is never a verified finish; the report names them and their
   kinds, and `compare.mjs` shows them as `C`.
 
@@ -463,7 +466,7 @@ capture, hidden tests copied in and run, classification and the report. One run 
   hold these very cards' merged solutions), the reference checkout, earlier runs' artifacts, and a concurrent run's
   checkout after its hidden tests were copied in. Hiding those too is not done (they sit beside the bench's own folders
   under `/srv/code`, which `--hide` could cover case by case). What exists for them is detection: a run is
-  flagged `contaminated` (and `foreignPaths` lists up to 20) when a tool call's arguments name an absolute path under
+  flagged `contaminated` (and `foreignPaths` lists up to 20) when a tool call's command or path fields name an absolute path under
   the reference checkout, any directory holding a checkout, the results, or the home directory (except Pi's install),
   or the solution's short SHA. It does not see a relative walk (`cat ../c07m/...`), a path built at run time, or a
   search from `/`. Read flagged runs, and spot-check some unflagged finishes, before trusting a rate.
