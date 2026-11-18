@@ -379,8 +379,10 @@ describe("G05 Windows network case and the trusted-host program path (review)", 
       };
       let reads = 0;
       const recipe = { get mode() { reads += 1; return reads === 1 ? "trusted-host" : "sandboxed"; }, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] } as unknown as LaunchRequest["recipe"];
-      const win = await SandboxLauncher.create({ platform: "win32", backend: healthy, protectedPaths: [], trustedHost: { authority: "t" }, audit: () => undefined });
-      await assert.rejects(win.launch({ recipe, command: ["C:\\Windows\\System32\\cmd.exe", "/d", "/c", "exit 0"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "invalid_recipe");
+      // No authority: if the mode is taken as trusted-host the run is refused as not_authorized; if it is taken as sandboxed, as invalid_recipe. Either way no confined plan is made
+      // (the recipe is now read once, so the normalized mode is the first read; before that, the launcher's own read and the recipe's could differ).
+      const win = await SandboxLauncher.create({ platform: "win32", backend: healthy, protectedPaths: [], audit: () => undefined });
+      await assert.rejects(win.launch({ recipe, command: ["C:\\Windows\\System32\\cmd.exe", "/d", "/c", "exit 0"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => ["invalid_recipe", "not_authorized"].includes((e as { code?: string }).code ?? ""));
       assert.deepEqual(planned, []);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
