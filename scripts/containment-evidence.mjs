@@ -1,5 +1,7 @@
 // Card G05: produce and judge isolation-boundary evidence.
-//   node scripts/containment-evidence.mjs run  --out DIR            run the suite here, write DIR/containment-<platform>.json
+//   node scripts/containment-evidence.mjs run  --out DIR [--allow-unavailable]   run the suite here, write DIR/containment-<platform>.json
+//        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner that cannot run
+//        Windows Sandbox). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
 //   node scripts/containment-evidence.mjs gate --dir DIR --commit SHA   read every containment-*.json in DIR and list what blocks a release
 // `run` builds the tree first (tsc --build; the compiled code is not tracked by git, so a stale build would otherwise be reported under HEAD's commit) and needs a committed checkout; the report names the commit and says if the tree was dirty.
 // `gate` exits 1 while anything blocks, so a release step can call it. Reports are read as data: size-bounded and shape-checked.
@@ -20,17 +22,19 @@ const flag = (name) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? re
 
 if (command === "run") {
   const out = flag("out");
-  if (out === undefined) { console.error("usage: run --out DIR"); process.exit(2); }
+  if (out === undefined) { console.error("usage: run --out DIR [--allow-unavailable]"); process.exit(2); }
   const report = await worker.produceReport(root);
   mkdirSync(resolve(out), { recursive: true });
   const file = join(resolve(out), `containment-${report.platform}.json`);
   writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
   const bad = report.cases.filter((c) => c.verdict !== "pass");
   console.log(`${report.platform} (${report.backend}${report.backendVersion ? ` ${report.backendVersion}` : ""}) commit ${report.implementationCommit.slice(0, 12)}${report.dirty ? " DIRTY" : ""}: ${report.cases.length - bad.length}/${report.cases.length} cases hold -> ${file}`);
-  for (const c of bad) console.log(`  ${c.verdict} ${c.id}: ${c.detail}`);
+  const outcome = worker.runOutcome(report, { allowUnavailable: rest.includes("--allow-unavailable") });
+  if (outcome.skipped) console.log(`  SKIPPED: no sandbox capacity on this host (${report.capacityReason ?? "unavailable"}); every case is not_run and the release gate blocks on this platform`);
+  else for (const c of bad) console.log(`  ${c.verdict} ${c.id}: ${c.detail}`);
   const exception = report.trustedHost !== undefined && report.trustedHost.refusedWithoutAuthority && report.trustedHost.reachesHostFiles;
-  if (!exception) console.log("  the trusted-host exception could not be shown");
-  process.exit(bad.length === 0 && report.capacityAvailable && exception ? 0 : 1);
+  if (!exception && !outcome.skipped) console.log("  the trusted-host exception could not be shown");
+  process.exit(outcome.exitCode);
 } else if (command === "gate") {
   const dir = flag("dir");
   const commit = flag("commit");
@@ -49,6 +53,6 @@ if (command === "run") {
   console.log(result.ok && problems.length === 0 ? "isolation evidence complete for this commit" : "isolation evidence incomplete: the release is blocked");
   process.exit(result.ok && problems.length === 0 ? 0 : 1);
 } else {
-  console.error("usage: containment-evidence.mjs run --out DIR | gate --dir DIR --commit SHA");
+  console.error("usage: containment-evidence.mjs run --out DIR [--allow-unavailable] | gate --dir DIR --commit SHA");
   process.exit(2);
 }

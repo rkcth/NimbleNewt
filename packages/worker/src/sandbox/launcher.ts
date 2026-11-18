@@ -211,14 +211,21 @@ export class SandboxLauncher {
   async launch(request: LaunchRequest): Promise<SandboxRun> {
     if (this.#stopped) throw new SandboxError("unavailable", "the launcher has been stopped");
     if (request === null || typeof request !== "object") throw new SandboxError("invalid_recipe", "a launch request is an object");
-    const { command, timeoutMs, maxOutputBytes } = request;
-    if (!Array.isArray(command) || command.length === 0 || command.some((a) => typeof a !== "string" || a.includes("\0"))) throw new SandboxError("invalid_recipe", "command: a non-empty list of strings");
-    if (typeof command[0] === "string" && !command[0].startsWith("/")) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
+    const { timeoutMs, maxOutputBytes } = request;
+    // A copy, read once: what is checked here is what is recorded and planned, even if the caller's list changes (or reads differently) while the audit is awaited.
+    const command: readonly string[] = Array.isArray(request.command) ? Object.freeze([...(request.command as readonly unknown[])]) as readonly string[] : [];
+    if (command.length === 0 || command.some((a) => typeof a !== "string" || a.includes("\0"))) throw new SandboxError("invalid_recipe", "command: a non-empty list of strings");
+    // A trusted-host run is not confined, so its program is a host path; on a Windows host that is a drive path (C:\...). Every other run names its program as the sandbox sees it.
+    // The mode is judged on the normalized recipe below, the same value that picks the trusted-host or the confined path, never on the raw request; here a drive path is only not refused yet on a Windows host.
+    const program = command[0] as string;
+    const hostProgram = !program.startsWith("/");
+    if (hostProgram && !((this.#config.platform ?? process.platform) === "win32" && /^[A-Za-z]:\\/.test(program))) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new SandboxError("invalid_recipe", "timeoutMs: a whole number from 1 ms to 24 hours");
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > MAX_OUTPUT_BYTES) throw new SandboxError("invalid_recipe", "maxOutputBytes: a whole number from 1 to 64 MiB");
     if (request.stream !== undefined && (request.stdin !== undefined || typeof request.stream.onStdout !== "function")) throw new SandboxError("invalid_recipe", "stream: needs onStdout and cannot be combined with stdin");
     if (request.stdin !== undefined && (typeof request.stdin !== "string" || Buffer.byteLength(request.stdin, "utf8") > MAX_STDIN_BYTES)) throw new SandboxError("invalid_recipe", "stdin: text of at most 1 MiB");
     const recipe = normalizeRecipe(request.recipe, this.#protectedPaths);
+    if (hostProgram && recipe.mode !== "trusted-host") throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
     const limits = request.limits === undefined ? {} : checkLimits(request.limits);
     checkHeadroom(limits, this.#config.headroom ?? DEFAULT_HEADROOM);
 
