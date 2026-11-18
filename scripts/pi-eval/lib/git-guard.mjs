@@ -317,7 +317,22 @@ export const IN_PROJECT_TESTS = "in-project-tests";
 // or fetches from a local folder; once core.askPass=echo was let through, those calls were refused for protocol.allow
 // alone and counted. It is still refused; it is tagged under the same conditions, where every address is a local folder.
 const ASKPASS_OR_PROXY = new Set(["core.askpass", "core.gitproxy", "protocol.allow"]);
+/** Where the bench's git settings send GitHub addresses instead: loopback port 9 over http, which they do not allow anyway. */
+export const REFUSED_ADDRESS = "http://127.0.0.1:9/pushing-is-disabled/";
 const REMOTE_SUBS = new Set(["clone", "fetch", "pull", "ls-remote", "push", "send-pack", "http-push", "archive", "remote"]);
+// Options of fetch/pull known to take no separate value: a --no-recurse-submodules right after one of them is its own option.
+const NO_VALUE_OPTIONS = new Set(["--no-tags", "--tags", "-q", "--quiet", "-v", "--verbose", "--prune", "--force", "-f", "--dry-run", "--atomic", "--all", "--no-write-fetch-head", "--ff-only", "--no-rebase", "--rebase", "--no-edit", "--no-recurse-submodules"]);
+// Whether `--no-recurse-submodules` is given as an option: before any `--`, and not the value of the option before it
+// (`fetch -o --no-recurse-submodules ...` passes it to the server and still recurses; W01d final re-check).
+function noRecurseOption(rest) {
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--") return false;
+    if (rest[i] !== "--no-recurse-submodules") continue;
+    const p = rest[i - 1];
+    if (i === 0 || typeof p !== "string" || !p.startsWith("-") || /^--[^=]+=/.test(p) || NO_VALUE_OPTIONS.has(p)) return true;
+  }
+  return false;
+}
 const NETWORK_ADDRESS =/^(?!file:\/\/)[A-Za-z][A-Za-z0-9+.-]*:\/\/|^[A-Za-z][A-Za-z0-9+.-]*::|^[^\s/\\@:]+@[^\s/\\:]+:/i;
 
 /** The call's arguments and environment without its askpass and proxy settings (the -c, --config-env and env forms). */
@@ -408,7 +423,9 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
     const sp = line.indexOf(" ");
     const key = sp < 0 ? line : line.slice(0, sp);
     const value = sp < 0 ? "" : line.slice(sp + 1);
-    if (/^url\./i.test(key)) return false;
+    // A URL rewrite may send a local path to the network; one to the bench's refused address (the run's own git settings
+    // rewrite GitHub there, on every call) reaches nothing, so it is not one (W01d final re-check).
+    if (/^url\./i.test(key)) { const m = /^url\.(.*)\.(?:push)?insteadof$/i.exec(key); if (m !== null && m[1] === REFUSED_ADDRESS) continue; return false; }
     // A submodule's own entry (submodule.<name>.url, ...) or recursion turned on; the worker's submodule.recurse=false is fine.
     if (/^submodule\.recurse$|\.recursesubmodules$/i.test(key)) {
       if (!/^(?:false|no|off|0)$/i.test(value)) return false;
@@ -423,7 +440,7 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
   if (named.some((v) => !remoteNames.has(v) && !testLocal(v))) return false;
   // fetch and pull recurse "on demand" by default, which also reaches a populated submodule with its own .git folder (no
   // modules/ folder to see): tagged only with recursion turned off, as the worker always does (W01d final check).
-  if ((g.sub === "fetch" || g.sub === "pull") && !fetchRecurseOff && !g.rest.includes("--no-recurse-submodules")) return false;
+  if ((g.sub === "fetch" || g.sub === "pull") && !fetchRecurseOff && !noRecurseOption(g.rest)) return false;
   if (REMOTE_SUBS.has(g.sub)) {
     if (g.rest.some((a) => /^--remote(?:=|$)/.test(a))) return false; // archive --remote
     if (g.rest.some((a) => !a.startsWith("-") && !remoteNames.has(a) && !testLocal(a))) return false;

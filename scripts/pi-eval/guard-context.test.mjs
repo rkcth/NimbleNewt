@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { IN_PROJECT_TESTS, decide, envConfigs, guardLogCounts, inProjectTests } from "./lib/git-guard.mjs";
-import { findRealGit } from "./lib/isolation.mjs";
+import { REFUSED_ADDRESS, findRealGit, gitConfigText } from "./lib/isolation.mjs";
 import { renderReport } from "./lib/stats.mjs";
 
 const GUARD = fileURLToPath(new URL("./lib/git-guard.mjs", import.meta.url));
@@ -297,4 +297,34 @@ test("W01d final check: an abbreviated recursing option, or a fetch or pull that
   const ce = { cwd: scratch, roots, env: { ...plainEnv, NNU: "https://example.invalid/r.git" }, git: (a) => runGit(a, scratch) };
   assert.match(decide(["--config-env=remote.a=b.url=NNU", "status"], ce).refuse ?? "", /remote address/);
   assert.match(decide(["--config-env", "remote.a=b.url=NNU", "status"], ce).refuse ?? "", /remote address/);
+});
+
+test("W01d final re-check: --no-recurse-submodules taken as another option's value, or after --, does not turn recursion off", () => {
+  // -o/--server-option and pull's -X take the next argument as their value; after -- it is a refspec.
+  assert.equal(inProjectTests([...ASK, "fetch", "-o", "--no-recurse-submodules", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "fetch", "--server-option", "--no-recurse-submodules", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "pull", "-X", "--no-recurse-submodules", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "fetch", bare, "--", "--no-recurse-submodules"], ctx(scratch)), false);
+  // As its own option: after a positional or a known valueless option, and before -- (the worker's restore form).
+  assert.equal(inProjectTests([...ASK, "fetch", "-q", "--no-recurse-submodules", bare, "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", bare, "--no-recurse-submodules", "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-tags", "--no-recurse-submodules", "--", bare, "main"], ctx(scratch)), true);
+});
+
+test("W01d final re-check: under the bench's own git settings (a GitHub rewrite to the refused address) the worker's calls stay tagged", () => {
+  // The guard sets GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM to these settings on every call of a real run.
+  const benchCfg = join(base, "bench-gitconfig");
+  writeFileSync(benchCfg, gitConfigText());
+  const benchEnv = { ...plainEnv, GIT_CONFIG_GLOBAL: benchCfg, GIT_CONFIG_SYSTEM: benchCfg };
+  delete benchEnv.GIT_CONFIG_NOSYSTEM;
+  const bc = (cwd) => ({ cwd, roots, testRoots: [tmp], checkout, env: benchEnv, git: (a, c) => { const r = spawnSync(realGit, a, { cwd: c, env: benchEnv, encoding: "utf8" }); return r.status === 0 ? r.stdout : null; } });
+  assert.match(runGit(["--version"], tmp) ?? "", /git version/);
+  assert.match(spawnSync(realGit, ["config", "--get-regexp", "^url\\."], { cwd: scratch, env: benchEnv, encoding: "utf8" }).stdout, /pushing-is-disabled/);
+  const WORKER = ["-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=user", "-c", "protocol.file.allow=always", "-c", "submodule.recurse=false"];
+  assert.equal(inProjectTests([...WORKER, "--git-dir", join(scratch, ".git"), "fetch", "--no-tags", "--no-recurse-submodules", bare, "main"], bc(tmp)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-recurse-submodules", bare, "main"], bc(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "status"], bc(scratch)), true);
+  // Any other rewrite, or another setting under the refused address's section, is still not tagged.
+  assert.equal(inProjectTests([...ASK, "-c", `url.https://example.invalid/.insteadOf=${bare}`, "fetch", "--no-recurse-submodules", bare, "main"], bc(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "-c", `url.${REFUSED_ADDRESS}.other=x`, "status"], bc(scratch)), false);
 });
