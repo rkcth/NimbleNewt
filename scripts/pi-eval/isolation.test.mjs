@@ -921,11 +921,15 @@ test("the checkout is still graded by the bench with its own environment (an hon
 
 // Card W01c: the shared work root holds every run's checkout; a run sees its own only.
 const SIBLING_MARKER = "DECOY-SIBLING-CHECKOUT-a9e2";
+let peekRuns = 0;
 const peekRun = async (workRoot, extra = {}) => {
+  // A results folder of its own: two runs started in the same second share an artifacts folder, and a report left by an
+  // earlier test must not stand in for a run whose agent never started.
+  const resultsDir = join(root, "w01c-results", String(++peekRuns));
   const sibling = join(workRoot, "eval-sibling-run");
   mkdirSync(sibling, { recursive: true });
   writeFileSync(join(sibling, "marker.txt"), `${SIBLING_MARKER}\n`);
-  const { ctx } = incidentCtx({ workRoot, agent: ["node", join(here, "test-agents", "peek-agent.mjs")], agentEnv: { PEEK_WORK_ROOT: workRoot, PEEK_SIBLING: sibling }, ...extra });
+  const { ctx } = incidentCtx({ workRoot, agent: ["node", join(here, "test-agents", "peek-agent.mjs")], resultsDir, agentEnv: { PEEK_WORK_ROOT: workRoot, PEEK_SIBLING: sibling }, ...extra });
   const r = await runOne(ctx, set.tasks[0], "A", 1);
   return { r, s: JSON.parse(readFileSync(join(r.artifacts, "peek-report.json"), "utf8")).steps, sibling };
 };
@@ -939,6 +943,15 @@ test("W01c: which part of the work root is hidden: the whole of it, or (a kept f
   assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [repo, dirname(wr), "/srv/code"] }), [r(wr)], "parents of the work root are not kept folders");
   assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [ref] }), [join(r(wr), "eval-sib")], "a kept folder inside: the siblings one by one");
   assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [wr] }).sort(), [join(r(wr), "eval-sib"), join(r(wr), "ref")].sort(), "the work root itself kept: every other entry, not the run's own");
+  // Links in the work root are taken by where they lead: to the run's own checkout or to a kept folder outside, nothing is
+  // hidden for them (the hidden list is resolved later, which would hide the target); to a sibling, the sibling.
+  const outsideRef = join(root, "w01c-outside-ref");
+  mkdirSync(outsideRef, { recursive: true });
+  symlinkSync(outsideRef, join(wr, "link-ref"));
+  symlinkSync(own, join(wr, "link-own"));
+  symlinkSync(sib, join(wr, "link-sib"));
+  assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [ref, outsideRef] }), [join(r(wr), "eval-sib")], "links lead to the own checkout, a kept folder or the sibling");
+  assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [outsideRef] }), [r(wr)], "a kept folder outside the work root: the whole of it");
   assert.deepEqual(workRootHidden({ workRoot: join(root, "no-such-work"), ownDir: own }), []);
   assert.deepEqual(workRootHidden({ workRoot: undefined, ownDir: own }), []);
   assert.deepEqual(workRootHidden({ workRoot: "/", ownDir: own }), []);
@@ -986,4 +999,20 @@ test("W01c: a work root holding a folder the agent must read: that folder stays 
   assert.match(s.findWork.stdout, /reference\/README\.md/, JSON.stringify(s.findWork));
   assert.equal(s.ownWrite.stdout, "own-work\n", JSON.stringify(s.ownWrite));
   assert.ok(!r.isolation.hidden.includes(realpathSync(workRoot)), JSON.stringify(r.isolation));
+});
+
+test("W01c: a work root reached through a link, with spaces and other characters in its name: the sibling is still hidden and the run's own checkout usable", needsSandbox, async () => {
+  const real = join(root, "w01c odd (ü) work");
+  mkdirSync(real, { recursive: true });
+  const link = join(root, "w01c-work-link");
+  symlinkSync(real, link);
+  const { r, s } = await peekRun(link);
+  const listed = s.listWork.stdout.split("\n").filter(Boolean);
+  assert.equal(listed.length, 1, JSON.stringify(s.listWork));
+  assert.match(listed[0], /^eval-/);
+  assert.notEqual(s.readSibling.status, 0, JSON.stringify(s.readSibling));
+  assert.doesNotMatch(JSON.stringify(s), new RegExp(SIBLING_MARKER));
+  assert.equal(s.ownWrite.stdout, "own-work\n", JSON.stringify(s.ownWrite));
+  assert.equal(s.ownGit.status, 0, JSON.stringify(s.ownGit));
+  assert.ok(r.isolation.hidden.includes(realpathSync(real)), JSON.stringify(r.isolation));
 });

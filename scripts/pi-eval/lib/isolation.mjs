@@ -288,7 +288,10 @@ export function workRootHidden({ workRoot, ownDir, keep = [] }) {
   const own = typeof ownDir === "string" ? real(resolve(ownDir)) : null;
   let names;
   try { names = readdirSync(wr); } catch { return []; }
-  return names.map((n) => join(wr, n)).filter((p) => !(own && (under(own, p) || under(p, own))) && !kept.some((k) => under(k, p)));
+  // Each entry by where it really is: a link in the work root to the run's own checkout or to a kept folder (the hidden
+  // list is resolved again later) must not hide that; a link leading out of the work root is not a sibling's checkout.
+  const entries = [...new Set(names.map((n) => real(join(wr, n))))].filter((p) => p !== wr && under(p, wr));
+  return entries.filter((p) => !(own && (under(own, p) || under(p, own))) && !kept.some((k) => under(k, p)));
 }
 
 /** File names that hold keys and logins by convention (a `.env` but not its `.example`, key files, login files). */
@@ -381,8 +384,10 @@ export function bwrapPrefix({ bwrap = "bwrap", hidden, readOnlyTrees = [], writa
     try { isDir = statSync(h).isDirectory(); } catch { continue; }
     argv.push(...(isDir ? ["--tmpfs", h] : ["--ro-bind", "/dev/null", h]));
   }
+  // Bound back at where each folder really is: bubblewrap cannot make a mount point through an absolute link whose target
+  // lies under a covered folder (a work root given as a link, hidden by card W01c), and the link still leads there.
   const back = [...writable.map((p) => [p, "--bind"]), ...readable.filter((p) => isHidden(p) || isPrivate(p)).map((p) => [p, "--ro-bind"])]
-    .filter(([p]) => existsSync(p))
+    .filter(([p]) => existsSync(p)).map(([p, how]) => [real(p), how])
     .sort((a, b) => a[0].length - b[0].length);
   for (const [p, how] of back) argv.push(how, p, p);
   // A hidden place inside a folder bound back (a later mount shows what was covered under it) is covered again.
