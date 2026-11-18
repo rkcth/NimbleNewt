@@ -6697,12 +6697,32 @@
       ],
       "deliverable": "Browser settings views over the same configuration service as chat and API for providers, routes, local inference endpoints, difficulty profiles, agents and teams, approval policy, API access, operations, P/PC, MCP connections and secrets; later cards add their own areas to these views (portability-and-configuration 43-63, 89-92; README 15, 74)",
       "acceptance_and_verification": "A fresh install is configured entirely through the UI with no source edits and no target-repository files; UI and chat edits yield the same durable revision; editable, inherited and locked values are shown with their source; secrets are entered write-only; invalid values are rejected with path-addressed errors; compatibility and migration status shows affected agents and operations; settings persist across restart on macOS, Linux and Windows; the views show the sandbox mechanism each host uses and flag a weaker boundary (macOS Seatbelt is process-level with weaker limits than Linux) wherever the owner chooses or reviews where work runs (G01 decision 2026-10-21); an approval-load view: owner decisions per day, how long asks wait, and the share decided by standing rule, agent review and owner, with every pending ask and its age; first-run setup explains the derived profile in plain words, recommends it for testing and development work, and asks whether to switch from the strict profile a new installation starts in; the same question is asked in chat setup for an installation with no browser UI, the answer is recorded and either profile can be chosen later; first run applies the configuration's approvals.preset when no approval policy exists yet (a private profile may say derived), before it asks the setup question",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d8c4918",
+          "3c628613",
+          "cbabe672",
+          "c26e72f6",
+          "225b3ee9",
+          "a8fb570d",
+          "cf17a6dd",
+          "22534438",
+          "3d631b07",
+          "7a83661f"
+        ],
+        "ci_runs": [
+          "44204281876"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "An Administration tab (First run, Settings, Providers, Secrets, Agents and teams, Policy, API access, Operations, Sandbox, Migration) plus Approvals and Models pages, all reading owner-only views of the same configuration and policy services the chat and API use, and each also answerable in chat in free words; a page edit is the chat's own turn for fixed words, shown first and applied on Apply, and gives the same kind of revision and history entry as the typed edit; settings show value, default/set/inherited/locked and the layer they come from; secrets are entered write-only (never shown, logged or stored outside the secret store; owner and signing-key names reserved); an invalid value is refused with an error naming the setting's path and nothing applied; a compatibility status names hosts on older or refused protocols and waiting migrations with the agents and operations each touches; the sandbox mechanism per host is shown with a weaker-boundary warning for macOS Seatbelt and unknown systems on First run, API access, Operations and Sandbox; the approval-load view gives decisions per day, waits, the split by rule, grant, agent review and owner and every waiting ask with its age; first run (page and chat setup) explains the derived profile, recommends it for testing and development and asks whether to switch, the answer (including staying strict) is recorded and can be changed later; the launcher applies the configuration's approvals.preset before the question when no policy exists; a fresh install configured over the browser's door alone (pages and chat tab) touches no source or target-repository file and reads back the same after a restart. Limits: the local host joins only at the next start (a browser cannot do that step); the Providers form adds one provider at a time, so the first two routes are added in the chat tab; teams, API access, operations and migration are read-only on the page (changed by chat); the restart through the whole controller runs on SQLite only (the other backends at service level) and macOS/Windows persistence comes from CI; the page is tested against a fake document, not a real browser; no real model, real secret store or real macOS/Windows sandbox was used; recent (already-run) migrations do not list affected agents, and a worker turned away before announcing itself is not listed."
+      }
     },
     {
       "id": "U10",
