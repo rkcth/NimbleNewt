@@ -5,11 +5,12 @@ import { test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { LeaseWatchdog, LineDecoder, findAnchors, encodeMessage, parseFromChild, parseToChild, type ChannelStart, type FromChild, type ToChild } from "@nimblenewt/contracts";
-import { createOfflineModels } from "../testing/offline.js";
+import { OFFLINE_MODEL_REF, createOfflineModels } from "../testing/offline.js";
 import { rig, wireBody } from "../testing/wire.js";
 import { COMPLETION_RULES } from "../prompt-layout.js";
 import { WORK_END_TOOL } from "../bridge.js";
-import { durabilityOf, runWorker, type WorkerHooks } from "./process.js";
+import { durabilityOf, placeSelectedUpdate, runWorker, type WorkerHooks } from "./process.js";
+import { PiAdapter } from "../adapter.js";
 import { LENGTH_NUDGE_LEAD, NUDGE_TEXT } from "./nudge.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -872,6 +873,22 @@ test("G09: an update whose request ID the conversation already holds under other
     second.send({ t: "close" });
     await second.done;
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("G09: an update whose ID was recorded but whose admission a crash interrupted is placed once, as first given, when it is offered again under other wording", async () => {
+  let crash = true;
+  const offline = createOfflineModels();
+  const adapter = await PiAdapter.open({ storage: new MemoryStorage(), models: offline.models, model: OFFLINE_MODEL_REF, testHooks: { beforeAdmission: async () => { if (crash) { crash = false; throw new Error("crash before admission"); } } } });
+  try {
+    const root = adapter.root();
+    const update = { requestId: "upd:fedcba9876543210fedcba9876543210", text: "Owner correction: use plan B.", origin: "side line cbr-first, desk record dsk-y, update 2" };
+    await assert.rejects(placeSelectedUpdate(root, update), /crash before admission/);
+    await placeSelectedUpdate(root, { ...update, origin: "side line cbr-second, desk record dsk-y, update 1" });
+    await placeSelectedUpdate(root, { ...update, origin: "side line cbr-third, desk record dsk-y, update 1" });
+    const placed = (await root.transcript()).filter((e) => e.kind === "nimblenewt.update");
+    assert.equal(placed.length, 1);
+    assert.deepEqual(placed[0]!.data, { source: null, run: false, origin: update.origin });
+  } finally { await adapter.close(); }
 });
 
 // Card W06: every Pi agent this process runs carries the completion rules as its system text, the same bytes for every task, role and context switch.

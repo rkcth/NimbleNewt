@@ -602,6 +602,15 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
     return fingerprintsMatch(existing.fingerprint, fingerprintOf(request)) ? "same" : "different";
   }
 
+  /**
+   * The request as first submitted under this ID while it has no recorded result yet (card G09: a selected update offered again under other wording is resubmitted as first given, so one whose admission a crash
+   * interrupted is still placed); `undefined` otherwise. Read-only.
+   */
+  async pendingRequest(id: RequestId): Promise<RetainedRequest["request"] | undefined> {
+    const record = await this.record(id);
+    return record?.result === undefined ? record?.request : undefined;
+  }
+
   /** The recorded result of a request that has already settled and been read; `undefined` otherwise. Never waits. */
   async recorded(id: RequestId): Promise<SemanticResult | undefined> {
     return (await this.record(id))?.result;
