@@ -48,17 +48,56 @@ $t = Get-ScheduledTask -TaskName $env:NN_TASK -ErrorAction SilentlyContinue
 if ($null -eq $t) { '{"present":false}' } else { @{ present = $true; enabled = [bool]$t.Settings.Enabled -and ($t.State -ne 'Disabled'); executable = $t.Actions[0].Execute } | ConvertTo-Json -Compress }
 `;
 
+/** One PowerShell probe's time limit. Each probe starts a fresh powershell.exe, which on a busy machine, or in the bare environment the launcher gives its runner process, can be slow. */
+export const PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * Runs a program with a hard time limit. At the limit the whole process tree is stopped first (`stopTree`: on Windows `taskkill /T /F`, which needs the parent still alive to find its
+ * descendants), then the program itself, and its pipes are closed, so a descendant that inherited them can neither keep running nor hold the result back. If even that brings no end
+ * within a few seconds, the result is given anyway. A timed-out result has code null, timedOut true and says so in stderr.
+ */
+export function runBounded(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number; readonly env?: NodeJS.ProcessEnv }, stopTree: (pid: number) => Promise<void>): Promise<ProcessResult> {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    let done = false;
+    let last: NodeJS.Timeout | undefined;
+    const said = (): string => `timed out after ${String(Math.round(options.timeoutMs / 1000))} s and was stopped`;
+    const finish = (r: ProcessResult): void => { if (done) return; done = true; clearTimeout(timer); if (last !== undefined) clearTimeout(last); resolve(r); };
+    const child = execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), windowsHide: true, maxBuffer: 16 * 1024 * 1024, ...(options.env === undefined ? {} : { env: options.env }) }, (error, stdout, stderr) => {
+      if (timedOut) { finish({ code: null, stdout: String(stdout), stderr: `${String(stderr)}${said()}`, timedOut: true }); return; }
+      const e = error as NodeJS.ErrnoException | null;
+      finish({ code: e === null ? 0 : typeof e.code === "number" ? e.code : null, stdout: String(stdout), stderr: e !== null && typeof e.code !== "number" && String(stderr) === "" ? e.message : String(stderr), timedOut: false });
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      const pid = child.pid;
+      void (pid === undefined ? Promise.resolve() : stopTree(pid).catch(() => undefined)).finally(() => {
+        try { child.kill(); } catch { /* already gone */ }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        last = setTimeout(() => { finish({ code: null, stdout: "", stderr: said(), timedOut: true }); }, 5_000);
+      });
+    }, options.timeoutMs);
+  });
+}
+
+/** A read-only probe is tried a second time only when the first try ran out of time; a probe that answered with a failure is not retried, so a refusal stays a refusal. */
+export async function retryOnceOnTimeout(attempt: () => Promise<ProcessResult>): Promise<ProcessResult> {
+  const first = await attempt();
+  return first.timedOut ? attempt() : first;
+}
+
 export function windowsRealHost(): WindowsHost {
   const sysRoot = (): string => process.env["SystemRoot"] ?? "C:\\Windows";
+  // taskkill walks the tree from the parent, so it runs while the parent is still alive; the parent is our own unreaped child, so its process id cannot have been reused yet.
+  const stopTree = (pid: number): Promise<void> => new Promise((resolve) => {
+    execFile(`${sysRoot()}\\System32\\taskkill.exe`, ["/PID", String(pid), "/T", "/F"], { windowsHide: true, timeout: 15_000 }, () => { resolve(); });
+  });
   const run = (file: string, args: readonly string[], options: { cwd?: string; timeoutMs: number; env?: Record<string, string> }): Promise<ProcessResult> =>
-    new Promise((resolve) => {
-      execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeout: options.timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, ...options.env } }, (error, stdout, stderr) => {
-        const e = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
-        resolve({ code: e === null ? 0 : typeof e.code === "number" ? e.code : null, stdout: String(stdout), stderr: e !== null && typeof e.code !== "number" && String(stderr) === "" ? e.message : String(stderr), timedOut: e?.killed === true });
-      });
-    });
+    runBounded(file, args, { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs, env: { ...process.env, ...options.env } }, stopTree);
   const powershell = async <T>(script: string, vars: Record<string, string> = {}): Promise<T> => {
-    const out = await run(`${sysRoot()}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { timeoutMs: 60_000, env: vars });
+    const out = await retryOnceOnTimeout(() => run(`${sysRoot()}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { timeoutMs: PROBE_TIMEOUT_MS, env: vars }));
+    if (out.timedOut) throw new Error(`PowerShell timed out twice (${String(PROBE_TIMEOUT_MS / 1000)} s each) and was stopped with everything it started`);
     if (out.code !== 0) throw new Error(`PowerShell failed (exit ${String(out.code)}): ${out.stderr.trim().slice(0, 300)}`);
     return JSON.parse(out.stdout.trim()) as T;
   };

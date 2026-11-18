@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -355,7 +355,7 @@ describe("G05 Windows network case and the trusted-host program path (review)", 
     assert.equal((await network("tried=1\r\nCONNECTED-PS\r\nadapters=\r\ng05-end\r\n")).verdict, "fail");
   });
   test("a Windows launcher takes a drive path as a trusted-host program: refused without authority (not as a bad path); still refused for a confined run", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nn-g05-win-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-g05-win-"))); // the real path: on macOS tmpdir() is under /var, a link to /private/var, and a recipe refuses a linked workdir
     try {
       const d = (n: string): string => { const p = join(dir, n); mkdirSync(p); return p; };
       const recipe = { mode: "trusted-host" as const, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] };
@@ -368,7 +368,7 @@ describe("G05 Windows network case and the trusted-host program path (review)", 
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   test("the drive-path exception is decided on the normalized recipe: a mode that reads trusted-host first and sandboxed after never reaches a confined plan", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nn-g05-win-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-g05-win-"))); // the real path: on macOS tmpdir() is under /var, a link to /private/var, and a recipe refuses a linked workdir
     try {
       const d = (n: string): string => { const p = join(dir, n); mkdirSync(p); return p; };
       const planned: string[] = [];
@@ -387,7 +387,7 @@ describe("G05 Windows network case and the trusted-host program path (review)", 
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   test("the program is read once: a command list changed during the audit, or other spellings of a host path, never reach a confined plan", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "nn-g05-win-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-g05-win-"))); // the real path: on macOS tmpdir() is under /var, a link to /private/var, and a recipe refuses a linked workdir
     try {
       const d = (n: string): string => { const p = join(dir, n); mkdirSync(p); return p; };
       const planned: string[] = [];

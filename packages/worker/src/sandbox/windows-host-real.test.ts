@@ -12,7 +12,7 @@ import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js"
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { checkWindowsHostPath, VM_FALLBACK_DECISION, type WindowsSettings } from "./windows-plan.js";
-import { windowsRealHost } from "./windows-real.js";
+import { PROBE_TIMEOUT_MS, windowsRealHost } from "./windows-real.js";
 
 // Card A03b: the Windows launcher's own parts on a REAL Windows machine, without Windows Sandbox itself. They run on every Windows CI cell (GitHub's hosted Windows runners,
 // which the owner counts as real operating-system runs, 2026-11-18) and skip everywhere else. A hosted runner is Windows Server: it has no Windows Sandbox client and cannot
@@ -94,23 +94,30 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     assert.equal((await host.signature(plain)).valid, false);
   });
 
-  test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", async () => {
+  // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout, so six probes in this bare environment can in the worst case take far longer than the
+  // package's default per-test limit; the child and the test get a ceiling above that worst case, and the job is released whatever happens, so no later test sees it.
+  const ENV_PROBES_CEILING_MS = 6 * 2 * PROBE_TIMEOUT_MS + 120_000;
+  test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", { timeout: ENV_PROBES_CEILING_MS + 60_000 }, async () => {
     const backend = windowsSandboxBackend(options());
     const plan = backend.plan(recipeIn("envjob"), ["/windows/system32/cmd.exe", "/d", "/c", "exit 0"], `ci-${randomUUID()}`);
-    assert.ok(existsSync(plan.env["TEMP"]!), "the runner's temporary folder exists");
-    const script = [
-      `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
-      "const h = windowsRealHost(); const out = {};",
-      // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
-      "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
-      "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
-      "}",
-      "process.stdout.write(JSON.stringify(out));",
-    ].join("\n");
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: 240_000, windowsHide: true });
-    assert.equal(child.status, 0, child.stderr);
-    assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
-    await backend.release!(plan);
+    try {
+      assert.ok(existsSync(plan.env["TEMP"]!), "the runner's temporary folder exists");
+      const script = [
+        `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
+        "const h = windowsRealHost(); const out = {};",
+        // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
+        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
+        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
+        "}",
+        "process.stdout.write(JSON.stringify(out));",
+      ].join("\n");
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CEILING_MS, windowsHide: true });
+      assert.equal(child.status, 0, child.stderr);
+      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
+    } finally {
+      await backend.release!(plan);
+    }
+    assert.deepEqual(host.listDir(join(base, "control", "jobs")), [], "the job is released and its folder removed");
   });
 
   test("fail closed: with no Windows Sandbox client there is no capacity, the launcher refuses, and nothing is left behind", async (t) => {
