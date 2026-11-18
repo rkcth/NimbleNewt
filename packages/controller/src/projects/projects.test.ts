@@ -720,6 +720,29 @@ for (const backend of backends) {
     assert.equal((await duties.status(owner, r.id))!.checkOverdue, false);
   });
 
+  suite("the last successful check (lastOkAt) is kept apart from the last check: a later failed or unmarked check leaves it, a note does not set it, and a restarted controller reads it (card P04)", async ({ owner, duties, project, setNow, reopen }) => {
+    const p = await project("P");
+    const r = await duties.create(owner, { commandId: cid("r"), projectId: p, title: "Web", objective: "Web answers", everyMinutes: 60 } as never);
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "not yet", outcome: "attention" });
+    assert.equal((await duties.status(owner, r.id))!.lastOkAt, undefined, "no ok check yet");
+    setNow("2026-10-22T10:10:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "fine", outcome: "ok" });
+    setNow("2026-10-22T10:20:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "down", outcome: "failed" });
+    assert.deepEqual([(await duties.status(owner, r.id))!.lastCheckOutcome, (await duties.status(owner, r.id))!.lastOkAt], ["failed", "2026-10-22T10:10:00.000Z"]);
+    setNow("2026-10-22T10:25:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "looked" });
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "note", summary: "noted" });
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "intervention", summary: "restarted", outcome: "ok" });
+    let s = (await duties.status(owner, r.id))!;
+    assert.deepEqual([s.lastCheckAt, s.lastCheckOutcome, s.lastOkAt], ["2026-10-22T10:25:00.000Z", undefined, "2026-10-22T10:10:00.000Z"], "the unmarked check has no outcome; an intervention marked ok is not a check");
+    s = (await reopen().duties.status(owner, r.id))!;
+    assert.deepEqual([s.lastCheckAt, s.lastOkAt], ["2026-10-22T10:25:00.000Z", "2026-10-22T10:10:00.000Z"], "read back by a fresh service");
+    setNow("2026-10-22T10:30:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "fine again", outcome: "ok" });
+    assert.equal((await duties.status(owner, r.id))!.lastOkAt, "2026-10-22T10:30:00.000Z");
+  });
+
   suite("a resource has one managing responsibility: a second claim is refused, simultaneous claims have one winner, and dropping it or retiring frees it", async ({ owner, resources, duties, project }) => {
     const p = await project("P");
     const server = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "service", label: "Server", locator: "ssh://host" } as never);
