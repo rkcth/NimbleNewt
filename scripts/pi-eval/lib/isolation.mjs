@@ -507,7 +507,10 @@ export function findRealGit(pathValue = process.env.PATH ?? process.env.Path ?? 
 const GIT = String.raw`(?<![\w.-])git(?:\.exe)?`;
 // Options before the subcommand: `-C`, `-c` and the long options git also takes with a separate value (`--git-dir <path>`)
 // eat that value (W01e second review: `git --git-dir /x/.git push` was not seen).
-const GIT_OPTS = String.raw`(?:\s+(?:(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix|list-cmds))\s+(?:"[^"]*"|'[^']*'|\S+)|--?[A-Za-z][\w-]*(?:=\S+)?))*`;
+// W01e third review: each option reads one way only (a value is quoted parts and other characters; a bare flag is never
+// one that takes a value), so a run of `-C "x"` or `--git-dir` no longer backtracks exponentially (26 `-C "x"` took 26 s).
+const VALUE_OPTS = "[Cc]|git-dir|work-tree|namespace|exec-path|config-env|super-prefix|list-cmds";
+const GIT_OPTS = String.raw`(?:\s+(?:(?:-[Cc]|--(?:${VALUE_OPTS}))\s+(?:"[^"]*"|'[^']*'|[^\s"'])+|--?(?!(?:${VALUE_OPTS})\s)[A-Za-z][\w-]*(?:=\S+)?))*`;
 const PUSH = new RegExp(`${GIT}${GIT_OPTS}\\s+(?:push|send-pack|http-push)\\b`);
 /** `git remote add|set-url ...` (the rest of the segment captured) and `git config remote.<name>.(push)url <value>`. */
 const REMOTE = new RegExp(`${GIT}${GIT_OPTS}\\s+remote(?:\\s+-\\S+)*\\s+(?:add|set-url)\\b([^;&|\\n]*)`, "i");
@@ -517,6 +520,9 @@ const CREDENTIALS = /(?:^|[^\w])\.ssh(?:[/\\"'\s]|$)|\.git-credentials\b|(?<![\w
 /** The same under a home folder only: what a search of the code (grep, rg, git grep) counts, since code may name `.ssh`. */
 const HOME_CREDENTIALS = /(?:~|\$HOME|\$\{HOME\}|\/home\/[^/\s"']+|\/root|\/Users\/[^/\s"']+)[/\\]\.(?:ssh|git-credentials|netrc|config[/\\]gh|pi[/\\]agent|aws|docker|kube|gnupg|codex|claude|paperclip|hermes)\b/;
 const SEARCH_TOOLS = /^(?:grep|egrep|fgrep|rg|ag|ack)$/;
+/** A file tool's path that is a home folder or above one (`~`, `$HOME`, `/home/u`, `/home`, `/`), and one walking up. */
+const HOME_ROOT = /^\s*(?:~[/\\]?|\$\{?HOME\}?[/\\]?|\/(?:home|Users)?(?:\/[^/\\\s"']+)?\/?|\/root\/?)\s*$/;
+const UP_WALK = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
 
 /** Whether a remote address given on a command line is not plainly a local folder (unknown, a variable, a network address). */
 function nonLocalAddress(rest) {
@@ -606,7 +612,14 @@ export function credentialAttempts(commands) {
     for (const c of t.commands) { commandKinds(c.text, found, c.cut); if (c.cut) commandKinds(wholePart(c), found); }
     for (const p of t.paths) if (CREDENTIALS.test(p.text) || (p.cut && CREDENTIALS.test(wholePart(p)))) found.add("credentials");
     // A file tool's search pattern is a search of the code, read as a grep in bash is: only a key path under a home folder.
-    for (const p of t.patterns ?? []) if (HOME_CREDENTIALS.test(p.text) || (p.cut && HOME_CREDENTIALS.test(wholePart(p)))) found.add("credentials");
+    // W01e third review: a key name searched from a home folder (or above one, or up a `..` walk) is a key read split over
+    // two fields (`{ path: "/home/u", pattern: ".ssh/*" }`), counted as a path is.
+    const fromHome = t.paths.some((q) => HOME_ROOT.test(q.text) || UP_WALK.test(q.text));
+    for (const p of t.patterns ?? []) {
+      const whole = p.cut ? wholePart(p) : p.text;
+      if (HOME_CREDENTIALS.test(p.text) || HOME_CREDENTIALS.test(whole) || t.paths.some((q) => HOME_CREDENTIALS.test(`${q.text}/${p.text}`))
+        || (fromHome && (CREDENTIALS.test(p.text) || CREDENTIALS.test(whole)))) found.add("credentials");
+    }
   }
   return [...found].sort();
 }

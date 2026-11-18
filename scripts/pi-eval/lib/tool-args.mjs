@@ -58,28 +58,36 @@ const PATTERN_FIELDS = new Set(["pattern", "glob", "regex", "query", "include", 
 const EXCERPT_WORDS = /git|ssh|netrc|credential|gh-token|\.config|id_(?:rsa|dsa|ecdsa|ed25519)|SSH_AUTH|docker|secrets|\.pi[/\\]|\.codex|\$\{?HOME|~\/|(?:^|[\s"'=:(])\/[A-Za-z]/g;
 const EXCERPT_SPAN = 256;
 
-/** The lines of s between `from` and `to` that hold an EXCERPT_WORDS match, at most `budget` characters in all. */
-function excerpts(s, from, to, budget) {
+/**
+ * The lines of s between `from` and `to` that hold an EXCERPT_WORDS match, at most `budget` characters in all: the first
+ * ones, or with `last` the last ones (W01e third review: a dense middle used the whole budget near the head, so a push the
+ * old tail held, just before the shrunk tail, was lost). `after` is where earlier excerpts end.
+ */
+function excerpts(s, from, to, budget, { last = false, after = 0 } = {}) {
+  if (budget <= 0) return [];
   const out = [];
   const re = new RegExp(EXCERPT_WORDS.source, "g");
   // Start a little before `from`, so a line the head's cut falls inside is found from its start.
   re.lastIndex = Math.max(0, from - EXCERPT_SPAN);
-  let used = 0, prevEnd = 0;
-  for (let m; used < budget && (m = re.exec(s)) !== null && m.index < to;) {
+  let used = 0, prevEnd = after, first = 0;
+  for (let m; (last || used < budget) && (m = re.exec(s)) !== null && m.index < to;) {
     // The word's own position (the match may begin with the newline before an absolute path).
     const at = s[m.index] === "\n" ? m.index + 1 : m.index;
     const lineStart = s.lastIndexOf("\n", at - 1) + 1;
     const nl = s.indexOf("\n", at);
     const lineEnd = nl === -1 ? s.length : nl;
     const start = Math.max(lineStart, at - EXCERPT_SPAN, prevEnd);
-    const end = Math.min(lineEnd, m.index + m[0].length + EXCERPT_SPAN, start + budget - used);
+    const end = Math.min(lineEnd, m.index + m[0].length + EXCERPT_SPAN, last ? Infinity : start + budget - used);
     if (end <= start) { re.lastIndex = m.index + 1; continue; }
-    out.push({ text: s.slice(start, end), cut: end < lineEnd, cutStart: start > lineStart });
+    out.push({ start, end, cut: end < lineEnd, cutStart: start > lineStart });
     used += end - start;
+    // The last ones: the earliest are let go while over the budget (only ranges are held, compacted as they are let go).
+    while (last && used > budget) { used -= out[first].end - out[first].start; first++; }
+    if (first > 1024 && first * 2 > out.length) { out.splice(0, first); first = 0; }
     prevEnd = end;
     re.lastIndex = Math.max(end, m.index + 1);
   }
-  return out;
+  return out.slice(first).map(({ start, end, cut, cutStart }) => ({ text: s.slice(start, end), cut, cutStart, end }));
 }
 
 /** A string value a cut ended inside: only its visible start is known. */
@@ -104,8 +112,15 @@ export function argTexts(args, toolName = null, { limit = CALL_LIMIT } = {}) {
     if (s.length <= cap) { list.push({ text: s, cut: cutEnd }); chars += s.length; return; }
     // Head, the middle's lines that name git, a key or a path (at most a quarter of the room), and tail.
     const lo = Math.floor((cap - Math.floor(cap / 4)) / 2);
-    const ex = excerpts(s, lo, s.length - lo, Math.floor(cap / 4));
-    const used = ex.reduce((n, x) => n + x.text.length, 0);
+    // Half the room for the lines just past the head, the rest for the last lines before the tail (both cuts' edges first);
+    // what one side leaves unused goes to the other.
+    const budget = Math.floor(cap / 4), mid = Math.floor(s.length / 2);
+    const len = (xs) => xs.reduce((n, x) => n + x.text.length, 0);
+    let head = excerpts(s, lo, mid, Math.floor(budget / 2));
+    const tail = excerpts(s, mid, s.length - lo, budget - len(head), { last: true, after: head.at(-1)?.end ?? 0 });
+    if (len(head) + len(tail) < budget) head = excerpts(s, lo, mid, budget - len(tail));
+    const ex = [...head, ...tail].map(({ text, cut, cutStart }) => ({ text, cut, cutStart }));
+    const used = len(ex);
     const half = Math.floor((cap - used) / 2);
     list.push({ text: s.slice(0, half), cut: true }, ...ex, { text: s.slice(s.length - half), cut: cutEnd, cutStart: true });
     chars += 2 * half + used; textsCut = true;

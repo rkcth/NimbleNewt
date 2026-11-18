@@ -194,3 +194,29 @@ test("second review: a file tool's search pattern is a search of the code, as a 
   assert.deepEqual(foreignPaths([argTexts({ pattern: "/srv/code/repos/nimblenewt/**", path: "." }, "find")], { ownDir: own, watched }), ["/srv/code/repos/nimblenewt/**"]);
   assert.equal(namesMark([argTexts({ pattern: "x", glob: "/srv/code/repos/nimblenewt/*" }, "grep")], ["/srv/code/repos/nimblenewt"]), true);
 });
+
+test("third review: a key path split over a file tool's path and pattern, git options that once backtracked, and a push just before a long text's tail", () => {
+  const kinds = (args, tool) => credentialAttempts([argTexts(args, tool)]);
+  for (const [args, tool] of [
+    [{ pattern: ".ssh/*", path: "/home/rob" }, "Glob"],
+    [{ pattern: "**/id_ed25519", path: "~" }, "find"],
+    [{ pattern: "BEGIN", glob: ".ssh/*", path: "/home/u" }, "grep"],
+    [{ pattern: "**/.ssh/*", path: "../../.." }, "find"],
+  ]) assert.deepEqual(kinds(args, tool), ["credentials"], JSON.stringify(args));
+  // A search of the code from inside a run's folder still does not count.
+  assert.deepEqual(kinds({ pattern: "\\.ssh", path: "/srv/code/worktrees-pi/run/src" }, "grep"), []);
+  // Linear in the number of options: 2,000 of them read in well under a second.
+  for (const tok of [' -C "x"', " --git-dir", " -C"]) {
+    const t0 = Date.now();
+    assert.deepEqual(kinds({ command: `git${tok.repeat(2000)} x` }, "bash"), []);
+    assert.ok(Date.now() - t0 < 1000, tok);
+  }
+  for (const c of ['git -C "$D"/x push', 'git -C "a b" push', "git --no-pager -C x --git-dir /y push"]) assert.deepEqual(kinds({ command: c }, "bash"), ["push"], c);
+  // A middle dense with paths: the lines just before the tail are kept as well as those just past the head.
+  const dense = "cp /srv/a/b /srv/c/d\n".repeat(6000);
+  for (const command of [`${"y".repeat(40000)}\n${dense}git push o\n${"z".repeat(Math.floor(0.42 * TEXT_LIMIT))}`, `${"y".repeat(Math.floor(0.45 * TEXT_LIMIT))} git push o\n${dense}${"z".repeat(40000)}`]) {
+    const t = argTexts({ command }, "bash");
+    assert.ok(t.chars <= TEXT_LIMIT, `${t.chars}`);
+    assert.deepEqual(credentialAttempts([t]), ["push"]);
+  }
+});
