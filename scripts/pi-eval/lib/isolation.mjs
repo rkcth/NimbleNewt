@@ -272,6 +272,25 @@ export function defaultHidden({ ownerHome = homedir(), extra = [] } = {}) {
   return [...new Set(list.filter((p) => typeof p === "string" && isAbsolute(p) && existsSync(p)).map((p) => real(resolve(p))))].filter((p) => p !== sep);
 }
 
+/**
+ * What to hide of the shared work root, which holds every run's checkout (card W01c): the work root itself, so a run sees
+ * only its own checkout (bound back writable by bwrapPrefix, after the work root's empty tmpfs). When a folder the agent
+ * must still read (`keep`: the reference repositories, the bench, other read-only trees) is the work root or lies inside
+ * it, hiding the whole of it would hide that too: then each other entry present now (the siblings' checkouts) is hidden
+ * instead, leaving the run's own checkout and the entries holding a kept folder. Nothing without a work root.
+ */
+export function workRootHidden({ workRoot, ownDir, keep = [] }) {
+  if (typeof workRoot !== "string" || !existsSync(workRoot)) return [];
+  const wr = real(resolve(workRoot));
+  if (wr === sep) return [];
+  const kept = keep.filter((p) => typeof p === "string").map((p) => real(resolve(p))).filter((p) => under(p, wr));
+  if (kept.length === 0) return [wr];
+  const own = typeof ownDir === "string" ? real(resolve(ownDir)) : null;
+  let names;
+  try { names = readdirSync(wr); } catch { return []; }
+  return names.map((n) => join(wr, n)).filter((p) => !(own && (under(own, p) || under(p, own))) && !kept.some((k) => under(k, p)));
+}
+
 /** File names that hold keys and logins by convention (a `.env` but not its `.example`, key files, login files). */
 const CREDENTIAL_FILE = /^(?:\.env(?:\.(?!(?:example|sample|template|dist)$)[\w.-]+)?|.+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|ppk)|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.netrc|_netrc|\.git-credentials|\.npmrc|\.pypirc|\.pgpass|\.htpasswd|credentials(?:\.json)?|.+\.credentials\.json|secrets?\.(?:json|ya?ml|toml|env)|.+-token|service-account.*\.json)$/i;
 /** Folder names that hold keys and logins by convention. */

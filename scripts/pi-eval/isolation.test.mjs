@@ -918,3 +918,72 @@ test("the checkout is still graded by the bench with its own environment (an hon
   assert.ok(!existsSync(join(r.artifacts, "git-guard.log")) || statSync(join(r.artifacts, "git-guard.log")).size === 0);
   assert.equal(spawnSync("git", ["-C", repo, "remote"], { encoding: "utf8" }).stdout, "", "the reference repository is untouched");
 });
+
+// Card W01c: the shared work root holds every run's checkout; a run sees its own only.
+const SIBLING_MARKER = "DECOY-SIBLING-CHECKOUT-a9e2";
+const peekRun = async (workRoot, extra = {}) => {
+  const sibling = join(workRoot, "eval-sibling-run");
+  mkdirSync(sibling, { recursive: true });
+  writeFileSync(join(sibling, "marker.txt"), `${SIBLING_MARKER}\n`);
+  const { ctx } = incidentCtx({ workRoot, agent: ["node", join(here, "test-agents", "peek-agent.mjs")], agentEnv: { PEEK_WORK_ROOT: workRoot, PEEK_SIBLING: sibling }, ...extra });
+  const r = await runOne(ctx, set.tasks[0], "A", 1);
+  return { r, s: JSON.parse(readFileSync(join(r.artifacts, "peek-report.json"), "utf8")).steps, sibling };
+};
+
+test("W01c: which part of the work root is hidden: the whole of it, or (a kept folder inside it) each sibling entry, never the run's own checkout", { skip: process.platform === "win32" }, async () => {
+  const { workRootHidden } = await import("./lib/isolation.mjs");
+  const wr = join(root, "w01c-unit");
+  const own = join(wr, "eval-own"), sib = join(wr, "eval-sib"), ref = join(wr, "ref", "repo");
+  for (const d of [own, sib, ref]) mkdirSync(d, { recursive: true });
+  const r = (p) => realpathSync(p);
+  assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [repo, dirname(wr), "/srv/code"] }), [r(wr)], "parents of the work root are not kept folders");
+  assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [ref] }), [join(r(wr), "eval-sib")], "a kept folder inside: the siblings one by one");
+  assert.deepEqual(workRootHidden({ workRoot: wr, ownDir: own, keep: [wr] }).sort(), [join(r(wr), "eval-sib"), join(r(wr), "ref")].sort(), "the work root itself kept: every other entry, not the run's own");
+  assert.deepEqual(workRootHidden({ workRoot: join(root, "no-such-work"), ownDir: own }), []);
+  assert.deepEqual(workRootHidden({ workRoot: undefined, ownDir: own }), []);
+  assert.deepEqual(workRootHidden({ workRoot: "/", ownDir: own }), []);
+  // In the sandbox's command: the work root covered by an empty tmpfs, the run's checkout bound back writable after it.
+  const argv = bwrapPrefix({ hidden: [r(wr)], readOnlyTrees: [root], writable: [own], readable: [], readOnly: [] });
+  const at = (...seq) => argv.findIndex((_, i) => seq.every((x, j) => argv[i + j] === x));
+  const hid = at("--tmpfs", r(wr)), back = at("--bind", own, own);
+  assert.ok(hid > 0 && back > hid, argv.join(" "));
+});
+
+test("W01c: a run cannot list or read another run's checkout in the shared work root, and still uses its own", needsSandbox, async () => {
+  const workRoot = join(root, "w01c-work");
+  const { r, s, sibling } = await peekRun(workRoot);
+  // The work root shows the run's own checkout only.
+  assert.equal(s.listWork.status, 0, JSON.stringify(s.listWork));
+  const listed = s.listWork.stdout.split("\n").filter(Boolean);
+  assert.equal(listed.length, 1, JSON.stringify(s.listWork));
+  assert.match(listed[0], /^eval-/);
+  assert.notEqual(listed[0], "eval-sibling-run");
+  assert.doesNotMatch(s.findWork.stdout, /eval-sibling-run|marker\.txt/, JSON.stringify(s.findWork));
+  assert.notEqual(s.listSibling.status, 0, JSON.stringify(s.listSibling));
+  assert.notEqual(s.readSibling.status, 0, JSON.stringify(s.readSibling));
+  assert.doesNotMatch(JSON.stringify(s), new RegExp(SIBLING_MARKER));
+  // Its own checkout: listed, written and used with git.
+  assert.match(s.ownList.stdout, /lib\.mjs/);
+  assert.equal(s.ownWrite.status, 0, JSON.stringify(s.ownWrite));
+  assert.equal(s.ownWrite.stdout, "own-work\n");
+  assert.equal(s.ownGit.status, 0, JSON.stringify(s.ownGit));
+  assert.match(s.ownGit.stdout, /peek-own\.txt/);
+  assert.ok(r.isolation.hidden.includes(realpathSync(workRoot)), JSON.stringify(r.isolation));
+  // The sibling is untouched on the host.
+  assert.equal(readFileSync(join(sibling, "marker.txt"), "utf8"), `${SIBLING_MARKER}\n`);
+});
+
+test("W01c: a work root holding a folder the agent must read: that folder stays readable, the sibling checkouts are hidden one by one", needsSandbox, async () => {
+  const workRoot = join(root, "w01c-work-kept");
+  const ref = join(workRoot, "reference");
+  mkdirSync(ref, { recursive: true });
+  writeFileSync(join(ref, "README.md"), "kept\n");
+  const { r, s } = await peekRun(workRoot, { readOnlyTrees: [shared, ref] });
+  assert.equal(s.listSibling.status, 0, "the sibling's entry is an empty folder");
+  assert.equal(s.listSibling.stdout, "", JSON.stringify(s.listSibling));
+  assert.notEqual(s.readSibling.status, 0, JSON.stringify(s.readSibling));
+  assert.doesNotMatch(JSON.stringify(s), new RegExp(SIBLING_MARKER));
+  assert.match(s.findWork.stdout, /reference\/README\.md/, JSON.stringify(s.findWork));
+  assert.equal(s.ownWrite.stdout, "own-work\n", JSON.stringify(s.ownWrite));
+  assert.ok(!r.isolation.hidden.includes(realpathSync(workRoot)), JSON.stringify(r.isolation));
+});
