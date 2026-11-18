@@ -143,7 +143,7 @@ export class ToolboxProposalService {
     const rationale = words(command.rationale, "rationale", PROPOSAL_LIMITS.rationale);
     const tests = words(command.tests, "tests", PROPOSAL_LIMITS.tests);
     const taskId = command.taskId === undefined ? undefined : checkTaskId(command.taskId);
-    const audience = command.audience === undefined ? undefined : await this.#catalog.audienceOf(command.audience);
+    const audience = command.audience === undefined ? undefined : await this.#suggestedAudience(by, command.audience);
     const { version: v, name, entry: own } = await this.#ownTool(by, command.from, command.fromVersion, "from");
     // A personal tool that began as a copy of a shared one (any of its versions) is offered back as an improvement of that tool, never as a new shared tool.
     for (const x of own.versions) {
@@ -196,7 +196,8 @@ export class ToolboxProposalService {
     const asked = { instructionsRecordId: command.instructionsRecordId ?? null, executableRecordId: command.executableRecordId ?? null, manifest: (command.manifest ?? null) as JsonObject | null, fromVersion: command.fromVersion ?? null, onLatest: command.onLatest ?? null, rationale: command.rationale ?? null, tests: command.tests ?? null } as unknown as JsonObject;
     const done = await this.#update(by, "toolbox.proposal.revise", command.commandId, found.id, command.expectedRevision, { kind: "revise", asked }, async (cur) => {
       if (cur.state !== "open" && cur.state !== "changes_requested") throw new DomainError("invalid_command", `the proposal is ${cur.state}; only an open proposal, or one with changes requested, is revised`, { field: "proposalId" });
-      if (cur.round !== p.round) throw new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
+      // A rebase in between moved the base without a new round: the patch was computed against the base as read, so it is refused rather than moving the proposal back.
+      if (cur.round !== p.round || cur.base?.version !== p.base?.version) throw new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
       const body: ToolboxProposalBody = { ...cur, ...next, rationale, tests, state: "open", round: cur.round + 1, history: event(cur, { at: this.#runner.now(), by: by.id, event: "revised" }), updatedAt: this.#runner.now() };
       return { body, changes: [] };
     });
@@ -241,7 +242,8 @@ export class ToolboxProposalService {
     };
     const shaped = this.#shape(now, proposed);
     await this.#update(by, "toolbox.proposal.rebase", command.commandId, found.id, command.expectedRevision, { kind: "rebase" }, async (cur) => {
-      if (cur.base?.version !== p.base!.version || !PENDING.includes(cur.state)) throw new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
+      // The rebased content was computed from the proposal as read: a revision in between (same base, new content) must not be overwritten with the old content.
+      if (cur.base?.version !== p.base!.version || !PENDING.includes(cur.state) || cur.round !== p.round || cur.proposed.digest !== p.proposed.digest) throw new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
       const at = this.#runner.now();
       const body: ToolboxProposalBody = { ...cur, base: { version: now.version, digest: now.digest }, ...shaped, history: event(cur, { at, by: by.id, event: "rebased", from: p.base!.version, to: latest }), updatedAt: at };
       const told = by.id === cur.author ? undefined : await noticeChange(this.#runner, cur.author, { key: `proposal|${found.id}|rebased|${latest}`, kind: "proposal", name: cur.target, version: latest, proposalId: found.id, text: `${by.id} moved your proposal ${found.id} for ${cur.target} from ${p.base!.version} onto ${latest}, the version in use; your changes are unchanged and were checked again.` });
@@ -507,6 +509,23 @@ export class ToolboxProposalService {
     const v = await this.#version(parsed.canonical, chosen);
     if (v === undefined) throw new DomainError("not_found", `${parsed.canonical} has no version ${chosen}`);
     return { version: v, name: parsed.canonical, entry };
+  }
+
+  /**
+   * A promotion's suggested audience (review of slice 2). Any agent may promote, so the suggestion must not tell it which teams or projects exist: it names only teams and projects the author itself belongs to (its own team; a
+   * project it holds grants in), and a team or project that does not exist gets the same answer as one the author is not in. Roles are installation role names and are checked as for a release. The decider chooses the audience.
+   */
+  async #suggestedAudience(by: Principal, value: unknown): Promise<Audience> {
+    const refuse = (field: string): never => invalid(field, "a suggestion names all agents, roles, or teams and projects you belong to (by ID or exact name)");
+    let audience: Audience;
+    try { audience = await this.#catalog.audienceOf(value); } catch (error) {
+      if (error instanceof DomainError && (error.field === "audience.teams" || error.field === "audience.projects") && /does not exist|called|by name/.test(error.message)) refuse(error.field);
+      throw error;
+    }
+    const get = (kind: string, id: string) => this.#runner.get(kind, id);
+    for (const t of audience.teams ?? []) if (!(await mayReadCatalogEntry(get, by, { layer: "toolbox", audience: { teams: [t] } }))) refuse("audience.teams");
+    for (const p of audience.projects ?? []) if (!(await mayReadCatalogEntry(get, by, { layer: "toolbox", audience: { projects: [p] } }))) refuse("audience.projects");
+    return audience;
   }
 
   /** One of the author's own records for a patch: accepted, original (the desk's rule for a tool's source) and shared, so the maintainers who decide can read it. */

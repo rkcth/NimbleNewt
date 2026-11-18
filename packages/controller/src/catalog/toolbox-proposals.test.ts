@@ -201,6 +201,13 @@ for (const backend of backends) {
     await refuses("invalid_command", () => promote({ from: "my-lint" }), /copy of toolbox\.lint/);
     await refuses("invalid_command", () => promote({ from: "quiet" }), /private scratch/);
     await refuses("not_found", () => promote({ from: `${personalNamespace(maya.p.id)}.fmt` }), /no personal tool/);
+    // Review of slice 2: a suggestion names only teams and projects the author belongs to, and one that does not exist gets the same answer (promote tells no agent which teams or projects exist).
+    const notMine = await promote({ audience: { projects: ["Orchard"] } }).then(() => "accepted", (e: unknown) => (e instanceof DomainError ? `${e.code}: ${e.message}` : String(e)));
+    const unknown = await promote({ audience: { projects: ["Nowhere"] } }).then(() => "accepted", (e: unknown) => (e instanceof DomainError ? `${e.code}: ${e.message}` : String(e)));
+    const noTeam = await promote({ audience: { teams: ["Ghosts"] } }).then(() => "accepted", (e: unknown) => (e instanceof DomainError ? `${e.code}: ${e.message}` : String(e)));
+    assert.match(notMine, /^invalid_command: audience\.projects: a suggestion names .* you belong to/);
+    assert.equal(unknown, notMine);
+    assert.equal(noTeam, notMine.replace("audience.projects", "audience.teams"));
     const promoted = await promote({ audience: { projects: ["Garden"] } });
     // Pat maintains Orchard only: the suggested Garden audience is not its to decide, so the proposal does not exist for it.
     await refuses("not_found", () => c.props.get(pat.p, promoted.proposalId));
@@ -208,12 +215,16 @@ for (const backend of backends) {
     assert.equal((await c.props.get(gardenMaint.p, promoted.proposalId)).kind, "promotion");
     // Gil may release it for Garden only, not for all agents.
     await refuses("forbidden", () => c.props.decide(gardenMaint.p, { commandId: cid("d"), proposalId: promoted.proposalId, decision: "accept", version: "1.0.0", audience: { all: true } }), /audience/);
-    const done = await c.props.decide(gardenMaint.p, { commandId: cid("d"), proposalId: promoted.proposalId, decision: "accept", version: "1.0.0" });
+    const acceptId = cid("d");
+    const done = await c.props.decide(gardenMaint.p, { commandId: acceptId, proposalId: promoted.proposalId, decision: "accept", version: "1.0.0" });
     const shared = (await c.cat.get(c.owner, "toolbox.fmt"))!;
     assert.deepEqual([shared.layer, shared.registeredBy, shared.instructional.author, shared.digest], ["toolbox", gardenMaint.p.id, cody.p.id, done.released!.digest]);
     assert.deepEqual((await c.cat.toolbox(c.owner)).items.find((x) => x.name === "toolbox.fmt")?.audience, { projects: [c.a] });
     // A second promotion of the same name finds it taken now.
     await refuses("command_conflict", () => promote({}), /is taken/);
+    // Review of slice 2: a repeat of the committed acceptance is answered from its record, even after the author superseded a record the release was made from.
+    await c.note(cody.p, "console.log('fmt 2')", { supersedes: fmtCode });
+    assert.deepEqual((await c.props.decide(gardenMaint.p, { commandId: acceptId, proposalId: promoted.proposalId, decision: "accept", version: "1.0.0" })).released, done.released);
   });
 
   suite("a release's snapshot keeps it readable after its desk record changes; a copy keeps its own; a revocation removes the release's snapshot; the owner's deletion of the record removes its text everywhere", async (c) => {

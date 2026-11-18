@@ -375,6 +375,8 @@ export class CatalogService {
   async #publish(by: Principal, op: string, commandId: string, plan: {
     canonical: string; layer: Layer; kind: ArtifactKind; version: string; manifest: Manifest; instructional: SourceRef; executable?: SourceRef;
     texts: { instructions: string; executable?: string }; pins: readonly { ref: AggregateRef; revision: number }[]; audience?: Audience; maintainer: boolean;
+    /** Reads the texts and pins inside the write instead (a release from a proposal): a repeat of a committed release is then answered from its record before anything is read again. */
+    sources?: () => Promise<{ texts: { instructions: string; executable?: string }; pins: readonly { ref: AggregateRef; revision: number }[] }>;
     /** A shared release from a proposal: the version the entry must still be choosing (an improvement), or `absent` (a promotion names a free name). */
     expect?: { chosen: string } | "absent";
     payload?: JsonObject;
@@ -417,15 +419,16 @@ export class CatalogService {
         if (prior !== undefined && compare(version, prior.latest) <= 0) throw new DomainError("invalid_command", `${canonical} is at ${prior.latest}; a new version must be higher`, { field: "version" });
         if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
         const keepAudience = audience ?? prior?.audience;
+        const { texts, pins } = plan.sources === undefined ? plan : await plan.sources();
         const nextEntry: EntryBody = { name: canonical, layer, kind, ...(layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }), ...(keepAudience === undefined ? {} : { audience: keepAudience }) };
         const more = extra === undefined ? [] : await extra(prior, { versionId, digest });
         return {
           ref: vref, creates: true,
           changes: [
             { type: "create", ref: vref, body: full as unknown as JsonObject },
-            ...(layer === "toolbox" ? [{ type: "create" as const, ref: snapshotRef(versionId), body: snapshotOf(full, plan.texts, this.#runner.now()) as unknown as JsonObject }] : []),
+            ...(layer === "toolbox" ? [{ type: "create" as const, ref: snapshotRef(versionId), body: snapshotOf(full, texts, this.#runner.now()) as unknown as JsonObject }] : []),
             // The source records must still be as they were read: retention may archive or remove one between that read and this write (it reads the catalog's sources just before its own write).
-            ...plan.pins.filter((p, i, all) => all.findIndex((o) => o.ref.kind === p.ref.kind && o.ref.id === p.ref.id) === i).map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
+            ...pins.filter((p, i, all) => all.findIndex((o) => o.ref.kind === p.ref.kind && o.ref.id === p.ref.id) === i).map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
             entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
             ...more,
           ],
@@ -452,28 +455,32 @@ export class CatalogService {
     const maintainer = by.kind === "agent";
     if (by.kind !== "owner" && !(maintainer && maintainsAnywhere(by))) throw new DomainError("forbidden", `${by.id} may not publish shared tools (it needs ${TOOLBOX_MANAGE})`);
     if (maintainer && command.audience !== undefined && !mayManage(by, command.audience)) throw new DomainError("forbidden", `${by.id} may not publish to that audience (its ${TOOLBOX_MANAGE} does not cover it)`);
-    const texts: { instructions?: string; executable?: string } = {};
-    const pins: { ref: AggregateRef; revision: number }[] = [];
-    for (const part of ["instructions", "executable"] as const) {
-      const p = command.parts[part];
-      if (p === undefined) continue;
-      if (p.base !== undefined) {
-        const baseVersion = (await this.#runner.get("catalog-version", p.base))?.body as unknown as VersionBody | undefined;
-        const src = baseVersion === undefined ? undefined : part === "instructions" ? baseVersion.instructional : baseVersion.executable;
-        const got = baseVersion === undefined || src === undefined || src.digest !== p.ref.digest ? "changed" : await this.#released({ ...baseVersion, id: p.base }, part, (await this.#entryOf(baseVersion.name))?.revoked.includes(baseVersion.version) === true);
-        if (typeof got === "string") throw new DomainError("invalid_command", `the ${part} the proposal keeps from its base version can no longer be read as released`);
-        texts[part] = got.text; pins.push(got.pin);
-        continue;
+    // Read inside the guarded write (after the runner has looked for a record of this command), so a repeat of a committed acceptance is answered from its record even when the author's records changed since.
+    const sources = async (): Promise<{ texts: { instructions: string; executable?: string }; pins: { ref: AggregateRef; revision: number }[] }> => {
+      const texts: { instructions?: string; executable?: string } = {};
+      const pins: { ref: AggregateRef; revision: number }[] = [];
+      for (const part of ["instructions", "executable"] as const) {
+        const p = command.parts[part];
+        if (p === undefined) continue;
+        if (p.base !== undefined) {
+          const baseVersion = (await this.#runner.get("catalog-version", p.base))?.body as unknown as VersionBody | undefined;
+          const src = baseVersion === undefined ? undefined : part === "instructions" ? baseVersion.instructional : baseVersion.executable;
+          const got = baseVersion === undefined || src === undefined || src.digest !== p.ref.digest ? "changed" : await this.#released({ ...baseVersion, id: p.base }, part, (await this.#entryOf(baseVersion.name))?.revoked.includes(baseVersion.version) === true);
+          if (typeof got === "string") throw new DomainError("invalid_command", `the ${part} the proposal keeps from its base version can no longer be read as released`);
+          texts[part] = got.text; pins.push(got.pin);
+          continue;
+        }
+        const found = await this.#runner.get("desk-record", p.ref.recordId);
+        const record = found?.body as unknown as { owner?: string; status?: string; visibility?: string; body?: unknown; origin?: unknown; copiedFrom?: unknown; archived?: unknown; deleted?: unknown } | undefined;
+        if (found === undefined || record === undefined || record.owner !== p.ref.author || found.revision !== p.ref.revision || typeof record.body !== "string" || sha(record.body) !== p.ref.digest) throw new DomainError("invalid_command", `the proposed ${part} is no longer as it was proposed; the author revises the proposal`);
+        if (record.visibility === "private" || record.status !== "accepted" || record.origin !== undefined || record.copiedFrom !== undefined || record.archived !== undefined || record.deleted !== undefined) throw new DomainError("invalid_command", `the proposed ${part} is no longer an accepted, shared, original desk record`);
+        texts[part] = record.body; pins.push({ ref: { kind: "desk-record", id: found.id }, revision: found.revision });
       }
-      const found = await this.#runner.get("desk-record", p.ref.recordId);
-      const record = found?.body as unknown as { owner?: string; status?: string; visibility?: string; body?: unknown; origin?: unknown; copiedFrom?: unknown; archived?: unknown; deleted?: unknown } | undefined;
-      if (found === undefined || record === undefined || record.owner !== p.ref.author || found.revision !== p.ref.revision || typeof record.body !== "string" || sha(record.body) !== p.ref.digest) throw new DomainError("invalid_command", `the proposed ${part} is no longer as it was proposed; the author revises the proposal`);
-      if (record.visibility === "private" || record.status !== "accepted" || record.origin !== undefined || record.copiedFrom !== undefined || record.archived !== undefined || record.deleted !== undefined) throw new DomainError("invalid_command", `the proposed ${part} is no longer an accepted, shared, original desk record`);
-      texts[part] = record.body; pins.push({ ref: { kind: "desk-record", id: found.id }, revision: found.revision });
-    }
+      return { texts: texts as { instructions: string; executable?: string }, pins };
+    };
     return this.#publish(by, "toolbox.proposal.accept", command.commandId, {
       canonical: parsed.canonical, layer: "toolbox", kind: command.kind, version: command.version, manifest: command.manifest, instructional: command.parts.instructions.ref,
-      ...(command.parts.executable === undefined ? {} : { executable: command.parts.executable.ref }), texts: texts as { instructions: string; executable?: string }, pins,
+      ...(command.parts.executable === undefined ? {} : { executable: command.parts.executable.ref }), texts: { instructions: "" }, pins: [], sources,
       ...(command.audience === undefined ? {} : { audience: command.audience }), maintainer, expect: command.expect, payload: command.payload,
     }, extra);
   }
