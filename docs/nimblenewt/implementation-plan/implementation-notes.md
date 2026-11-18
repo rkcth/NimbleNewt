@@ -14312,3 +14312,33 @@ Reviewed `bcd3b005` for how strict and how robust the contamination reading is. 
 - `GIT_OPTS` against `208b5ded`: 1,500 generated `git ... push` / `remote add|set-url` lines (`-C`, `-c`, `--git-dir`, `--work-tree`, equals forms, quotes, tabs, env prefixes) flag the same through the regexes and through `credentialAttempts`. Three lines lose a flag, and none of them pushes: `git -C push` and `git -c push` (the option takes `push` as its value) and `git --exec-path push` (bare `--exec-path` prints and exits). An escaped quote in a value (`-C "a\"b" push`) is still caught by the loose reading. Adversarial inputs (runs of quotes, unclosed quotes, 40,000 spaces, 200 options) take under 4 ms. A run of `git -C git -C ...` is quadratic in both versions (about 185 ms at 21,000 characters), not exponential. Both versions still miss `--git-dir="/a b/.git" push` and `-C x\ y push`.
 - Search fields: `\.ssh` searched from `.`, `src`, `/srv`, `/tmp` or a repo path is not flagged. Home folder, `/`, `/home`, `/root`, `..` walks and joined path+pattern are flagged. Budget split: with a path-heavy middle (70,000 to 400,000 characters, 201 push positions each), the positions the old version caught just past the head now go partly to the lines just before the tail, as many gained as lost. With a sparse middle a push is caught at every position. `argTexts` takes 23 ms or less at the 262,144-character call cap.
 - The replays of all 45 run folders (full arguments, stored cut copies) are line for line the same as `208b5ded`: batch 4 is clean, and `grant-proposals-B-r1-20261117T094724` is flagged (credentials, push, remote). Through `/tmp/nn-slot.sh`: pi-eval 143/143 and y02-checkpoint 26/26, after `tsc -p packages/contracts` and with a temporary `node_modules` (removed). Skipped: real bench runs, the pi-adapter and worker rebuilds (existing dist used), other suites, Windows and macOS.
+
+## G09 follow-up: an updated resume on a remote worker host shows the agent the selected correction (Claude agent, Opus 5.5, 2026-11-18)
+A flip audit of card G09 found that `remote/host.ts` took `contextUpdates` off the order before offering it to a remote host. On the remote path an updated resume never showed the agent the selected correction. The G09 clause "an updated resume applies the selected update once / the correction of an old owner decision" now holds there too.
+
+**Changed.**
+- `remote/host.ts`: `RemoteWorkerHost.start` keeps `contextUpdates` in the offered order. The starting-size parts and the environment revision pin are still kept back, as before. An order with no updates is offered without the field, as before.
+- `dispatch/context-updates.ts`: new pure `contextUpdatesProblem(value)` checks the shape and bounds `boundContextUpdates` gives. Absent is fine. Otherwise it must be a list of at most 20 objects with only `requestId` (1 to 200 characters, the worker channel's bound), `text` (at most 20,000) and `origin` (at most 300). The texts together must be at most 64,000 characters plus one left-out note. A request ID given twice is not refused: the process places it once, as on a local host.
+- `remote/service.ts` `place`: refuses an order whose `contextUpdates` fail the check (`invalid_command`, field `order.contextUpdates`). Nothing is offered and the placement is unchanged.
+- `remote/runner.ts` (the remote worker's side of an offer): after the contract is confirmed and before `host.start`, it applies the same check. An offer that fails it starts nothing and completes as failed ("the worker could not start the order: its contextUpdates ..."). Otherwise the order goes to the machine's `LocalWorker` unchanged. The worker package's host passes the updates on the channel's `start` message (`updates`, cut to `CHANNEL_UPDATES`). The worker process places each one before `ready`: place-only, under its request ID, so the update applies exactly once per conversation. This is the code the local host already used, so no worker-side change was needed.
+- `dispatch/ports.ts`: the `contextUpdates` doc comment no longer says the updates are not sent to a remote host.
+- No protocol version change. The contract digest still covers identity, recipe and expiry, not the updates, so offers verify as before. An older worker package ignores the field and places nothing, which is how it behaved before.
+
+**Tests.**
+- New composed test `packages/integration/src/g09-remote-updates.test.ts`. The composed controller (SQLite) and dispatcher offer the attempt over HTTP to a `RemoteOfferRunner`. Its host is the worker package's launcher and the real worker process in bubblewrap, behind a `LocalWorker`, with no `context` of its own. A scripted OpenAI-compatible model answers. The test follows the C05 flow of `g09-retained-context.test.ts`: decision A is selected, the owner corrects it (B supersedes A), the correction is selected and the side line resumes. It then checks:
+  - the first offer has no `contextUpdates` field;
+  - the second offer carries the correction only;
+  - the model's request holds the correction exactly once, with its origin, after the earlier turn and before this turn's instruction, and without decision A;
+  - a third run in a new process on the same conversation, offered the same correction again, does not place it twice.
+
+  Mutation check: putting the removal back in `remote/host.ts` makes this test fail (`expected: 1`), and the new unit test in `host-environment.test.ts` fails too.
+- Unit tests:
+  - `host-environment.test.ts`: updates offered as given; an order without updates is offered without the field.
+  - `context-updates.test.ts`: the checker accepts what `boundContextUpdates` gives and names each bad shape.
+  - `remote.test.ts` (both backends): `place` refuses bad updates and changes nothing; good updates reach the host's offer.
+  - `runner.test.ts`: updates reach `host.start`; bad ones start nothing and report failed.
+- `w03-rig-support.ts`: its scripted `model` is now exported for reuse. Nothing else changed.
+
+**Not done.**
+- The first-call admission (`#judge`, C07o) still measures the order's content and resume note without the updates' text, as the local host's `firstCall` does. Updates are bounded at 64,000 characters, but neither path counts them in the first call's estimate.
+- The remote test uses one reply per run (its machine tool bridge answers nothing, so no W04 continuation is asked). Nudged runs on the remote path are covered elsewhere, not here.

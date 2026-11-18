@@ -20,7 +20,7 @@ const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c"
 
 /** One scripted reply: a text (a natural stop), a tool call, or thinking only with no visible text (card W04). */
 export interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object }; readonly thinking?: string; /** Run before the reply is sent (the call is open meanwhile). */ readonly before?: () => Promise<void>; /** The text reply is cut off at the output limit (`finish_reason: length`, card W07). */ readonly length?: boolean; /** The reply is held open after its first bytes until this is released (card G09: the owner acts while the model is still writing). */ readonly hold?: Promise<void>; /** A tool call whose arguments arrive in two parts: `head` at once, `tail` and the end only after `hold` (card G09). A reader that has gone away is not answered. */ readonly partial?: { readonly name: string; readonly head: string; readonly tail: string; readonly hold: Promise<void> } }
-async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: string[]; bodies: Record<string, unknown>[] }> {
+export async function model(steps: Step[]): Promise<{ server: Server; url: string; seen: string[]; bodies: Record<string, unknown>[] }> {
   const seen: string[] = [];
   // Every request body as the provider received it (card W07 checks the route's budget here, at the far side of the relay).
   const bodies: Record<string, unknown>[] = [];
