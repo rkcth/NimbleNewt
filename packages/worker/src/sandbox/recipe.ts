@@ -78,6 +78,15 @@ export const sha256 = (text: string): string => createHash("sha256").update(text
 
 const AGENT_PLACES: ReadonlySet<string> = new Set(["workdir", "home", "scratch"]);
 const bad = (message: string): never => { throw new SandboxError("invalid_recipe", message); };
+// A plain copy of a list, read once by index into a fresh array (holes stay holes, as `slice` keeps them). Not `slice`, `map` or `concat` on the caller's list:
+// those build their result with the list's own `constructor[Symbol.species]`, which could return an object of the caller's choosing.
+function copyList(list: readonly unknown[]): unknown[] {
+  const out: unknown[] = [];
+  const length = list.length;
+  for (let i = 0; i < length; i++) if (i in list) out[i] = list[i];
+  out.length = length;
+  return out;
+}
 
 const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 const guestOverlaps = (a: string, b: string): boolean => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
@@ -146,7 +155,7 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   const scratch = checkHostPath("scratch", recipe.scratch, protectedPaths, "directory");
   const rawReadOnly: unknown = recipe.readOnly;
   if (!Array.isArray(rawReadOnly)) return bad("readOnly: must be a list");
-  const readOnly = (Array.prototype.slice.call(rawReadOnly) as SandboxRecipe["readOnly"][number][]).map((m, i) => {
+  const readOnly = (copyList(rawReadOnly) as SandboxRecipe["readOnly"][number][]).map((m, i) => {
     if (m === null || typeof m !== "object") return bad(`readOnly[${i}]: must be { host, guest }`);
     return { host: checkHostPath(`readOnly[${i}].host`, m.host, protectedPaths, "any"), guest: checkGuestPath(`readOnly[${i}].guest`, m.guest) };
   });
@@ -171,7 +180,7 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   }
   const rawNames: unknown = recipe.protectedSubpaths ?? [".git"];
   if (!Array.isArray(rawNames)) return bad("protectedSubpaths: must be a list of names");
-  const names = Array.prototype.slice.call(rawNames) as string[];
+  const names = copyList(rawNames) as string[];
   for (const name of names) if (typeof name !== "string" || !SUBPATH.test(name) || name === "." || name === "..") return bad(`protectedSubpaths: ${JSON.stringify(name)} must be a plain file or directory name`);
   const protectedSubpaths = [...new Set(names)].sort();
   const unprotectedSubpaths: string[] = [];
