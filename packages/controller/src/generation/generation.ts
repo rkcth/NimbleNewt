@@ -2,7 +2,7 @@ import { DISPATCHER_PRINCIPAL } from "../security/task-credentials.js";
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { fence as checkFence, type Fence } from "../domain/assignment-model.js";
+import { fence as checkFence, isAgentOwner, type Fence } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { EffectBody, EffectBridge, EffectOutcome, EffectService } from "../domain/effects.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
@@ -747,7 +747,7 @@ export class GenerationService {
     if (viewer.id === run.owner) return allows(viewer, "attempt.work", run.projectId, resource);
     if (!allows(viewer, "assignment.read", run.projectId, resource)) return false;
     const assigned = await this.#assignments?.getAssignment(run.taskId);
-    if (assigned?.owner?.id === viewer.id) return true;
+    if (isAgentOwner(assigned?.owner, viewer)) return true;
     if (this.#readers.roles === undefined || this.#readers.reviewAssignments === undefined) return false;
     const roles = await this.#readers.roles(viewer.id, { projectId: run.projectId, taskId: run.taskId }, viewer);
     if (!roles.includes("reviewer")) return false;

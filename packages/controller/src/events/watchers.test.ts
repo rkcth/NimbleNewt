@@ -626,6 +626,44 @@ for (const backend of backends) {
     assert.deepEqual(await watches.consumeWakes(c.disp, { wake: async () => "woken" }), { woken: 0, deferred: 0, scanLimited: false });
   });
 
+  suite("an agent named by its bare ID in a real assignment reads, extends and settles its own handling; a person or role owner with the same name does not make it the owner", async (c) => {
+    // Real assignments name an agent by its bare ID (`{ kind: "agent", id: "cal" }`, as the chat, check runs and meetings assign), while the agent signs in as `agent:cal`. Cal may not read the
+    // project's histories, so only being the owner lets it see the handling.
+    await c.principals.enroll(c.owner, { commandId: cid("e"), kind: "agent", name: "cal", grants: [{ action: "attempt.work", project: c.a }] });
+    const cal = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:cal")).token);
+    const taskFor = async (owner: { kind: string; id: string }) => {
+      const t = (await c.projects.createTask({ commandId: cid("t"), actor: "owner:rob", projectId: c.a, title: `for ${owner.kind} ${owner.id}` })).id;
+      await c.projects.transitionTask({ commandId: cid("r"), actor: "owner:rob", taskId: t, expectedRevision: 1, to: "ready" });
+      await c.assign.assignTask({ commandId: cid("as"), actor: "owner:rob", taskId: t, owner });
+      const w = await c.watch(t);
+      await c.events.publish(c.disp, { commandId: cid("p"), stream: `task:${t}`, kind: "file.changed", ref: { kind: "file", id: "a" } });
+      const d = await c.watches.dispatch(c.disp, w);
+      assert.equal(d.status, "scheduled", JSON.stringify(d));
+      return (d as { handlingId: string }).handlingId;
+    };
+    const mine = await taskFor({ kind: "agent", id: "cal" });
+    assert.deepEqual((await c.watches.inspect(c.owner, mine))!.handling.owner, { kind: "agent", id: "cal" }, "the handling copies the assignment's bare ID");
+    assert.ok(await c.watches.inspect(cal, mine), "the owning agent reads its own handling");
+    const api = new StateApi({ principals: c.principals, projects: c.projects, assignments: c.assign, watches: c.watches } as never);
+    const read = await api.handle((await c.principals.issueCredential(c.owner, "agent:cal")).token, { v: 1, op: "events.handling", args: { handlingId: mine } });
+    assert.ok(read.ok, JSON.stringify(read));
+    await c.watches.extendLease(cal, { commandId: cid("ex"), handlingId: mine, seconds: 60 });
+    assert.equal((await c.watches.settle(cal, { commandId: cid("st"), handlingId: mine, outcome: "failed", detail: "could not finish" })).state, "failed");
+    assert.deepEqual((await c.watches.failures(cal)).items.map((i) => i.id), [mine], "the owning agent lists its own failed handling");
+    assert.equal((await c.watches.settle(cal, { commandId: cid("st"), handlingId: mine, outcome: "abandoned" })).state, "abandoned");
+    // The same name under another owner kind is someone else: neither spelling makes cal its owner.
+    for (const owner of [{ kind: "person", id: "cal" }, { kind: "person", id: "agent:cal" }, { kind: "role", id: "agent:cal" }]) {
+      const theirs = await taskFor(owner);
+      assert.equal(await c.watches.inspect(cal, theirs), undefined, `${owner.kind} ${owner.id}`);
+      await refuses("not_found", () => c.watches.extendLease(cal, { commandId: cid("ex"), handlingId: theirs, seconds: 60 }));
+      await refuses("not_found", () => c.watches.settle(cal, { commandId: cid("st"), handlingId: theirs, outcome: "completed" }));
+      await c.watches.settle(c.owner, { commandId: cid("st"), handlingId: theirs, outcome: "completed" });
+    }
+    // The prefixed spelling still works.
+    const prefixed = await taskFor({ kind: "agent", id: "agent:cal" });
+    assert.equal((await c.watches.settle(cal, { commandId: cid("st"), handlingId: prefixed, outcome: "completed" })).state, "settled");
+  });
+
   suite("a lease can be extended a few times and never past a day; a lease-expired handling can still be completed late", async (c) => {
     const stream = `task:${c.t1}`;
     const w = await c.watch(c.t1);

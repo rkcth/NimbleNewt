@@ -4,6 +4,7 @@ import { FaultInjectingStorage } from "../storage/faults.js";
 import {
   ASSIGNMENT_EVENTS, AssignmentService, DeliveryDispatcher, assignmentIdOf, DomainError, assignmentEventId, derivedId, type AssignmentEvent, type DomainErrorCode, type Fence, type Owner,
 } from "./index.js";
+import { isAgentOwner } from "./assignment-model.js";
 import { ProjectService } from "./service.js";
 import { backends, stopServer, type World } from "./testing/backends.js";
 
@@ -25,6 +26,21 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, check
     return true;
   });
 };
+
+test("isAgentOwner: an agent owner in bare or prefixed spelling is the agent principal of that name, and nobody else", () => {
+  const cal = { kind: "agent", id: "agent:cal" };
+  assert.equal(isAgentOwner({ kind: "agent", id: "cal" }, cal), true);
+  assert.equal(isAgentOwner({ kind: "agent", id: "agent:cal" }, cal), true);
+  assert.equal(isAgentOwner(undefined, cal), false);
+  assert.equal(isAgentOwner({ kind: "agent", id: "ann" }, cal), false);
+  assert.equal(isAgentOwner({ kind: "agent", id: "agent:agent:cal" }, cal), false);
+  // Whole IDs only: an agent whose name contains, ends or starts with the owner's ID is someone else.
+  for (const name of ["pascal", "cal-2", "xcalx"]) for (const id of ["cal", "agent:cal"]) assert.equal(isAgentOwner({ kind: "agent", id }, { kind: "agent", id: `agent:${name}` }), false, `${name} ${id}`);
+  assert.equal(isAgentOwner({ kind: "agent", id: "cal-2" }, cal), false);
+  for (const kind of ["person", "role", "team", "owner"]) for (const id of ["cal", "agent:cal"]) assert.equal(isAgentOwner({ kind, id }, cal), false, `${kind} ${id}`);
+  // Only an agent principal: a host, client, service or owner principal whose ID an agent owner happens to carry is not that owner.
+  for (const kind of ["host", "client", "service", "owner"]) assert.equal(isAgentOwner({ kind: "agent", id: `${kind}:cal` }, { kind, id: `${kind}:cal` }), false, kind);
+});
 
 for (const backend of backends) {
   const suite = (name: string, body: (ctx: { projects: ProjectService; assign: AssignmentService; world: World; epoch: number }) => Promise<void>) =>

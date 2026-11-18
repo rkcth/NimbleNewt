@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAgentOwner } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -105,7 +106,7 @@ const HANDLING_ID = /^evh-[a-z2-7]{20}$/;
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const clean = (value: string, max: number): string => redactText(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
-const owns = (by: Principal, h: HandlingBody): boolean => by.kind === "owner" || by.kind === "service" || by.id === h.owner.id;
+const owns = (by: Principal, h: HandlingBody): boolean => by.kind === "owner" || by.kind === "service" || isAgentOwner(h.owner, by);
 
 /**
  * Turning events into work for the owning agent (card H13). A **watch** ties an event subscription (H06) to a task: events of its stream wake the task's current owner. `dispatch` pulls a
@@ -602,7 +603,7 @@ export class WatchService {
   }
 
   async #watch(id: string): Promise<Aggregate | undefined> { return typeof id === "string" && WATCH_ID.test(id) ? this.#runner.get(WATCH_KIND, id) : undefined; }
-  #mayRead(by: Principal, h: HandlingBody): boolean { return by.kind === "owner" || by.id === h.owner.id || allows(by, "history.read", h.projectId); }
+  #mayRead(by: Principal, h: HandlingBody): boolean { return by.kind === "owner" || isAgentOwner(h.owner, by) || allows(by, "history.read", h.projectId); }
 
   async #loopHeld(stream: string, kind: string, ref: { kind: string; id: string }): Promise<boolean> {
     const found = await this.#runner.get(LOOP_KIND, loopIdOf(stream, kind, ref));
