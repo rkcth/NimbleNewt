@@ -13931,3 +13931,19 @@ Four cells failed, with three causes. Everything else was green.
 | `start-resume-off-loop.test.js` | 80 of 80 |
 
 **Skipped:** the full controller suite and the other packages (no other code changed); the Windows-only real-host tests and any Windows or macOS run, so the libuv job behaviour itself is confirmed only by the next CI run. This round is final.
+
+**Clean-context second review of ci-fix2 (at d12bb74f): no defects found, so no code was changed.**
+- `resume.ts` `advance`, "reviewing" step:
+  - The guard is added with no await between `has` and `add`.
+  - Every exit after that goes through the `finally` that releases it: the `continue` when the fresh read is no longer "reviewing", the not-run write, both blocks, the verdict write, and a throw from the fresh `#get`, the reviewer or `#update`.
+  - Everything after the guard uses the fresh copy `fb`: the open changes, the base verdicts, the block's `blocks` count and the done test. Nothing still uses the stale `b`.
+- Step budget: a stale "reviewing" costs one of the 10 steps; the next step reads "ready" and returns. The phase guards in `#update` and `#block` are unchanged, so a write cannot land twice.
+- Read-after-write: `runner.get` reads storage directly with no cache. The other advance releases the guard only after its write has committed, so a read started after the guard is taken sees that write on all four backends.
+- Sweep and dispatcher: there is one production `ResumeCheckService` (`api/start.ts`), so the in-memory guard covers both within one process. The guard is still per process, as before (multi-process caveat unchanged).
+- Mutation check: with the fresh read replaced by the stale `b`, the new test fails on all 4 backends ("the reviewer was asked once"). After restoring, the `resume.ts` sha256 was 8b1665dd...2336, the same as before, and the build was redone.
+- Recovery-code test: checked the padding-only branch (the 52nd character's top bit is the key bit) and the 9 x 56 x 31 count.
+- Ran (Linux, installed tsc, through `/tmp/nn-slot.sh`):
+  - Controller `continuation`, `backup`, `api/start-resume*`, `dispatch/resume*` and `chat/resume*` (59 files): 863 of 863 pass.
+  - Worker suite: 545 tests, 544 pass, 1 skipped.
+  - Under 12 busy node loops (load 10 to 17), 10 rounds each of `resume-review-once`, `encryption-manage`, `windows-real-run` and `start-resume-off-loop`: 40 of 40 runs pass.
+- Skipped: Windows and macOS (the job-object change is confirmed only by CI), the rest of the controller suite, and the other packages.
