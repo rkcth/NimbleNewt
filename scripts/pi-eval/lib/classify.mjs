@@ -3,7 +3,7 @@
 // Plain Node ESM, no dependencies; paths are never built here, so it is the same on every platform.
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { STORED_ARGS_LIMIT, argTexts } from "./tool-args.mjs";
+import { CALL_LIMIT, SMALL_CALL_LIMIT, STORED_ARGS_LIMIT, SUMMARY_LIMIT, argTexts } from "./tool-args.mjs";
 
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
 export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "server-rejected-history", "error", "unclassified"]);
@@ -102,7 +102,7 @@ export function newSummary() {
     // toolCommands: each call's argument JSON, cut to STORED_ARGS_LIMIT characters (a record kept for size; toolCommandsCut
     // counts the cut ones). toolTexts: what each call names, read from its full parsed arguments (lib/tool-args.mjs), which
     // is what the contamination checks read (card W01e: a cut record named a shortened path or read edit text as a command).
-    turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [], toolCommandsCut: 0, toolTexts: [],
+    turns: 0, assistantMessages: 0, toolCalls: 0, toolErrors: 0, toolCommands: [], toolCommandsCut: 0, toolTexts: [], toolTextChars: 0, toolTextsCut: 0,
     tokens: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
     // Model replies that carried no input and output token counts: their use is unknown (a budgeted batch stops on it).
     usageMissing: 0,
@@ -125,12 +125,20 @@ export function addEvent(s, e) {
     case "tool_execution_start":
       s.toolCalls++;
       // Kept bounded: only used to look for a run that read the hidden solution from elsewhere.
-      if (s.toolCommands.length < 5000) {
+      {
         const json = JSON.stringify(e.args ?? {}) ?? "{}";
         const argsCut = json.length > STORED_ARGS_LIMIT;
-        if (argsCut) s.toolCommandsCut++;
-        s.toolCommands.push(json.slice(0, STORED_ARGS_LIMIT));
-        s.toolTexts.push({ ...argTexts(e.args ?? {}, e.toolName), argsCut });
+        if (s.toolCommands.length < 5000) {
+          if (argsCut) s.toolCommandsCut++;
+          s.toolCommands.push(json.slice(0, STORED_ARGS_LIMIT));
+        }
+        // Every call is read (not only the first 5,000), bounded in size: CALL_LIMIT per call until the run's calls hold
+        // SUMMARY_LIMIT characters, SMALL_CALL_LIMIT per call after that. toolTextsCut counts the calls kept head and tail.
+        const room = SUMMARY_LIMIT - s.toolTextChars;
+        const t = argTexts(e.args ?? {}, e.toolName, { limit: Math.max(SMALL_CALL_LIMIT, Math.min(CALL_LIMIT, room)) });
+        s.toolTextChars += t.chars;
+        if (t.textsCut) s.toolTextsCut++;
+        s.toolTexts.push({ ...t, argsCut });
       }
       if (typeof e.args?.command === "string" && TEST_COMMAND.test(e.args.command)) s.pendingTests.add(e.toolCallId);
       break;

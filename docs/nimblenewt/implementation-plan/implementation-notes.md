@@ -14080,3 +14080,55 @@ The old classifier reproduces both records' stored flags exactly; neither run ha
 **Skipped.** Any real bench run (no Radiance request); the rest of the repository's suites (no product code changed); Windows and macOS.
 - ASSUMPTION: a tool with no recorded name keeps the strict reading (its `command` is a command), since older records and the stub agents may carry none.
 - ASSUMPTION: the reference marks follow the same rule as paths (file content and edit text are not read). A solution SHA seen in written code would have had to come from a command or a read, and those are still checked.
+
+### W01e review (Claude agent, Opus 5.5, 2026-11-18): one round, final
+
+Reviewed `5563836f` for whether the detector errs strict, checked against Pi's real tool set (bash, powershell, edit, find, grep, ls, read, write) and the 45 run folders in `eval-results/runs` (they use only bash, edit, read, write).
+
+**Defects found and fixed (`lib/tool-args.mjs`, `lib/isolation.mjs`, `lib/classify.mjs`, `lib/runner.mjs`).**
+- A shell command in a field other than a top-level `command`/`cmd`/`script` was read only as a path, so it was never checked for a push or a remote. Missed shapes: `args`, `input`, `cmdline`, `commands`, `bash`, a nested `params.command`, and an argv list (`command: ["git", "push"]`). Now:
+  - for a call with no tool name, command-like fields at any depth are commands, and string lists are also read joined;
+  - for a named tool that is not a file tool, every string is a command, content fields included.
+- A content key hid everything below it, so `edits: [{ path }]` was not read. Now only a string directly in a content field is skipped; an object inside one is read field by field.
+- A text over 65,536 characters kept only its head, so a push after a long heredoc was missed. Strings past 256 per call, and anything deeper than 8 levels, were dropped without a mark. Now:
+  - a long text keeps its head and its tail (`cutStart` marks the tail);
+  - texts past a call's room are joined and kept head and tail;
+  - a too-deep value is read whole as one text;
+  - such a call carries `textsCut`.
+- No size bound on the in-memory `toolTexts`: 5,000 calls × 256 texts × 64 KiB. Now bounded:
+  - 256 KiB per call;
+  - after a run's calls hold 16 Mi characters, 4 KiB per call.
+  - All calls are now read, not only the first 5,000. The stored `toolCommands` copies keep their 5,000 bound.
+  - The run record gets `toolTextsCut`, the number of calls kept head and tail. The field is optional and additive.
+- `wholePart` alone made cut texts less strict than before: `git push|` and `echo $SSH_AUTH_SOCK|` at the cut were no longer seen. A cut text is now read both as far as it is visible and up to its last whole word.
+- A remote command that runs to the cut now counts as `remote`, because its address is not known. Before, `git remote add o ht|` read as local.
+
+**Checked, no change.**
+- The reference-folder check still catches a Claude `Read` `file_path`, a Pi `read` `path`, and shell commands.
+- Tool results are not read. They show what came back, not what the agent asked for.
+- The three behaviour changes beyond the fix are right:
+  - a file tool's `command` field is not run (Claude's `str_replace_editor` names its action there);
+  - nested strings are now searched (stricter);
+  - marks no longer match inside written text (a read of the reference still goes through a command or a path field).
+- Older records stay readable. The fallback on the stored cut copies flags the same real runs.
+- `results.jsonl` only gains optional fields.
+- A test in the card's own file used the invented tool name `multi` for its nested-path case. It now uses a call with no tool name; under the review rule a named tool that is not a file tool reads every string as a command.
+- ASSUMPTION: a named tool that is not a file tool reading content fields as commands could flag a todo-style tool whose text mentions `git push`. The bench runs only Pi, whose only such tools are bash and powershell, so strict wins.
+
+**Replay (read only, every run folder with an `agent.jsonl`, 45).**
+- Origin/main, the card's commit and this review were compared.
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean under the card and the review. Under origin/main they were flagged.
+- `grant-proposals-B-r1-20261117T094724` is still flagged under all three, from both the full arguments and the stored cut copies:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+- The other flagged runs keep their flags. Exceptions:
+  - `landing-proposal-B-r1-20261111T083657` loses `/srv/code/worktrees-pi/eval-work/eval-la`, a cut prefix of its own checkout;
+  - `flaky-proposal-B-r3-20261110T234535` newly shows `/home/rob`, which is real: a bash Python script past 2,000 characters sets `HOME=/home/rob`.
+- The review's lib gives the same result as the card's on all 45 runs. No real run reaches a size cap.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 166 of 166 pass, none skipped. That is 163 plus 3 review tests: unexpected command fields and argv lists, readings at the cut, and the size bounds with head and tail kept.
+- Build: `tsc --build --force packages/pi-adapter packages/worker`, run with the installed TypeScript through a temporary worktree `node_modules`, removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.

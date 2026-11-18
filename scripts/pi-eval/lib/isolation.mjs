@@ -553,12 +553,14 @@ function shellSegments(c) {
 }
 
 /** The kinds seen in one shell command. */
-function commandKinds(c, found) {
+function commandKinds(c, found, cut = false) {
   if (PUSH.test(c)) found.add("push");
+  // In a text cut at a size limit, a remote command that runs to the cut has an address that is not known.
+  const toCut = (m) => cut && m.index + m[0].length === c.length;
   const r = REMOTE.exec(c);
-  if (r && nonLocalAddress(r[1] ?? "")) found.add("remote");
+  if (r && (nonLocalAddress(r[1] ?? "") || toCut(r))) found.add("remote");
   const rc = REMOTE_CONFIG.exec(c);
-  if (rc && nonLocalAddress(`x ${rc[1] ?? ""}`)) found.add("remote");
+  if (rc && (nonLocalAddress(`x ${rc[1] ?? ""}`) || toCut(rc))) found.add("remote");
   for (const segment of shellSegments(c)) {
     let prog = "";
     try { prog = programOf(segment); } catch { /* unbalanced quotes: searched in full */ }
@@ -574,15 +576,18 @@ function commandKinds(c, found) {
  * kinds seen, sorted. Detection only: a command assembled at run time is not seen.
  *   commands: one entry per call, either summary.toolTexts (read from the full parsed arguments) or an argument JSON
  *   string (summary.toolCommands, older records). See lib/tool-args.mjs: only a shell tool's `command`/`cmd`/`script`
- *   is read as a command, its other fields and a file tool's fields as paths, and file content and edit text not at all.
- *   A text cut at a size limit counts only up to its last whole word (`git pu|` is not a push, `git push |` is).
+ *   and the like are read as commands, a file tool's fields as paths, and file content and edit text not at all.
+ *   A text cut at a size limit is read as far as it is visible and up to its last whole word (`git pu|` is not a push,
+ *   `git push|` is).
  */
 export function credentialAttempts(commands) {
   const found = new Set();
   for (const entry of commands) {
     const t = toolCallTexts(entry);
-    for (const c of t.commands) commandKinds(wholePart(c), found);
-    for (const p of t.paths) if (CREDENTIALS.test(wholePart(p))) found.add("credentials");
+    // A cut text is read both as far as it is visible and up to its last whole word: each reading can see what the other
+    // misses (`git push|` or `$SSH_AUTH_SOCK|` at the cut); a remote command that runs to the cut has an unknown address.
+    for (const c of t.commands) { commandKinds(c.text, found, c.cut); if (c.cut) commandKinds(wholePart(c), found); }
+    for (const p of t.paths) if (CREDENTIALS.test(p.text) || (p.cut && CREDENTIALS.test(wholePart(p)))) found.add("credentials");
   }
   return [...found].sort();
 }

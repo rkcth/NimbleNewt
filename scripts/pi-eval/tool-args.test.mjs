@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { summarizeLogText } from "./lib/classify.mjs";
 import { credentialAttempts } from "./lib/isolation.mjs";
 import { foreignPaths, namesMark } from "./lib/runner.mjs";
-import { STORED_ARGS_LIMIT, argTexts, parseVisible, toolCallTexts, wholePart } from "./lib/tool-args.mjs";
+import { CALL_LIMIT, SMALL_CALL_LIMIT, STORED_ARGS_LIMIT, SUMMARY_LIMIT, TEXT_LIMIT, argTexts, parseVisible, toolCallTexts, wholePart } from "./lib/tool-args.mjs";
 
 const own = "/srv/code/worktrees-pi/eval-work/eval-l02e-2-B-r1-20261118T080448";
 const watched = ["/srv/code/repos/nimblenewt", "/srv/code/repos", "/srv/code/worktrees-pi/eval-results", "/srv/code/worktrees-pi"];
@@ -57,7 +57,8 @@ test("a real push, a real foreign path and the owner's keys are still flagged, f
   assert.deepEqual(argTexts({ command: "git push", path: "/x" }, "read").commands, []);
   assert.deepEqual(argTexts({ command: "git push" }).commands.map((c) => c.text), ["git push"]);
   // Nested path fields are read too; nested content fields are not.
-  assert.deepEqual(argTexts({ files: [{ path: "/a" }, { path: "/b", content: "git push" }] }, "multi").paths.map((p) => p.text), ["/a", "/b"]);
+  // (Review: a call with no tool name; a named tool that is not a file tool now reads every string as a command.)
+  assert.deepEqual(argTexts({ files: [{ path: "/a" }, { path: "/b", content: "git push" }] }).paths.map((p) => p.text), ["/a", "/b"]);
 });
 
 test("a stored argument string that is not valid JSON (cut at its size limit): only what a strict reading of the visible text supports is flagged, and the reading says so", () => {
@@ -97,4 +98,64 @@ test("the tolerant reader: complete values parsed, the value a cut ends inside k
   assert.equal(parseVisible('{"a" "x"}'), undefined, "a syntax error before the end is not JSON");
   assert.equal(wholePart({ text: "git push orig", cut: true }), "git push ");
   assert.equal(wholePart({ text: "git push orig", cut: false }), "git push orig");
+});
+
+test("review: a command in an unexpected field, nested, or as an argv list is still read as a command", () => {
+  const push = (args, tool) => credentialAttempts([argTexts(args, tool)]);
+  for (const tool of ["bash", "powershell", "shell", "Bash", null]) {
+    for (const key of ["args", "input", "cmdline", "script", "commands", "bash", "argv"]) {
+      assert.deepEqual(push({ [key]: "git push origin HEAD" }, tool), ["push"], `${tool} ${key}`);
+      assert.deepEqual(push({ [key]: ["git", "push", "origin"] }, tool), ["push"], `${tool} ${key} as a list`);
+      assert.deepEqual(push({ params: { [key]: "git push origin HEAD" } }, tool), ["push"], `${tool} nested ${key}`);
+    }
+  }
+  // A named tool that is not a file tool reads every string, content fields too.
+  assert.deepEqual(push({ text: "git push x" }, "shell"), ["push"]);
+  assert.deepEqual(push({ options: { whatever: "git remote add o https://example.invalid/x" } }, "run_command"), ["remote"]);
+  // An object inside a content field is read field by field: a path there is not hidden.
+  assert.deepEqual(foreignPaths([argTexts({ edits: [{ path: "/srv/code/repos/nimblenewt/a.ts", newText: "x" }] }, "edit")], { ownDir: own, watched }), ["/srv/code/repos/nimblenewt/a.ts"]);
+  assert.deepEqual(foreignPaths([argTexts({ edits: [{ oldText: "/srv/code/repos/nimblenewt/a.ts", newText: "x" }] }, "edit")], { ownDir: own, watched }), [], "edit text stays data");
+  // Deeper than any real call: read whole, not left out.
+  let deep = { command: "git push x" };
+  for (let k = 0; k < 12; k++) deep = { a: deep };
+  assert.deepEqual(push(deep, "bash"), ["push"]);
+  assert.deepEqual(push(deep, null), ["push"]);
+  // A file tool's own `command` field is a path-like text (Claude's `str_replace_editor` names its action there).
+  assert.deepEqual(argTexts({ command: "view", path: "/x" }, "Edit").commands, []);
+});
+
+test("review: a cut text is read as far as it is visible and to its last whole word", () => {
+  assert.deepEqual(credentialAttempts(['{"command":"cd x && git push']), ["push"], "a push at the cut");
+  assert.deepEqual(credentialAttempts(['{"command":"echo $SSH_AUTH_SOCK']), ["credentials"], "a socket name at the cut");
+  assert.deepEqual(credentialAttempts(['{"command":"git remote add o ht']), ["remote"], "an address the cut shortened is not known to be local");
+  assert.deepEqual(credentialAttempts(['{"command":"git pu']), []);
+});
+
+test("review: texts are bounded per call and per run, keep head and tail, and are marked; nothing is dropped unread", () => {
+  // A command longer than TEXT_LIMIT: the push after it is in the tail.
+  const t = argTexts({ command: `cat > a <<'EOF'\n${"y".repeat(TEXT_LIMIT * 3)}\nEOF\ngit push gh HEAD` }, "bash");
+  assert.equal(t.textsCut, true);
+  assert.ok(t.chars <= TEXT_LIMIT);
+  assert.deepEqual(credentialAttempts([t]), ["push"]);
+  assert.equal(t.commands[1].cutStart, true);
+  // Many large path fields: the call stays within its room; a foreign path after them is still seen.
+  const many = { files: Array.from({ length: 400 }, (_, k) => `/w/${k}/${"z".repeat(3000)}`).concat(["/srv/code/repos/nimblenewt/late.ts"]) };
+  const m = argTexts(many, "read");
+  assert.equal(m.textsCut, true);
+  assert.ok(m.chars <= CALL_LIMIT + 2 * TEXT_LIMIT, `${m.chars}`);
+  assert.deepEqual(foreignPaths([m], { ownDir: own, watched }), ["/srv/code/repos/nimblenewt/late.ts"]);
+  // A run whose calls are huge: the summary stays bounded and every call is read.
+  const huge = "q".repeat(CALL_LIMIT * 2);
+  const lines = [];
+  for (let k = 0; k < Math.ceil(SUMMARY_LIMIT / CALL_LIMIT) + 30; k++) lines.push(call("bash", { command: `echo ${huge}` }, `c${k}`));
+  lines.push(call("bash", { command: `echo ${huge}; git push x` }, "last"));
+  const s = summarizeLogText(lines.join("\n"));
+  assert.ok(s.toolTextChars <= SUMMARY_LIMIT + 31 * SMALL_CALL_LIMIT + 2 * TEXT_LIMIT, `${s.toolTextChars}`);
+  assert.equal(s.toolTexts.length, lines.length);
+  assert.equal(s.toolTextsCut, lines.length);
+  assert.deepEqual(credentialAttempts(s.toolTexts.slice(-1)), ["push"], "the last call is read, its tail kept");
+  // Calls past the stored copies' 5,000 are still read.
+  const after = summarizeLogText(Array.from({ length: 5002 }, (_, k) => call("bash", { command: k === 5001 ? "git push x" : "ls" }, `c${k}`)).join("\n"));
+  assert.equal(after.toolCommands.length, 5000);
+  assert.deepEqual(credentialAttempts(after.toolTexts), ["push"]);
 });

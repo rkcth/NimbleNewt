@@ -416,7 +416,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
       // The log shows no model reply, or a reply without token counts: the run's token use is not known (0 is not a reading).
       ...(summary.assistantMessages === 0 || summary.usageMissing > 0 ? { tokensUnknown: true } : {}),
       plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
-      credentialAttempts: attempts, guardRefusals, ...(summary.toolCommandsCut > 0 ? { toolArgsCut: summary.toolCommandsCut } : {}), ...(guardRefusalsInTests > 0 ? { guardRefusalsInTests } : {}),
+      credentialAttempts: attempts, guardRefusals, ...(summary.toolCommandsCut > 0 ? { toolArgsCut: summary.toolCommandsCut } : {}), ...(summary.toolTextsCut > 0 ? { toolTextsCut: summary.toolTextsCut } : {}), ...(guardRefusalsInTests > 0 ? { guardRefusalsInTests } : {}),
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });

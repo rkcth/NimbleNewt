@@ -189,9 +189,13 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   `guardRefusalsInTests` (tagged, not counted; the report prints "refused inside project tests: N, not counted") and
   `isolation` (what applied to the run). File
   content the agent writes is not searched (code may talk about pushing). The checks read each call's full parsed
-  arguments (`lib/tool-args.mjs`, card W01e): only a shell tool's `command`/`cmd`/`script` is read as a command, a
-  file tool's `path`-like fields as paths, and edit text and file content not at all; the copy of each call kept in the
-  summary is still cut to 2,000 characters (records carry `toolArgsCut`, the number cut). A contaminated run is left out of the report's
+  arguments (`lib/tool-args.mjs`, card W01e): a file tool's (read, write, edit, grep, find, ls) fields are read as paths
+  and its edit text and file content not at all; a named tool that is not a file tool (bash, powershell, any other) has
+  every string read as a command; a call with no tool name has its command-like fields (`command`, `cmd`, `script`,
+  `args`, `input`, ... at any depth, argv lists joined) read as commands, the rest as paths, content not at all. Every
+  call is read; the texts are bounded (64 KiB per text, 256 KiB per call, 4 KiB per call once a run's calls hold
+  16 Mi characters), keeping each text's head and tail; records carry `toolTextsCut` (calls so cut). The copy of each
+  call kept in the summary is still cut to 2,000 characters (records carry `toolArgsCut`, the number cut). A contaminated run is left out of the report's
   table and gates (`report.mjs`, the batch's own report) and is never a verified finish; the report names them and their
   kinds, and `compare.mjs` shows them as `C`.
 
