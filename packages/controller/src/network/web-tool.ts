@@ -112,7 +112,8 @@ export class WebFetch {
   /**
    * Card P04 (remote host acted on with no worker there): one request that may change something, under exactly the web tool's rules (a live grant of the task for that host and port, the one checked address, private addresses only when
    * the grant names them, no credential but the grant's own header, no redirect followed, logged in the task's connection log as `remote-action`). The body, when given, is sent as JSON. Only the status comes back: the answer's
-   * text is read (at most 4 KiB) and dropped, never handed to anyone. A refusal (`NetworkRefused`, `DomainError`) says why nothing was sent.
+   * text is read (at most 4 KiB) and dropped, never handed to anyone. A `NetworkRefused`, or a `DomainError` other than `unavailable`, says why nothing was sent; `unavailable` is a request that failed once it was under way
+   * (a timeout, a reset), so it may have reached the service.
    */
   async act(ctx: NetworkContext, rawUrl: string, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body: unknown, signal?: AbortSignal): Promise<{ readonly status: number }> {
     const url = webUrl(rawUrl);

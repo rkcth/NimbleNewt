@@ -31,13 +31,16 @@ interface Seen { readonly method: string; readonly path: string; readonly body: 
 /** The stand-in host: answers each method and path as `routes` says (default 200), and keeps what it was sent. */
 async function standIn(): Promise<{ server: Server; port: number; seen: Seen[]; routes: Map<string, number> }> {
   const seen: Seen[] = [];
+  /** A status of 0 never answers (the request runs into the web tool's time bound); a 3xx points elsewhere. */
   const routes = new Map<string, number>();
   const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
       seen.push({ method: req.method ?? "", path: req.url ?? "", body: Buffer.concat(chunks).toString("utf8"), agent: String(req.headers["user-agent"] ?? "") });
-      res.writeHead(routes.get(`${req.method} ${req.url}`) ?? 200, { "content-type": "text/plain" });
+      const status = routes.get(`${req.method} ${req.url}`) ?? 200;
+      if (status === 0) return;
+      res.writeHead(status, { "content-type": "text/plain", ...(status >= 300 && status < 400 ? { location: "/elsewhere" } : {}) });
       res.end("server text that must never reach the agent");
     });
   });
@@ -69,7 +72,7 @@ for (const backend of backends) {
         const incidents = IncidentService.withEpoch(w.storage, w.epoch, duties, w.options);
         const leases = MaintenanceLeaseService.withEpoch(w.storage, w.epoch, duties, incidents, w.options);
         const network = NetworkGrantService.withEpoch(w.storage, w.epoch, w.options);
-        const web = new WebFetch({ grants: network, resolve: async () => { throw new Error("no name lookups in this test"); }, timeoutMs: 5000 });
+        const web = new WebFetch({ grants: network, resolve: async () => { throw new Error("no name lookups in this test"); }, timeoutMs: 1500 });
         const tool = remoteActionTool({ leases, resources: w.resources, duties, claimOf: async (id) => (await w.resources.heldClaim(id))?.responsibilityId, web, reachable: (t, h, p, a) => network.check(t, h, p, a) });
         const serviceOver = (dispatcher: Pick<DispatcherService, "get" | "toolOperation">): ToolExecutionService =>
           new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner: { run: async () => { throw new Error("no scripts here"); } }, pauses: w.pauses, desks, builtins: [tool], facts: async () => ({ os: "linux", arch: "x64", interpreters: {}, packages: {}, cpus: 8, memoryMb: 16_384 }), isLocalHost: () => true });
@@ -100,7 +103,7 @@ for (const backend of backends) {
         c.dispatcher = c.restart();
         await c.policy.set(c.owner, { scope: "installation", commandId: uid("pol"), profile: "autonomous" });
         await body(c);
-      } finally { await new Promise((r) => host.server.close(r)); await store.close(); }
+      } finally { host.server.closeAllConnections(); await new Promise((r) => host.server.close(r)); await store.close(); }
     });
 
   const args = (resourceId: string, extra: JsonObject = {}): JsonObject => ({ tool: TOOL, input: { resourceId, purpose: "restart the web service", action: { method: "POST", path: "/admin/restart", body: { graceful: true } }, check: { path: "/health" }, ...extra } });
@@ -215,4 +218,87 @@ for (const backend of backends) {
     assert.equal((await c.leases.list(c.owner, c.project, { resourceId: windowed.resource }))!.length, 0);
     assert.equal(c.host.seen.length, 0, "the stand-in host received nothing");
   });
+
+  suite("a redirect is not followed, a check that never answers ends the holding, the agent's own lease held by another call blocks, and a credential in the arguments is refused before anything is recorded", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: `tool.${TOOL}`, project: c.project }]);
+    const annP = await c.principals.authenticate((await c.principals.issueCredential(c.owner, ann.id)).token);
+    const redirected = await c.duty(ann.id, { escalation: { to: "owner" } });
+    const hanging = await c.duty(ann.id, { escalation: { to: "owner" } });
+    const ownHeld = await c.duty(ann.id);
+    const secret = await c.duty(ann.id);
+    const held = await c.leases.acquire(annP, { commandId: uid("l"), resourceId: ownHeld.resource, purpose: "a longer change" });
+    assert.equal(held.status, "granted");
+    const outs: JsonObject[] = []; let refused: BridgeResponse | undefined;
+    c.host.routes.set("POST /admin/restart", 302);
+    await c.attempt(ann, async (s) => {
+      outs.push(output(good(await s.send("tool.invoke", args(redirected.resource)))));
+      c.host.routes.set("POST /admin/restart", 200); c.host.routes.set("GET /health", 0);
+      outs.push(output(good(await s.send("tool.invoke", args(hanging.resource)))));
+      outs.push(output(good(await s.send("tool.invoke", args(ownHeld.resource)))));
+      refused = await s.send("tool.invoke", args(secret.resource, { action: { method: "POST", path: "/admin/restart", body: { password: "hunter2-not-real" } } }));
+    });
+    // The redirect: the 302 is the action's answer (not 2xx), so nothing is checked, and /elsewhere is never asked.
+    assert.deepEqual([outs[0]!["outcome"], (outs[0]!["action"] as JsonObject)["status"]], ["escalated", 302]);
+    // The check that never answers: a failed check within the web tool's time bound, the lease given back as failed and escalated.
+    assert.equal(outs[1]!["outcome"], "escalated", JSON.stringify(outs[1]));
+    assert.ok(typeof (outs[1]!["check"] as JsonObject)["error"] === "string");
+    for (const r of [redirected.resource, hanging.resource]) {
+      const lease = (await c.leases.list(c.owner, c.project, { resourceId: r }))![0]!;
+      assert.deepEqual([lease.status, lease.lastRelease?.validation, lease.lastRelease?.response], ["free", "failed", "escalate"]);
+      assert.ok(!lease.lastRelease!.evidence.includes("server text"));
+    }
+    // The agent's own lease, held for something else: the call is blocked, sends nothing, and leaves that holding alone.
+    assert.match(String(outs[2]!["note"]), /already holds the maintenance lease/);
+    assert.equal(outs[2]!["outcome"], "blocked");
+    const own = (await c.leases.list(c.owner, c.project, { resourceId: ownHeld.resource }))![0]!;
+    assert.deepEqual([own.status, own.holderId, own.generation], ["held", ann.id, 1]);
+    // The credential: refused before the dispatcher records the call or the ledger its intent.
+    assert.equal(refused!.ok, false, JSON.stringify(refused));
+    assert.match((refused as { message: string }).message, /look like they carry a credential/);
+    assert.ok(!JSON.stringify(refused).includes("hunter2"));
+    assert.equal((await c.leases.list(c.owner, c.project, { resourceId: secret.resource }))!.length, 0);
+    assert.deepEqual(c.host.seen.map((x) => `${x.method} ${x.path}`), ["POST /admin/restart", "POST /admin/restart", "GET /health"]);
+  });
 }
+
+/** The paths that do not need storage, over stand-in services: what is released, and what kind of failure the effect ledger is told, when something goes wrong on the way. */
+test("remote action: a failure before the lease is a refusal; a request refused before sending is escalated without a check or a rollback; a thrown error after the lease still releases it and is never a refusal", async () => {
+  const calls: string[] = [];
+  let releaseFails = 0;
+  let resourceFails = false;
+  let actRefused = false;
+  const tool = remoteActionTool({
+    leases: {
+      acquire: async () => { calls.push("acquire"); return { status: "granted", lease: { responsibilityId: "r1", renewals: 0 } } as never; },
+      release: async (_by, cmd) => { calls.push(`release ${cmd.validation}/${cmd.onFailure ?? "-"}`); if (releaseFails-- > 0) throw new Error("storage gave way"); return { lease: {} } as never; },
+    },
+    resources: { get: async () => { if (resourceFails) throw new Error("storage gave way"); return { projectId: "p1", state: "bound", locator: "http://198.51.100.7:8080/" } as never; } },
+    duties: { get: async () => ({ permittedActions: ["rollback"] }) as never, status: async () => ({ inMaintenanceWindow: false }) as never },
+    claimOf: async () => "r1",
+    reachable: async () => ({ live: true }),
+    web: { act: async (_ctx, url, method) => {
+      calls.push(`${method} ${new URL(url).pathname}`);
+      if (actRefused) { const e = new Error("the name now resolves to an address the grant does not allow"); e.name = "NetworkRefused"; throw e; }
+      return { status: method === "GET" ? 503 : 200 };
+    } },
+  });
+  const call = { attemptId: "a1", taskId: "t1", projectId: "p1", agent: { id: "agent:ann", kind: "agent" } as never, callId: "c1" };
+  const input = { resourceId: "res1", purpose: "restart", action: { method: "POST", path: "/restart" }, check: { path: "/health" }, rollback: { method: "POST", path: "/undo" } } as JsonObject;
+  const signal = new AbortController().signal;
+
+  resourceFails = true;
+  await assert.rejects(tool.run(call, input, signal), (e: unknown) => e instanceof Error && e.constructor.name === "DomainError" && /nothing was sent/.test(e.message));
+  assert.deepEqual(calls, [], "nothing leased or sent");
+  resourceFails = false;
+
+  actRefused = true;
+  const refused = await tool.run({ ...call, callId: "c2" }, input, signal);
+  assert.equal(refused["outcome"], "escalated");
+  assert.deepEqual(calls, ["acquire", "POST /restart", "release failed/escalate"], "no check and no rollback after a request that never went out");
+  actRefused = false; calls.length = 0;
+
+  releaseFails = 1;
+  await assert.rejects(tool.run({ ...call, callId: "c3" }, input, signal), (e: unknown) => e instanceof Error && e.constructor.name === "Error" && /stopped after it began/.test(e.message));
+  // The check failed, the rollback was sent and its release failed; the lease was then given back as escalated.
+  assert.deepEqual(calls, ["acquire", "POST /restart", "GET /health", "POST /undo", "release failed/rollback", "release failed/escalate"]);
+});

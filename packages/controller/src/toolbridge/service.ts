@@ -997,6 +997,8 @@ export class ToolExecutionService {
     if (!isObject(input)) return invalid("input", "must be a JSON object");
     const problems = checkValue(tool.input, input);
     if (problems.length > 0) throw new DomainError("invalid_command", `the arguments do not match ${tool.name} ${tool.version}: ${problems.slice(0, 5).join("; ")}`, { field: "input" });
+    // The arguments of an effect are kept whole on the effect ledger (its intent is recorded before it runs): text that would be redacted as a credential is refused here, before anything is recorded.
+    if (tool.effect !== undefined && redactText(JSON.stringify(input)) !== JSON.stringify(input)) throw new DomainError("invalid_command", `the arguments of ${tool.name} look like they carry a credential; they are kept on the effect ledger, so a credential belongs in the network grant, never in a call`, { field: "input" });
     const key = `${c.attemptId}\0${c.callId}`;
     this.#bridgeCalls.add(key);
     const call = { attemptId: c.attemptId, taskId: c.taskId, projectId: c.projectId, agent: c.agent, callId: c.callId };
