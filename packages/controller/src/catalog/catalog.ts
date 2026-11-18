@@ -146,11 +146,13 @@ export function audienceWords(audience: Audience | undefined): string {
   ];
   return parts.join("; ");
 }
-/** Whether a principal holds a live grant naming exactly this project (a grant for every project does not count): what "in the project" means for a project audience. */
+/**
+ * Whether a principal holds a live grant naming exactly this project (a grant for every project does not count): what "in the project" means for a project audience. The grant must also still be usable
+ * there (`allows`: not expired, not under a standing restriction, inside a task credential's project), so an agent the owner has restricted in a project is not counted as in it.
+ */
 const holdsIn = (by: Principal, project: string): boolean => {
   if (by.taskScope !== undefined && by.taskScope.projectId !== project) return false;
-  const now = new Date().toISOString();
-  return by.asOf !== undefined && by.grants.some((g) => g.project === project && (g.expiresAt === undefined || g.expiresAt > now));
+  return by.asOf !== undefined && by.grants.some((g) => g.project === project && allows(by, g.action, project, g.resource === undefined ? {} : { resource: g.resource }));
 };
 /** Whether an agent holds `toolbox.manage` anywhere (for every project, or for at least one). */
 export const maintainsAnywhere = (by: Principal): boolean => by.kind === "agent" && (allows(by, TOOLBOX_MANAGE, undefined) || by.grants.some((g) => g.project !== "*" && allows(by, TOOLBOX_MANAGE, g.project)));
@@ -465,6 +467,8 @@ export class CatalogService {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (entry === undefined || prior === undefined || !prior.versions.includes(command.version)) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
+        // A maintainer that may neither change nor read the entry learns nothing about it: the same answer as for a version that does not exist.
+        if (maintainer && prior.layer === "toolbox" && !mayManage(owner, prior.audience) && !(await this.#mayReadEntry(owner, prior))) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
         if (maintainer && (prior.layer !== "toolbox" || !mayManage(owner, prior.audience))) throw new DomainError("forbidden", `${owner.id} may not change ${command.name}: its ${TOOLBOX_MANAGE} does not cover that tool's audience`);
         if (mustBeLive && prior.revoked.includes(command.version)) throw new DomainError("invalid_command", "that version is revoked; roll back to one that is not", { field: "toVersion" });
         const add = choose(prior).filter((v) => !(prior.deprecated ?? []).includes(v));
@@ -813,6 +817,8 @@ export class CatalogService {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (entry === undefined || prior === undefined || prior.layer !== "toolbox") throw new DomainError("not_found", `${name} is not a shared tool`);
+        // A maintainer that may neither change nor read the entry learns nothing about it: the same answer as for a name that does not exist.
+        if (!mayManage(by, prior.audience) && !(await this.#mayReadEntry(by, prior))) throw new DomainError("not_found", `${name} is not a shared tool`);
         if (!mayManage(by, prior.audience)) throw new DomainError("forbidden", `${by.id} may not change ${name}: its ${TOOLBOX_MANAGE} does not cover that tool's present audience`);
         if (command.expectedRevision !== undefined && entry.revision !== command.expectedRevision) throw new DomainError("stale_revision", `${name} is at revision ${entry.revision}, not ${command.expectedRevision}`, { currentRevision: entry.revision });
         const next: EntryBody = { ...prior, audience };
@@ -907,7 +913,9 @@ export class CatalogService {
         if (prior !== undefined && prior.kind !== base.kind) throw new DomainError("invalid_command", `${canonical} is a ${prior.kind}; a name keeps its kind`, { field: "as" });
         // The shared entry must still be as it was read (not revoked in between), and the lineage gains this copy in the same write.
         const shared = await this.#runner.get(sref.kind, sref.id);
-        if (shared === undefined || (shared.body as unknown as EntryBody).revoked.includes(base.version)) throw new DomainError("invalid_command", `${base.name} ${base.version} was revoked`, { field: "version" });
+        // The audience is judged again on the entry this write is checked against: an agent taken out of it after the first read copies nothing.
+        if (shared === undefined || !(await this.#mayReadEntry(by, shared.body as unknown as EntryBody))) throw new DomainError("not_found", `no shared tool ${base.name} ${base.version} you may read`);
+        if ((shared.body as unknown as EntryBody).revoked.includes(base.version)) throw new DomainError("invalid_command", `${base.name} ${base.version} was revoked`, { field: "version" });
         const vref: AggregateRef = { kind: "catalog-version", id: versionId };
         const existing = await this.#runner.get(vref.kind, vref.id);
         if (existing !== undefined) {

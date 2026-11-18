@@ -9,7 +9,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ACTIONS } from "../security/access.js";
 import { AGREED_GRANTABLE_ACTIONS, AGREED_GRANTABLE_ON_ONE_SERVICE, AGREED_GRANTABLE_ON_ONE_TASK } from "../security/grants.js";
-import { PrincipalService, type Grant, type Principal } from "../security/index.js";
+import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { CatalogService, TOOLBOX_MANAGE, mayManage, personalNamespace, toolboxName, type HostFacts } from "./index.js";
 
 // Card T08 (first slice): the scoped toolbox.manage permission, audiences, read-only source, personal copies with provenance and fork lineage.
@@ -26,7 +27,7 @@ const host: HostFacts = { os: "linux", arch: "x64", interpreters: { node: "22.19
 
 for (const backend of backends) {
   interface Ctx {
-    cat: CatalogService; deps: DependencyService; desks: DeskService; agents: AgentService; principals: PrincipalService; owner: Principal; a: string; b: string; ta: string; tb: string; web: string;
+    cat: CatalogService; deps: DependencyService; desks: DeskService; agents: AgentService; principals: PrincipalService; owner: Principal; a: string; b: string; ta: string; tb: string; web: string; storage: ControllerStorage; epoch: number;
     /** An agent record with roles and a team, and its authenticated principal with these grants. */
     agent(name: string, grants: Grant[], extra?: { roles?: string[]; teamId?: string }): Promise<{ id: string; p: Principal; reauth(): Promise<Principal> }>;
     note(by: Principal, body: string, extra?: Record<string, unknown>): Promise<string>;
@@ -47,7 +48,7 @@ for (const backend of backends) {
         const web = (await agents.createTeam(owner, { commandId: cid("team"), name: "web" })).id;
         const desks = DeskService.withEpoch(world.storage, projects.epoch, options);
         await body({
-          cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), deps: DependencyService.withEpoch(world.storage, projects.epoch, options), desks, agents, principals, owner, a, b, ta, tb, web,
+          cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), deps: DependencyService.withEpoch(world.storage, projects.epoch, options), desks, agents, principals, owner, a, b, ta, tb, web, storage: world.storage, epoch: projects.epoch,
           agent: async (friendlyName, grants, extra = {}) => {
             const id = (await agents.create(owner, { commandId: cid("ag"), friendlyName, ...(extra.roles === undefined ? {} : { roles: extra.roles }), ...(extra.teamId === undefined ? {} : { teamId: extra.teamId }) })).id;
             const pid = `agent:${id}`;
@@ -242,5 +243,41 @@ for (const backend of backends) {
     // Once the owner widens the audience, the same reader is checked.
     await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { all: true } });
     await refuses("invalid_command", () => c.deps.record(rex.p, { commandId: cid("dep"), taskId: c.ta, dependencies: toolDep(wrong) }), /not the version's digest/);
+  });
+  suite("second review: an audience change during a copy stops it, a restricted agent is not in a project audience, and a maintainer learns nothing of an entry it may neither change nor read", async (c) => {
+    const ann = await c.agent("Ann", worker(c.a));
+    const cody = await c.agent("Cody", worker(c.a), { roles: ["coder"] });
+    const readme = await c.note(ann.p, "Run lint."); const code = await c.note(ann.p, "console.log('lint')");
+    await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.0.0", manifest, instructionsRecordId: readme, executableRecordId: code, audience: { roles: ["coder"] } } as never);
+    // The owner takes Cody out of the audience after the copy's first read of the entry and before its write (here: while it reads the released text back).
+    let hook: (() => Promise<void>) | undefined;
+    const storage = new Proxy(c.storage, { get(target, prop) {
+      if (prop === "getAggregate") return async (ref: { kind: string; id: string }) => { if (hook !== undefined && ref.kind === "desk-record") { const h = hook; hook = undefined; await h(); } return target.getAggregate(ref); };
+      const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+      return typeof v === "function" ? (v as (...args: unknown[]) => unknown).bind(target) : v;
+    } });
+    const racing = CatalogService.withEpoch(storage, c.epoch, c.desks, options);
+    hook = async () => { await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { roles: ["reviewer"] } }); };
+    await refuses("not_found", () => racing.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "my-lint" }), /you may read/);
+    assert.equal(hook, undefined, "the audience changed during the copy");
+    assert.equal(await c.cat.get(c.owner, `${personalNamespace(cody.p.id)}.my-lint`), undefined, "no copy was made");
+    assert.deepEqual((await c.cat.forks(c.owner, "lint")).forks, [], "nor recorded in the lineage");
+    // A project audience counts a grant only while it is usable there: a standing restriction in the project takes the agent out.
+    await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { projects: [c.a] } });
+    assert.notEqual(await c.cat.get(ann.p, "toolbox.lint"), undefined);
+    const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    for (const action of ["desk.write", "desk.read"]) await grants.restrict(c.owner, { commandId: cid("rs"), subject: ann.p.id, action, project: c.a, reason: "kept out of Garden" });
+    assert.equal(await c.cat.get(await ann.reauth(), "toolbox.lint"), undefined);
+    const annNow = await ann.reauth();
+    await refuses("not_found", () => c.cat.source(annNow, "lint"));
+    // A maintainer for Orchard only, outside the Garden audience: changing it is answered as for a tool that does not exist.
+    const pat = await c.agent("Pat", [{ action: "catalog.read", project: "*" }, { action: TOOLBOX_MANAGE, project: c.b }]);
+    for (const p of [{ name: "lint" }, { name: "nothing-here" }]) await refuses("not_found", () => c.cat.setAudience(pat.p, { commandId: cid("aud"), name: p.name, audience: { projects: [c.b] } }), /is not a shared tool/);
+    for (const name of ["toolbox.lint", "toolbox.nothing-here"]) await refuses("not_found", () => c.cat.deprecate(pat.p, { commandId: cid("dp"), name, version: "1.0.0", reason: "x" }), /is not in the catalog/);
+    await refuses("not_found", () => c.cat.forks(pat.p, "lint"));
+    // In the audience (a grant naming Garden) but not covering it: still refused as forbidden, as before.
+    const pia = await c.agent("Pia", [{ action: "catalog.read", project: "*" }, { action: "desk.read", project: c.a }, { action: TOOLBOX_MANAGE, project: c.b }]);
+    await refuses("forbidden", () => c.cat.setAudience(pia.p, { commandId: cid("aud"), name: "lint", audience: { projects: [c.b] } }), /present audience/);
+    await refuses("forbidden", () => c.cat.deprecate(pia.p, { commandId: cid("dp"), name: "toolbox.lint", version: "1.0.0", reason: "x" }));
   });
 }
