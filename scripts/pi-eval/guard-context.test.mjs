@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { IN_PROJECT_TESTS, guardLogCounts, inProjectTests } from "./lib/git-guard.mjs";
+import { IN_PROJECT_TESTS, decide, envConfigs, guardLogCounts, inProjectTests } from "./lib/git-guard.mjs";
 import { findRealGit } from "./lib/isolation.mjs";
 import { renderReport } from "./lib/stats.mjs";
 
@@ -37,7 +37,8 @@ g(["worktree", "add", "-q", linked], checkout);
 const roots = [checkout, runBase];
 const runGit = (a, cwd) => { const r = spawnSync(realGit, a, { cwd, env: plainEnv, encoding: "utf8" }); return r.status === 0 ? r.stdout : null; };
 const ctx = (cwd, env = {}) => ({ cwd, roots, testRoots: [tmp], checkout, env: { ...plainEnv, ...env }, git: runGit });
-const ASK = ["-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=never"];
+// An askpass program other than `echo` (which the guard lets through since the W01d review): still refused, and tagged.
+const ASK = ["-c", "core.sshCommand=false", "-c", "core.askPass=./no-prompt.sh", "-c", "protocol.allow=never"];
 
 test("W01d guard log counts: lines tagged as the project tests' own are reported apart; every other refusal counts", () => {
   const t = (kind, tag = "") => `2026-11-18T06:42:06.394Z refused ${kind}${tag ? ` ${tag}` : ""}`;
@@ -63,7 +64,7 @@ test("W01d: the worker's own calls on a repository its test made in the temporar
   assert.equal(inProjectTests([...ASK, "push", bare, "main"], ctx(scratch)), true);
   assert.equal(inProjectTests([...ASK, "init", "-q", join(tmp, "new-one")], ctx(tmp)), true);
   // The env form (GIT_CONFIG_COUNT), and core.gitProxy.
-  assert.equal(inProjectTests(["status"], ctx(scratch, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "echo" })), true);
+  assert.equal(inProjectTests(["status"], ctx(scratch, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "./no-prompt.sh" })), true);
   assert.equal(inProjectTests(["-c", "core.gitProxy=/bin/false", "fetch", bare], ctx(scratch)), true);
 });
 
@@ -90,7 +91,7 @@ test("W01d: loosening the agent asks for itself is never the tests' own", () => 
   assert.equal(inProjectTests([...ASK, "-c", "credential.helper=store", "status"], ctx(scratch)), false);
   assert.equal(inProjectTests([...ASK, "-c", "http.https://h/.extraHeader=Authorization: Basic eA==", "status"], ctx(scratch)), false);
   assert.equal(inProjectTests([...ASK, "-c", "url.https://github.com/.insteadOf=x:", "status"], ctx(scratch)), false);
-  assert.equal(inProjectTests(["status"], ctx(scratch, { GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "echo", GIT_CONFIG_KEY_1: "credential.helper", GIT_CONFIG_VALUE_1: "store" })), false);
+  assert.equal(inProjectTests(["status"], ctx(scratch, { GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "./no-prompt.sh", GIT_CONFIG_KEY_1: "credential.helper", GIT_CONFIG_VALUE_1: "store" })), false);
   // A key path alone, and an askpass written into a configuration with `git config` (a lasting change): counted.
   assert.equal(inProjectTests(["-c", "core.sshCommand=ssh -i key", "status"], ctx(scratch)), false);
   assert.equal(inProjectTests(["config", "core.askPass", "/tmp/give-token.sh"], ctx(scratch)), false);
@@ -132,4 +133,93 @@ test("W01d report: refusals inside project tests are shown apart and do not make
   assert.match(text, /refused inside project tests: 185, not counted \(2 run\(s\)/);
   assert.doesNotMatch(text, /contaminated/);
   assert.doesNotMatch(renderReport([run(3, {})]).text, /refused inside project tests/);
+});
+
+test("W01d review: core.askPass=echo exactly is let through (the worker's own setting); any other askpass is still refused", () => {
+  const c = { cwd: scratch, roots, env: plainEnv, git: (a) => runGit(a, scratch) };
+  assert.equal(decide(["-c", "core.askPass=echo", "status"], c).refuse, null);
+  assert.equal(decide(["-c", "core.askpass=echo", "-c", "core.sshCommand=false", "-c", "protocol.allow=never", "log", "-1"], c).refuse, null);
+  assert.equal(decide(["status"], { ...c, env: { ...plainEnv, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "echo" } }).refuse, null);
+  for (const v of ["/bin/echo", "echo token", "ECHO", " echo", "echo ", "", "./echo", "sh -c echo"]) {
+    assert.match(decide(["-c", `core.askPass=${v}`, "status"], c).refuse ?? "", /askpass program is disabled/, v);
+  }
+  // A proxy program is still refused, echo or not; askpass=echo next to a credential helper is still refused.
+  assert.match(decide(["-c", "core.gitProxy=echo", "status"], c).refuse ?? "", /disabled/);
+  assert.match(decide(["-c", "core.askPass=echo", "-c", "credential.helper=store", "status"], c).refuse ?? "", /credential/);
+  // Through the wrapper itself: the worker's whole flag set on a scratch repository runs and logs nothing.
+  const log = join(base, "artifacts-echo", "git-guard.log");
+  mkdirSync(join(base, "artifacts-echo"), { recursive: true });
+  const cfg = join(runBase, "git-guard-echo.json");
+  writeFileSync(cfg, JSON.stringify({ realGit, allowRoots: roots, testRoots: [tmp], checkout, gitConfig: "/dev/null", log }));
+  const worker = ["-c", "core.hooksPath=/nonexistent", "-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=never", "-c", "protocol.file.allow=never", "-c", "safe.directory=*"];
+  const r = spawnSync(process.execPath, [GUARD, cfg, ...worker, "log", "-1", "--format=%s"], { cwd: scratch, env: plainEnv, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "start");
+  assert.throws(() => readFileSync(log, "utf8"));
+});
+
+test("W01d review: a call that can reach a network address through the repository or an scp-style argument is never tagged", () => {
+  const net = join(tmp, "nn-net");
+  mkdirSync(net, { recursive: true });
+  g(["init", "-q", "-b", "main"], net);
+  // A network remote written into the configuration file directly (no `git remote add`, so the guard never saw it).
+  writeFileSync(join(net, ".git", "config"), readFileSync(join(net, ".git", "config"), "utf8") + '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n');
+  for (const sub of [["fetch", "origin"], ["fetch"], ["pull"], ["ls-remote", "origin"], ["remote", "update"], ["status"]]) {
+    assert.equal(inProjectTests([...ASK, ...sub], ctx(net)), false, sub.join(" "));
+  }
+  // A branch whose remote is an address of its own, and a URL rewrite in the configuration.
+  const br = join(tmp, "nn-branch");
+  mkdirSync(br, { recursive: true });
+  g(["init", "-q", "-b", "main"], br);
+  writeFileSync(join(br, ".git", "config"), readFileSync(join(br, ".git", "config"), "utf8") + '[branch "main"]\n\tremote = git@github.com:owner/repo.git\n');
+  assert.equal(inProjectTests([...ASK, "fetch"], ctx(br)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "branch.main.remote=https://github.com/o/r", "status"], ctx(scratch)), false);
+  const rw = join(tmp, "nn-rewrite");
+  mkdirSync(rw, { recursive: true });
+  g(["init", "-q", "-b", "main"], rw);
+  writeFileSync(join(rw, ".git", "config"), readFileSync(join(rw, ".git", "config"), "utf8") + '[url "https://github.com/"]\n\tinsteadOf = local/\n');
+  assert.equal(inProjectTests([...ASK, "fetch", "local/repo"], ctx(rw)), false);
+  // An ssh address without a user (`host:path`), an address after an option's `=`, archive --remote and submodules.
+  assert.equal(inProjectTests([...ASK, "clone", "github.com:owner/repo.git", "x"], ctx(tmp)), false);
+  assert.equal(inProjectTests([...ASK, "fetch", "github.com:owner/repo.git"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "clone", "--reference=https://h/r", bare, "y"], ctx(tmp)), false);
+  assert.equal(inProjectTests([...ASK, "archive", "--remote=" + bare, "HEAD"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "submodule", "update", "--init"], ctx(scratch)), false);
+  // Local remotes and local arguments stay tagged: a repository with a remote that is a bare repository in the temporary folder.
+  const loc = join(tmp, "nn-local");
+  mkdirSync(loc, { recursive: true });
+  g(["init", "-q", "-b", "main"], loc);
+  g(["remote", "add", "origin", bare], loc);
+  g(["config", "branch.main.remote", "origin"], loc);
+  assert.equal(inProjectTests([...ASK, "fetch", "origin"], ctx(loc)), true);
+  assert.equal(inProjectTests([...ASK, "fetch"], ctx(loc)), true);
+  assert.equal(inProjectTests([...ASK, "clone", "-q", bare, join(tmp, "nn-clone")], ctx(tmp)), true);
+  assert.equal(inProjectTests([...ASK, "commit", "-m", "fix: a thing"], ctx(loc)), true);
+});
+
+test("W01d review: GIT_CONFIG_PARAMETERS is read as git reads it, quotes included", () => {
+  assert.deepEqual(envConfigs({ GIT_CONFIG_PARAMETERS: "'core.editor'='x'\\''y' 'credential.helper'='store'" }), [["core.editor", "x'y"], ["credential.helper", "store"]]);
+  assert.deepEqual(envConfigs({ GIT_CONFIG_PARAMETERS: "'a.b'='c'\\!'d' 'credential.helper=store'  'x.y'=" }), [["a.b", "c!d"], ["credential.helper", "store"], ["x.y", "true"]]);
+  assert.deepEqual(envConfigs({ GIT_CONFIG_PARAMETERS: "'protocol.https.allow'='always'" }), [["protocol.https.allow", "always"]]);
+  assert.deepEqual(envConfigs({ GIT_CONFIG_PARAMETERS: "" }), []);
+  // A setting after a quoted quote is now seen, and refused.
+  const c = { cwd: scratch, roots, env: { ...plainEnv, GIT_CONFIG_PARAMETERS: "'core.editor'='x'\\''y' 'credential.helper'='store'" }, git: (a) => runGit(a, scratch) };
+  assert.match(decide(["status"], c).refuse ?? "", /credential/);
+  // What the real git reads from the same text (so the reading above is git's own).
+  const r = spawnSync(realGit, ["config", "--get", "credential.helper"], { cwd: scratch, env: c.env, encoding: "utf8" });
+  assert.equal(r.stdout.trim(), "store");
+});
+
+test("W01d review: the worker's local clone (-c protocol.allow=user with protocol.file.allow=always) is refused and tagged; elsewhere or with a network address it counts", () => {
+  const LOCAL = ["-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=user", "-c", "protocol.file.allow=always"];
+  const c = { cwd: tmp, roots, env: plainEnv, git: (a) => runGit(a, tmp) };
+  assert.match(decide([...LOCAL, "clone", "-q", "--bare", bare, join(tmp, "nn-c1")], c).refuse ?? "", /allowed protocols/);
+  assert.equal(inProjectTests([...LOCAL, "clone", "-q", "--bare", bare, join(tmp, "nn-c1")], ctx(tmp)), true);
+  assert.equal(inProjectTests([...LOCAL, "--git-dir", join(scratch, ".git"), "fetch", bare, "main"], ctx(tmp)), true);
+  // A network address, the run's checkout, another protocol key next to it: counted.
+  assert.equal(inProjectTests([...LOCAL, "clone", "https://github.com/owner/repo.git", join(tmp, "nn-c2")], ctx(tmp)), false);
+  assert.equal(inProjectTests([...LOCAL, "clone", "github.com:owner/repo.git", join(tmp, "nn-c3")], ctx(tmp)), false);
+  assert.equal(inProjectTests([...LOCAL, "fetch", bare], ctx(checkout)), false);
+  assert.equal(inProjectTests([...LOCAL, "-c", "protocol.https.allow=always", "fetch", bare], ctx(scratch)), false);
+  assert.equal(inProjectTests(["-c", "protocol.allow=always", "-c", "credential.helper=store", "fetch", bare], ctx(scratch)), false);
 });

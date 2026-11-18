@@ -143,11 +143,14 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   real git without `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND` or askpass programs, and with the run's own
   settings (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` set back, `GIT_CONFIG_NOSYSTEM` dropped). Each refusal is logged (its
   kind only) to `git-guard.log` in the run's artifacts. A refusal is tagged `in-project-tests` (card W01d) only when it is
-  the project's own tests at work: refused only for an askpass or proxy program (`core.askpass`, `core.gitproxy`) given
-  for that one call, the same call otherwise let through, no alias and no network address in it, and its folder, any
-  `--git-dir`/`--work-tree`/`GIT_DIR`, and the repository's own git folder all in the run's temporary folder (where the
-  worker's tests make their repositories, with `-c core.askPass=echo` on every call), never the run's checkout. It is
-  still refused.
+  the project's own tests at work: refused only for an askpass or proxy program (`core.askpass`, `core.gitproxy`) or the
+  allowed protocols (`protocol.allow`) given for that one call, the same call otherwise let through, no alias and no
+  network address in it (nor in the repository's remotes, its branches' remotes or a URL rewrite; never `submodule`), and
+  its folder, any `--git-dir`/`--work-tree`/`GIT_DIR`, and the repository's own git folder all in the run's temporary
+  folder (where the worker's tests make their repositories), never the run's checkout. It is still refused.
+  `core.askPass=echo` exactly (the worker gives it on every call; `echo` answers a prompt with its own text, never a
+  login) is let through like `core.sshCommand=false`; the worker's local clones still meet the `protocol.allow=user`
+  refusal (tagged).
 - **The owner's folders hidden, no network, nothing writable outside the run (Linux, bubblewrap).** Second review,
   2026-11-17. The agent runs under `bwrap` with: the whole file system read-only (`--ro-bind / /`), except the run's
   checkout, its temporary folder and its artifacts, bound back writable; these hidden behind empty folders (more with
