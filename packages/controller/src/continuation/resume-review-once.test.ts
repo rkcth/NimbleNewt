@@ -69,7 +69,8 @@ for (const backend of backends) {
       svc = ResumeCheckService.withEpoch(storage, projects.epoch, { continuations: continuations as never, dependencies: dependencies as never, blockers: blockers as never, ports }, options);
       // The check is started; it waits in "reviewing" while the reviewer is out.
       const first = svc.start(owner, { commandId: "s1", taskId: task, model, after: "restart" });
-      for (let i = 0; i < 500 && asked.length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+      // Polled to a deadline, not a count: on a loaded runner the start can take longer than 500 short sleeps before the reviewer is asked.
+      for (const until = Date.now() + 20_000; Date.now() < until && asked.length === 0;) await new Promise((r) => setTimeout(r, 2));
       assert.equal(asked.length, 1, "the reviewer was asked");
       checkId = (await svc.forTask(owner, task))!.id;
       answer!();
@@ -141,7 +142,8 @@ for (const backend of backends) {
       const svc = ResumeCheckService.withEpoch(storage, projects.epoch, { continuations: continuations as never, dependencies: dependencies as never, blockers: blockers as never, ports }, options);
       // The check is started; it waits in "reviewing" while the reviewer is out.
       const first = svc.start(owner, { commandId: "s1", taskId: task, model, after: "restart" });
-      for (let i = 0; i < 500 && asked.length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+      // Polled to a deadline, not a count: on a loaded runner the start can take longer than 500 short sleeps before the reviewer is asked.
+      for (const until = Date.now() + 20_000; Date.now() < until && asked.length === 0;) await new Promise((r) => setTimeout(r, 2));
       assert.equal(asked.length, 1, "the reviewer was asked");
       const checkId = (await svc.forTask(owner, task))!.id;
       // The second advance reads the check while it is still "reviewing"; that read is held.

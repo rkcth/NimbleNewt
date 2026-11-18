@@ -13889,3 +13889,45 @@ Four cells failed, with three causes. Everything else was green.
 
 **Verified (Linux, node 22.23, all through `/tmp/nn-slot.sh`):** `tsc --build`; worker suite (545 tests, 544 pass, 1 skipped, 0 failed); 21 controller files touching resume checks, the reviewer wiring and backup crypto (499 tests, 499 pass); under load (12 busy processes on 32 cores, load about 19), 20 rounds each of `start-resume-off-loop.test.js` (4 tests: SQLite and PostgreSQL), the two recovery-code tests and `resume-review-once.test.js` (8 tests): 0 failures.
 **Skipped:** the full controller suite and the other packages (no other code changed); the Windows-only real-host tests (they need Windows); a macOS run.
+
+### Review of the CI fix after run 44258423696 (Claude agent, Opus 5.5, 2026-11-18; final round)
+
+**`ResumeCheckService.advance` (`continuation/resume.ts`): correct, no change.**
+- The guard check and the guard taking have no `await` between them, so within one process only one advance holds a check's guard.
+- `finally` releases the guard on every path: each `continue`, a refused or failing fresh read (`#get` throws `not_found`), a reviewer failure, `#block` and `#update` throwing.
+- The fresh body (`fb`) is used for the rest of the step: the open changes, the verdicts kept, the task ID and both blocks. `#update` reads again and writes only from "reviewing", as before.
+- No double ask: a holder releases its guard only after its verdict write has resolved. The next holder's read starts after taking the guard, so it sees that write on all four backends. The reference store and SQLite (also on its worker thread) serialize, and PostgreSQL answers the write only after commit, with reads at read-committed.
+- No lost resume: a fresh body that is no longer "reviewing" makes the loop read the check again and act on its new phase. That costs one of the 10 advance steps, which leaves enough room for collecting, verifying, reviewing, the extra read and ready/executing.
+- One `ResumeCheckService` is built per controller (`api/start.ts`), so the sweep and the dispatcher share the guard. Two controllers on one store remain outside its scope, as documented.
+- Checked by putting back the old `resume.ts`, rebuilding and running the new test: it failed on all 4 backends ("the reviewer was asked once"). With the fix it passes.
+
+**Windows `windows-real-run.test.ts`: the reasoning holds, assertions are honest.**
+- Offline evidence: libuv's own header (`uv.h`, `UV_PROCESS_DETACHED`: "will effectively enable the child to keep running after the parent exits"; seen in the node-gyp 24.21 headers and the node 22.23 tarball headers).
+- From libuv's Windows spawn code (not on this machine): a global job object with kill-on-job-close and silent breakaway, which every spawned child joins unless it is detached.
+- Silent breakaway also means the detached descendant is not in the test runner's own job.
+- The CI logs match: test 2 failed with "the stand-in tree stop did not end the descendant" and test 5 came back in 64 ms.
+- Minor wording, not changed: on Linux and macOS `detached` calls `setsid`, a new session as well as a new process group. This makes no difference to the tests.
+- Test 2 still asserts that the descendant outlives the stand-in tree stop. Test 5 now asserts its premise before `timedOut`, so on Windows a descendant that dies again names itself rather than passing vacuously.
+
+**Recovery code: the decision is right; no follow-up card proposed.**
+- The unlock path fails closed, verified in `crypto.ts`. A changed code that passes the checksum decodes to another 32-byte key, and HKDF gives another key-encryption key. The AES-256-GCM tag check in `unwrap` then throws, and that becomes `UnlockFailed`. Even a tag collision would be refused by `privateFrom`, which compares the unwrapped key's public key with the keyring's.
+- A change only in the 4 checksum characters can never pass, because the key is unchanged and so is its checksum.
+- The only cost of a missed typo is a less specific message for about one single-character typo in 2^20 ("does not open this key" rather than "check what you typed"). That does not justify a format change that would invalidate printed codes.
+- If a recovery-code format v2 is ever made for another reason, a check designed to catch every single substitution and adjacent transposition belongs in it; it is not a card on its own.
+- The new test is fully deterministic: fixed keys, every substitution, and exact counts (9 x 56 x 31).
+
+**Determinism fix (this review).** Both tests in `resume-review-once.test.ts` waited at most 500 x 2 ms (about 1 s) for the first reviewer call. On a loaded runner, the PostgreSQL start (create, collecting, verifying, reviewing writes) can take longer, and the test would then fail with "the reviewer was asked" for reasons unrelated to the product. Both now poll to a 20 s deadline. The ordering inside the test (the held read and the order of answer and delivery) is fixed by promises, not timing.
+
+**Verified (Linux, node 22.23, `tsc --build` of the installed tsc, all tests through `/tmp/nn-slot.sh`):**
+- Worker suite: 545 tests, 544 pass, 1 skipped, 0 failed.
+- Controller `dist/continuation/*.test.js`, `dist/backup/*.test.js` and `dist/api/start-resume*.test.js` (48 files): 470 of 470 pass.
+- Under load (12 busy node loops on 32 cores, load about 18 to 20), 20 rounds of each:
+
+| Test file | Passed |
+| --- | --- |
+| `resume-review-once.test.js` | 160 of 160 |
+| the two recovery-code tests | 40 of 40 |
+| `windows-real-run.test.js` | 180 of 180 |
+| `start-resume-off-loop.test.js` | 80 of 80 |
+
+**Skipped:** the full controller suite and the other packages (no other code changed); the Windows-only real-host tests and any Windows or macOS run, so the libuv job behaviour itself is confirmed only by the next CI run. This round is final.
