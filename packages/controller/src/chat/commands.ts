@@ -52,6 +52,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "toolbox.audience.set": { verb: "Change who a shared tool is for (name: the tool; all: true for every agent, or roles, teams and projects by the owner's own names)", mode: "propose" },
   "toolbox.deprecate": { verb: "Set a shared tool version aside (no longer chosen by default; work pinned to it keeps it)", mode: "propose" },
   "toolbox.rollback": { verb: "Return a shared tool to an earlier version", mode: "propose" },
+  // Decisions on agents' toolbox proposals (card T08): accept (optionally releasing a version), ask for changes, defer, reject or reopen. Shown first: an acceptance with a version publishes it.
+  "toolbox.proposal.decide": { verb: "Decide an agent's toolbox proposal (proposalId from the toolbox_proposals status; decision accept, request_changes, defer, reject or reopen; reason; version to release when accepting)", mode: "propose" },
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // Defining a source in settings (card H13f) decides what is looked at on the controller's machine or asked over the network, and what wakes agents: shown first in every profile (provisional, like turning sources on and off). Removing one is shown first too.
   "events.sources.define": { verb: "Watch something outside for a project (a timer, a file or folder, a git repository or a service's health address)", mode: "propose", needsProject: true },

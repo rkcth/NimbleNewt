@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { CatalogService, personalNamespace } from "../catalog/index.js";
+import { CatalogService, ToolboxProposalService, personalNamespace } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
@@ -1350,6 +1350,52 @@ for (const backend of backends) {
     assert.deepEqual(seen[0]!.raw.args, { taskId, dependencies: [{ kind: "file", key: "a.md" }] });
     assert.match(String(seen[0]!.raw.commandId), /^bridge:/);
     assert.ok(steps.some((x) => /recorded 1 input\(s\) its work relied on/.test(x)), steps.join("\n"));
+  });
+
+  suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const steps: string[] = [];
+    const props = ToolboxProposalService.withEpoch(c.storage, c.epoch, c.catalog, c.desks, c.options);
+    const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, proposals: props, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, activity: async (step) => { steps.push(step.summary); }, isLocalHost: () => true });
+    const bare = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
+      const doc = good(await send("desk.write", { kind: "note", title: "lint", body: "Run lint.", visibility: "shared", status: "accepted" }, "w0"));
+      const code = good(await send("desk.write", { kind: "note", title: "lint code", body: "console.log('lint')", visibility: "shared", status: "accepted" }, "w1"));
+      const better = good(await send("desk.write", { kind: "note", title: "lint code 2", body: "console.log('lint 2')", visibility: "shared", status: "accepted" }, "w2"));
+      // The owner releases Ann's work as a shared tool for the project's agents.
+      await c.catalog.register(c.owner, { commandId: uid("pub"), name: "toolbox.lint", kind: "tool", version: "1.0.0", manifest: manifest(), instructionsRecordId: doc["id"] as string, executableRecordId: code["id"] as string, audience: { projects: [c.project] } } as never);
+      out["source"] = await send("toolbox.source", { name: "lint" }, "r0");
+      out["copy"] = await send("toolbox.copy", { name: "lint", as: "my-lint" }, "c0");
+      out["copy-again"] = await send("toolbox.copy", { name: "lint", as: "my-lint" }, "c0");
+      out["copies"] = await send("toolbox.copies", {}, "r1");
+      out["named-task"] = await send("toolbox.propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "faster", tests: "ran it", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "p0");
+      out["propose"] = await send("toolbox.propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "faster", tests: "ran it" }, "p1");
+      await props.decide(c.owner, { commandId: uid("d"), proposalId: (out["propose"] as { result: JsonObject }).result["proposalId"] as string, decision: "request_changes", reason: "add a test" });
+      out["notices"] = await send("toolbox.notices", {}, "r2");
+      out["unavailable"] = await bare.handle(s.token, s.gateway, { op: "toolbox.propose", callId: "p2", args: { name: "lint", executableRecordId: better["id"] as string, rationale: "faster", tests: "ran it" } });
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      out["paused-copy"] = await send("toolbox.copy", { name: "lint", as: "other" }, "c1");
+      out["paused-propose"] = await send("toolbox.propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "again", tests: "ran it" }, "p3");
+      out["paused-source"] = await send("toolbox.source", { name: "lint" }, "r3");
+    });
+    await c.tick();
+    const src = good(out["source"]!);
+    assert.deepEqual([src["name"], src["version"], src["instructions"], src["executable"]], ["toolbox.lint", "1.0.0", "Run lint.", "console.log('lint')"]);
+    const copy = good(out["copy"]!);
+    assert.equal(copy["name"], `${personalNamespace("agent:ann")}.my-lint`);
+    assert.deepEqual(good(out["copy-again"]!), copy, "the same call ID answers again");
+    assert.equal(((good(out["copies"]!)["items"]) as JsonObject[])[0]!["name"], copy["name"]);
+    assert.equal(bad(out["named-task"]!).code, "invalid_command", "the task is the attempt's own, never one the request names");
+    const proposal = good(out["propose"]!);
+    assert.equal((await props.get(c.owner, proposal["proposalId"] as string)).taskId, taskId);
+    assert.match(String((((good(out["notices"]!)["items"]) as JsonObject[])[0]!)["text"]), /asked for changes .*add a test/);
+    assert.equal(bad(out["unavailable"]!).code, "unavailable");
+    for (const op of ["paused-copy", "paused-propose"]) assert.equal(bad(out[op]!).code, "paused", op);
+    good(out["paused-source"]!);
+    assert.ok(steps.some((x) => /copied shared tool toolbox\.lint/.test(x)) && steps.some((x) => /proposed a change to shared tool toolbox\.lint/.test(x)), steps.join("\n"));
   });
 
   suite("task.recall (card W13): the attempt and so the task come from the credential, a named task is refused, a call is a read that a pause does not stop, the cap refuses with a clear text, an answered call is answered again for free, and the owner sees a counts-only step", async (c) => {

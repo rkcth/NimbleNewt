@@ -167,8 +167,10 @@ for (const backend of backends) {
     await c.cat.rollback(pm.p, { commandId: cid("rb"), name: "toolbox.fmt", toVersion: "1.0.0", reason: "1.1.0 misformats" });
     assert.equal((await c.cat.get(c.owner, "toolbox.fmt"))!.version, "1.0.0");
     assert.deepEqual((await c.cat.forks(pm.p, "fmt")).forks, []);
-    // Only the owner revokes (this slice), and protected names stay the owner's.
-    await refuses("forbidden", () => c.cat.revoke(pm.p, { commandId: cid("rv"), name: "toolbox.fmt", version: "1.1.0", reason: "x" }));
+    // A maintainer revokes a version of its own entry (second slice) and must say what happens to running calls; protected names stay the owner's.
+    await refuses("invalid_command", () => c.cat.revoke(pm.p, { commandId: cid("rv"), name: "toolbox.fmt", version: "1.1.0", reason: "x" }), /finish or cancel/);
+    await c.cat.revoke(pm.p, { commandId: cid("rv"), name: "toolbox.fmt", version: "1.1.0", reason: "x", runningCalls: "finish" });
+    await refuses("forbidden", () => c.cat.revoke(pm.p, { commandId: cid("rv"), name: "nimblenewt.fmt", version: "1.0.0", reason: "x", runningCalls: "finish" }));
     await refuses("forbidden", () => c.cat.deprecate(pm.p, { commandId: cid("dp"), name: "nimblenewt.fmt", version: "1.0.0", reason: "x" }));
     assert.equal(mayManage(pm.p, { projects: [c.a] }), true);
     assert.equal(mayManage(pm.p, undefined), false, "an entry with no audience is for all agents");

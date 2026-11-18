@@ -10,6 +10,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
+import { pushNotice, readNotices, type ToolboxNotice } from "./notices.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 
 /** What a catalogued artifact is: a skill is instructions; a tool also has an executable. */
@@ -124,6 +125,22 @@ export function protectedVersions(e: Pick<EntryBody, "latest" | "versions" | "re
   const unrevoked = sorted.find((v) => !e.revoked.includes(v));
   if (unrevoked !== undefined) keep.add(unrevoked);
   return keep;
+}
+/** The version chosen when no version is named: the highest published one that is neither revoked nor set aside (undefined when none is left). */
+export function chosenVersion(e: Pick<EntryBody, "versions" | "revoked" | "deprecated">): string | undefined {
+  return e.versions.filter((v) => !e.revoked.includes(v) && !(e.deprecated ?? []).includes(v)).sort(compare).reverse()[0];
+}
+/** Compares two major.minor.patch versions. */
+export const compareVersions = compare;
+/**
+ * The text a shared release (or a personal copy of one) was made from, kept with the version (card T08): the release stays readable when its desk record later changes or is archived. Keyed by the version's record ID. A revoked
+ * version is never served from it (revoking removes it), and the owner's deletion of a source record removes it with the record (retention's deletion gathers it through `sources`).
+ */
+export interface SnapshotBody { readonly versionId: string; readonly name: string; readonly version: string; readonly digest: string; readonly sources: readonly string[]; readonly instructions: string; readonly executable?: string; readonly at: string }
+export const SNAPSHOT_KIND = "catalog-snapshot";
+export const snapshotRef = (versionId: string): AggregateRef => ({ kind: SNAPSHOT_KIND, id: versionId });
+function snapshotOf(v: VersionBody, texts: { instructions: string; executable?: string }, at: string): SnapshotBody {
+  return { versionId: versionIdOf(v.name, v.version), name: v.name, version: v.version, digest: v.digest, sources: [...new Set([v.instructional.recordId, ...(v.executable === undefined ? [] : [v.executable.recordId])])], instructions: texts.instructions, ...(texts.executable === undefined ? {} : { executable: texts.executable }), at };
 }
 /** The personal namespace of a principal: `a_` plus a fixed digest of its ID, so it can be neither chosen nor reused. */
 export const personalNamespace = (principalId: string): string => `a_${sha(`agent-namespace\0${principalId}`).slice(0, 16)}`;
@@ -298,7 +315,7 @@ export class CatalogService {
   readonly #runner: CommandRunner;
   readonly #desks: DeskService;
 
-  readonly #revoked = new Set<(name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal) => void>();
+  readonly #revoked = new Set<(name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal | undefined) => void>();
 
   private constructor(runner: CommandRunner, desks: DeskService) { this.#runner = runner; this.#desks = desks; }
 
@@ -306,7 +323,7 @@ export class CatalogService {
    * Tells `listener` (name, version) after a revocation has been committed (T02b: what happens to work in flight is the listener's policy). A repeat of an already-committed revoke tells again, so a listener must be idempotent;
    * a listener that throws never undoes the revocation. Returns the way to stop listening.
    */
-  onRevoked(listener: (name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
+  onRevoked(listener: (name: string, version: string, runningCalls: RunningCallsChoice | undefined, owner: Principal | undefined) => void): () => void { this.#revoked.add(listener); return () => { this.#revoked.delete(listener); }; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, desks: DeskService, options: RunnerOptions = {}): CatalogService {
     return new CatalogService(new CommandRunner(storage, epoch, options), desks);
@@ -344,84 +361,185 @@ export class CatalogService {
     // Only the registrant's own accepted original work is accepted: the desk refuses another desk's content and copies of it.
     const instructions = await this.#source(by, command.instructionsRecordId, maintainer);
     const executable = command.executableRecordId === undefined ? undefined : await this.#source(by, command.executableRecordId, maintainer);
-    const version = command.version;
+    const pins = [instructions, ...(executable === undefined ? [] : [executable])].map((s) => ({ ref: { kind: "desk-record", id: s.ref.recordId }, revision: s.ref.revision }));
+    return this.#publish(by, "catalog.register", command.commandId, {
+      canonical, layer: parsed.layer, kind: command.kind, version: command.version, manifest, instructional: instructions.ref, ...(executable === undefined ? {} : { executable: executable.ref }),
+      texts: { instructions: instructions.text, ...(executable === undefined ? {} : { executable: executable.text }) }, pins, ...(audience === undefined ? {} : { audience }), maintainer,
+    });
+  }
+
+  /**
+   * The write of a new version (register, and a shared release from an accepted proposal). `extra` runs inside the same guarded write after the catalogue's own checks and adds changes to it (the proposal's decision and the author's
+   * notice), so a release and the decision that made it are one record or neither. A shared (`toolbox.`) version also stores a snapshot of its released text (card T08), so it stays readable if its desk record later changes.
+   */
+  async #publish(by: Principal, op: string, commandId: string, plan: {
+    canonical: string; layer: Layer; kind: ArtifactKind; version: string; manifest: Manifest; instructional: SourceRef; executable?: SourceRef;
+    texts: { instructions: string; executable?: string }; pins: readonly { ref: AggregateRef; revision: number }[]; audience?: Audience; maintainer: boolean;
+    /** A shared release from a proposal: the version the entry must still be choosing (an improvement), or `absent` (a promotion names a free name). */
+    expect?: { chosen: string } | "absent";
+    payload?: JsonObject;
+  }, extra?: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<readonly import("../storage/types.js").Change[]>): Promise<{ versionId: string; name: string; digest: string }> {
+    const { canonical, layer, kind, version, manifest, instructional, executable, audience, maintainer } = plan;
+    if (typeof version !== "string" || !VERSION.test(version)) invalid("version", "must be major.minor.patch");
     const entryId = derivedId("cat", canonical);
     const versionId = derivedId("cav", `${canonical}|${version}`);
-    const body: Omit<VersionBody, "digest"> = { name: canonical, layer: parsed.layer, kind: command.kind, version, manifest, instructional: instructions, ...(executable === undefined ? {} : { executable }), registeredBy: by.id, registeredAt: this.#runner.now() };
+    const body: Omit<VersionBody, "digest"> = { name: canonical, layer, kind, version, manifest, instructional, ...(executable === undefined ? {} : { executable }), registeredBy: by.id, registeredAt: this.#runner.now() };
     const { registeredBy: _by, registeredAt: _at, ...identity } = body;
     void _by; void _at;
     const digest = sha(canonicalJson(identity as unknown as JsonObject));
     const full: VersionBody = { ...body, digest };
-    await this.#runner.command("catalog.register", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { name: canonical, kind: command.kind, version, digest, ...(audience === undefined ? {} : { audience: audience as unknown as JsonObject }) },
+    await this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+      payload: { name: canonical, kind, version, digest, ...(audience === undefined ? {} : { audience: audience as unknown as JsonObject }), ...(plan.payload ?? {}) },
       build: async () => {
         const entry = await this.#runner.get("catalog-entry", entryId);
         const existing = await this.#runner.get("catalog-version", versionId);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (prior !== undefined && prior.layer === "agent" && prior.owner !== by.id) throw new DomainError("forbidden", "that name belongs to another agent");
-        if (prior !== undefined && prior.kind !== command.kind) throw new DomainError("invalid_command", `${canonical} is a ${prior.kind}; a name keeps its kind`, { field: "kind" });
+        if (prior !== undefined && prior.kind !== kind) throw new DomainError("invalid_command", `${canonical} is a ${prior.kind}; a name keeps its kind`, { field: "kind" });
         if (maintainer) {
           // A maintainer changes only entries whose audience its grant covers; a name's first release names who it is for.
           if (prior === undefined && audience === undefined) throw new DomainError("invalid_command", "audience: a maintainer names who a new shared tool is for (all agents, roles, teams or projects)", { field: "audience" });
           if (prior !== undefined && !mayManage(by, prior.audience)) throw new DomainError("forbidden", `${by.id} may not change ${canonical}: its ${TOOLBOX_MANAGE} does not cover that tool's audience`);
+        }
+        if (plan.expect === "absent" && prior !== undefined) throw new DomainError("command_conflict", `${canonical} exists now; propose an improvement of it instead`);
+        if (plan.expect !== undefined && plan.expect !== "absent") {
+          const chosen = prior === undefined ? undefined : chosenVersion(prior);
+          if (chosen !== plan.expect.chosen) throw new DomainError("stale_revision", `${canonical} is at ${chosen ?? "no live version"}, not ${plan.expect.chosen}, which the proposal is against; rebase it first (toolbox.proposal.rebase)`);
         }
         const vref: AggregateRef = { kind: "catalog-version", id: versionId };
         const eref: AggregateRef = { kind: "catalog-entry", id: entryId };
         if (existing !== undefined) {
           // The same bytes again are a no-op; different bytes under a published version are refused.
           if ((existing.body as unknown as VersionBody).digest !== digest) throw new DomainError("command_conflict", `${canonical} ${version} is already published with different content; versions are immutable`);
+          if (extra !== undefined) throw new DomainError("invalid_command", `${canonical} ${version} is already published; name a higher version`, { field: "version" });
           return { ref: vref, creates: false, changes: [{ type: "check", ref: vref, expectedRevision: existing.revision }], detail: { name: canonical, version, existing: true } };
         }
         if (prior !== undefined && compare(version, prior.latest) <= 0) throw new DomainError("invalid_command", `${canonical} is at ${prior.latest}; a new version must be higher`, { field: "version" });
         if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
         const keepAudience = audience ?? prior?.audience;
-        const nextEntry: EntryBody = { name: canonical, layer: parsed.layer, kind: command.kind, ...(parsed.layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }), ...(keepAudience === undefined ? {} : { audience: keepAudience }) };
+        const nextEntry: EntryBody = { name: canonical, layer, kind, ...(layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }), ...(keepAudience === undefined ? {} : { audience: keepAudience }) };
+        const more = extra === undefined ? [] : await extra(prior, { versionId, digest });
         return {
           ref: vref, creates: true,
           changes: [
             { type: "create", ref: vref, body: full as unknown as JsonObject },
+            ...(layer === "toolbox" ? [{ type: "create" as const, ref: snapshotRef(versionId), body: snapshotOf(full, plan.texts, this.#runner.now()) as unknown as JsonObject }] : []),
             // The source records must still be as they were read: retention may archive or remove one between that read and this write (it reads the catalog's sources just before its own write).
-            ...[instructions, ...(executable === undefined ? [] : [executable])].filter((src, i, all) => all.findIndex((o) => o.recordId === src.recordId) === i).map((src) => ({ type: "check" as const, ref: { kind: "desk-record", id: src.recordId }, expectedRevision: src.revision })),
+            ...plan.pins.filter((p, i, all) => all.findIndex((o) => o.ref.kind === p.ref.kind && o.ref.id === p.ref.id) === i).map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
             entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
+            ...more,
           ],
-          detail: { name: canonical, version, kind: command.kind, layer: parsed.layer },
-          contention: async () => new DomainError("stale_revision", `${canonical} changed at the same moment; register again`),
+          detail: { name: canonical, version, kind, layer },
+          contention: async () => new DomainError("stale_revision", `${canonical} changed at the same moment; ${op === "catalog.register" ? "register" : "ask"} again`),
         };
       },
     }));
     return { versionId, name: canonical, digest };
   }
 
-  /** The owner withdraws a version for good. It is no longer chosen and a run of it is refused; nothing is deleted (retention may later blank its executable text, never its record, digest or the revocation). */
-  async revoke(owner: Principal, command: NoActor & { name: string; version: string; reason: string; runningCalls?: RunningCallsChoice }): Promise<void> {
-    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner revokes a version`);
+  /**
+   * A shared release from an accepted proposal (card T08), for the proposal service: the decider is the owner or a maintainer whose grant covers the audience, exactly as for `register`. The parts are the proposal's: a part the
+   * proposal left as it was is the base version's released text (read back by digest, from its desk record or its snapshot); a part the author wrote is the author's accepted, shared, original desk record, still exactly as proposed.
+   * The decider needs no desk grant of its own: the author gave the text to the maintainers by proposing it. `extra` adds the proposal's decision to the same write. Nothing else is authorised by it: no grant, push, merge or deploy.
+   */
+  async releaseProposal(by: Principal, command: {
+    commandId: string; name: string; kind: ArtifactKind; version: string; manifest: Manifest;
+    parts: { instructions: { ref: SourceRef; base?: string }; executable?: { ref: SourceRef; base?: string } };
+    audience?: Audience; expect: { chosen: string } | "absent"; payload: JsonObject;
+  }, extra: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<readonly import("../storage/types.js").Change[]>): Promise<{ versionId: string; name: string; digest: string }> {
+    const parsed = parseName(command.name);
+    if (parsed === null || parsed.layer !== "toolbox") return invalid("name", "must be a shared tool name");
+    const maintainer = by.kind === "agent";
+    if (by.kind !== "owner" && !(maintainer && maintainsAnywhere(by))) throw new DomainError("forbidden", `${by.id} may not publish shared tools (it needs ${TOOLBOX_MANAGE})`);
+    if (maintainer && command.audience !== undefined && !mayManage(by, command.audience)) throw new DomainError("forbidden", `${by.id} may not publish to that audience (its ${TOOLBOX_MANAGE} does not cover it)`);
+    const texts: { instructions?: string; executable?: string } = {};
+    const pins: { ref: AggregateRef; revision: number }[] = [];
+    for (const part of ["instructions", "executable"] as const) {
+      const p = command.parts[part];
+      if (p === undefined) continue;
+      if (p.base !== undefined) {
+        const baseVersion = (await this.#runner.get("catalog-version", p.base))?.body as unknown as VersionBody | undefined;
+        const src = baseVersion === undefined ? undefined : part === "instructions" ? baseVersion.instructional : baseVersion.executable;
+        const got = baseVersion === undefined || src === undefined || src.digest !== p.ref.digest ? "changed" : await this.#released({ ...baseVersion, id: p.base }, part, (await this.#entryOf(baseVersion.name))?.revoked.includes(baseVersion.version) === true);
+        if (typeof got === "string") throw new DomainError("invalid_command", `the ${part} the proposal keeps from its base version can no longer be read as released`);
+        texts[part] = got.text; pins.push(got.pin);
+        continue;
+      }
+      const found = await this.#runner.get("desk-record", p.ref.recordId);
+      const record = found?.body as unknown as { owner?: string; status?: string; visibility?: string; body?: unknown; origin?: unknown; copiedFrom?: unknown; archived?: unknown; deleted?: unknown } | undefined;
+      if (found === undefined || record === undefined || record.owner !== p.ref.author || found.revision !== p.ref.revision || typeof record.body !== "string" || sha(record.body) !== p.ref.digest) throw new DomainError("invalid_command", `the proposed ${part} is no longer as it was proposed; the author revises the proposal`);
+      if (record.visibility === "private" || record.status !== "accepted" || record.origin !== undefined || record.copiedFrom !== undefined || record.archived !== undefined || record.deleted !== undefined) throw new DomainError("invalid_command", `the proposed ${part} is no longer an accepted, shared, original desk record`);
+      texts[part] = record.body; pins.push({ ref: { kind: "desk-record", id: found.id }, revision: found.revision });
+    }
+    return this.#publish(by, "toolbox.proposal.accept", command.commandId, {
+      canonical: parsed.canonical, layer: "toolbox", kind: command.kind, version: command.version, manifest: command.manifest, instructional: command.parts.instructions.ref,
+      ...(command.parts.executable === undefined ? {} : { executable: command.parts.executable.ref }), texts: texts as { instructions: string; executable?: string }, pins,
+      ...(command.audience === undefined ? {} : { audience: command.audience }), maintainer, expect: command.expect, payload: command.payload,
+    }, extra);
+  }
+
+  /**
+   * Withdraws a version for good. It is no longer chosen and a run of it is refused; nothing is deleted (retention may later blank its executable text, never its record, digest or the revocation). The owner revokes any version;
+   * a holder of `toolbox.manage` (card T08) revokes a shared version its grant covers, and says what happens to calls running now (`finish` or `cancel`: pausing tasks stays the owner's). The release's snapshot goes in the same
+   * write (a revoked version is never served from one). Afterwards each agent that keeps a personal copy of that version is sent a notice (`toolbox.notices`); the copy itself is not changed.
+   */
+  async revoke(by: Principal, command: NoActor & { name: string; version: string; reason: string; runningCalls?: RunningCallsChoice }): Promise<void> {
+    const maintainer = by.kind === "agent" && parseName(command.name)?.layer === "toolbox" && maintainsAnywhere(by);
+    if (by.kind !== "owner" && !maintainer) throw new DomainError("forbidden", `${by.id} is not the owner; only the owner revokes a version (or, for a shared tool, a holder of ${TOOLBOX_MANAGE} covering its audience)`);
     onlyKnown(command, ["commandId", "name", "version", "reason", "runningCalls"]);
     if (command.runningCalls !== undefined && command.runningCalls !== "finish" && command.runningCalls !== "cancel" && command.runningCalls !== "pause") invalid("runningCalls", "must be finish, cancel or pause");
+    if (maintainer && command.runningCalls !== "finish" && command.runningCalls !== "cancel") invalid("runningCalls", "a maintainer says finish or cancel for the calls running now; pausing their tasks is the owner's decision");
     const runningCalls = command.runningCalls;
     const parsed = parseName(command.name);
-    if (parsed === null) invalid("name", "is not a canonical name");
+    if (parsed === null) return invalid("name", "is not a canonical name");
     if (typeof command.version !== "string" || !VERSION.test(command.version)) invalid("version", "must be major.minor.patch");
     const reason = redactText(text(command.reason, "reason", { min: 1, max: 500 }));
     const versionId = derivedId("cav", `${command.name}|${command.version}`);
     const ref: AggregateRef = { kind: "catalog-revocation", id: versionId };
     const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", command.name) };
-    await this.#runner.command("catalog.revoke", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
+    await this.#runner.command("catalog.revoke", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { versionId, reason, ...(runningCalls === undefined ? {} : { runningCalls }) },
       build: async () => {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (entry === undefined || prior === undefined || !prior.versions.includes(command.version)) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
+        // The same answers as for setting a version aside: a maintainer that may neither change nor read the entry learns nothing of it; one that may read it but not change it is refused.
+        if (maintainer && !mayManage(by, prior.audience) && !(await this.#mayReadEntry(by, prior))) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
+        if (maintainer && (prior.layer !== "toolbox" || !mayManage(by, prior.audience))) throw new DomainError("forbidden", `${by.id} may not revoke ${command.name}: its ${TOOLBOX_MANAGE} does not cover that tool's audience`);
         if (prior.revoked.includes(command.version) || (await this.#runner.get(ref.kind, ref.id)) !== undefined) throw new DomainError("invalid_command", "that version is already revoked", { field: "version" });
-        const body: RevocationBody = { revokedBy: owner.id, reason, at: this.#runner.now(), ...(runningCalls === undefined ? {} : { runningCalls }) };
+        const body: RevocationBody = { revokedBy: by.id, reason, at: this.#runner.now(), ...(runningCalls === undefined ? {} : { runningCalls }) };
         const next: EntryBody = { ...prior, revoked: [...prior.revoked, command.version] };
+        const snap = await this.#runner.get(SNAPSHOT_KIND, versionId);
         return {
           ref, creates: true,
-          changes: [{ type: "create", ref, body: body as unknown as JsonObject }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }],
+          changes: [
+            { type: "create", ref, body: body as unknown as JsonObject }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject },
+            ...(snap === undefined ? [] : [{ type: "delete" as const, ref: snapshotRef(versionId), expectedRevision: snap.revision }]),
+          ],
+          ...(snap === undefined ? {} : { audit: [{ type: "catalog.snapshot.remove", subject: snapshotRef(versionId), detail: { name: command.name, version: command.version, why: "revoked" } }] }),
           detail: { name: command.name, version: command.version }, contention: async () => new DomainError("stale_revision", "the catalog entry changed at the same moment; revoke again"),
         };
       },
     }));
-    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls, owner); } catch { /* the revocation stands whatever a listener does */ } }
+    // The listeners stop or let finish the calls running now; only the owner's revocation can pause their tasks (a maintainer gives no principal to pause them with).
+    for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls, by.kind === "owner" ? by : undefined); } catch { /* the revocation stands whatever a listener does */ } }
+    if (parsed.layer === "toolbox") await this.#noticeForks(command.name, command.version, reason);
+  }
+
+  /**
+   * Sends each agent that keeps a personal copy of a revoked shared version a notice in its toolbox inbox (card T08). One write per agent, keyed by the version, so a repeat of the revoke sends each once. Best effort: a notice that
+   * cannot be written leaves the pull answer (`toolbox.copies` says the base was revoked) as the record.
+   */
+  async #noticeForks(name: string, version: string, reason: string): Promise<void> {
+    const lineage = ((await this.#runner.get("catalog-forks", derivedId("cfk", name)))?.body as unknown as ForkBody | undefined)?.forks ?? [];
+    const owners = new Map<string, string[]>();
+    for (const f of lineage) if (f.baseVersion === version) owners.set(f.owner, [...(owners.get(f.owner) ?? []), `${f.copy} ${f.version}`]);
+    for (const [owner, copies] of owners) {
+      const one = copies.length === 1;
+      try {
+        await pushNotice(this.#runner, owner, { key: `revoked|${name}|${version}`, kind: "revocation", name, version, text: `${name} ${version} was revoked: ${reason}. Your personal ${one ? "copy" : "copies"} ${copies.slice(0, 5).join(", ")} ${one ? "was" : "were"} made from it and ${one ? "is" : "are"} unchanged; decide whether to keep using ${one ? "it" : "them"}.` });
+      } catch { /* the pull answer stays */ }
+    }
   }
 
   /**
@@ -615,7 +733,9 @@ export class CatalogService {
           const e = entry.body as unknown as EntryBody;
           if (!eligible(e)) throw new DomainError("stale_revision", "it is no longer a version retention may drop");
           const next: EntryBody = { ...e, versions: e.versions.filter((v) => v !== drop.version), ...(e.deprecated === undefined ? {} : { deprecated: e.deprecated.filter((v) => v !== drop.version) }) };
-          return { ref: vref, creates: false, changes: [{ type: "delete", ref: vref, expectedRevision: found.revision }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: drop.name, version: drop.version, rule: "catalog-versions-kept", keep: drop.keep } };
+          // A shared release's snapshot (card T08) goes with its version.
+          const snap = await this.#runner.get(SNAPSHOT_KIND, versionId);
+          return { ref: vref, creates: false, changes: [{ type: "delete", ref: vref, expectedRevision: found.revision }, { type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }, ...(snap === undefined ? [] : [{ type: "delete" as const, ref: snapshotRef(versionId), expectedRevision: snap.revision }])], ...(snap === undefined ? {} : { audit: [{ type: "catalog.snapshot.remove", subject: snapshotRef(versionId), detail: { name: drop.name, version: drop.version, why: "retention" } }] }), detail: { name: drop.name, version: drop.version, rule: "catalog-versions-kept", keep: drop.keep } };
         },
       }));
       return { dropped: true };
@@ -773,11 +893,11 @@ export class CatalogService {
     if (resolved === undefined) throw new DomainError("forbidden", `${by.id} may not read ${String(name).slice(0, 64)}`);
     const source = part === "instructions" ? resolved.version.instructional : resolved.version.executable;
     if (source === undefined) throw new DomainError("not_found", `${name} has no ${part}`);
-    // Read as the registrant would: the desk's own rule about who may read a record applies to the registrant, and the catalog serves what was registered.
-    const record = (await this.#runner.get("desk-record", source.recordId))?.body as unknown as { body: string } | undefined;
-    if ((record as { deleted?: unknown } | undefined)?.deleted !== undefined) throw new DomainError("not_found", `${name} ${version}: the ${part} text was removed (blanked by retention after the version was revoked, or deleted by the owner; the version's record and digest stay)`);
-    if (record === undefined || sha(record.body) !== source.digest) throw new DomainError("invalid_command", `${name} ${version}: the recorded ${part} is missing or has changed since it was registered`);
-    return record.body;
+    // Read as the registrant would: the desk's own rule about who may read a record applies to the registrant, and the catalog serves what was registered (from the snapshot of a shared release when the record has changed).
+    const got = await this.#released(resolved.version, part, resolved.version.revoked !== undefined);
+    if (got === "deleted") throw new DomainError("not_found", `${name} ${version}: the ${part} text was removed (blanked by retention after the version was revoked, or deleted by the owner; the version's record and digest stay)`);
+    if (got === "changed") throw new DomainError("invalid_command", `${name} ${version}: the recorded ${part} is missing or has changed since it was registered`);
+    return got.text;
   }
 
   /** Whether a catalog version exists, is not revoked and may be used by this principal (its own personal entries; shared and system ones with `catalog.read`; the owner anything live). For environments. */
@@ -889,14 +1009,14 @@ export class CatalogService {
     if (resolved === undefined) throw new DomainError("not_found", `no shared tool ${source}${command.version === undefined ? "" : ` ${command.version}`} you may read`);
     const base = resolved.version;
     if (base.revoked !== undefined) throw new DomainError("invalid_command", `${base.name} ${base.version} was revoked (${base.revoked.reason}); copy a version that is not`, { field: "version" });
-    // The recorded text must still be exactly what was released, so the copy is of the released bytes.
-    const sources = [base.instructional, ...(base.executable === undefined ? [] : [base.executable])];
-    const records = new Map<string, number>();
-    for (const s of sources) {
-      const live = await this.#runner.get("desk-record", s.recordId);
-      const body = live?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
-      if (live === undefined || body === undefined || body.deleted !== undefined || typeof body.body !== "string" || sha(body.body) !== s.digest || live.revision !== s.revision) throw new DomainError("invalid_command", `${base.name} ${base.version}: its recorded text is no longer as released, so it cannot be copied`);
-      records.set(s.recordId, live.revision);
+    // The copy is of the released bytes: read back by digest from the desk record or, when that has changed since, from the release's snapshot; the copy keeps a snapshot of its own (a later revocation of the base removes the base's).
+    const texts: { instructions?: string; executable?: string } = {};
+    const records = new Map<string, { ref: AggregateRef; revision: number }>();
+    for (const part of ["instructions", ...(base.executable === undefined ? [] : ["executable" as const])] as const) {
+      const got = await this.#released(base, part, false);
+      if (typeof got === "string") throw new DomainError("invalid_command", `${base.name} ${base.version}: its recorded text is no longer as released, so it cannot be copied`);
+      texts[part] = got.text;
+      records.set(`${got.pin.ref.kind}/${got.pin.ref.id}`, got.pin);
     }
     const copiedFrom: CopiedFrom = { name: base.name, version: base.version, digest: base.digest };
     const body: Omit<VersionBody, "digest"> = { name: canonical, layer: "agent", kind: base.kind, version, manifest: base.manifest, instructional: base.instructional, ...(base.executable === undefined ? {} : { executable: base.executable }), copiedFrom, registeredBy: by.id, registeredAt: this.#runner.now() };
@@ -938,7 +1058,8 @@ export class CatalogService {
           ref: vref, creates: true,
           changes: [
             { type: "create", ref: vref, body: full as unknown as JsonObject },
-            ...[...records].map(([id, revision]) => ({ type: "check" as const, ref: { kind: "desk-record", id }, expectedRevision: revision })),
+            { type: "create", ref: snapshotRef(versionId), body: snapshotOf(full, texts as { instructions: string; executable?: string }, this.#runner.now()) as unknown as JsonObject },
+            ...[...records.values()].map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
             { type: "check", ref: sref, expectedRevision: shared.revision },
             forks === undefined ? { type: "create", ref: fref, body: nextForks as unknown as JsonObject } : { type: "update", ref: fref, expectedRevision: forks.revision, body: nextForks as unknown as JsonObject },
             entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
@@ -989,16 +1110,22 @@ export class CatalogService {
     return { name: canonical, forks: lineage.map((f) => ({ ...f, baseRevoked: entry.revoked.includes(f.baseVersion) })) };
   }
 
+  /** The caller's toolbox inbox (card T08): decisions on its proposals and revocations of shared versions it keeps copies of, oldest first; `after` is the last `seq` already read. Agents only. */
+  async notices(by: Principal, query: { after?: number; limit?: number } = {}): Promise<{ items: ToolboxNotice[]; last: number }> {
+    onlyKnown(query, ["after", "limit"]);
+    return readNotices(this.#runner, by, query);
+  }
+
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   /**
    * The source of a version. An agent registers only its own accepted original work (the desk refuses another desk's content and copies of it). The owner, releasing a shared or system version,
    * takes an agent's accepted, shared (not private) original record, never a draft or a copy; the author stays recorded, and the release is a separate version with its own digest.
    */
-  async #source(by: Principal, recordId: string, maintainer = false): Promise<SourceRef> {
+  async #source(by: Principal, recordId: string, maintainer = false): Promise<{ ref: SourceRef; text: string }> {
     if (by.kind !== "owner" && !maintainer) {
       const found = await this.#desks.executableSource(by, recordId);
-      return { recordId: found.id, revision: found.revision, digest: sha(found.body), author: by.id };
+      return { ref: { recordId: found.id, revision: found.revision, digest: sha(found.body), author: by.id }, text: found.body };
     }
     // A maintainer (card T08) releases only a record the desk lets it read; the rules below (accepted, shared, original) are the owner's own.
     if (maintainer) await this.#desks.read(by, recordId);
@@ -1009,12 +1136,38 @@ export class CatalogService {
     if (record.status !== "accepted") throw new DomainError("invalid_command", "only an accepted record can be released", { field: "recordId" });
     if (record.origin !== undefined || record.copiedFrom !== undefined) throw new DomainError("forbidden", "a copy of another desk's content cannot be released as a skill or tool");
     if ((record as { archived?: unknown; deleted?: unknown }).archived !== undefined || (record as { deleted?: unknown }).deleted !== undefined) throw new DomainError("invalid_command", "that record is archived or deleted; restore it or write the work again", { field: "recordId" });
-    return { recordId: found.id, revision: found.revision, digest: sha(record.body), author: record.owner };
+    return { ref: { recordId: found.id, revision: found.revision, digest: sha(record.body), author: record.owner }, text: record.body };
+  }
+
+  /**
+   * The released text of one part of a version (card T08): its desk record while that still holds exactly the released bytes, otherwise (an unrevoked version only) the snapshot stored at release. A record the owner deleted
+   * (or retention blanked) answers `deleted` whatever the snapshot holds, and a revoked version is never served from a snapshot (its text is blanked by retention's own rule). `pin` is the record the text was read from, so a
+   * write that relies on it can check it is unchanged.
+   */
+  async #released(v: Pick<VersionBody, "instructional" | "executable"> & { readonly id: string }, part: "instructions" | "executable", revoked: boolean): Promise<{ text: string; pin: { ref: AggregateRef; revision: number } } | "deleted" | "changed"> {
+    const source = part === "instructions" ? v.instructional : v.executable;
+    if (source === undefined) return "changed";
+    const live = await this.#runner.get("desk-record", source.recordId);
+    const record = live?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
+    if (record?.deleted !== undefined) return "deleted";
+    if (live !== undefined && typeof record?.body === "string" && sha(record.body) === source.digest) return { text: record.body, pin: { ref: { kind: "desk-record", id: live.id }, revision: live.revision } };
+    if (revoked) return "changed";
+    const snap = await this.#runner.get(SNAPSHOT_KIND, v.id);
+    const text = (snap?.body as unknown as SnapshotBody | undefined)?.[part];
+    if (snap !== undefined && typeof text === "string" && sha(text) === source.digest) return { text, pin: { ref: snapshotRef(v.id), revision: snap.revision } };
+    return "changed";
+  }
+
+  async #entryOf(name: string): Promise<EntryBody | undefined> {
+    return (await this.#runner.get("catalog-entry", derivedId("cat", name)))?.body as unknown as EntryBody | undefined;
   }
 
   async #mayReadEntry(by: Principal, e: EntryBody, projectId?: string): Promise<boolean> {
     return mayReadCatalogEntry((kind, id) => this.#runner.get(kind, id), by, e, projectId);
   }
+
+  /** An audience as it would be stored (the proposal service checks a promotion's suggested audience with it). */
+  async audienceOf(value: unknown): Promise<Audience> { return this.#checkAudience(value); }
 
   /** Checks an audience and stores it by durable identity: roles by name (they must be defined), teams and projects by ID or by their exact name (exactly one must match; a name that matches several is refused). */
   async #checkAudience(value: unknown): Promise<Audience> {
