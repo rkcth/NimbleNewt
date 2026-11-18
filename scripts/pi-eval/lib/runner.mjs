@@ -250,7 +250,7 @@ const ABS_PATH = /(?:~\/|\/)[A-Za-z0-9._@+~-][^\s"'`;|&<>(){}\\,]*/g;
  * results folder). File content and edit text are not read; a cut text only up to where it was cut.
  */
 export function namesMark(commands, marks) {
-  return commands.some((entry) => { const t = toolCallTexts(entry); return [...t.commands, ...t.paths].some(({ text }) => marks.some((m) => text.includes(m))); });
+  return commands.some((entry) => { const t = toolCallTexts(entry); return [...t.commands, ...t.paths, ...(t.patterns ?? [])].some(({ text }) => marks.some((m) => text.includes(m))); });
 }
 
 /**
@@ -273,7 +273,7 @@ export function foreignPaths(commands, { ownDir, watched = [] }) {
   const found = new Set();
   for (const entry of commands) {
     const t = toolCallTexts(entry);
-    for (const { text, cut } of [...t.commands, ...t.paths]) {
+    for (const { text, cut } of [...t.commands, ...t.paths, ...(t.patterns ?? [])]) {
       for (const m of text.matchAll(ABS_PATH)) {
         const partial = cut && m.index + m[0].length === text.length;
         const raw = partial ? m[0] : m[0].replace(/[.:]+$/, "");

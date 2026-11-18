@@ -505,7 +505,9 @@ export function findRealGit(pathValue = process.env.PATH ?? process.env.Path ?? 
 // ---- detection in the agent's log ----
 
 const GIT = String.raw`(?<![\w.-])git(?:\.exe)?`;
-const GIT_OPTS = String.raw`(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[A-Za-z][\w-]*(?:=\S+)?))*`;
+// Options before the subcommand: `-C`, `-c` and the long options git also takes with a separate value (`--git-dir <path>`)
+// eat that value (W01e second review: `git --git-dir /x/.git push` was not seen).
+const GIT_OPTS = String.raw`(?:\s+(?:(?:-[Cc]|--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix|list-cmds))\s+(?:"[^"]*"|'[^']*'|\S+)|--?[A-Za-z][\w-]*(?:=\S+)?))*`;
 const PUSH = new RegExp(`${GIT}${GIT_OPTS}\\s+(?:push|send-pack|http-push)\\b`);
 /** `git remote add|set-url ...` (the rest of the segment captured) and `git config remote.<name>.(push)url <value>`. */
 const REMOTE = new RegExp(`${GIT}${GIT_OPTS}\\s+remote(?:\\s+-\\S+)*\\s+(?:add|set-url)\\b([^;&|\\n]*)`, "i");
@@ -552,8 +554,16 @@ function shellSegments(c) {
   return out;
 }
 
-/** The kinds seen in one shell command. */
-function commandKinds(c, found, cut = false) {
+/**
+ * A second reading of a command for a push or a remote (W01e second review): line continuations joined, quotes dropped,
+ * and an argv list's punctuation (`,` `[` `]` `(` `)`) read as spaces, so `git \<newline> push`, `"git" push`, `git'' push`,
+ * Python's `subprocess.run(["git", "push"])` and Node's `execFileSync("git", ["push"])` read as `git push`. It only adds
+ * kinds. The key search does not use it: without its quotes a search pattern `'a|\.ssh'` would split into programs.
+ */
+const looseReading = (c) => c.replace(/\\\r?\n/g, " ").replace(/["'`]/g, "").replace(/[,[\]()]/g, " ");
+
+/** A push or a remote in one command text. */
+function gitKinds(c, found, cut) {
   if (PUSH.test(c)) found.add("push");
   // In a text cut at a size limit, a remote command that runs to the cut has an address that is not known.
   const toCut = (m) => cut && m.index + m[0].length === c.length;
@@ -561,6 +571,13 @@ function commandKinds(c, found, cut = false) {
   if (r && (nonLocalAddress(r[1] ?? "") || toCut(r))) found.add("remote");
   const rc = REMOTE_CONFIG.exec(c);
   if (rc && (nonLocalAddress(`x ${rc[1] ?? ""}`) || toCut(rc))) found.add("remote");
+}
+
+/** The kinds seen in one shell command. */
+function commandKinds(c, found, cut = false) {
+  gitKinds(c, found, cut);
+  const loose = looseReading(c);
+  if (loose !== c) gitKinds(loose, found, cut);
   for (const segment of shellSegments(c)) {
     let prog = "";
     try { prog = programOf(segment); } catch { /* unbalanced quotes: searched in full */ }
@@ -588,6 +605,8 @@ export function credentialAttempts(commands) {
     // misses (`git push|` or `$SSH_AUTH_SOCK|` at the cut); a remote command that runs to the cut has an unknown address.
     for (const c of t.commands) { commandKinds(c.text, found, c.cut); if (c.cut) commandKinds(wholePart(c), found); }
     for (const p of t.paths) if (CREDENTIALS.test(p.text) || (p.cut && CREDENTIALS.test(wholePart(p)))) found.add("credentials");
+    // A file tool's search pattern is a search of the code, read as a grep in bash is: only a key path under a home folder.
+    for (const p of t.patterns ?? []) if (HOME_CREDENTIALS.test(p.text) || (p.cut && HOME_CREDENTIALS.test(wholePart(p)))) found.add("credentials");
   }
   return [...found].sort();
 }

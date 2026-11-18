@@ -194,7 +194,8 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   every string read as a command; a call with no tool name has its command-like fields (`command`, `cmd`, `script`,
   `args`, `input`, ... at any depth, argv lists joined) read as commands, the rest as paths, content not at all. Every
   call is read; the texts are bounded (64 KiB per text, 256 KiB per call, 4 KiB per call once a run's calls hold
-  16 Mi characters), keeping each text's head and tail; records carry `toolTextsCut` (calls so cut). The copy of each
+  16 Mi characters), keeping each text's head and tail and, from its middle, the lines naming git, a key or a path; a
+  file tool's search pattern counts for keys only as a path under a home folder, as a grep in bash does; records carry `toolTextsCut` (calls so cut). The copy of each
   call kept in the summary is still cut to 2,000 characters (records carry `toolArgsCut`, the number cut). A contaminated run is left out of the report's
   table and gates (`report.mjs`, the batch's own report) and is never a verified finish; the report names them and their
   kinds, and `compare.mjs` shows them as `C`.

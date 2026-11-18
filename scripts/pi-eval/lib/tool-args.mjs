@@ -17,7 +17,9 @@
 // cut inside that path, and a cut call that no longer parsed was read whole as a command). The texts are bounded in
 // size (TEXT_LIMIT per text, CALL_LIMIT per call, SMALL_CALL_LIMIT per call once a run's calls hold SUMMARY_LIMIT): a
 // longer text keeps its head and its tail, texts past a call's room are joined and kept head and tail, and the call is
-// marked `textsCut`. Nothing is dropped unread. A text whose end is not known carries `cut: true`, one whose start is
+// marked `textsCut`. No call is left unread; of a cut text's middle only the lines naming git, a key or a path are kept
+// (`excerpts`). A file tool's search fields (`pattern`, `glob`, ...) are `patterns`: a search of the code, whose key check
+// counts only a key path under a home folder. A text whose end is not known carries `cut: true`, one whose start is
 // not known `cutStart: true`.
 // A stored argument string that is not valid JSON (an older record cut at its size limit) is read with a tolerant
 // parser: each complete field is used as above, and a string the cut ends inside is kept with `cut: true` (source
@@ -44,6 +46,41 @@ export const STORED_ARGS_LIMIT = 2000;
 const MAX_TEXTS = 256;
 const MAX_DEPTH = 8;
 const MIN_PIECE = 256;
+/** A file tool's search fields (Pi's grep and find, Claude's Grep and Glob): read as `patterns`, a search of the code, so
+ *  the key check counts only a key path under a home folder there, as it does for a grep run in bash (W01e second review). */
+const PATTERN_FIELDS = new Set(["pattern", "glob", "regex", "query", "include", "exclude", "iglob"]);
+/**
+ * W01e second review: the middle of a text kept head and tail is not dropped whole. Each line in it that names git, ssh, a
+ * key or login file, a home folder or an absolute path is kept too (up to EXCERPT_SPAN characters each side of the word,
+ * a quarter of the text's room in all), so a push between two long heredocs, or one the head/tail cut falls across, is
+ * still seen. Other middle text is not read.
+ */
+const EXCERPT_WORDS = /git|ssh|netrc|credential|gh-token|\.config|id_(?:rsa|dsa|ecdsa|ed25519)|SSH_AUTH|docker|secrets|\.pi[/\\]|\.codex|\$\{?HOME|~\/|(?:^|[\s"'=:(])\/[A-Za-z]/g;
+const EXCERPT_SPAN = 256;
+
+/** The lines of s between `from` and `to` that hold an EXCERPT_WORDS match, at most `budget` characters in all. */
+function excerpts(s, from, to, budget) {
+  const out = [];
+  const re = new RegExp(EXCERPT_WORDS.source, "g");
+  // Start a little before `from`, so a line the head's cut falls inside is found from its start.
+  re.lastIndex = Math.max(0, from - EXCERPT_SPAN);
+  let used = 0, prevEnd = 0;
+  for (let m; used < budget && (m = re.exec(s)) !== null && m.index < to;) {
+    // The word's own position (the match may begin with the newline before an absolute path).
+    const at = s[m.index] === "\n" ? m.index + 1 : m.index;
+    const lineStart = s.lastIndexOf("\n", at - 1) + 1;
+    const nl = s.indexOf("\n", at);
+    const lineEnd = nl === -1 ? s.length : nl;
+    const start = Math.max(lineStart, at - EXCERPT_SPAN, prevEnd);
+    const end = Math.min(lineEnd, m.index + m[0].length + EXCERPT_SPAN, start + budget - used);
+    if (end <= start) { re.lastIndex = m.index + 1; continue; }
+    out.push({ text: s.slice(start, end), cut: end < lineEnd, cutStart: start > lineStart });
+    used += end - start;
+    prevEnd = end;
+    re.lastIndex = Math.max(end, m.index + 1);
+  }
+  return out;
+}
 
 /** A string value a cut ended inside: only its visible start is known. */
 class CutString { constructor(text) { this.text = text; } }
@@ -60,25 +97,31 @@ export function argTexts(args, toolName = null, { limit = CALL_LIMIT } = {}) {
   const tool = typeof toolName === "string" ? toolName : null;
   const fileTool = tool !== null && FILE_TOOLS.test(tool);
   const named = tool !== null && !fileTool;
-  const commands = [], paths = [], overflow = { commands: [], paths: [] };
+  const commands = [], paths = [], patterns = [], overflow = { commands: [], paths: [], patterns: [] };
+  const lists = { commands, paths, patterns };
   let chars = 0, textsCut = false;
   const push = (list, s, cutEnd, cap) => {
     if (s.length <= cap) { list.push({ text: s, cut: cutEnd }); chars += s.length; return; }
-    const half = Math.floor(cap / 2);
-    list.push({ text: s.slice(0, half), cut: true }, { text: s.slice(s.length - half), cut: cutEnd, cutStart: true });
-    chars += 2 * half; textsCut = true;
+    // Head, the middle's lines that name git, a key or a path (at most a quarter of the room), and tail.
+    const lo = Math.floor((cap - Math.floor(cap / 4)) / 2);
+    const ex = excerpts(s, lo, s.length - lo, Math.floor(cap / 4));
+    const used = ex.reduce((n, x) => n + x.text.length, 0);
+    const half = Math.floor((cap - used) / 2);
+    list.push({ text: s.slice(0, half), cut: true }, ...ex, { text: s.slice(s.length - half), cut: cutEnd, cutStart: true });
+    chars += 2 * half + used; textsCut = true;
   };
+  const count = () => commands.length + paths.length + patterns.length;
   const add = (kind, v) => {
     const cutEnd = v instanceof CutString;
     const s = cutEnd ? v.text : v;
     const room = Math.min(TEXT_LIMIT, limit - chars);
-    if (commands.length + paths.length >= MAX_TEXTS || (room < MIN_PIECE && s.length > room)) { overflow[kind].push(v); return; }
-    push(kind === "commands" ? commands : paths, s, cutEnd, room);
+    if (count() >= MAX_TEXTS || (room < MIN_PIECE && s.length > room)) { overflow[kind].push(v); return; }
+    push(lists[kind], s, cutEnd, room);
   };
   const isText = (v) => typeof v === "string" || v instanceof CutString;
   const walk = (v, key, depth, content) => {
     const asCommand = !fileTool && (named || COMMAND_FIELDS.has(key));
-    if (isText(v)) { if (!content || named) add(asCommand ? "commands" : "paths", v); return; }
+    if (isText(v)) { if (!content || named) add(asCommand ? "commands" : fileTool && PATTERN_FIELDS.has(key) ? "patterns" : "paths", v); return; }
     if (v === null || typeof v !== "object") return;
     // Deeper than any real tool's arguments: read whole as one text rather than left out.
     if (depth >= MAX_DEPTH) { add(fileTool ? "paths" : "commands", JSON.stringify(v) ?? ""); return; }
@@ -92,13 +135,13 @@ export function argTexts(args, toolName = null, { limit = CALL_LIMIT } = {}) {
   };
   if (isText(args)) add("commands", args);
   else walk(args, null, 0, false);
-  for (const kind of ["commands", "paths"]) {
+  for (const kind of ["commands", "paths", "patterns"]) {
     if (overflow[kind].length === 0) continue;
     textsCut = true;
     const cutEnd = overflow[kind].at(-1) instanceof CutString;
-    push(kind === "commands" ? commands : paths, overflow[kind].map((x) => (x instanceof CutString ? x.text : x)).join("\n"), cutEnd, Math.max(MIN_PIECE, Math.min(TEXT_LIMIT, limit - chars)));
+    push(lists[kind], overflow[kind].map((x) => (x instanceof CutString ? x.text : x)).join("\n"), cutEnd, Math.max(MIN_PIECE, Math.min(TEXT_LIMIT, limit - chars)));
   }
-  return { tool, commands, paths, chars, ...(textsCut ? { textsCut: true } : {}) };
+  return { tool, commands, paths, ...(patterns.length > 0 ? { patterns } : {}), chars, ...(textsCut ? { textsCut: true } : {}) };
 }
 
 /**

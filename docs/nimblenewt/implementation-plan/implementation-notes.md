@@ -14132,3 +14132,43 @@ Reviewed `5563836f` for whether the detector errs strict, checked against Pi's r
 - Build: `tsc --build --force packages/pi-adapter packages/worker`, run with the installed TypeScript through a temporary worktree `node_modules`, removed afterwards.
 
 **Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
+
+### W01e second review (Claude agent, Opus 5.5, clean context, 2026-11-18): final round
+
+Reviewed `bcd3b005` for how strict and how robust the contamination reading is. Probed shapes are in the tests below; the replays read the run folders only.
+
+**Defects found and fixed (`lib/isolation.mjs`, `lib/tool-args.mjs`, `lib/runner.mjs`).**
+- Missed pushes and remotes:
+  - `git --git-dir /x/.git push`, `git --work-tree /x push`: the long options git also takes with a separate value now eat that value, the same way `-C` and `-c` already did;
+  - `git \<newline> push`, `"git" push`, `git'' push`, Python `subprocess.run(["git", "push"])`, Node `execFileSync("git", ["push"])`: a second, loose reading of each command (line continuations joined, quotes dropped, `, [ ] ( )` read as spaces) is checked for a push or a remote. It only adds kinds. The key check does not use it: without its quotes, a pattern `'a|\.ssh'` would split into programs.
+- A text over its room kept only head and tail, so a push between two long heredocs, or one the head/tail cut fell across, was missed. The middle's lines that name git, ssh, a key or login file, a home folder or an absolute path are now kept as well (`excerpts`: up to 256 characters each side of the word, a quarter of the room in all). Head and tail shrink to fit, so the per-text, per-call and per-run bounds are unchanged. Other middle text is still not read. The header comment's "nothing is dropped unread" is corrected.
+- False flag: Pi's `grep`/`find` tool (and Claude's Grep/Glob) searching the code for `\.ssh` counted as `credentials`, though the same search in bash grep did not. This predates the card. A file tool's `pattern`, `glob`, `regex`, `query`, `include`, `exclude` and `iglob` fields are now `patterns`, a search of the code. For keys they count only as a key path under a home folder, the same as a bash grep. They still count for foreign paths and the reference marks. The entry field is optional, and older entries and stored strings read as before.
+
+**Checked, no change.**
+- Already caught: `git -c x=y push`, `git<TAB>push`, `env GIT_SSH_COMMAND=... git push`, `/usr/bin/git push`, `\git push`, `os.system("git push")`, `send-pack`, a remote add to an ssh or quoted https address, a Python one-liner opening `~/.ssh/id_rsa`, `$HOME/.config/gh`, a read of `~/.ssh` or `/home/u/.ssh`, a relative walk up to `home/u/.ssh/id_rsa` (the `.ssh/` component), a path in `edits: [{ path }]`, a PowerShell push.
+- Not detectable from the call text, and not claimed: a git alias (`git config alias.p push; git p`), a shell alias or a variable as the program (`G=git; $G push`), base64 or hex of a command, a script written with a file tool and then run, `gh`/`curl` to a forge API, a path built from variables (`D=/srv/code; cat $D/repos/...`), a relative walk to another checkout (`cat ../../c07m/a`), `~other/`, a solution SHA that appears only in a long text's unexcerpted middle, and a key name split by quotes or variables (caught here only when `id_rsa` or the home path is still visible). These are heuristics.
+- What actually stops each one on Linux with bubblewrap:
+  - push, remote and network: the git wrapper, the run's own git settings (ssh off, network transports refused) and a network namespace with loopback only;
+  - keys and logins: the owner's home and the key folders hidden, a fresh home, a scrubbed environment;
+  - writing outside the run's folders: the read-only file system.
+  - Reading another checkout or the reference under `/srv/code` is not prevented. There the detector is the only safeguard, and the README already says so. Without bubblewrap (macOS, Windows, or a host where it does not work), only the wrapper and settings stand behind the detector.
+- Remaining strict cases, accepted: a bash `grep "git push"` and a commit message naming `git push` count as a push, as before; under the loose reading, `echo "git, push"` would too.
+- Bounds and speed: a synthetic 241 MB log (401 bash calls of 600K characters each, dense with paths and git words, and a push in the last) gives 17.4 M characters of texts (16 Mi plus 4 KiB per later call). Summarizing takes 1.4 s and detection 2.3 s, the same as `bcd3b005`. The push is found. All 45 real run folders replay in 5.4 s with a 125 MB peak resident size. The largest `agent.jsonl` is 27 MB, and no real call reaches a size cap.
+- Compatibility: `results.jsonl` gains no new fields in this round. `patterns` lives only in the in-memory summary. `rescore.mjs` re-derives outcomes through `summarizeLogFile` and `classify`, which do not read `toolTexts`.
+
+**Replay (read only, all 45 run folders with an `agent.jsonl`, the batch's watched roots and marks).** The results are line for line the same as `bcd3b005`, both from the full arguments and from the stored cut copies (fallback):
+- `l02e-2-B-r1-20261118T080448` and `c07m-B-r1-20261118T085505` are clean;
+- `grant-proposals-B-r1-20261117T094724` is still flagged:
+  - attempts: `credentials`, `push`, `remote`;
+  - the reference mark;
+  - foreign paths: `/srv/code/repos/nimblenewt`, `/home/rob/.git-credentials`, `/home/rob/.ssh`, `/home/rob/.ssh/paperclip`, `/home/rob/.ssh/paperclip/nimblenewt`.
+
+**Tests.** `tool-args.test.mjs` has two more:
+- quoting, continuations, separate-value options, one-liners' argv lists, a push and a path in a long text's middle, and one across the head/tail cut. Plain `git log`, `git status && echo pushed` and a local remote stay unflagged;
+- file-tool search patterns.
+
+**Verified (Linux, node 22, through `/tmp/nn-slot.sh`).**
+- `scripts/pi-eval/*.test.mjs` and `scripts/y02-checkpoint.test.mjs`: 168 of 168 pass, none skipped.
+- Build: `tsc --build --force packages/contracts packages/pi-adapter packages/worker` with the installed TypeScript, through a temporary worktree `node_modules` (links to the installed packages, `@nimblenewt/*` pointing at the worktree's packages). Removed afterwards.
+
+**Skipped.** Real bench runs (no Radiance), other repository suites (no product code changed), Windows and macOS.
