@@ -223,3 +223,58 @@ test("W01d review: the worker's local clone (-c protocol.allow=user with protoco
   assert.equal(inProjectTests([...LOCAL, "-c", "protocol.https.allow=always", "fetch", bare], ctx(scratch)), false);
   assert.equal(inProjectTests(["-c", "protocol.allow=always", "-c", "credential.helper=store", "fetch", bare], ctx(scratch)), false);
 });
+
+test("W01d second review: --config-env is split at its last `=` as git splits it, so a network remote given that way is refused", () => {
+  const c = { cwd: scratch, roots, env: { ...plainEnv, V: "https://example.invalid/r.git" }, git: (a) => runGit(a, scratch) };
+  assert.match(decide(["--config-env=remote.a=b.url=V", "fetch", "a=b"], c).refuse ?? "", /not a local folder/);
+  assert.match(decide(["--config-env", "remote.a=b.url=V", "fetch", "a=b"], c).refuse ?? "", /not a local folder/);
+  // What the real git reads from the same option (so the split above is git's own).
+  const r = spawnSync(realGit, ["--config-env=remote.a=b.url=V", "config", "--get-regexp", "^remote\\."], { cwd: scratch, env: c.env, encoding: "utf8" });
+  assert.equal(r.stdout.trim(), "remote.a=b.url https://example.invalid/r.git");
+  // The plain form still works, and an askpass given this way is still tagged.
+  assert.equal(decide(["--config-env=core.editor=V", "status"], c).refuse, null);
+  assert.equal(inProjectTests(["--config-env=core.askPass=V", "status"], ctx(scratch, { V: "./no-prompt.sh" })), true);
+});
+
+test("W01d second review: a call that may reach submodules, the run's checkout or another checkout is never tagged", () => {
+  const other = join(base, "work", "other2");
+  mkdirSync(other, { recursive: true });
+  g(["init", "-q", "-b", "main"], other);
+  g(["commit", "-q", "--allow-empty", "-m", "o"], other);
+  const s2 = join(tmp, "nn-s2");
+  mkdirSync(s2, { recursive: true });
+  g(["init", "-q", "-b", "main"], s2);
+  // A local source or destination that is the checkout or another checkout (outside the temporary folder).
+  assert.equal(inProjectTests([...ASK, "fetch", checkout], ctx(s2)), false);
+  assert.equal(inProjectTests([...ASK, "fetch", other], ctx(s2)), false);
+  assert.equal(inProjectTests([...ASK, "clone", other, join(tmp, "nn-o")], ctx(tmp)), false);
+  assert.equal(inProjectTests([...ASK, "clone", bare, join(base, "elsewhere")], ctx(tmp)), false);
+  assert.equal(inProjectTests([...ASK, "clone", "--reference=" + checkout, bare, join(tmp, "nn-r")], ctx(tmp)), false);
+  g(["remote", "add", "up", other], s2);
+  assert.equal(inProjectTests([...ASK, "fetch", "up"], ctx(s2)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "remote.x.url=" + checkout, "fetch", "x"], ctx(scratch)), false);
+  // Submodules: their addresses are not read, so a recursing option, a submodule setting or checked-out modules count.
+  assert.equal(inProjectTests([...ASK, "clone", "--recurse-submodules", bare, join(tmp, "nn-rs")], ctx(tmp)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=true", "fetch", bare], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "fetch.recurseSubmodules=on-demand", "fetch", bare], ctx(scratch)), false);
+  const sm = join(tmp, "nn-sm");
+  mkdirSync(sm, { recursive: true });
+  g(["init", "-q", "-b", "main"], sm);
+  writeFileSync(join(sm, ".git", "config"), readFileSync(join(sm, ".git", "config"), "utf8") + '[submodule "m"]\n\turl = https://example.invalid/m.git\n\tactive = true\n');
+  assert.equal(inProjectTests([...ASK, "fetch", bare], ctx(sm)), false);
+  const mods = join(tmp, "nn-mods");
+  mkdirSync(join(mods), { recursive: true });
+  g(["init", "-q", "-b", "main"], mods);
+  mkdirSync(join(mods, ".git", "modules", "m"), { recursive: true });
+  assert.equal(inProjectTests([...ASK, "fetch", bare], ctx(mods)), false);
+  // The worker's own form stays tagged: --no-recurse-submodules, a local repository and a commit in the temporary folder.
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-tags", "--no-recurse-submodules", bare, "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-tags", "--no-recurse-submodules", "--", bare, "main"], ctx(scratch)), true);
+});
+
+test("W01d second review: the worker's -c submodule.recurse=false does not stop the tag; turned on, it does", () => {
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=false", "fetch", "--no-recurse-submodules", bare, "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "-c", "fetch.recurseSubmodules=no", "status"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=1", "status"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.m.url=" + bare, "status"], ctx(scratch)), false);
+});

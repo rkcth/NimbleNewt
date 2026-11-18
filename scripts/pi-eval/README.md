@@ -145,7 +145,8 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   kind only) to `git-guard.log` in the run's artifacts. A refusal is tagged `in-project-tests` (card W01d) only when it is
   the project's own tests at work: refused only for an askpass or proxy program (`core.askpass`, `core.gitproxy`) or the
   allowed protocols (`protocol.allow`) given for that one call, the same call otherwise let through, no alias and no
-  network address in it (nor in the repository's remotes, its branches' remotes or a URL rewrite; never `submodule`), and
+  network address in it (nor in the repository's remotes, its branches' remotes or a URL rewrite; never `submodule` or
+  submodule recursion; every local address it fetches, clones or pushes with is in the run's temporary folder), and
   its folder, any `--git-dir`/`--work-tree`/`GIT_DIR`, and the repository's own git folder all in the run's temporary
   folder (where the worker's tests make their repositories), never the run's checkout. It is still refused.
   `core.askPass=echo` exactly (the worker gives it on every call; `echo` answers a prompt with its own text, never a

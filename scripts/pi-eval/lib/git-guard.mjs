@@ -18,7 +18,7 @@
 // gets past it. What it then meets is the run's git settings, and on Linux a home folder with no keys in it.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const IS_WIN = process.platform === "win32";
@@ -40,12 +40,15 @@ export function parseGlobal(args, env = {}) {
     if (name === "-C" && value !== undefined) dirs.push(value);
     else if (name === "-c" && value !== undefined) configs.push(splitKv(value));
     else if (name.startsWith("-c") && name.length > 2 && !name.startsWith("--")) configs.push(splitKv(name.slice(2)));
-    else if (name === "--config-env" && value !== undefined) { const [k, v] = splitKv(value); configs.push([k, env[v] ?? ""]); }
+    else if (name === "--config-env" && value !== undefined) { const [k, v] = splitEnvSpec(value); configs.push([k, env[v] ?? ""]); }
   }
   return { dirs, configs, globals: args.slice(0, i), sub: args[i], rest: args.slice(i + 1) };
 }
 
 const splitKv = (s) => { const j = String(s).indexOf("="); return j < 0 ? [String(s), "true"] : [s.slice(0, j), s.slice(j + 1)]; };
+// `--config-env=<key>=<envvar>`: git splits at the LAST `=` (git_config_push_env uses strrchr), so a key may hold `=` in its
+// subsection (`remote.a=b.url`). Splitting at the first `=` read `remote.a` and let a network remote through (W01d second review).
+const splitEnvSpec = (s) => { const j = String(s).lastIndexOf("="); return j < 0 ? [String(s), ""] : [s.slice(0, j), s.slice(j + 1)]; };
 
 /** The settings a git environment carries (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY_n/VALUE_n). */
 export function envConfigs(env) {
@@ -299,7 +302,9 @@ export function decide(args, { cwd, roots, env, git }, depth = 0) {
 //     remote that is not a local folder, no other refused setting (ssh command, credential helper, URL rewrite, ...);
 //   - the call names its subcommand directly (an alias is never tagged) and no argument is a network address; every
 //     remote the repository has (its configuration and the call's -c), every branch's remote, and each positional argument
-//     of a subcommand that contacts a remote, is a local folder; no URL rewrite is configured; never `submodule`;
+//     of a subcommand that contacts a remote, is a local folder in the run's temporary folder and outside its checkout (so
+//     never the checkout or another checkout); no URL rewrite is configured; never `submodule`, a recursing option, an
+//     enabled recursion setting, a submodule entry or checked-out modules (W01d second review);
 //   - its folder (after -C), any --git-dir / --work-tree / GIT_DIR / GIT_WORK_TREE, and the repository's own git folder
 //     (as the real git reports it) all lie in the run's temporary folder (TMPDIR), never the run's checkout.
 // The limit: the agent can make the same kind of call itself in a scratch repository in its temporary folder, and that
@@ -319,7 +324,7 @@ const NETWORK_ADDRESS =/^(?!file:\/\/)[A-Za-z][A-Za-z0-9+.-]*:\/\/|^[A-Za-z][A-Z
 function withoutAskpass(args, env) {
   const out = [];
   let i = 0;
-  const isAsk = (kv) => ASKPASS_OR_PROXY.has(splitKv(kv)[0].toLowerCase());
+  const isAsk = (kv, envForm = false) => ASKPASS_OR_PROXY.has((envForm ? splitEnvSpec(kv) : splitKv(kv))[0].toLowerCase());
   while (i < args.length && typeof args[i] === "string" && args[i].startsWith("-")) {
     const a = args[i];
     const eq = a.startsWith("--") ? a.indexOf("=") : -1;
@@ -327,11 +332,11 @@ function withoutAskpass(args, env) {
     const inline = eq > 0 ? a.slice(eq + 1) : undefined;
     if (VALUE_GLOBALS.has(name) && inline === undefined) {
       const v = args[i + 1];
-      if (!((name === "-c" || name === "--config-env") && v !== undefined && isAsk(v))) out.push(a, ...(v === undefined ? [] : [v]));
+      if (!((name === "-c" || name === "--config-env") && v !== undefined && isAsk(v, name === "--config-env"))) out.push(a, ...(v === undefined ? [] : [v]));
       i += 2;
       continue;
     }
-    const dropped = (name === "--config-env" && inline !== undefined && isAsk(inline)) || (name.startsWith("-c") && name.length > 2 && !name.startsWith("--") && isAsk(name.slice(2)));
+    const dropped = (name === "--config-env" && inline !== undefined && isAsk(inline, true)) || (name.startsWith("-c") && name.length > 2 && !name.startsWith("--") && isAsk(name.slice(2)));
     if (!dropped) out.push(a);
     i += 1;
   }
@@ -384,9 +389,17 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
   // (`github.com:owner/repo`, an ssh address without a user, matched no network pattern). A submodule's addresses come
   // from .gitmodules: never tagged.
   if (g.sub === "submodule") return false;
+  // Nor any call that may recurse into submodules (their addresses come from .gitmodules and submodule.*.url, not read
+  // here): a --recurse-submodules/--recursive option (the worker's --no-recurse-submodules is fine), or a submodule or recursion setting (W01d second review).
+  if (args.some((a) => typeof a === "string" && /^--recurs(?:e-submodules|ive)(?:=|$)/.test(a))) return false;
   const callGlobals = []; // the call's own global options without -C (its folder is already `dir`), so its -c values count
   for (let i = 0; i < g.globals.length; i++) { if (g.globals[i] === "-C") { i++; continue; } callGlobals.push(g.globals[i]); }
-  const configured = (git([...callGlobals, "config", "--get-regexp", "^(remote\\..*\\.(push)?url|url\\..*|branch\\..*\\.(push)?remote|remote\\.pushdefault)$"], dir) ?? "").split(/\r?\n/).filter(Boolean);
+  const configured = (git([...callGlobals, "config", "--get-regexp", "^(remote\\..*\\.(push)?url|url\\..*|branch\\..*\\.(push)?remote|remote\\.pushdefault|submodule\\..*|.*\\.recursesubmodules)$"], dir) ?? "").split(/\r?\n/).filter(Boolean);
+  const tests = testRoots.map((r) => realish(r));
+  const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
+  // A local address counts only when it lies in the run's temporary folder and outside its checkout: a fetch, clone or push
+  // between a scratch repository and the checkout or another checkout is not the tests' own (W01d second review).
+  const testLocal = (u) => { const p = localPath(u, dir); return p !== null && inside(p, tests) && !inside(p, own); };
   const remoteNames = new Set();
   const named = []; // a branch's remote: a remote's name or an address of its own
   for (const line of configured) {
@@ -394,19 +407,25 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
     const key = sp < 0 ? line : line.slice(0, sp);
     const value = sp < 0 ? "" : line.slice(sp + 1);
     if (/^url\./i.test(key)) return false;
+    // A submodule's own entry (submodule.<name>.url, ...) or recursion turned on; the worker's submodule.recurse=false is fine.
+    if (/^submodule\.recurse$|\.recursesubmodules$/i.test(key)) { if (/^(?:false|no|off|0)$/i.test(value)) continue; return false; }
+    if (/^submodule\./i.test(key)) return false;
     if (/^branch\.|^remote\.pushdefault$/i.test(key)) { named.push(value); continue; }
-    if (localPath(value, dir) === null) return false;
+    if (!testLocal(value)) return false;
     remoteNames.add(key.replace(/^remote\./i, "").replace(/\.(?:push)?url$/i, ""));
   }
-  if (named.some((v) => !remoteNames.has(v) && localPath(v, dir) === null)) return false;
+  if (named.some((v) => !remoteNames.has(v) && !testLocal(v))) return false;
   if (REMOTE_SUBS.has(g.sub)) {
     if (g.rest.some((a) => /^--remote(?:=|$)/.test(a))) return false; // archive --remote
-    if (g.rest.some((a) => !a.startsWith("-") && !remoteNames.has(a) && localPath(a, dir) === null)) return false;
+    if (g.rest.some((a) => !a.startsWith("-") && !remoteNames.has(a) && !testLocal(a))) return false;
+    // An option's own value after `=` (`--reference=<path>`, `--separate-git-dir=<path>`): a path outside, or an address.
+    if (g.rest.some((a) => /^--[^=]+=./.test(a) && !testLocal(a.slice(a.indexOf("=") + 1)))) return false;
   }
   const common = git([...locator, "rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
-  if (common !== null && common.trim() !== "") places.push(common.trim());
-  const tests = testRoots.map((r) => realish(r));
-  const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
+  if (common !== null && common.trim() !== "") {
+    places.push(common.trim());
+    if (existsSync(join(common.trim(), "modules"))) return false; // a repository with submodules checked out
+  }
   return places.every((p) => { const r = realish(p); return inside(r, tests) && !inside(r, own); });
 }
 
