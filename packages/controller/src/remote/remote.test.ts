@@ -118,6 +118,20 @@ for (const backend of backends) {
     assert.equal((await c.remote.placement(c.owner, attemptId))!.hostId, r1.id);
   });
 
+  suite("G09 remote path: an order's selected updates are checked when it is placed and reach the host in its offer as given; updates out of shape or bounds are refused and nothing is offered", async (c) => {
+    const r1 = await c.host("r1");
+    const { attemptId, order, placement } = await c.started(r1);
+    const one = { requestId: "upd:cbr-1:2", text: "Owner correction: use plan B.", origin: "side line cbr-1, desk record dsk-2, update 2" };
+    for (const bad of [[{ ...one, text: 7 }], [{ ...one, requestId: "" }], [{ ...one, extra: 1 }], Array.from({ length: 21 }, (_, i) => ({ ...one, requestId: `u${i}` })), "text"]) {
+      await refuses("invalid_command", () => c.remote.place(c.dispatcherPrincipal, { hostId: r1.id, order: { ...order, contextUpdates: bad } as never, requirements: { data: "cloud-allowed" } }), (e) => assert.match(e.message, /order\.contextUpdates/));
+    }
+    assert.equal((await c.remote.placement(c.owner, attemptId))!.placement, placement, "a refused placement changed nothing");
+    const again = await c.remote.place(c.dispatcherPrincipal, { hostId: r1.id, order: { ...order, contextUpdates: [one] }, requirements: { data: "cloud-allowed" } });
+    const offer = (await r1.client.offers()).find((o) => o.order.attemptId === attemptId && o.placement === again.placement);
+    assert.ok(offer, "the attempt was offered again");
+    assert.deepEqual(offer.order.contextUpdates, [one]);
+  });
+
   suite("the worker's watchdog guards the attempt: nothing begins once it says stop, a renewal counts from its send, and a fenced answer stops it (card H08)", async (c) => {
     const r1 = await c.host("r1");
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
