@@ -152,7 +152,11 @@ export function audienceWords(audience: Audience | undefined): string {
  */
 const holdsIn = (by: Principal, project: string): boolean => {
   if (by.taskScope !== undefined && by.taskScope.projectId !== project) return false;
-  return by.asOf !== undefined && by.grants.some((g) => g.project === project && allows(by, g.action, project, g.resource === undefined ? {} : { resource: g.resource }));
+  if (by.asOf === undefined) return false;
+  // Each grant naming the project is judged alone (another grant, such as one for every project, does not lend it life). A grant for the whole project stays usable there despite a restriction on one
+  // resource in it (that resource is not the project), so only restrictions naming no resource take it away; a grant for one resource meets the restrictions on that resource too.
+  const general = (by.restrictions ?? []).filter((r) => r.resource === undefined);
+  return by.grants.some((g) => g.project === project && allows({ ...by, grants: [g], restrictions: g.resource === undefined ? general : (by.restrictions ?? []) }, g.action, project, g.resource === undefined ? {} : { resource: g.resource }));
 };
 /** Whether an agent holds `toolbox.manage` anywhere (for every project, or for at least one). */
 export const maintainsAnywhere = (by: Principal): boolean => by.kind === "agent" && (allows(by, TOOLBOX_MANAGE, undefined) || by.grants.some((g) => g.project !== "*" && allows(by, TOOLBOX_MANAGE, g.project)));

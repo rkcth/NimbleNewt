@@ -266,6 +266,9 @@ for (const backend of backends) {
     await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { projects: [c.a] } });
     assert.notEqual(await c.cat.get(ann.p, "toolbox.lint"), undefined);
     const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    // A restriction on one task in the project leaves Ann in the project (her grants are for the whole project).
+    for (const action of ["desk.write", "desk.read"]) await grants.restrict(c.owner, { commandId: cid("rs"), subject: ann.p.id, action, project: c.a, resource: { kind: "task", id: c.ta }, reason: "kept off one task" });
+    assert.notEqual(await c.cat.get(await ann.reauth(), "toolbox.lint"), undefined, "a restriction on one task does not take Ann out of the project audience");
     for (const action of ["desk.write", "desk.read"]) await grants.restrict(c.owner, { commandId: cid("rs"), subject: ann.p.id, action, project: c.a, reason: "kept out of Garden" });
     assert.equal(await c.cat.get(await ann.reauth(), "toolbox.lint"), undefined);
     const annNow = await ann.reauth();
