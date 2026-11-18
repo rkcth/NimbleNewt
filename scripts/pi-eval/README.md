@@ -142,7 +142,16 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   judged as what it stands for, and a push's remotes are read with the call's own `-C`, `--git-dir` and `-c`. It runs the
   real git without `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND` or askpass programs, and with the run's own
   settings (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` set back, `GIT_CONFIG_NOSYSTEM` dropped). Each refusal is logged (its
-  kind only) to `git-guard.log` in the run's artifacts.
+  kind only) to `git-guard.log` in the run's artifacts. A refusal is tagged `in-project-tests` (card W01d) only when it is
+  the project's own tests at work: refused only for an askpass or proxy program (`core.askpass`, `core.gitproxy`) or the
+  allowed protocols (`protocol.allow`) given for that one call, the same call otherwise let through, no alias and no
+  network address in it (nor in the repository's remotes, its branches' remotes or a URL rewrite; never `submodule` or
+  submodule recursion; every local address it fetches, clones or pushes with is in the run's temporary folder), and
+  its folder, any `--git-dir`/`--work-tree`/`GIT_DIR`, and the repository's own git folder all in the run's temporary
+  folder (where the worker's tests make their repositories), never the run's checkout. It is still refused.
+  `core.askPass=echo` exactly (the worker gives it on every call; `echo` answers a prompt with its own text, never a
+  login) is let through like `core.sshCommand=false`; the worker's local clones still meet the `protocol.allow=user`
+  refusal (tagged).
 - **The owner's folders hidden, no network, nothing writable outside the run (Linux, bubblewrap).** Second review,
   2026-11-17. The agent runs under `bwrap` with: the whole file system read-only (`--ro-bind / /`), except the run's
   checkout, its temporary folder and its artifacts, bound back writable; these hidden behind empty folders (more with
@@ -175,8 +184,10 @@ it with the owner's home, keys and network. Since then every agent the bench sta
   changed to an address that is not a local folder, or a path or socket of the owner's keys and logins (`~/.ssh`,
   `.git-credentials`, `id_rsa`/`id_ed25519` and the like, `.netrc`, the gh token, `SSH_AUTH_SOCK`, Pi's own
   `.pi/agent`, the container engine, the team's key folder; in a code search with grep, rg or git grep only such a path
-  under a home folder counts, since code may name `.ssh`), or when the git wrapper refused anything.
-  Records carry `credentialAttempts` (the kinds seen), `guardRefusals` and `isolation` (what applied to the run). File
+  under a home folder counts, since code may name `.ssh`), or when the git wrapper refused anything not tagged as the
+  project's tests' own. Records carry `credentialAttempts` (the kinds seen), `guardRefusals` (counted),
+  `guardRefusalsInTests` (tagged, not counted; the report prints "refused inside project tests: N, not counted") and
+  `isolation` (what applied to the run). File
   content the agent writes is not searched (code may talk about pushing). A contaminated run is left out of the report's
   table and gates (`report.mjs`, the batch's own report) and is never a verified finish; the report names them and their
   kinds, and `compare.mjs` shows them as `C`.

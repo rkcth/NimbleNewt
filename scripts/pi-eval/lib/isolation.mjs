@@ -27,15 +27,15 @@ import { Transform } from "node:stream";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { splitAlias } from "./git-guard.mjs";
+import { REFUSED_ADDRESS, splitAlias } from "./git-guard.mjs";
 
 const IS_WIN = process.platform === "win32";
 /** The git wrapper program put first on the agent's PATH. */
 export const GIT_GUARD = fileURLToPath(new URL("./git-guard.mjs", import.meta.url));
 /** What the agent reads when it tries to push. */
 export const PUSH_REFUSED = "pushing is disabled in this environment";
-/** Where GitHub addresses are sent instead: loopback port 9 over http, which the agent's git settings do not allow anyway. */
-export const REFUSED_ADDRESS = "http://127.0.0.1:9/pushing-is-disabled/";
+/** Where GitHub addresses are sent instead (defined in git-guard.mjs, which reads the bench's own rewrite to it). */
+export { REFUSED_ADDRESS };
 
 // ---- environment ----
 
@@ -443,7 +443,9 @@ export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = 
     const guardConfig = join(base, "bin", "git-guard.json");
     // The refusals of this run only (two runs started in the same second share a run ID and so an artifacts folder).
     rmSync(join(artifactsDir, "git-guard.log"), { force: true });
-    writeFileSync(guardConfig, JSON.stringify({ realGit, allowRoots, gitConfig: gitconfig, log: join(artifactsDir, "git-guard.log") }));
+    // testRoots: the run's temporary folder (TMPDIR below), where a project's own tests make their repositories; a refusal
+    // there of an askpass or proxy program alone is logged as the tests' own and not counted (git-guard.mjs, card W01d).
+    writeFileSync(guardConfig, JSON.stringify({ realGit, allowRoots, testRoots: [real(join(base, "tmp"))], checkout: real(checkoutDir), gitConfig: gitconfig, log: join(artifactsDir, "git-guard.log") }));
     const node = process.execPath;
     if (IS_WIN) writeFileSync(join(base, "bin", "git.cmd"), `@"${node}" "${GIT_GUARD}" "${guardConfig}" %*\r\n`);
     else {
