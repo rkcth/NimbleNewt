@@ -3,7 +3,7 @@ import { parseName, wireName } from "@nimblenewt/registry";
 import type { AgentMessageService } from "../messaging/index.js";
 import type { StateApi } from "../api/index.js";
 import { catalogFacts } from "../dispatch/local-worker.js";
-import { checkHost, runAction, type CatalogService, type HostFacts, type VersionBody } from "../catalog/index.js";
+import { checkHost, runAction, toolboxName, type CatalogService, type HostFacts, type ToolboxProposalService, type VersionBody } from "../catalog/index.js";
 import type { DeskService } from "../context/index.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL, type ToolIdentity } from "../dispatch/model.js";
@@ -39,7 +39,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -94,7 +94,9 @@ export interface ToolExecutionDeps {
   readonly credentials: Pick<TaskCredentialService, "authenticate" | "principalOf" | "agentOf">;
   readonly dispatch: Pick<DispatcherService, "get" | "toolOperation">;
   readonly assignments: Pick<AssignmentService, "getAssignment">;
-  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked" | "revocationOf">>;
+  readonly catalog: Pick<CatalogService, "get" | "list" | "register" | "content" | "authorizeRun"> & Partial<Pick<CatalogService, "onRevoked" | "revocationOf" | "source" | "copy" | "copies" | "notices">>;
+  /** Toolbox proposals (card T08): `toolbox.propose` from a run. Absent: the operation answers that proposals are not available here. */
+  readonly proposals?: Pick<ToolboxProposalService, "propose">;
   /**
    * The `pause` policy (card T02c): the running call is aborted (what a revoked tool writes never reaches the agent) AND the task of each running call is paused (the owner who revoked is the actor), so the agent does
    * nothing more until the owner resumes it. Absent, or a task that cannot be paused: the call is aborted all the same and the owner is told through `notice`.
@@ -197,7 +199,7 @@ export interface BuiltinTool {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
@@ -522,6 +524,7 @@ export class ToolExecutionService {
               case "turn.continue": return this.#turnContinue(context, args);
               case "task.recall": return await this.#recall(context, args);
               case "dependency.record": return await this.#dependencyRecord(token, context, args);
+              case "toolbox.source": case "toolbox.copy": case "toolbox.copies": case "toolbox.notices": case "toolbox.propose": return await this.#toolbox(context, request.op as BridgeOperation, args);
             }
           };
           response = checked.admit !== undefined && ADMITTED.has(request.op as BridgeOperation) ? await this.#admitted(context, request, checked.admit, perform) : await perform();
@@ -751,6 +754,8 @@ export class ToolExecutionService {
       : op === "task.recall" ? { summary: `${c.agent.id} read its own task's records back with task.recall (${id("part")}; ${typeof result["chars"] === "number" ? result["chars"] : "?"} characters${result["found"] === false ? ", nothing found" : ""}).`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "turn.continue" ? { summary: `The turn of ${c.agent.id} was continued (nudge ${typeof result["n"] === "number" ? result["n"] : "?"} of ${typeof result["max"] === "number" ? result["max"] : "?"}): it had ended ${typeof result["endKind"] === "string" ? `as ${result["endKind"]}` : "early"}, without a tool call or work.end.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "dependency.record" ? { summary: `${c.agent.id} recorded ${typeof result["recorded"] === "number" ? result["recorded"] : "?"} input(s) its work relied on through the bridge, so a resume is checked against them.`, refs: [{ kind: "task", id: c.taskId }] }
+      : op === "toolbox.copy" ? { summary: `${c.agent.id} copied shared tool ${id("source")} into its own namespace as ${id("name")} ${id("version")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
+      : op === "toolbox.propose" ? { summary: `${c.agent.id} proposed a change to shared tool ${id("name")}, proposal ${id("proposalId")}, through the bridge (a suggestion: it changes nothing until a maintainer decides).`, refs: [{ kind: "toolbox-proposal", id: id("proposalId") }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
@@ -905,6 +910,44 @@ export class ToolExecutionService {
     }
     const made = await this.#deps.catalog.register(c.agent, { ...args, commandId: bridgeCommandId("bridge", c.attemptId, c.callId) } as never);
     return ok({ name: made.name, versionId: made.versionId, digest: made.digest });
+  }
+
+  /**
+   * The shared toolbox from a run (card T08), as the agent with its own grants (the catalogue is installation-wide): the read-only source of a tool it may read, a personal copy of one, its copies with what happened to their
+   * bases, its toolbox inbox, and a proposal to improve a shared tool. Each answer is the catalogue's own, with the same audience and not-found rules as the state API.
+   */
+  async #toolbox(c: Context, op: BridgeOperation, args: JsonObject): Promise<BridgeResponse> {
+    const cat = this.#deps.catalog;
+    const missing = (): never => { throw new DomainError("unavailable", `${op} is not available on this controller`); };
+    const str = (key: string, required = true): string | undefined => { const v = args[key]; if (v === undefined && !required) return undefined; return typeof v === "string" ? v : invalid(key, "must be text"); };
+    switch (op) {
+      case "toolbox.source": {
+        onlyKnown(args, ["name", "version"]);
+        const src = await (cat.source ?? missing).call(cat, c.agent, str("name")!, str("version", false));
+        const clipped = (t: string | undefined): string | undefined => (t === undefined ? undefined : clip(t, BRIDGE_LIMITS.instructions));
+        return ok({ ...src, instructions: clipped(src.instructions)!, ...(src.executable === undefined ? {} : { executable: clipped(src.executable)! }), ...((src.instructions.length > BRIDGE_LIMITS.instructions || (src.executable?.length ?? 0) > BRIDGE_LIMITS.instructions) ? { truncated: true } : {}) } as unknown as JsonObject);
+      }
+      case "toolbox.copy": {
+        onlyKnown(args, ["name", "version", "as", "copyVersion"]);
+        const made = await (cat.copy ?? missing).call(cat, c.agent, { commandId: bridgeCommandId("bridge", c.attemptId, c.callId), name: str("name")!, as: str("as")!, ...(args["version"] === undefined ? {} : { version: str("version")! }), ...(args["copyVersion"] === undefined ? {} : { copyVersion: str("copyVersion")! }) });
+        return ok({ ...made, source: made.copiedFrom.name } as unknown as JsonObject);
+      }
+      case "toolbox.copies": { onlyKnown(args, []); return ok(await (cat.copies ?? missing).call(cat, c.agent) as unknown as JsonObject); }
+      case "toolbox.notices": {
+        onlyKnown(args, ["after", "limit"]);
+        const num = (key: string): number | undefined => (args[key] === undefined ? undefined : typeof args[key] === "number" ? (args[key] as number) : invalid(key, "must be a number"));
+        const after = num("after"); const limit = num("limit");
+        return ok(await (cat.notices ?? missing).call(cat, c.agent, { ...(after === undefined ? {} : { after }), ...(limit === undefined ? {} : { limit }) }) as unknown as JsonObject);
+      }
+      case "toolbox.propose": {
+        onlyKnown(args, ["name", "baseVersion", "fromCopy", "fromVersion", "instructionsRecordId", "executableRecordId", "manifest", "rationale", "tests"]);
+        const proposals = this.#deps.proposals ?? missing();
+        // The task named for the decision's notice is the attempt's own, never one the request names.
+        const made = await proposals.propose(c.agent, { ...(args as Record<string, unknown>), commandId: bridgeCommandId("bridge", c.attemptId, c.callId), taskId: c.taskId } as never);
+        return ok({ ...made, name: toolboxName(str("name")!) } as unknown as JsonObject);
+      }
+      default: return missing();
+    }
   }
 
   /** The names the agent may see with their latest live versions. Names and versions only: a description is fetched with `tool.describe`, on demand. */
