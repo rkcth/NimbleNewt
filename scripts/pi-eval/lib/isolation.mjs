@@ -443,7 +443,9 @@ export async function prepareIsolation({ checkoutDir, artifactsDir, ownerHome = 
     const guardConfig = join(base, "bin", "git-guard.json");
     // The refusals of this run only (two runs started in the same second share a run ID and so an artifacts folder).
     rmSync(join(artifactsDir, "git-guard.log"), { force: true });
-    writeFileSync(guardConfig, JSON.stringify({ realGit, allowRoots, gitConfig: gitconfig, log: join(artifactsDir, "git-guard.log") }));
+    // testRoots: the run's temporary folder (TMPDIR below), where a project's own tests make their repositories; a refusal
+    // there of an askpass or proxy program alone is logged as the tests' own and not counted (git-guard.mjs, card W01d).
+    writeFileSync(guardConfig, JSON.stringify({ realGit, allowRoots, testRoots: [real(join(base, "tmp"))], checkout: real(checkoutDir), gitConfig: gitconfig, log: join(artifactsDir, "git-guard.log") }));
     const node = process.execPath;
     if (IS_WIN) writeFileSync(join(base, "bin", "git.cmd"), `@"${node}" "${GIT_GUARD}" "${guardConfig}" %*\r\n`);
     else {

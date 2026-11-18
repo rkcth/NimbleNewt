@@ -12,7 +12,8 @@
 // an alias is judged as what it stands for, and the remotes' addresses are read with the call's own -C, --git-dir and -c;
 // and runs the real git otherwise, without GIT_SSH, GIT_SSH_COMMAND, GIT_PROXY_COMMAND or an askpass program, and with the
 // run's own git settings (GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM set back, GIT_CONFIG_NOSYSTEM dropped).
-// Each refusal is logged (its kind only) to the config's log, which the bench reads after the run.
+// Each refusal is logged (its kind only, tagged when it is the project's own tests at work: see inProjectTests) to the
+// config's log, which the bench reads after the run.
 // This is a guard for an agent following its habits, not a sandbox: an agent that runs the real git by its full path
 // gets past it. What it then meets is the run's git settings, and on Linux a home folder with no keys in it.
 import { spawnSync } from "node:child_process";
@@ -245,6 +246,108 @@ export function decide(args, { cwd, roots, env, git }, depth = 0) {
   }
 }
 
+// ---- refusals inside a project's own test run (card W01d) ----
+// NimbleNewt's worker gives `-c core.askPass=echo` on every git call it makes (a program that answers nothing, so git never
+// prompts), and its tests run that code against repositories they create in the temporary folder. The guard refuses those
+// calls like any other, but they are not the agent loosening its own git: they are logged with the tag below and the
+// bench does not count them as contamination (it reports them apart). A refusal is tagged only when all of these hold:
+//   - it is a refused setting, and every refused setting is an askpass or proxy program (core.askpass, core.gitproxy) given
+//     for this one call (-c, --config-env, GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT), never written with `git config`;
+//   - the same call without those settings is let through by `decide` unchanged: no push outside the run's folders, no
+//     remote that is not a local folder, no other refused setting (ssh command, credential helper, URL rewrite, ...);
+//   - the call names its subcommand directly (an alias is never tagged) and no argument is a network address;
+//   - its folder (after -C), any --git-dir / --work-tree / GIT_DIR / GIT_WORK_TREE, and the repository's own git folder
+//     (as the real git reports it) all lie in the run's temporary folder (TMPDIR), never the run's checkout.
+// The limit: the agent can make the same kind of call itself in a scratch repository in its temporary folder, and that
+// refusal is not counted. What it hides is only an askpass or proxy program refused on a scratch repository, for a call
+// that would otherwise only touch the run's own folders; anything carrying a push out, a remote, a key path or another
+// checkout is still counted, and the call is refused either way.
+export const IN_PROJECT_TESTS = "in-project-tests";
+const ASKPASS_OR_PROXY = new Set(["core.askpass", "core.gitproxy"]);
+const NETWORK_ADDRESS = /^(?!file:\/\/)[A-Za-z][A-Za-z0-9+.-]*:\/\/|^[A-Za-z][A-Za-z0-9+.-]*::|^[^\s/\\@:]+@[^\s/\\:]+:/i;
+
+/** The call's arguments and environment without its askpass and proxy settings (the -c, --config-env and env forms). */
+function withoutAskpass(args, env) {
+  const out = [];
+  let i = 0;
+  const isAsk = (kv) => ASKPASS_OR_PROXY.has(splitKv(kv)[0].toLowerCase());
+  while (i < args.length && typeof args[i] === "string" && args[i].startsWith("-")) {
+    const a = args[i];
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    const inline = eq > 0 ? a.slice(eq + 1) : undefined;
+    if (VALUE_GLOBALS.has(name) && inline === undefined) {
+      const v = args[i + 1];
+      if (!((name === "-c" || name === "--config-env") && v !== undefined && isAsk(v))) out.push(a, ...(v === undefined ? [] : [v]));
+      i += 2;
+      continue;
+    }
+    const dropped = (name === "--config-env" && inline !== undefined && isAsk(inline)) || (name.startsWith("-c") && name.length > 2 && !name.startsWith("--") && isAsk(name.slice(2)));
+    if (!dropped) out.push(a);
+    i += 1;
+  }
+  out.push(...args.slice(i));
+  const pairs = envConfigs(env).filter(([k]) => !ASKPASS_OR_PROXY.has(String(k).toLowerCase()));
+  const e = { ...env };
+  delete e.GIT_CONFIG_PARAMETERS;
+  for (const k of Object.keys(e)) if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(k)) delete e[k];
+  if (pairs.length > 0) { e.GIT_CONFIG_COUNT = String(pairs.length); pairs.forEach(([k, v], n) => { e[`GIT_CONFIG_KEY_${n}`] = k; e[`GIT_CONFIG_VALUE_${n}`] = v; }); }
+  return { args: out, env: e };
+}
+
+/**
+ * Whether a refused call is a project test's own (see above): true only when it is refused for an askpass or proxy program
+ * alone, in a repository wholly inside `testRoots` (the run's temporary folder) and outside `checkout` (the run's own).
+ * `git(args, cwd)` runs the real git and returns its output, or null.
+ */
+export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git }) {
+  if (!Array.isArray(testRoots) || testRoots.length === 0) return false;
+  const g = parseGlobal(args, env);
+  const settings = [...g.configs, ...envConfigs(env)];
+  let asks = 0;
+  for (const [k, v] of settings) {
+    if (!protectedSetting(k, v, { cwd, roots })) continue;
+    if (!ASKPASS_OR_PROXY.has(String(k).toLowerCase())) return false;
+    asks++;
+  }
+  if (asks === 0) return false;
+  if (typeof g.sub !== "string" || !NOT_ALIASES.has(g.sub)) return false;
+  if (args.some((a) => typeof a !== "string" || NETWORK_ADDRESS.test(a))) return false;
+  const stripped = withoutAskpass(args, env);
+  if (decide(stripped.args, { cwd, roots, env: stripped.env, git }).refuse) return false;
+  // Where it acts: its folder, any git folder or work tree it names, and the repository's own git folder.
+  let dir = cwd;
+  for (const d of g.dirs) dir = resolve(dir, d);
+  const places = [dir];
+  const locator = [];
+  for (let i = 0; i < g.globals.length; i++) {
+    const a = g.globals[i];
+    for (const opt of ["--git-dir", "--work-tree"]) {
+      if (a === opt && i + 1 < g.globals.length) { places.push(resolve(dir, g.globals[i + 1])); locator.push(opt, g.globals[i + 1]); }
+      else if (a.startsWith(`${opt}=`)) { places.push(resolve(dir, a.slice(opt.length + 1))); locator.push(a); }
+    }
+  }
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) if (typeof env[k] === "string" && env[k] !== "") places.push(resolve(dir, env[k]));
+  const common = git([...locator, "rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
+  if (common !== null && common.trim() !== "") places.push(common.trim());
+  const tests = testRoots.map((r) => realish(r));
+  const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
+  return places.every((p) => { const r = realish(p); return inside(r, tests) && !inside(r, own); });
+}
+
+/**
+ * The guard log, counted: `counted` refusals (contamination) and `inProjectTests` (tagged as a project test's own, reported
+ * apart). Only a line of exactly the tagged form is left out; any other line with " refused " counts.
+ */
+export function guardLogCounts(text) {
+  let counted = 0, tests = 0;
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (!line.includes(" refused ")) continue;
+    if (/^\S+ refused setting in-project-tests$/.test(line)) tests++; else counted++;
+  }
+  return { counted, inProjectTests: tests };
+}
+
 const STRIP = ["GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_PROXY_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK"];
 
 function main() {
@@ -261,7 +364,11 @@ function main() {
   let d;
   try { d = decide(args, { cwd: process.cwd(), roots: cfg.allowRoots, env, git: runGit }); } catch { d = { refuse: "this git command could not be checked; it is disabled in this environment", kind: "unchecked" }; }
   if (d.refuse) {
-    try { appendFileSync(cfg.log, `${new Date().toISOString()} refused ${d.kind}\n`); } catch { /* the log is best effort */ }
+    let tag = "";
+    try {
+      if (d.kind === "setting" && inProjectTests(args, { cwd: process.cwd(), roots: cfg.allowRoots, testRoots: cfg.testRoots, checkout: cfg.checkout, env, git: runGit })) tag = ` ${IN_PROJECT_TESTS}`;
+    } catch { /* not shown to be a test's own: counted */ }
+    try { appendFileSync(cfg.log, `${new Date().toISOString()} refused ${d.kind}${tag}\n`); } catch { /* the log is best effort */ }
     process.stderr.write(`git: ${d.refuse}\n`);
     process.exit(1);
   }
