@@ -13320,6 +13320,11 @@ ASSUMPTION (first review): dependency texts are kept after a task ends, as its m
 - Breakage on the built `start.js`, restored by checksum after `tsc --build --force`: `observeAll` taken from the host's port alone fails ("read again ... once", 1 against 2).
 - Runs: `tsc --build` clean; `nn-slot.sh`. Controller `dist/api/start-resume*.test.js` and `security/secret-scan.test.js` passed 51 of 51, none skipped. Skipped, because a test-only change cannot affect them: the rest of the controller, pi-adapter, integration and `scripts/*.test.mjs`.
 
+**Composed observation test, second review (Claude agent, Opus 5.5, 2026-11-18, clean context, final round).** No defect found, and the test is unchanged. The test goes through `startController`, whose `start.ts` passes the host's `resume.observe` as `files` to `resumeObservation` and shares one `RecentTexts` with `changeViews`. Each of the three checks asserts exactly one request and a distinct reviewer outcome: not shown, the diff, nothing. The server, the controller and the temporary folder are closed in a `finally` that also covers a failed start.
+- Stability: 5 runs through `nn-slot.sh`, plus 1 run with six busy CPU loops, all passed in about 1.3 s each. No `nn-obs-wire-*` folder was left behind.
+- Breakage on the built `start.js` (not tried in earlier rounds): `resumeObservation` given its own `new RecentTexts()` instead of the shared one. The second check fails because the reviewer gets no diff. Restored by copy, the checksum matched, it was rebuilt with `tsc --build --force`, and the checksum matched again.
+- Runs: `dist/api/start-resume*.test.js` and `dist/security/secret-scan.test.js` passed 51 of 51, none skipped. Skipped, because a test-only change cannot affect them: the rest of the controller, pi-adapter, integration and `scripts/*.test.mjs`.
+
 ## G09 second measured run on Radiance, and W01 night batch (Claude agent, Opus 5.5, 2026-11-17 evening)
 
 Rob ended the Radiance maintenance window. Rules followed: one request at a time, nothing loaded, unloaded, switched or restarted, the key read only from Pi's configuration and only put in an Authorization header (counted 0 times in the evidence), every run through `/tmp/nn-slot.sh` (the bench's own builds and grading through `--test-slot`). Branch `radiance-g09-w01` off origin/main `691f3064`.
