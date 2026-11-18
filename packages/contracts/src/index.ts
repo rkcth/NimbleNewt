@@ -82,6 +82,8 @@ export type AdapterRequest =
       readonly requestId: RequestId;
       readonly content: string;
       readonly source?: UpdateSource;
+      /** Where the update came from in the controller's records (card G09: the side line of work and the original it selected), kept on the entry. Absent: none is kept. */
+      readonly origin?: string;
       readonly whenBusy?: WhenBusy;
       /**
        * Whether applying the update also resumes the task (default true). With `false` the update is only placed in the

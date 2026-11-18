@@ -45,7 +45,7 @@ import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND,
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
-import { StartRefused, turnEndKindOf, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
+import { CONTEXT_UPDATE_LIMITS, StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
@@ -227,6 +227,11 @@ export interface DispatcherDeps {
    * The goal anchor (card W12). `plan` answers, for the attempt about to start, how many characters the block may take (the owner's cap and the route's share of its window) or `undefined` when the owner turned the anchor
    * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
    */
+  /**
+   * The updates side lines of work selected for the task and brought back when they returned (card G09), read with the attempt's own task credential: they go with the order, and the host places each in the task's
+   * conversation once. A failure to read them is reported and the attempt starts without them (its next start is given them again).
+   */
+  readonly selectedUpdates?: (c: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly credential: string }) => Promise<readonly ContextUpdate[]>;
   readonly anchor?: {
     readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number; /** Card W13: the owner has the memory tool on, so the block says it exists. */ readonly recall?: boolean } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
     readonly rules?: (c: { readonly taskId: string; readonly projectId: string }) => Promise<{ readonly version: number; readonly total: number; readonly items: readonly { readonly id: string; readonly text: string }[] } | undefined>;
@@ -2745,7 +2750,16 @@ export class DispatcherService {
     const rules = (await this.#policyNote(b)) + (await this.#doneNote(b));
     // The anchor is the controller's own text about the task, so it is counted with the rules in the starting-size watch.
     const startParts = { task: taskText.length, rules: rules.length + (anchor === undefined ? 0 : anchor.block.text.length + 2), handoff: handed.length, view: view === undefined ? 0 : view.text.length + 2, refs: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])] };
+    // Card G09: what returned side lines selected for the task, bounded; the request IDs make a repeat (a restart, the next round of the same conversation) apply nothing twice.
+    let contextUpdates: ContextUpdate[] = [];
+    if (this.#deps.selectedUpdates !== undefined) {
+      try {
+        contextUpdates = (await this.#deps.selectedUpdates({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, credential: credential.token })).slice(-CONTEXT_UPDATE_LIMITS.items)
+          .map((u) => ({ requestId: u.requestId, text: u.text.slice(0, CONTEXT_UPDATE_LIMITS.text), origin: u.origin.slice(0, CONTEXT_UPDATE_LIMITS.origin) }));
+      } catch (error) { this.#options.onError?.(error); contextUpdates = []; }
+    }
     const order: WorkOrder = {
+      ...(contextUpdates.length === 0 ? {} : { contextUpdates }),
       attemptId: b.attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, generation: b.generation, ...(b.harness === undefined ? {} : { harness: b.harness }), route: b.route, credential: credential.token, recipe, ...(environment === undefined ? {} : { environmentRevision: environment }),
       content: (anchor === undefined ? "" : `${anchor.block.text}\n\n`) + taskText + rules + handed + (view === undefined ? "" : `\n\n${view.text}`), requestId: `cmd:adm:${b.attemptId}${b.turnRound === undefined ? "" : `:se${b.turnRound}`}${b.wakeRound === undefined ? "" : `:wk${b.wakeRound}`}`, startParts,
       ...(view === undefined ? {} : { startupView: { route: b.route, measured: view.measured, chars: view.text.length + 2 } }), ...(b.expiresAt === undefined ? {} : { expiresAt: b.expiresAt }), leaseMs: this.#options.leaseMs,

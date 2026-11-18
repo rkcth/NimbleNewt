@@ -339,6 +339,12 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     }
     // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
+    // Card G09: the updates a side line of work selected for the task go into the conversation before the turn, each as an update entry that keeps where it came from. The request ID names the update, so one this
+    // conversation already holds (a restart, the next round of the same attempt) is applied once. One that cannot be placed fails the start: the turn never runs without it.
+    for (const u of start.updates ?? []) {
+      const placed = await (await adapter.root().submit({ kind: "update", requestId: requestId(u.requestId), content: `[An update selected for this task in a side line of work (${u.origin}):]\n${u.text}`, origin: u.origin, run: false })).result();
+      if (placed.status !== "placed" && placed.status !== "completed") throw new Error(`the selected update ${u.requestId} was not placed (${placed.status})`);
+    }
     // Pi Durable renders no system text of its own; the system prompt is the layout's sections (card W06: the completion rules), measured as Pi renders them.
     send({ t: "ready", v: WORKER_CHANNEL_VERSION, toolSchemaChars, systemPromptChars: sharedSystemText(PI_AGENT_LAYOUT).length });
   };

@@ -231,7 +231,7 @@ function placedUpdateDraft(request: Extract<AdapterRequest, { kind: "update" }>)
     entry: {
       kind: "nimblenewt.update",
       model: [{ role: "user", content: request.content, timestamp: Date.now() }],
-      data: { source: sourceData(request.source), run: false },
+      data: { source: sourceData(request.source), run: false, ...(request.origin === undefined ? {} : { origin: request.origin }) },
     },
   };
 }
@@ -329,7 +329,7 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
           requestId: request.requestId,
           ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }),
           // An update is placed as its own kind of entry, so provenance is in the transcript; the model still sees the text.
-          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: sourceData(request.source), run: true } } } : {}),
+          ...(request.kind === "update" ? { entry: { kind: "nimblenewt.update", data: { source: sourceData(request.source), run: true, ...(request.origin === undefined ? {} : { origin: request.origin }) } } } : {}),
         },
         context,
       );
