@@ -17,8 +17,8 @@
 // This is a guard for an agent following its habits, not a sandbox: an agent that runs the real git by its full path
 // gets past it. What it then meets is the run's git settings, and on Linux a home folder with no keys in it.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { appendFileSync, existsSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const IS_WIN = process.platform === "win32";
@@ -380,6 +380,11 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
     asks++;
   }
   if (asks === 0) return false;
+  return testsOwnCall(args, g, { cwd, roots, testRoots, checkout, env, git });
+}
+
+/** The conditions of inProjectTests after the refused settings (shared with goneFolderTests). */
+function testsOwnCall(args, g, { cwd, roots, testRoots, checkout, env, git }) {
   if (typeof g.sub !== "string" || !NOT_ALIASES.has(g.sub)) return false;
   // The address may also follow an option's `=` (`--upload-pack=...`, `--reference=...`): read both forms.
   if (args.some((a) => typeof a !== "string" || NETWORK_ADDRESS.test(a) || NETWORK_ADDRESS.test(a.replace(/^--[^=]*=/, "")))) return false;
@@ -455,6 +460,59 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
   return places.every((p) => { const r = realish(p); return inside(r, tests) && !inside(r, own); });
 }
 
+/** The folders a call acts in: its folder after -C, and any --git-dir, --work-tree, GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR. */
+function callPlaces(g, cwd, env) {
+  let dir = cwd;
+  for (const d of g.dirs) dir = resolve(dir, d);
+  const places = [dir];
+  for (let i = 0; i < g.globals.length; i++) {
+    const a = g.globals[i];
+    for (const opt of ["--git-dir", "--work-tree"]) {
+      if (a === opt && i + 1 < g.globals.length) places.push(resolve(dir, g.globals[i + 1]));
+      else if (a.startsWith(`${opt}=`)) places.push(resolve(dir, a.slice(opt.length + 1)));
+    }
+  }
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]) if (typeof env[k] === "string" && env[k] !== "") places.push(resolve(dir, env[k]));
+  return places;
+}
+
+// ---- a call from a folder that no longer exists (W01d follow-up) ----
+// A worker test can remove its temporary folder while one of its git calls is starting; that call's folder cannot be read
+// (process.cwd() throws), so nothing about it can be decided and it is refused (kind GONE_FOLDER). Its last known folder
+// is the one the system kept (Linux: /proc/self/cwd reads `<path> (deleted)`, which the caller cannot set); only where that
+// cannot be read, PWD (the shell's). It is tagged as the tests' own only when all of these hold, with that folder standing in:
+//   - it is an absolute path that no longer exists, inside the run's temporary folder and outside its checkout;
+//   - every folder the call acts in (its folder after -C, --git-dir, --work-tree, GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR)
+//     no longer exists either, and lies in the run's temporary folder outside its checkout: there is no repository left
+//     for it to read or change;
+//   - every other condition of inProjectTests holds with PWD as its folder: no refused setting other than an askpass or
+//     proxy program or protocol.allow, the subcommand named directly, no network address, no submodule or recursion, every
+//     address a local folder in the temporary folder. The refused-askpass condition itself is not needed: the folder being
+//     gone is the reason for the refusal.
+// Any other call whose folder is gone is refused and counted. The limit: where PWD is used, it is the caller's to set, so an
+// agent whose own folder is gone could name a gone folder in the temporary folder; such a call is refused and has no
+// repository to touch.
+export const GONE_FOLDER = "gone-folder";
+/** The last known folder of a process whose folder is gone: the system's record (Linux), else PWD; or null. */
+export function lastKnownFolder(env = process.env, procCwd = "/proc/self/cwd") {
+  try {
+    const link = readlinkSync(procCwd);
+    return link.endsWith(" (deleted)") ? link.slice(0, -" (deleted)".length) : null;
+  } catch { /* no /proc (macOS, Windows): PWD */ }
+  return typeof env.PWD === "string" ? env.PWD : null;
+}
+
+export function goneFolderTests(args, { pwd, roots, testRoots, checkout, env, git }) {
+  if (!Array.isArray(testRoots) || testRoots.length === 0) return false;
+  if (typeof pwd !== "string" || !isAbsolute(pwd) || existsSync(pwd)) return false;
+  const g = parseGlobal(args, env);
+  const tests = testRoots.map((r) => realish(r));
+  const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
+  const ok = (p) => { if (existsSync(p)) return false; const r = realish(p); return inside(r, tests) && !inside(r, own); };
+  if (!ok(pwd) || !callPlaces(g, pwd, env).every(ok)) return false;
+  return testsOwnCall(args, g, { cwd: pwd, roots, testRoots, checkout, env, git });
+}
+
 /**
  * The guard log, counted: `counted` refusals (contamination) and `inProjectTests` (tagged as a project test's own, reported
  * apart). Only a line of exactly the tagged form is left out; any other line with " refused " counts.
@@ -463,7 +521,7 @@ export function guardLogCounts(text) {
   let counted = 0, tests = 0;
   for (const line of String(text ?? "").split(/\r?\n/)) {
     if (!line.includes(" refused ")) continue;
-    if (/^\S+ refused setting in-project-tests$/.test(line)) tests++; else counted++;
+    if (/^\S+ refused (?:setting|gone-folder) in-project-tests$/.test(line)) tests++; else counted++;
   }
   return { counted, inProjectTests: tests };
 }
@@ -481,12 +539,20 @@ function main() {
   if (typeof cfg.gitConfig === "string") { env.GIT_CONFIG_GLOBAL = cfg.gitConfig; env.GIT_CONFIG_SYSTEM = cfg.gitConfig; }
   delete env.GIT_CONFIG_NOSYSTEM;
   const runGit = (a, cwd) => { const r = spawnSync(cfg.realGit, a, { cwd, env, encoding: "utf8" }); return r.status === 0 ? r.stdout : null; };
+  // The folder is read once (W01d follow-up): when it no longer exists, the call is refused (see goneFolderTests).
+  let cwd = null;
+  try { cwd = process.cwd(); } catch { /* the folder is gone */ }
   let d;
-  try { d = decide(args, { cwd: process.cwd(), roots: cfg.allowRoots, env, git: runGit }); } catch { d = { refuse: "this git command could not be checked; it is disabled in this environment", kind: "unchecked" }; }
+  if (cwd === null) d = { refuse: "this git command's folder no longer exists; it is disabled in this environment", kind: GONE_FOLDER };
+  else {
+    try { d = decide(args, { cwd, roots: cfg.allowRoots, env, git: runGit }); } catch { d = { refuse: "this git command could not be checked; it is disabled in this environment", kind: "unchecked" }; }
+  }
   if (d.refuse) {
     let tag = "";
     try {
-      if (d.kind === "setting" && inProjectTests(args, { cwd: process.cwd(), roots: cfg.allowRoots, testRoots: cfg.testRoots, checkout: cfg.checkout, env, git: runGit })) tag = ` ${IN_PROJECT_TESTS}`;
+      const tc = { roots: cfg.allowRoots, testRoots: cfg.testRoots, checkout: cfg.checkout, env, git: runGit };
+      if (d.kind === "setting" && inProjectTests(args, { ...tc, cwd })) tag = ` ${IN_PROJECT_TESTS}`;
+      else if (d.kind === GONE_FOLDER && goneFolderTests(args, { ...tc, pwd: lastKnownFolder() })) tag = ` ${IN_PROJECT_TESTS}`;
     } catch { /* not shown to be a test's own: counted */ }
     try { appendFileSync(cfg.log, `${new Date().toISOString()} refused ${d.kind}${tag}\n`); } catch { /* the log is best effort */ }
     process.stderr.write(`git: ${d.refuse}\n`);

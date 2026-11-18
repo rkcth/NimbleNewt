@@ -4,12 +4,12 @@
 // Only local folders and fake guard logs are used: no network, no model server.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { IN_PROJECT_TESTS, decide, envConfigs, guardLogCounts, inProjectTests } from "./lib/git-guard.mjs";
+import { GONE_FOLDER, IN_PROJECT_TESTS, decide, envConfigs, goneFolderTests, guardLogCounts, inProjectTests, lastKnownFolder } from "./lib/git-guard.mjs";
 import { REFUSED_ADDRESS, findRealGit, gitConfigText } from "./lib/isolation.mjs";
 import { renderReport } from "./lib/stats.mjs";
 
@@ -327,4 +327,85 @@ test("W01d final re-check: under the bench's own git settings (a GitHub rewrite 
   // Any other rewrite, or another setting under the refused address's section, is still not tagged.
   assert.equal(inProjectTests([...ASK, "-c", `url.https://example.invalid/.insteadOf=${bare}`, "fetch", "--no-recurse-submodules", bare, "main"], bc(scratch)), false);
   assert.equal(inProjectTests([...ASK, "-c", `url.${REFUSED_ADDRESS}.other=x`, "status"], bc(scratch)), false);
+});
+
+// W01d follow-up: a worker test removes its temporary folder while one of its git calls starts; process.cwd() then throws.
+// The call is refused (kind gone-folder); it is tagged only when PWD and every folder it names are gone, in the temporary
+// folder, outside the checkout, and the rest of the tag conditions hold. Any other call from a gone folder is counted.
+test("W01d follow-up: a call from a folder that no longer exists is refused; tagged only inside the temporary folder", () => {
+  const log = join(base, "artifacts-gone", "git-guard.log");
+  mkdirSync(join(base, "artifacts-gone"), { recursive: true });
+  const cfg = join(runBase, "git-guard-gone.json");
+  writeFileSync(cfg, JSON.stringify({ realGit, allowRoots: roots, testRoots: [tmp], checkout, gitConfig: "/dev/null", log }));
+  // The shell enters the folder, removes it, then runs the guard there (PWD is the shell's, unless `pwd` overrides it).
+  let n = 0;
+  const fromGone = (parent, args, { pwd, make = true } = {}) => {
+    const dir = join(parent, `gone-${n++}`);
+    if (make) mkdirSync(dir, { recursive: true });
+    const setPwd = pwd === undefined ? "" : pwd === null ? "unset PWD; " : `export PWD='${pwd}'; `;
+    const r = spawnSync("/bin/sh", ["-c", `cd "$1" && rmdir "$1" && shift && ${setPwd}exec "$0" "$@"`, process.execPath, dir, GUARD, cfg, ...args], { cwd: base, env: plainEnv, encoding: "utf8" });
+    const lines = readFileSync(log, "utf8").trim().split("\n");
+    return { ...r, line: lines[lines.length - 1], lines: lines.length };
+  };
+  const WORKER = ["-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=never", "-c", "submodule.recurse=false"];
+  const goneRepo = join(tmp, "nn-lws-gone", "shared", ".git");
+  // The replayed case: the worker's flags, a git folder that was removed with the test's folder.
+  let r = fromGone(tmp, ["--git-dir", goneRepo, ...WORKER, "rev-parse", "--verify", "HEAD^{commit}"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /folder no longer exists/);
+  assert.match(r.line, / refused gone-folder in-project-tests$/);
+  // A refused askpass program from a gone folder in the temporary folder: tagged the same way.
+  assert.match(fromGone(tmp, [...ASK, "status"]).line, / refused gone-folder in-project-tests$/);
+  // Outside the temporary folder (the run's own folder, the checkout): counted.
+  assert.match(fromGone(runBase, ["--git-dir", goneRepo, ...WORKER, "status"]).line, / refused gone-folder$/);
+  assert.match(fromGone(checkout, [...WORKER, "status"]).line, / refused gone-folder$/);
+  // A folder it names that still exists (a repository is there to act on): counted.
+  assert.match(fromGone(tmp, ["--git-dir", join(scratch, ".git"), ...WORKER, "status"]).line, / refused gone-folder$/);
+  assert.match(fromGone(tmp, ["-C", scratch, ...WORKER, "status"]).line, / refused gone-folder$/);
+  if (existsSync("/proc/self/cwd")) {
+    // Linux: the system's record of the folder decides, whatever PWD says (unset, or a gone folder in the temporary folder).
+    assert.match(fromGone(tmp, [...WORKER, "status"], { pwd: null }).line, / refused gone-folder in-project-tests$/);
+    assert.match(fromGone(runBase, [...WORKER, "status"], { pwd: join(tmp, "gone-elsewhere") }).line, / refused gone-folder$/);
+  } else {
+    // Without /proc, PWD unset, relative, still existing, or naming a gone folder outside the temporary folder: counted.
+    assert.match(fromGone(tmp, [...WORKER, "status"], { pwd: null }).line, / refused gone-folder$/);
+    assert.match(fromGone(tmp, [...WORKER, "status"], { pwd: "tmp/x" }).line, / refused gone-folder$/);
+    assert.match(fromGone(tmp, [...WORKER, "status"], { pwd: scratch }).line, / refused gone-folder$/);
+    assert.match(fromGone(tmp, [...WORKER, "status"], { pwd: join(runBase, "gone-elsewhere") }).line, / refused gone-folder$/);
+  }
+  // Any other tag condition failing: a network address, another refused setting, an alias, recursion: counted.
+  assert.match(fromGone(tmp, [...WORKER, "push", "https://github.com/owner/repo.git", "main"]).line, / refused gone-folder$/);
+  assert.match(fromGone(tmp, [...WORKER, "-c", "credential.helper=store", "status"]).line, / refused gone-folder$/);
+  assert.match(fromGone(tmp, [...WORKER, "st"]).line, / refused gone-folder$/);
+  assert.match(fromGone(tmp, [...WORKER, "fetch", "--recurse-submodules", bare]).line, / refused gone-folder$/);
+  assert.match(fromGone(tmp, [...WORKER, "submodule", "update"]).line, / refused gone-folder$/);
+  r = fromGone(tmp, [...WORKER, "fetch", "--no-recurse-submodules", join(runBase, "gone-remote.git")]);
+  assert.match(r.line, / refused gone-folder$/);
+  const text = readFileSync(log, "utf8");
+  const tagged = existsSync("/proc/self/cwd") ? 3 : 2;
+  assert.deepEqual(guardLogCounts(text), { counted: r.lines - tagged, inProjectTests: tagged });
+});
+
+test("W01d follow-up: goneFolderTests and the log form of a gone-folder refusal", () => {
+  const c = { roots, testRoots: [tmp], checkout, env: plainEnv, git: runGit };
+  const gonePwd = join(tmp, "nn-gone-unit");
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: gonePwd }), true);
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: gonePwd, testRoots: undefined }), false);
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: undefined }), false);
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: scratch }), false); // still exists
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: join(checkout, "gone") }), false); // the checkout
+  assert.equal(goneFolderTests(["-C", "..", "status"], { ...c, pwd: gonePwd }), false); // -C leads to the existing tmp
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: gonePwd, env: { ...plainEnv, GIT_DIR: join(scratch, ".git") } }), false);
+  assert.equal(GONE_FOLDER, "gone-folder");
+  // The last known folder: the system's record when it names a removed folder; PWD only where there is no record.
+  const links = join(base, "proc-links");
+  mkdirSync(links, { recursive: true });
+  symlinkSync(`${gonePwd} (deleted)`, join(links, "deleted"));
+  symlinkSync(scratch, join(links, "present"));
+  assert.equal(lastKnownFolder({ PWD: "/elsewhere" }, join(links, "deleted")), gonePwd);
+  assert.equal(lastKnownFolder({ PWD: "/elsewhere" }, join(links, "present")), null);
+  assert.equal(lastKnownFolder({ PWD: "/elsewhere" }, join(links, "none")), "/elsewhere");
+  assert.equal(lastKnownFolder({}, join(links, "none")), null);
+  const t = (kind, tag = "") => `2026-11-18T06:42:06.394Z refused ${kind}${tag ? ` ${tag}` : ""}`;
+  assert.deepEqual(guardLogCounts([t(GONE_FOLDER, IN_PROJECT_TESTS), t(GONE_FOLDER), t("unchecked"), t("gone-folders", IN_PROJECT_TESTS)].join("\n")), { counted: 3, inProjectTests: 1 });
 });

@@ -13809,3 +13809,24 @@ Re-checked `3fb95d5f` (diff against its parent). No defect found, no code change
 - Cosmetic, not changed: on a timeout the "timed out after N s" text is appended to stderr without a separating newline.
 
 **Verified (Linux, node 22.23):** `tsc --build`; worker suite once through the test slot (545 tests, 544 pass, 1 skipped, 0 failed); the new file 5 times under load. **Skipped:** other packages' suites (no other package imports `windows-real`); the Windows-only real-host tests (they need Windows).
+
+## W01d follow-up: a git call whose folder was removed is refused as `gone-folder`, tagged only as a test's own (Claude agent, Opus 5.5, 2026-11-18)
+
+**Cause.** This fixes the counted `refused unchecked` line noted above. Debug replays showed the call: the worker's `--git-dir <tmp>/nn-lws-*/shared/.git -c core.askPass=echo ... rev-parse --verify HEAD^{commit}`, started from `<tmp>/nn-lws-*/scratch` while the test's teardown was removing it. `process.cwd()` threw inside `decide`'s try block. All of that call's settings are allowed, so the existing tag (which needs a refused askpass setting) could never match it.
+
+**Change (`scripts/pi-eval/lib/git-guard.mjs`).** `main()` reads the folder once, before `decide`. When it cannot be read, the call is refused with the new kind `gone-folder` (fail closed, as before). It is tagged `in-project-tests` only when `goneFolderTests` holds:
+- The last known folder is absolute and gone, and lies in the run's temporary folder outside its checkout. That folder is `lastKnownFolder()`: on Linux the system's record `/proc/self/cwd` (`<path> (deleted)`), which the caller cannot set; PWD only where `/proc` cannot be read.
+- Every folder the call acts in (after `-C`; `--git-dir`, `--work-tree`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`) is also gone and lies in the temporary folder outside the checkout, so there is no repository left to touch.
+- Every other `inProjectTests` condition holds with that folder (now shared as `testsOwnCall`): only askpass, proxy or `protocol.allow` among refused settings, the subcommand named directly, no network address, no submodule or recursion, every address a local folder in the temporary folder.
+
+Anything else from a gone folder is logged `refused gone-folder` and counted. `guardLogCounts` leaves out exactly `refused setting in-project-tests` and `refused gone-folder in-project-tests`. The `unchecked` kind remains for a `decide` that throws in a readable folder.
+
+ASSUMPTION: the folder being gone stands in for the refused-askpass condition. A call from a removed folder with only allowed settings cannot be the agent loosening its git, and the narrowest sound rule is the one above. The system's record is preferred over PWD because PWD can be stale: when the folder is removed between node's `chdir` and `/bin/sh` starting, dash keeps the parent's PWD. That is the likely source of a counted line seen in 1 of 21 replays before this was added (none in the 18 of them run with a debug copy). Where only PWD exists (macOS, no `/proc`), a caller could name a gone folder in the temporary folder; that call is still refused and has no repository to act on.
+
+**Tests (`guard-context.test.mjs`, 2 new).** The guard runs from a folder removed after `cd`:
+- Tagged in the temporary folder.
+- Counted for: the run's own folder or the checkout; an existing `--git-dir` or `-C`; a network push; a credential helper; an alias; `--recurse-submodules`; `submodule`; a fetch from outside the temporary folder.
+- Linux: PWD does not decide either way. Without `/proc`, a bad PWD is counted.
+- Unit tests for `goneFolderTests`, for `lastKnownFolder` (fake `/proc` links) and for the new log form.
+
+**Verified.** All runs went through `/tmp/nn-slot.sh`. The compiled worker tests (`workspace/git.test.js`, `host.test.js`, `local-host.test.js` from main's dist, read only) were replayed through the wrapper with `gitConfigText()` as the bench config and testRoots set to TMPDIR. Six replays with the final guard: 0 counted every time (65 or 66 tagged). Four of them had a gone-folder call, all tagged. The 64 worker-test failures under the wrapper are the guard's intended `protocol.allow` refusals. `node --test scripts/pi-eval/*.test.mjs scripts/y02-checkpoint.test.mjs` passed 158 of 158. Setup: contracts rebuilt with main's installed tsc (`-p`, `--typeRoots` main's `@types`), with a temporary `node_modules` linking `@nimblenewt/contracts` and `@nimblenewt/registry` to the worktree and `@earendil-works/pi-ai` to main's. That folder was removed afterwards. **Skipped:** root `npm test`, workspace TypeScript suites, exhaustive CI, Windows and macOS (the PWD fallback is covered only by the non-Linux test branch, not run here). Final for this card.
