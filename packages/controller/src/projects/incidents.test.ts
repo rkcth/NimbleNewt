@@ -118,6 +118,22 @@ for (const backend of backends) {
     assert.equal((await inc.observed(owner, r))!.observed, "failed");
   });
 
+  suite("the last successful check is shown apart: an ok check then a failed one keeps the ok time, and observed follows the latest check, not it (card P04)", async ({ owner, duties, inc, setNow, make }) => {
+    const r = await make();
+    assert.equal((await inc.observed(owner, r))!.lastOkAt, undefined, "never checked");
+    await duties.record(owner, { commandId: cid("c"), responsibilityId: r, kind: "check", summary: "all well", outcome: "ok" });
+    assert.deepEqual([(await inc.observed(owner, r))!.observed, (await inc.observed(owner, r))!.lastOkAt], ["ok", "2026-10-22T10:00:00.000Z"]);
+    setNow("2026-10-22T10:05:00.000Z");
+    await duties.record(owner, { commandId: cid("c"), responsibilityId: r, kind: "check", summary: "down", outcome: "failed" });
+    const s = (await inc.observed(owner, r))!;
+    assert.deepEqual([s.observed, s.lastCheckAt, s.lastOkAt, s.openIncidents], ["failed", "2026-10-22T10:05:00.000Z", "2026-10-22T10:00:00.000Z", 0]);
+    setNow("2026-10-22T10:06:00.000Z");
+    await duties.record(owner, { commandId: cid("c"), responsibilityId: r, kind: "check", summary: "looked, no verdict" });
+    assert.deepEqual([(await inc.observed(owner, r))!.observed, (await inc.observed(owner, r))!.lastOkAt], ["unknown", "2026-10-22T10:00:00.000Z"], "an earlier ok never makes it ok");
+    setNow("2026-10-22T13:00:00.000Z");
+    assert.deepEqual([(await inc.observed(owner, r))!.observed, (await inc.observed(owner, r))!.lastOkAt], ["unknown", "2026-10-22T10:00:00.000Z"], "stale: unknown, the ok time still shown");
+  });
+
   suite("who may report, resolve, escalate and read incidents: the owner, the responsible agent or a holder of responsibility.write; others are refused", async ({ owner, project, inc, make, agent }) => {
     const r = await make();
     const stranger = await agent([{ action: "task.read", project }]);

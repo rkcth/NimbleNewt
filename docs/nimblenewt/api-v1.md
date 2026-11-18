@@ -2423,13 +2423,13 @@ Result: `{ items }`.
 
 #### `responsibility.status`
 
-Where a responsibility stands against its schedule now: last check, next check due, whether it is overdue, whether now is inside a maintenance window. Starts nothing.
+Where a responsibility stands against its schedule now: last check and its outcome, the last check that found it ok (`lastOkAt`, kept when later checks fail; it says nothing about now), next check due, whether it is overdue, whether now is inside a maintenance window. Starts nothing.
 
 Arguments:
 
 - `responsibilityId`: the responsibility
 
-Result: `{ item }`.
+Result: `{ item }`: `responsibilityId`, `state`, `asOf`, `events`, `lastCheckAt?`, `lastCheckOutcome?`, `lastOkAt?`, `nextCheckDue?`, `checkOverdue`, `inMaintenanceWindow`.
 
 #### `responsibility.history`
 
@@ -2472,7 +2472,7 @@ Arguments:
 
 - `responsibilityId`: the responsibility
 
-Result: `{ item }`: `responsibilityId`, `intended`, `observed`, `lastCheckAt?`, `openIncidents` and `coverageGaps` (the times nothing was watching since the last check, or since the responsibility began when none: `id`, `reason`, `start`, `end?`; empty when there were none). A gap explains a missing check, it never makes the state healthy. Only gaps about this responsibility are listed: downtime always, a provider outage when it has an answering agent, an event-source outage when it names that source or a bare event kind (a kind may come from any source).
+Result: `{ item }`: `responsibilityId`, `intended`, `observed`, `lastCheckAt?`, `lastOkAt?` (the last check that found it ok, kept when later checks fail; it never makes `observed` ok), `openIncidents` and `coverageGaps` (the times nothing was watching since the last check, or since the responsibility began when none: `id`, `reason`, `start`, `end?`; empty when there were none). A gap explains a missing check, it never makes the state healthy. Only gaps about this responsibility are listed: downtime always, a provider outage when it has an answering agent, an event-source outage when it names that source or a bare event kind (a kind may come from any source).
 
 #### `responsibility.coverage`
 

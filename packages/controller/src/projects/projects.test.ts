@@ -720,6 +720,42 @@ for (const backend of backends) {
     assert.equal((await duties.status(owner, r.id))!.checkOverdue, false);
   });
 
+  suite("the last successful check (lastOkAt) is kept apart from the last check: a later failed or unmarked check leaves it, a note does not set it, and a restarted controller reads it (card P04)", async ({ owner, resources, duties, project, setNow, reopen }) => {
+    const p = await project("P");
+    const r = await duties.create(owner, { commandId: cid("r"), projectId: p, title: "Web", objective: "Web answers", everyMinutes: 60 } as never);
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "not yet", outcome: "attention" });
+    assert.equal((await duties.status(owner, r.id))!.lastOkAt, undefined, "no ok check yet");
+    setNow("2026-10-22T10:10:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "fine", outcome: "ok" });
+    setNow("2026-10-22T10:20:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "down", outcome: "failed" });
+    assert.deepEqual([(await duties.status(owner, r.id))!.lastCheckOutcome, (await duties.status(owner, r.id))!.lastOkAt], ["failed", "2026-10-22T10:10:00.000Z"]);
+    setNow("2026-10-22T10:25:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "looked" });
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "note", summary: "noted" });
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "intervention", summary: "restarted", outcome: "ok" });
+    let s = (await duties.status(owner, r.id))!;
+    assert.deepEqual([s.lastCheckAt, s.lastCheckOutcome, s.lastOkAt], ["2026-10-22T10:25:00.000Z", undefined, "2026-10-22T10:10:00.000Z"], "the unmarked check has no outcome; an intervention marked ok is not a check");
+    s = (await reopen().duties.status(owner, r.id))!;
+    assert.deepEqual([s.lastCheckAt, s.lastOkAt], ["2026-10-22T10:25:00.000Z", "2026-10-22T10:10:00.000Z"], "read back by a fresh service");
+    setNow("2026-10-22T10:30:00.000Z");
+    await duties.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "fine again", outcome: "ok" });
+    assert.equal((await duties.status(owner, r.id))!.lastOkAt, "2026-10-22T10:30:00.000Z");
+    // A log written before lastOkAt was kept (read here with the field taken out): its last check was ok, so that is the last ok one, shown and carried over a later failed check (card P04 review).
+    const storage = resources.runner.storage;
+    const legacy = new Proxy(storage, { get: (target, key) => {
+      if (key === "getAggregate") return async (ref: { kind: string; id: string }) => { const a = await target.getAggregate(ref as never); if (a === undefined || ref.kind !== "responsibility-log") return a; const { lastOkAt: _dropped, ...rest } = a.body as Record<string, unknown>; return { ...a, body: rest }; };
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const old = ResponsibilityService.withEpoch(legacy as never, resources.runner.epoch, { clock: () => "2026-10-22T10:40:00.000Z", pause: async () => undefined });
+    assert.equal((await old.status(owner, r.id))!.lastOkAt, "2026-10-22T10:30:00.000Z", "an old log whose last check was ok");
+    await old.record(owner, { commandId: cid("o"), responsibilityId: r.id, kind: "check", summary: "down", outcome: "failed" });
+    s = (await duties.status(owner, r.id))!;
+    assert.deepEqual([s.lastCheckAt, s.lastCheckOutcome, s.lastOkAt], ["2026-10-22T10:40:00.000Z", "failed", "2026-10-22T10:30:00.000Z"], "carried over from the old log");
+    assert.equal((await old.status(owner, r.id))!.lastOkAt, undefined, "an old log whose last check failed has no known ok time");
+  });
+
   suite("a resource has one managing responsibility: a second claim is refused, simultaneous claims have one winner, and dropping it or retiring frees it", async ({ owner, resources, duties, project }) => {
     const p = await project("P");
     const server = await resources.bindResource(owner, { commandId: cid("b"), projectId: p, kind: "service", label: "Server", locator: "ssh://host" } as never);

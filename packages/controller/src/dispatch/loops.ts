@@ -354,8 +354,11 @@ export async function assignedTaskIn(storage: Pick<ControllerStorage, "listAggre
     const page = await storage.listAggregates("assignment", { ...(after === undefined ? {} : { afterId: after }), limit: PAGE });
     for (const a of page) {
       after = a.id;
-      const b = a.body as unknown as { taskId?: string; state?: string; owner?: { id: string } };
-      if (b.state !== "assigned" || b.owner?.id !== agentId || b.taskId === undefined) continue;
+      const b = a.body as unknown as { taskId?: string; state?: string; owner?: { kind?: string; id: string } };
+      // An assignment names the agent by its bare ID (`{ kind: "agent", id }`) while the notice goes to the principal (`agent:<id>`): either spelling is the same agent (card P04 flip audit: with only the principal
+      // compared, no real assignment ever matched and an escalation to an agent was never told).
+      const holder = b.owner === undefined ? undefined : b.owner.id.startsWith("agent:") || b.owner.kind !== "agent" ? b.owner.id : `agent:${b.owner.id}`;
+      if (b.state !== "assigned" || holder !== agentId || b.taskId === undefined) continue;
       if (((await storage.getAggregate({ kind: "task", id: b.taskId }))?.body as unknown as { projectId?: string } | undefined)?.projectId === projectId) return b.taskId;
     }
     if (page.length < PAGE) return undefined;

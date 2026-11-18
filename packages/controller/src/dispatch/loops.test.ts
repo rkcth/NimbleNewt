@@ -243,6 +243,12 @@ test("the task that anchors a notice to an agent is one it holds now in that pro
   const storage = { listAggregates: async (kind: string, o: { afterId?: string }) => (kind === "assignment" ? aggs.filter((a) => o.afterId === undefined || a.id > o.afterId) : []), getAggregate: async (r: { id: string }) => (tasks[r.id] === undefined ? undefined : { body: { projectId: tasks[r.id] } }) } as never;
   assert.equal(await assignedTaskIn(storage, "proj-a", "agent:a"), "t4");
   assert.equal(await assignedTaskIn(storage, "proj-a", "agent:c"), undefined);
+  // A real assignment names the agent by its bare ID: the principal finds it (card P04 flip audit); another agent's bare ID does not, nor a non-agent owner of that name.
+  aggs.push({ kind: "assignment", id: "t5", body: { taskId: "t5", state: "assigned", owner: { kind: "agent", id: "agt-d" } } }, { kind: "assignment", id: "t6", body: { taskId: "t6", state: "assigned", owner: { kind: "human", id: "agt-e" } } });
+  tasks["t5"] = "proj-a"; tasks["t6"] = "proj-a";
+  assert.equal(await assignedTaskIn(storage, "proj-a", "agent:agt-d"), "t5");
+  assert.equal(await assignedTaskIn(storage, "proj-a", "agent:agt-e"), undefined);
+  assert.equal(await assignedTaskIn(storage, "proj-a", "agent:agt-dd"), undefined);
 });
 
 test("a watched event wakes the agent only when its attempt will read the inbox, and the wake loop asks every tick (card H13c)", async () => {
