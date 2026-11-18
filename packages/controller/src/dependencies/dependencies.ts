@@ -3,6 +3,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
+import { mayReadCatalogEntry, type EntryBody } from "../catalog/catalog.js";
 import { canRead, type DeskRecordBody } from "../context/desks.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { redactText } from "../security/redact.js";
@@ -289,7 +290,7 @@ export class DependencyService {
       case "negative": {
         const i = e.key.indexOf(":");
         if (i > 0 && e.key.slice(0, i) === "desk-record") { const r = (await this.#runner.get("desk-record", e.key.slice(i + 1)))?.body as unknown as DeskRecordBody | undefined; return r === undefined ? true : canRead(by, r); }
-        if (i > 0 && e.key.slice(0, i) === "catalog-entry") { const r = (await this.#runner.get("catalog-entry", e.key.slice(i + 1)))?.body as unknown as { layer: string; owner?: string } | undefined; return r === undefined ? true : r.layer === "agent" ? r.owner === by.id : allows(by, "catalog.read", undefined); }
+        if (i > 0 && e.key.slice(0, i) === "catalog-entry") { const r = (await this.#runner.get("catalog-entry", e.key.slice(i + 1)))?.body as unknown as EntryBody | undefined; return r === undefined ? true : mayReadCatalogEntry((kind, id) => this.#runner.get(kind, id), by, r); }
         return true;
       }
       default: return true;
@@ -299,8 +300,9 @@ export class DependencyService {
   async #mayReadVersion(by: Principal, versionId: string): Promise<boolean> {
     const v = (await this.#runner.get("catalog-version", versionId))?.body as unknown as { name: string } | undefined;
     if (v === undefined) return true;
-    const entry = (await this.#runner.get("catalog-entry", derivedId("cat", v.name)))?.body as unknown as { layer: string; owner?: string } | undefined;
-    return entry === undefined ? true : entry.layer === "agent" ? entry.owner === by.id : allows(by, "catalog.read", undefined);
+    // One visibility rule with the catalogue (card T08): a shared entry outside the reader's audience is not confirmed, nor its digest, here either.
+    const entry = (await this.#runner.get("catalog-entry", derivedId("cat", v.name)))?.body as unknown as EntryBody | undefined;
+    return entry === undefined ? true : mayReadCatalogEntry((kind, id) => this.#runner.get(kind, id), by, entry);
   }
 
   /** Whether the entry was verified against what it names (false when the recorder may not read it and the hash is only its word). */

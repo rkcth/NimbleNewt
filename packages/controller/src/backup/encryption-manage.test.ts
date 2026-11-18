@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,11 +33,15 @@ test("a printable recovery code carries the whole 256-bit key, has a checksum, r
   // Crockford has no I, L, O or U: a typed I or L is read as 1 and an O as 0, so a code with those characters swapped for lookalikes still opens.
   const looks = code.replaceAll("1", "l").replaceAll("0", "o");
   unlockWithRecoveryCode(keyring, looks);
-  // Any single changed character fails the checksum (never reaches an unlock attempt) with fixed text that does not repeat the code.
+  // A single changed character fails the checksum with fixed text that does not repeat the code. The checksum is 20 bits of a hash, so about one
+  // change in a million passes it (CI run 44258423696 hit one in the test below); such a code is another key and opens nothing.
   for (let i = 0; i < code.length; i += 1) {
     if (code[i] === "-") continue;
     const other = code[i] === "2" ? "3" : "2";
-    assert.throws(() => recoveryKeyFromCode(code.slice(0, i) + other + code.slice(i + 1)), (e: unknown) => e instanceof RecoveryCodeInvalid && !e.message.includes(code.slice(0, 8)), `position ${i}`);
+    const changed = code.slice(0, i) + other + code.slice(i + 1);
+    let read: string | undefined;
+    try { read = recoveryKeyFromCode(changed); } catch (e) { assert.ok(e instanceof RecoveryCodeInvalid && !e.message.includes(code.slice(0, 8)), `position ${i}`); }
+    if (read !== undefined) { assert.notEqual(read, recoveryFile.recoveryKey, `position ${i}`); assert.throws(() => unlockWithRecoveryCode(keyring, changed), UnlockFailed); }
   }
   for (const bad of ["", "ABCD", `${code}-AAAA`, code.slice(0, -5), "x".repeat(500)]) assert.throws(() => recoveryKeyFromCode(bad), RecoveryCodeInvalid);
   // A code of another key does not open this one.
@@ -178,19 +183,44 @@ test("a successful proof is kept across restarts and the quarterly proof falls d
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test("only the canonical recovery code is accepted: every other character at every position is refused (review: the 4 padding bits were not checked)", async () => {
+test("only the canonical recovery code is accepted: no other character at any position reads as the same key, the 4 padding bits are checked, and a change the checksum misses is another key (review: the 4 padding bits were not checked)", () => {
+  // Fixed keys and every substitution enumerated, so the run is the same every time. The test once drew fresh random keys and required every
+  // change to fail the checksum; but the checksum is 20 bits of a hash, so about one change in 2^20 passes it as a different key, and the
+  // 13,888 changes per run made that fail about once in 75 runs (CI run 44258423696, macOS: "round 2 position 18 6").
   const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-  for (let round = 0; round < 8; round += 1) {
-    const { recoveryFile } = await createKeyring({ passcode: PASS, scrypt: FAST });
-    const code = recoveryCodeOf(recoveryFile);
+  const keyOf = (n: number): string => createHash("sha256").update(`nn-recovery-code-test-${n}`).digest().toString("base64url");
+  const fileOf = (recoveryKey: string) => ({ format: "nimblenewt-recovery" as const, version: 1 as const, keyId: "test", recoveryKey });
+  let refused = 0; let otherKey = 0;
+  for (const n of [0, 1, 2, 3, 4, 5, 6, 7, 91]) {
+    const key = keyOf(n);
+    const code = recoveryCodeOf(fileOf(key));
+    assert.equal(recoveryKeyFromCode(code), key);
+    const lastData = code.replaceAll("-", "").length - 4 - 1; // the 52nd character: 1 key bit, then the 4 padding bits
+    let dataIndex = -1;
     for (let i = 0; i < code.length; i += 1) {
       if (code[i] === "-") continue;
+      dataIndex += 1;
       for (const other of ALPHABET) {
         if (other === code[i]) continue;
-        assert.throws(() => recoveryKeyFromCode(code.slice(0, i) + other + code.slice(i + 1)), RecoveryCodeInvalid, `round ${round} position ${i} ${other}`);
+        const changed = code.slice(0, i) + other + code.slice(i + 1);
+        // A change only in the padding bits names the same key: it must be refused by the padding check, whatever the checksum says.
+        if (dataIndex === lastData && (ALPHABET.indexOf(other) >> 4) === (ALPHABET.indexOf(code[i]!) >> 4)) {
+          assert.throws(() => recoveryKeyFromCode(changed), RecoveryCodeInvalid, `key ${n} position ${i} ${other} (padding)`);
+          refused += 1; continue;
+        }
+        let read: string | undefined;
+        try { read = recoveryKeyFromCode(changed); } catch (e) { assert.ok(e instanceof RecoveryCodeInvalid, `key ${n} position ${i} ${other}`); refused += 1; }
+        if (read !== undefined) { assert.notEqual(read, key, `key ${n} position ${i} ${other} read as the same key`); otherKey += 1; }
       }
     }
   }
+  // Key 91 was chosen because one change (position 36, 8 to G) passes the checksum: it reads as a different key, never this one.
+  const key91 = keyOf(91); const code91 = recoveryCodeOf(fileOf(key91));
+  assert.equal(code91[36], "8");
+  const missed = recoveryKeyFromCode(`${code91.slice(0, 36)}G${code91.slice(37)}`);
+  assert.notEqual(missed, key91);
+  assert.equal(otherKey, 1, "only the known change of key 91 passes the checksum");
+  assert.equal(refused + otherKey, 9 * 56 * 31);
 });
 
 test("setup leaves a file that was already at the recovery path as it was, and keeps nothing of its own (review: the existing recovery file was deleted)", async () => {

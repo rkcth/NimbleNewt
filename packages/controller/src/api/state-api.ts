@@ -95,7 +95,7 @@ import type { CommandService } from "../commands/index.js";
 import type { Principal, PrincipalService } from "../security/principals.js";
 import type { TaskCredentialService } from "../security/task-credentials.js";
 import type { JsonObject } from "../storage/types.js";
-import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ContinuationOps, type WebAccessPort } from "./operations.js";
+import { OPERATION_BY_NAME, type Args, type CatalogRevocationPort, type Context, type ToolboxPort, type ContinuationOps, type WebAccessPort } from "./operations.js";
 
 export const API_VERSION = 1;
 
@@ -223,6 +223,8 @@ export interface StateApiDeps {
   /** Revoking a catalogue version and listing its running calls (card T02b). */
   readonly catalogRevocation?: CatalogRevocationPort;
   readonly catalogPolicy?: Pick<CatalogPolicyService, "get" | "change">;
+  /** The shared toolbox (card T08). */
+  readonly toolbox?: ToolboxPort;
   /** Absent when the controller runs without the agent's ending (card H12n). */
   readonly workEnd?: Pick<WorkEndService, "request" | "get"> & Partial<Pick<WorkEndService, "note" | "answer">>;
   readonly notes?: Pick<WorkingNoteService, "write" | "revise" | "setVisibility" | "read" | "versions" | "list">;
@@ -448,6 +450,7 @@ export class StateApi {
         ...(this.#deps.eventSourceSettings === undefined ? {} : { eventSourceSettings: this.#deps.eventSourceSettings }),
         ...(this.#deps.catalogRevocation === undefined ? {} : { catalogRevocation: this.#deps.catalogRevocation }),
         ...(this.#deps.catalogPolicy === undefined ? {} : { catalogPolicy: this.#deps.catalogPolicy }),
+        ...(this.#deps.toolbox === undefined ? {} : { toolbox: this.#deps.toolbox }),
         ...(this.#deps.integration === undefined ? {} : { integration: this.#deps.integration }),
         ...(this.#deps.notes === undefined ? {} : { notes: this.#deps.notes }),
         ...(this.#deps.workEnd === undefined ? {} : { workEnd: this.#deps.workEnd }),
