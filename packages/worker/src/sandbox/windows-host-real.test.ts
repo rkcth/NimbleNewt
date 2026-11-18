@@ -101,14 +101,15 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     const script = [
       `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
       "const h = windowsRealHost(); const out = {};",
-      "for (const [k, f] of Object.entries({ session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
+      // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
+      "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
       "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
       "}",
       "process.stdout.write(JSON.stringify(out));",
     ].join("\n");
     const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: 240_000, windowsHide: true });
     assert.equal(child.status, 0, child.stderr);
-    assert.deepEqual(JSON.parse(child.stdout), { session: "ok", autologon: "ok", signature: true, writable: true });
+    assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
     await backend.release!(plan);
   });
 
@@ -229,7 +230,9 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     for (const p of [r.home, r.scratch]) assert.match(own(p).join("\n"), /\(OI\)\(CI\)\(M\)$/, p);
     assert.equal(own(input).length, 1, during[input]);
     assert.match(own(input)[0]!, /\(OI\)\(CI\)\(RX\)$/);
-    assert.match(own(join(r.workdir, ".git")).join("\n"), /\(OI\)\(CI\)\(DENY\)/, during[join(r.workdir, ".git")]);
+    // icacls may print the flags of a deny entry in either order ("(OI)(CI)(DENY)(W,DC)" or "(DENY)(OI)(CI)(W,DC)"); only the set of flags is checked, and the rights as W or as their parts (WD,AD,...).
+    const denies = own(join(r.workdir, ".git")).filter((e) => ["(OI)", "(CI)", "(DENY)"].every((f) => e.includes(f)) && /[(,](?:W|WD)[,)]/.test(e));
+    assert.equal(denies.length, 1, during[join(r.workdir, ".git")]);
     assert.match(own(join(jobDir, "guest")).join("\n"), /\(OI\)\(CI\)\(RX\)$/);
     assert.deepEqual(own(controlDir), [], "the control folder itself gets nothing");
     assert.ok(lower(during[join(r.workdir, "src", "a.txt")]!).includes(lower(SHARE)), "a file already in the checkout inherits the grant");
