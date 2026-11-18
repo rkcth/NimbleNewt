@@ -469,11 +469,12 @@ export async function produceReport(repo: string, options: SuiteOptions = {}): P
 
 /**
  * The exit status of `containment-evidence.mjs run`: 0 only when there was capacity, every case passed and the trusted-host exception was shown. With `allowUnavailable` (a CI cell
- * that cannot run this OS's sandbox at all, such as a GitHub-hosted Windows runner without Windows Sandbox), a run with NO capacity exits 0 as an honest skip: the report still says
- * `not_run` for every case and the release gate still blocks on it. A run that had capacity is judged in full either way.
+ * that cannot run this OS's sandbox at all, such as a GitHub-hosted Windows runner without Windows Sandbox), a Windows run with NO capacity exits 0 as an honest skip: the report
+ * still says `not_run` for every case and the release gate still blocks on it. A Linux or macOS report never skips. A run that had capacity is judged in full either way.
  */
 export function runOutcome(report: ContainmentReport, options: { readonly allowUnavailable?: boolean } = {}): { readonly exitCode: 0 | 1; readonly skipped: boolean } {
-  if (!report.capacityAvailable) return { exitCode: options.allowUnavailable === true ? 0 : 1, skipped: true };
+  // Only a Windows report may skip: Linux (bubblewrap) and macOS (Seatbelt) hosted runners can run their sandbox, so no capacity there is a failure even with the flag.
+  if (!report.capacityAvailable) return { exitCode: options.allowUnavailable === true && report.platform === "win32" ? 0 : 1, skipped: true };
   const exception = report.trustedHost !== undefined && report.trustedHost.refusedWithoutAuthority && report.trustedHost.reachesHostFiles;
   const allHeld = report.cases.length > 0 && report.cases.every((c) => c.verdict === "pass");
   return { exitCode: allHeld && exception ? 0 : 1, skipped: false };

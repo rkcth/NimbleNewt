@@ -402,5 +402,10 @@ describe("G05 run outcome (the exit status of `containment-evidence.mjs run`)", 
     assert.deepEqual(runOutcome(none), { exitCode: 1, skipped: true });
     assert.deepEqual(runOutcome(none, { allowUnavailable: true }), { exitCode: 0, skipped: true });
     assert.equal(gate(all({ win32: none })).ok, false);
+    // Linux and macOS may not skip: their hosted runners can run bubblewrap and Seatbelt, so no capacity there is a failure even with the flag.
+    for (const platform of ["linux", "darwin"] as const) {
+      const off = report(platform, { capacityAvailable: false, capacityReason: "no sandbox", cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: "control", verdict: "not_run", detail: "no capacity" })), trustedHost: undefined });
+      assert.deepEqual(runOutcome(off, { allowUnavailable: true }), { exitCode: 1, skipped: true }, platform);
+    }
   });
 });

@@ -1,6 +1,6 @@
 // Card G05: produce and judge isolation-boundary evidence.
 //   node scripts/containment-evidence.mjs run  --out DIR [--allow-unavailable]   run the suite here, write DIR/containment-<platform>.json
-//        --allow-unavailable: exit 0 when this host has no sandbox capacity at all (an honest skip, for a CI cell such as a GitHub-hosted Windows runner that cannot run
+//        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner that cannot run
 //        Windows Sandbox). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
 //   node scripts/containment-evidence.mjs gate --dir DIR --commit SHA   read every containment-*.json in DIR and list what blocks a release
 // `run` builds the tree first (tsc --build; the compiled code is not tracked by git, so a stale build would otherwise be reported under HEAD's commit) and needs a committed checkout; the report names the commit and says if the tree was dirty.
