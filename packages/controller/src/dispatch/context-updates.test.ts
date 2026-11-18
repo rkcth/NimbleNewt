@@ -49,6 +49,10 @@ test("G09 remote path: what boundContextUpdates gives passes the shape check; an
   assert.equal(contextUpdatesProblem([]), undefined);
   assert.equal(contextUpdatesProblem(boundContextUpdates(Array.from({ length: CONTEXT_UPDATE_LIMITS.items + 5 }, (_, i) => upd(i + 1, 20_000)))), undefined);
   assert.equal(contextUpdatesProblem(boundContextUpdates([upd(1, 10), upd(2, 20)])), undefined);
+  // The kept texts fill the total exactly and the note on the one left out comes on top: still the dispatcher's own output, so it passes (a check bounded at the total alone would refuse it and fail every remote start).
+  const full = boundContextUpdates([upd(1, 1), upd(2, 20_000), upd(3, 20_000), upd(4, 20_000), upd(5, CONTEXT_UPDATE_LIMITS.total - 60_000)]);
+  assert.equal(full.slice(1).reduce((n, u) => n + u.text.length, 0), CONTEXT_UPDATE_LIMITS.total);
+  assert.equal(contextUpdatesProblem(full), undefined);
   const one = upd(1, 10);
   for (const bad of ["x", {}, null, [null], ["text"], [[]], Array.from({ length: CONTEXT_UPDATE_LIMITS.items + 1 }, (_, i) => upd(i, 1)), [{ ...one, requestId: "" }], [{ ...one, requestId: "r".repeat(201) }], [{ ...one, requestId: 7 }],
     [{ ...one, text: "x".repeat(CONTEXT_UPDATE_LIMITS.text + 1) }], [{ ...one, text: undefined }], [{ ...one, origin: 7 }], [{ ...one, origin: "o".repeat(CONTEXT_UPDATE_LIMITS.origin + 1) }], [{ ...one, extra: 1 }],
