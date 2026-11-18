@@ -71,11 +71,15 @@ export function runBounded(file: string, args: readonly string[], options: { rea
     const timer = setTimeout(() => {
       timedOut = true;
       const pid = child.pid;
-      void (pid === undefined ? Promise.resolve() : stopTree(pid).catch(() => undefined)).finally(() => {
+      // The tree is stopped only while the program has not ended: once node has seen its end it lets go of the process, and Windows may then give the same id to another
+      // program, which a tree stop by id would end with everything under it. A program that ended while a descendant still holds its pipes is past that point; closing the
+      // pipes below still brings the result back (that descendant keeps running: with its parent gone, taskkill /T could not find it anyway).
+      const live = pid !== undefined && child.exitCode === null && child.signalCode === null;
+      void (live ? Promise.resolve().then(() => stopTree(pid)).catch(() => undefined) : Promise.resolve()).finally(() => {
         try { child.kill(); } catch { /* already gone */ }
         child.stdout?.destroy();
         child.stderr?.destroy();
-        last = setTimeout(() => { finish({ code: null, stdout: "", stderr: said(), timedOut: true }); }, 5_000);
+        if (!done) last = setTimeout(() => { finish({ code: null, stdout: "", stderr: said(), timedOut: true }); }, 5_000);
       });
     }, options.timeoutMs);
   });
@@ -89,7 +93,8 @@ export async function retryOnceOnTimeout(attempt: () => Promise<ProcessResult>):
 
 export function windowsRealHost(): WindowsHost {
   const sysRoot = (): string => process.env["SystemRoot"] ?? "C:\\Windows";
-  // taskkill walks the tree from the parent, so it runs while the parent is still alive; the parent is our own unreaped child, so its process id cannot have been reused yet.
+  // taskkill walks the tree from the parent, so it runs while the parent is still alive; runBounded calls it only for a program whose end node has not yet seen, so the id is
+  // still that program's (node still holds the process). A full path under the system root, arguments as a list, no shell and no PATH lookup.
   const stopTree = (pid: number): Promise<void> => new Promise((resolve) => {
     execFile(`${sysRoot()}\\System32\\taskkill.exe`, ["/PID", String(pid), "/T", "/F"], { windowsHide: true, timeout: 15_000 }, () => { resolve(); });
   });

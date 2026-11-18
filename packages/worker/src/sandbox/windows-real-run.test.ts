@@ -54,6 +54,36 @@ describe("runBounded: the time limit of a program the real Windows host runs", (
     assert.equal(r.timedOut, true);
     assert.equal(r.code, null);
   });
+
+  test("a tree stop that throws at once (not a rejected promise) still lets the program be ended and the result come back", async () => {
+    const r = await runBounded(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { timeoutMs: 500 }, (): Promise<void> => { throw new Error("could not start taskkill"); });
+    assert.equal(r.timedOut, true);
+    assert.equal(r.code, null);
+  });
+
+  test("review: a program that already ended while a descendant still holds its pipes is not stopped by its id (the id may belong to another program by then); the result still comes back", async () => {
+    // The program starts a descendant that inherits its pipes and outlives it, says its id, and ends at once; the descendant keeps the pipes open past the limit.
+    const program = [
+      "const { spawn } = require('node:child_process');",
+      "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' });",
+      "process.stdout.write('descendant=' + g.pid + '\\n');",
+      "g.unref();",
+    ].join("\n");
+    const calls: number[] = [];
+    let descendant: number | undefined;
+    const started = Date.now();
+    try {
+      const r = await runBounded(process.execPath, ["-e", program], { timeoutMs: 1500 }, async (pid) => { calls.push(pid); });
+      const took = Date.now() - started;
+      descendant = Number(/descendant=(\d+)/.exec(r.stdout)?.[1]);
+      assert.equal(r.timedOut, true);
+      assert.deepEqual(calls, [], "no tree stop for a program whose end was already seen");
+      assert.ok(took < 1500 + 4_000, `the result came back ${String(took)} ms after the start`);
+      assert.ok(Number.isSafeInteger(descendant) && descendant > 0, r.stdout);
+    } finally {
+      if (descendant !== undefined && Number.isSafeInteger(descendant)) { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone */ } }
+    }
+  });
 });
 
 describe("retryOnceOnTimeout: a read-only probe that ran out of time is tried once more, and only then", () => {

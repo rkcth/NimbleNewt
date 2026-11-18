@@ -12,7 +12,7 @@ import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js"
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { checkWindowsHostPath, VM_FALLBACK_DECISION, type WindowsSettings } from "./windows-plan.js";
-import { PROBE_TIMEOUT_MS, windowsRealHost } from "./windows-real.js";
+import { windowsRealHost } from "./windows-real.js";
 
 // Card A03b: the Windows launcher's own parts on a REAL Windows machine, without Windows Sandbox itself. They run on every Windows CI cell (GitHub's hosted Windows runners,
 // which the owner counts as real operating-system runs, 2026-11-18) and skip everywhere else. A hosted runner is Windows Server: it has no Windows Sandbox client and cannot
@@ -94,10 +94,12 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     assert.equal((await host.signature(plain)).valid, false);
   });
 
-  // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout, so six probes in this bare environment can in the worst case take far longer than the
-  // package's default per-test limit; the child and the test get a ceiling above that worst case, and the job is released whatever happens, so no later test sees it.
-  const ENV_PROBES_CEILING_MS = 6 * 2 * PROBE_TIMEOUT_MS + 120_000;
-  test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", { timeout: ENV_PROBES_CEILING_MS + 60_000 }, async () => {
+  // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout. The ceiling that governs here is not a per-test one: the package runner's
+  // --test-timeout (300 s) also bounds this whole file (node --test runs each file as one timed test), and a per-test limit could not fire during spawnSync anyway. In run
+  // 44242108811 the other tests of this file took about 30 s together, so the child gets 250 s: past that it is stopped and this test fails with its own message, and the job
+  // is released whatever happens, so no later test sees it. (Six probes that each time out twice would need 720 s; that is a failure, not a case to wait for.)
+  const ENV_PROBES_CHILD_MS = 250_000;
+  test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", async () => {
     const backend = windowsSandboxBackend(options());
     const plan = backend.plan(recipeIn("envjob"), ["/windows/system32/cmd.exe", "/d", "/c", "exit 0"], `ci-${randomUUID()}`);
     try {
@@ -111,8 +113,8 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
         "}",
         "process.stdout.write(JSON.stringify(out));",
       ].join("\n");
-      const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CEILING_MS, windowsHide: true });
-      assert.equal(child.status, 0, child.stderr);
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CHILD_MS, windowsHide: true });
+      assert.equal(child.status, 0, child.error === undefined ? child.stderr : `the probes did not all answer within ${String(ENV_PROBES_CHILD_MS / 1000)} s (${child.error.message}): ${child.stderr}`);
       assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
     } finally {
       await backend.release!(plan);
