@@ -1035,3 +1035,22 @@ test("W01c: a work root given as a link that lies directly in /tmp (no folder ar
     rmSync(link, { force: true });
   }
 });
+
+test("W01c: a hidden place inside a run folder named through a link in a covered place stays hidden at that spelling too", { ...needsSandbox, skip: needsSandbox.skip || (!existsSync("/tmp") ? "no /tmp here" : false) }, () => {
+  const real = realpathSync(mkdtempSync(join(root, "w01c-link-hide-")));
+  mkdirSync(join(real, "kept-out"), { recursive: true });
+  writeFileSync(join(real, "kept-out", "f.txt"), "HIDDEN-IN-OWN-b71c\n");
+  writeFileSync(join(real, "own.txt"), "own\n");
+  const link = `/tmp/pi-eval-w01c-hide-link-${process.pid}`;
+  symlinkSync(real, link);
+  try {
+    const argv = bwrapPrefix({ hidden: [join(real, "kept-out")], writable: [link], readable: [], readOnly: [] });
+    const at = (...seq) => argv.findIndex((_, i) => seq.every((x, j) => argv[i + j] === x));
+    assert.ok(at("--bind", real, link) > 0 && at("--tmpfs", join(link, "kept-out")) > at("--bind", real, link), argv.join(" "));
+    const r = spawnSync(argv[0], [...argv.slice(1), "sh", "-c", `cat "${link}/own.txt"; cat "${link}/kept-out/f.txt"; cat "${real}/kept-out/f.txt"; true`], { encoding: "utf8" });
+    assert.equal(r.status, 0, JSON.stringify(r));
+    assert.equal(r.stdout, "own\n", JSON.stringify(r));
+  } finally {
+    rmSync(link, { force: true });
+  }
+});
