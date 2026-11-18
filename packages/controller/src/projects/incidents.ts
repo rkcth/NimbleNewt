@@ -46,6 +46,8 @@ export interface ResponsibilityObservedState {
   /** `unknown`: no check yet, or the last one is older than twice the check period. Otherwise what the last check found. */
   readonly observed: "unknown" | "ok" | "attention" | "failed";
   readonly lastCheckAt?: string;
+  /** When a check last found it `ok`, even if later checks did not: shown apart, it never makes `observed` ok. */
+  readonly lastOkAt?: string;
   readonly openIncidents: number;
 }
 
@@ -319,7 +321,7 @@ export class IncidentService {
     const fresh = status.lastCheckAt !== undefined && (duty.everyMinutes === undefined || Date.parse(status.asOf) - Date.parse(status.lastCheckAt) <= 2 * duty.everyMinutes * 60_000);
     const last = status.lastCheckOutcome;
     const observed: ResponsibilityObservedState["observed"] = !fresh ? "unknown" : open.some((i) => i.worst === "failed") || last === "failed" ? "failed" : open.length > 0 || last === "attention" ? "attention" : last === "ok" ? "ok" : "unknown";
-    return { responsibilityId: duty.id, intended: duty.desiredCondition, observed, ...(status.lastCheckAt === undefined ? {} : { lastCheckAt: status.lastCheckAt }), openIncidents: open.length };
+    return { responsibilityId: duty.id, intended: duty.desiredCondition, observed, ...(status.lastCheckAt === undefined ? {} : { lastCheckAt: status.lastCheckAt }), ...(status.lastOkAt === undefined ? {} : { lastOkAt: status.lastOkAt }), openIncidents: open.length };
   }
 
   #mayReport(by: Principal, body: ResponsibilityBody): boolean {
