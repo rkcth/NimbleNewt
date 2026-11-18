@@ -41,7 +41,8 @@
           "needs POSIX permissions and a non-root user",
           "symbolic links need privileges on Windows",
           "POSIX permissions",
-          "POSIX paths"
+          "POSIX paths",
+          "this machine has a Windows Sandbox client; the no-client case does not apply (windows-real.test.ts covers a machine with one)"
         ]
       },
       "minTests": 45
