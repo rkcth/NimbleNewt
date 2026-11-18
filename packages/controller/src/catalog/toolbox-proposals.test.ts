@@ -145,6 +145,12 @@ for (const backend of backends) {
     const ownExec = await c.note(cody.p, "console.log('lint by the owner')");
     await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.1.0", manifest, instructionsRecordId: readme, executableRecordId: ownExec } as never);
     assert.deepEqual((await c.props.list(maya.p)).items.map((x) => [x.stale, x.current]), [[true, "1.1.0"], [true, "1.1.0"]]);
+    // Second review: waiting proposals are listed from the authors' indexes, in record ID order, a page at a time.
+    const waiting = [pExec, pDocs].sort();
+    const first = await c.props.list(maya.p, { limit: 1 });
+    assert.deepEqual([first.items.map((x) => x.id), first.next], [[waiting[0]], waiting[0]]);
+    assert.deepEqual((await c.props.list(maya.p, { limit: 1, after: first.next! })).items.map((x) => x.id), [waiting[1]]);
+    assert.deepEqual((await c.props.list(cody.p, { mine: true })).items.map((x) => x.id), waiting);
     await refuses("stale_revision", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: pDocs, decision: "accept", version: "1.2.0" }), /rebase it first/);
     await refuses("stale_revision", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: pDocs, decision: "accept" }), /rebase it first/);
     assert.equal((await c.cat.get(c.owner, "toolbox.lint"))!.version, "1.1.0", "nothing was released");
@@ -172,6 +178,8 @@ for (const backend of backends) {
     await refuses("command_conflict", () => c.props.rebase(cody.p, { commandId: cid("rb"), proposalId: p4 }));
     await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: p4, reason: "superseded" });
     assert.equal((await c.props.get(cody.p, p4)).state, "withdrawn");
+    assert.ok(!(await c.props.list(maya.p, { state: "all" })).items.every((x) => x.id !== p4), "a final proposal is still listed when asked for");
+    assert.ok((await c.props.list(maya.p)).items.every((x) => x.id !== p4) && (await c.props.list(cody.p, { mine: true })).items.every((x) => x.id !== p4), "but not as waiting");
     await refuses("invalid_command", () => c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: p4 }), /withdrawn/);
     await refuses("forbidden", () => c.props.withdraw(maya.p, { commandId: cid("wd"), proposalId: pExec }), /only the author/);
     const docs5 = await c.note(cody.p, "Run lint everywhere, twice.");

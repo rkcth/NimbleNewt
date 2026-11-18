@@ -13987,3 +13987,34 @@ Reviewed `8b76d607..404653d3` against the T08 card and the owner's rules. **Thre
 **Limits left (not defects of this round).** Proposals in a final state (accepted, rejected, withdrawn) are never removed. A propose-and-withdraw loop therefore stores records without bound (only the 20 waiting are capped), and once there are more than 5000 proposals the default list may come back `partial`. A retention rule for final proposals belongs to a later slice. A proposal accepted without a version cannot be rebased (it is no longer waiting). If its base moves on, or a promotion's name is taken, it can never be released, and the author proposes again. A retried `propose` with the default base, after the tool has moved on, is `command_conflict` rather than a replay (the default base is part of its payload). The bridge's own recorded-call replay answers the bridge case.
 
 **Verified (Linux, through `/tmp/nn-slot.sh`).** `tsc --build`. Controller files in `catalog`, `dependencies`, `toolbridge`, `commands`, `environments`, `status`, `chat`, `api` and `retention`: 2917/2917 (the toolbox suites ran on all four backends; `catalog/toolbox-proposals` 28/28). Registry 15/15. pi-adapter 266/266. Root `scripts/*.test.mjs` 225 (224 pass, 1 skipped). Integration `t06-bridge` and `h12b-worker-process` 2/2. **Skipped:** the rest of the controller and integration packages, other packages, hosted Windows/macOS (CI).
+
+### T08 second slice, second review (Claude agent, Opus 5.5, clean context, 2026-11-18; this round is final)
+
+Reviewed `8b76d607..c2eb2336` independently. **One defect fixed. Everything else was checked and left as it was.**
+
+**Fixed.** **Waiting proposals could drop out of the default listing once enough final ones existed.** `ToolboxProposalService.list` scanned every proposal record in ID order and stopped at 5000 (`partial`). Proposals in a final state are kept without bound. So once enough accepted, rejected or withdrawn proposals were stored ahead of a waiting one, three places could miss it: the default listing, `mine`, the deferred listing, and with them the owner's `toolbox_proposals` status view. The status view could then say "No toolbox proposal is waiting for a decision" next to "More proposals exist". A query for waiting states only (open, changes requested, deferred, which is every default and status query) now reads the authors' indexes. Those already hold exactly the waiting IDs (at most 20 per author) and are updated in each create and final-state write. The listing then fetches those records in record ID order, with the same filters, visibility check and `after`/`next` paging. An agent that is neither owner nor maintainer, and `mine`, read only the caller's own index. Queries naming a final state, or `all`, scan as before. Test (`catalog/toolbox-proposals`, all backends): two waiting proposals page one at a time in ID order for a maintainer and for the author's `mine`. A withdrawn proposal is listed under `all` but not as waiting.
+
+**The unbounded final-state proposals.** ASSUMPTION: storage is not bounded in this slice. Removing final proposals is a deletion of the owner's records. It belongs in the retention service, with its policy, audit and archive, and not in a decision's write. With the listing fix, the growth costs storage only. The waiting cap (20 per author) and the command rate still apply, and the scan for final states keeps its 5000 limit with `next`. Left for a later slice, as the first review recorded.
+
+**Checked, no change.**
+- **Authorization.** `toolbox.manage` is read from the caller's own grants on every decide, rebase, release and revoke path (`maintainsAnywhere`, `mayManage`; `#publish` checks the prior entry's audience again inside the write). An outsider gets `not_found` for proposals (`#visible` first), tools (`#readableEntry`) and revoke (not_found before forbidden, as for deprecate). The author is refused its own decision.
+- **Acceptance grants nothing.** `releaseProposal` writes only the version, snapshot, pins, entry, proposal, inbox and index.
+- **Accept-with-version.** The `sources` callback runs inside the build, so a repeat is answered from its record. That holds after the author superseded a record and after the released version was revoked, because nothing read before `runner.command` depends on either. The base parts are read by digest from the record or the snapshot, with revoked versions excluded. A revision between read and write is `stale_revision`, as is a moved base.
+- **Rebase and revise.** Both check round, digest and base inside the write.
+- **Suggested audience.** It names only the author's own teams and projects, and a missing one gets the same answer.
+- **Snapshots.** They are created only for `toolbox.` releases and copies. Revoke and retention's version drop delete them in the same write. `retention.delete` gathers them through `sources` (the record and its copies). They are served only for unrevoked versions whose digest matches.
+- **Notices.** The inbox is read only by its own agent, on the API and the bridge. Fork notices are keyed per agent and version, under a derived command ID.
+- **Bridge.** `toolbox.copy` and `toolbox.propose` are in `WRITES`, so a pause refuses them and they are admitted as effects, with activity steps. `propose` takes the attempt's own task. The Pi tool names match `BRIDGE_OPERATIONS`.
+- **Chat and status.** The chat op is `mode: "propose"`, and the interpreter text gives examples, says what an acceptance does not authorise, and says no fixed phrase is needed. The status view is owner only.
+- **API docs.** `node scripts/api-docs.mjs` stdout is byte-identical to `api-v1.md`. This review changed no operation.
+
+**Limits left (not defects of this round).** `propose`, `revise` and `rebase` read the author's records before `runner.command`, as accept did before the first review. A retry with the same command ID after the author superseded one of those records is answered "the record is no longer as it was" instead of the recorded answer. The bridge's recorded-call replay covers `toolbox.propose`. The other two have no bridge tool yet.
+
+**Verified (Linux, node 22.23, through `/tmp/nn-slot.sh`, two slots).**
+- `tsc --build`, using the worktree's installed TypeScript. It was invoked once as `npx --no-install tsc`, which downloads nothing.
+- Controller `catalog`, `dependencies`, `toolbridge`, `commands`, `environments`, `status`, `chat`, `api` and `retention`: 2917/2917, with `catalog/toolbox-proposals` 28/28 on the four backends.
+- Registry 15/15. pi-adapter 266/266.
+- Root `scripts/*.test.mjs`: 225 (224 pass, 1 skipped).
+- Integration `t06-bridge` and `h12b-worker-process`: 2/2.
+
+**Skipped:** the rest of the controller and integration packages, other packages, hosted Windows/macOS (CI).

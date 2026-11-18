@@ -367,6 +367,30 @@ export class ToolboxProposalService {
     if (query.after !== undefined && (typeof query.after !== "string" || !PROPOSAL_ID.test(query.after))) invalid("after", "must be the next of a previous answer");
     const entries = new Map<string, EntryBody | undefined>();
     const items: ProposalSummary[] = [];
+    // Second review of slice 2: proposals still waiting (open, changes requested, deferred) are listed from the authors' indexes, which hold exactly those (at most 20 per author), so final proposals,
+    // which are kept without bound, never push a waiting one past the scan limit (the default listing and the owner's status view would otherwise say none is waiting once enough final ones exist).
+    if (states.every((s) => PENDING.includes(s))) {
+      const ids = new Set<string>();
+      const take = (body: unknown): void => { for (const id of (body as AuthorIndex | undefined)?.pending ?? []) if (typeof id === "string" && PROPOSAL_ID.test(id)) ids.add(id); };
+      if (query.mine === true || (by.kind !== "owner" && !maintainsAnywhere(by))) take((await this.#runner.get(INDEX_KIND, derivedId("tpa", by.id)))?.body);
+      else for (let after: string | undefined; ;) {
+        const page = await this.#runner.list(INDEX_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+        for (const a of page) { after = a.id; take(a.body); }
+        if (page.length < 200) break;
+      }
+      for (const id of [...ids].sort()) {
+        if (query.after !== undefined && id <= query.after) continue;
+        const a = await this.#runner.get(PROPOSAL_KIND, id);
+        if (a === undefined) continue;
+        const p = a.body as unknown as ToolboxProposalBody;
+        if (!states.includes(p.state) || (name !== undefined && p.target !== name) || (query.mine === true && p.author !== by.id)) continue;
+        if (!(await this.#canSee(by, p))) continue;
+        if (!entries.has(p.target)) entries.set(p.target, await this.#entry(p.target));
+        items.push(await this.#summary(by, a.id, a.revision, p, entries.get(p.target)));
+        if (items.length >= limit) return { items, next: a.id };
+      }
+      return { items };
+    }
     let scanned = 0;
     for (let after = query.after; ;) {
       const page = await this.#runner.list(PROPOSAL_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
