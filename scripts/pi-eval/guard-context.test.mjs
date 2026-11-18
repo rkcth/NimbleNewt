@@ -65,7 +65,7 @@ test("W01d: the worker's own calls on a repository its test made in the temporar
   assert.equal(inProjectTests([...ASK, "init", "-q", join(tmp, "new-one")], ctx(tmp)), true);
   // The env form (GIT_CONFIG_COUNT), and core.gitProxy.
   assert.equal(inProjectTests(["status"], ctx(scratch, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.askPass", GIT_CONFIG_VALUE_0: "./no-prompt.sh" })), true);
-  assert.equal(inProjectTests(["-c", "core.gitProxy=/bin/false", "fetch", bare], ctx(scratch)), true);
+  assert.equal(inProjectTests(["-c", "core.gitProxy=/bin/false", "fetch", "--no-recurse-submodules", bare], ctx(scratch)), true);
 });
 
 test("W01d: loosening the agent asks for itself is never the tests' own", () => {
@@ -191,8 +191,8 @@ test("W01d review: a call that can reach a network address through the repositor
   g(["init", "-q", "-b", "main"], loc);
   g(["remote", "add", "origin", bare], loc);
   g(["config", "branch.main.remote", "origin"], loc);
-  assert.equal(inProjectTests([...ASK, "fetch", "origin"], ctx(loc)), true);
-  assert.equal(inProjectTests([...ASK, "fetch"], ctx(loc)), true);
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=false", "fetch", "origin"], ctx(loc)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-recurse-submodules"], ctx(loc)), true);
   assert.equal(inProjectTests([...ASK, "clone", "-q", bare, join(tmp, "nn-clone")], ctx(tmp)), true);
   assert.equal(inProjectTests([...ASK, "commit", "-m", "fix: a thing"], ctx(loc)), true);
 });
@@ -215,7 +215,7 @@ test("W01d review: the worker's local clone (-c protocol.allow=user with protoco
   const c = { cwd: tmp, roots, env: plainEnv, git: (a) => runGit(a, tmp) };
   assert.match(decide([...LOCAL, "clone", "-q", "--bare", bare, join(tmp, "nn-c1")], c).refuse ?? "", /allowed protocols/);
   assert.equal(inProjectTests([...LOCAL, "clone", "-q", "--bare", bare, join(tmp, "nn-c1")], ctx(tmp)), true);
-  assert.equal(inProjectTests([...LOCAL, "--git-dir", join(scratch, ".git"), "fetch", bare, "main"], ctx(tmp)), true);
+  assert.equal(inProjectTests([...LOCAL, "--git-dir", join(scratch, ".git"), "fetch", "--no-recurse-submodules", bare, "main"], ctx(tmp)), true);
   // A network address, the run's checkout, another protocol key next to it: counted.
   assert.equal(inProjectTests([...LOCAL, "clone", "https://github.com/owner/repo.git", join(tmp, "nn-c2")], ctx(tmp)), false);
   assert.equal(inProjectTests([...LOCAL, "clone", "github.com:owner/repo.git", join(tmp, "nn-c3")], ctx(tmp)), false);
@@ -277,4 +277,24 @@ test("W01d second review: the worker's -c submodule.recurse=false does not stop 
   assert.equal(inProjectTests([...ASK, "-c", "fetch.recurseSubmodules=no", "status"], ctx(scratch)), true);
   assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=1", "status"], ctx(scratch)), false);
   assert.equal(inProjectTests([...ASK, "-c", "submodule.m.url=" + bare, "status"], ctx(scratch)), false);
+});
+
+test("W01d final check: an abbreviated recursing option, or a fetch or pull that may recurse on demand, is not tagged", () => {
+  // git takes any unambiguous abbreviation of a long option; a later one overrides --no-recurse-submodules.
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-recurse-submodules", "--recurse-sub", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "clone", "--recurs", bare, join(tmp, "nn-ab")], ctx(tmp)), false);
+  // fetch and pull default to on-demand recursion (a populated submodule with its own .git folder leaves no modules/ folder).
+  assert.equal(inProjectTests([...ASK, "fetch", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "pull", bare, "main"], ctx(scratch)), false);
+  assert.equal(inProjectTests([...ASK, "-c", "push.recurseSubmodules=no", "fetch", bare, "main"], ctx(scratch)), false);
+  // Turned off, as the worker does (either form), they stay tagged; the worker's exact flag set too.
+  assert.equal(inProjectTests([...ASK, "-c", "submodule.recurse=false", "fetch", bare, "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "-c", "fetch.recurseSubmodules=false", "pull", bare, "main"], ctx(scratch)), true);
+  assert.equal(inProjectTests([...ASK, "fetch", "--no-recurse-submodules", bare, "main"], ctx(scratch)), true);
+  const WORKER = ["-c", "core.sshCommand=false", "-c", "core.askPass=echo", "-c", "protocol.allow=user", "-c", "protocol.file.allow=always", "-c", "submodule.recurse=false"];
+  assert.equal(inProjectTests([...WORKER, "--git-dir", join(scratch, ".git"), "fetch", "--no-tags", "--no-recurse-submodules", bare, "main"], ctx(tmp)), true);
+  // --config-env split at its last =: a key holding = in its subsection is read whole (and a network remote there is refused).
+  const ce = { cwd: scratch, roots, env: { ...plainEnv, NNU: "https://example.invalid/r.git" }, git: (a) => runGit(a, scratch) };
+  assert.match(decide(["--config-env=remote.a=b.url=NNU", "status"], ce).refuse ?? "", /remote address/);
+  assert.match(decide(["--config-env", "remote.a=b.url=NNU", "status"], ce).refuse ?? "", /remote address/);
 });

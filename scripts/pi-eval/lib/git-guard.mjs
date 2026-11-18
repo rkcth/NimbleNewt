@@ -391,7 +391,8 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
   if (g.sub === "submodule") return false;
   // Nor any call that may recurse into submodules (their addresses come from .gitmodules and submodule.*.url, not read
   // here): a --recurse-submodules/--recursive option (the worker's --no-recurse-submodules is fine), or a submodule or recursion setting (W01d second review).
-  if (args.some((a) => typeof a === "string" && /^--recurs(?:e-submodules|ive)(?:=|$)/.test(a))) return false;
+  // git accepts any unambiguous abbreviation of a long option (`--recurse-sub`), so every `--rec...` option counts (W01d final check).
+  if (args.some((a) => typeof a === "string" && /^--rec/.test(a))) return false;
   const callGlobals = []; // the call's own global options without -C (its folder is already `dir`), so its -c values count
   for (let i = 0; i < g.globals.length; i++) { if (g.globals[i] === "-C") { i++; continue; } callGlobals.push(g.globals[i]); }
   const configured = (git([...callGlobals, "config", "--get-regexp", "^(remote\\..*\\.(push)?url|url\\..*|branch\\..*\\.(push)?remote|remote\\.pushdefault|submodule\\..*|.*\\.recursesubmodules)$"], dir) ?? "").split(/\r?\n/).filter(Boolean);
@@ -402,19 +403,27 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
   const testLocal = (u) => { const p = localPath(u, dir); return p !== null && inside(p, tests) && !inside(p, own); };
   const remoteNames = new Set();
   const named = []; // a branch's remote: a remote's name or an address of its own
+  let fetchRecurseOff = false; // submodule.recurse or fetch.recurseSubmodules set to false
   for (const line of configured) {
     const sp = line.indexOf(" ");
     const key = sp < 0 ? line : line.slice(0, sp);
     const value = sp < 0 ? "" : line.slice(sp + 1);
     if (/^url\./i.test(key)) return false;
     // A submodule's own entry (submodule.<name>.url, ...) or recursion turned on; the worker's submodule.recurse=false is fine.
-    if (/^submodule\.recurse$|\.recursesubmodules$/i.test(key)) { if (/^(?:false|no|off|0)$/i.test(value)) continue; return false; }
+    if (/^submodule\.recurse$|\.recursesubmodules$/i.test(key)) {
+      if (!/^(?:false|no|off|0)$/i.test(value)) return false;
+      if (/^(?:submodule\.recurse|fetch\.recursesubmodules)$/i.test(key)) fetchRecurseOff = true;
+      continue;
+    }
     if (/^submodule\./i.test(key)) return false;
     if (/^branch\.|^remote\.pushdefault$/i.test(key)) { named.push(value); continue; }
     if (!testLocal(value)) return false;
     remoteNames.add(key.replace(/^remote\./i, "").replace(/\.(?:push)?url$/i, ""));
   }
   if (named.some((v) => !remoteNames.has(v) && !testLocal(v))) return false;
+  // fetch and pull recurse "on demand" by default, which also reaches a populated submodule with its own .git folder (no
+  // modules/ folder to see): tagged only with recursion turned off, as the worker always does (W01d final check).
+  if ((g.sub === "fetch" || g.sub === "pull") && !fetchRecurseOff && !g.rest.includes("--no-recurse-submodules")) return false;
   if (REMOTE_SUBS.has(g.sub)) {
     if (g.rest.some((a) => /^--remote(?:=|$)/.test(a))) return false; // archive --remote
     if (g.rest.some((a) => !a.startsWith("-") && !remoteNames.has(a) && !testLocal(a))) return false;
