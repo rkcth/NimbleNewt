@@ -313,6 +313,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   toolbox: { keys: [], about: "the shared tools (toolbox): for each one the version in use, who it is for (all agents, roles, teams or projects), the platforms it declares and how many agents keep a personal copy of it; who maintains them is a grant of toolbox.manage (status kind settings, or grant.create)" },
+  toolbox_proposals: { keys: ["state"], about: "owner only: the proposals agents made for the shared toolbox (improvements of a shared tool, or a personal tool offered to become a shared one): for each one the tool, the author, the version it is against and whether that is still the version in use, what it changes, the access it adds or drops and its state; by default those waiting (open, or with changes requested), with the number deferred; state names another (deferred, accepted, rejected, withdrawn or all). A maintainer or the owner decides with toolbox.proposal.decide" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   meeting_procedure: { keys: ["motionId|motionTopic"], about: "where a motion stands in the meeting procedure (card M06): the stage, the round, the objection check, rulings, the vote, and what it waits for and from whom" },
@@ -402,6 +403,7 @@ export type StatusRequest =
   | { readonly kind: "compatibility" }
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "toolbox" }
+  | { readonly kind: "toolbox_proposals"; readonly state?: string }
   | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
@@ -578,6 +580,8 @@ export interface StatusDeps {
   readonly toolbox?: {
     list(by: Principal): Promise<{ readonly items: readonly { readonly name: string; readonly kind: string; readonly latest: string; readonly os: readonly string[]; readonly arch: readonly string[]; readonly audience: { readonly all?: true; readonly roles?: readonly string[]; readonly teams?: readonly string[]; readonly projects?: readonly string[] } }[]; readonly partial?: true }>;
     forks(by: Principal, name: string): Promise<{ readonly forks: readonly { readonly baseRevoked: boolean }[] }>;
+    /** Toolbox proposals (card T08). Absent: the proposals view is not offered. */
+    proposals?(by: Principal, query: { state?: string; limit?: number }): Promise<{ readonly items: readonly { readonly id: string; readonly revision: number; readonly kind: string; readonly target: string; readonly author: string; readonly state: string; readonly round: number; readonly base?: { readonly version: string }; readonly from?: { readonly name: string; readonly version: string }; readonly changes: { readonly instructions: boolean; readonly executable: boolean; readonly manifest: boolean }; readonly permissionChanges: { readonly added: readonly string[]; readonly removed: readonly string[] }; readonly stale?: boolean; readonly current?: string; readonly released?: { readonly version: string } }[]; readonly next?: string; readonly partial?: true }>;
   };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates"> & {
@@ -947,6 +951,7 @@ export class StatusService {
       case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "toolbox": { onlyKnown(request, ["kind"]); return this.toolboxLines(by); }
+      case "toolbox_proposals": { onlyKnown(request, ["kind", "state"]); return this.toolboxProposalLines(by, request.state); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
@@ -1790,6 +1795,33 @@ export class StatusService {
     }
     if (found.items.length > 50) lines.push(line(`${found.items.length - 50} more shared tool(s) are not shown.`, cite("installation", "installation")));
     if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more shared tools.", cite("installation", "installation")));
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * The toolbox proposals (card T08), owner only: for each one the tool, the author, the base and whether it is still the version in use, what it changes, the access it adds or drops and its state. By default those waiting
+   * (open or with changes requested), with a count of the deferred ones (set aside: not listed as available); `state` names another state or all. Nothing of the proposed text.
+   */
+  async toolboxProposalLines(by: Principal, state: string | undefined): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const proposals = this.#deps.toolbox?.proposals;
+    if (proposals === undefined || by.kind !== "owner") return undefined;
+    if (state !== undefined && typeof state !== "string") invalid("state", "must be a proposal state or all");
+    const at = this.#runner.now();
+    const found = await proposals.call(this.#deps.toolbox, by, { ...(state === undefined ? {} : { state }), limit: 50 });
+    const lines: Line[] = [];
+    for (const p of found.items) {
+      const parts = [p.changes.instructions ? "instructions" : "", p.changes.executable ? "executable" : "", p.changes.manifest ? "manifest" : ""].filter((x) => x !== "");
+      const what = p.kind === "promotion" ? `offers ${shown(p.from?.name ?? "a personal tool", 80)} ${shown(p.from?.version ?? "", 20)} to become the shared tool ${shown(p.target, 80)}` : `proposes changing the ${parts.join(", ")} of ${shown(p.target, 80)} ${shown(p.base?.version ?? "", 20)}${p.stale === true ? ` (no longer the version in use, which is ${shown(p.current ?? "none", 20)}; it needs a rebase before it can be accepted)` : ""}`;
+      const access = p.permissionChanges.added.length === 0 && p.permissionChanges.removed.length === 0 ? "" : ` It ${p.permissionChanges.added.length === 0 ? "" : `asks for ${p.permissionChanges.added.map((x) => shown(x, 60)).join(", ")}`}${p.permissionChanges.added.length > 0 && p.permissionChanges.removed.length > 0 ? " and " : ""}${p.permissionChanges.removed.length === 0 ? "" : `drops ${p.permissionChanges.removed.map((x) => shown(x, 60)).join(", ")}`} (asking grants nothing).`;
+      const where = p.state === "open" ? "is open" : p.state === "changes_requested" ? "waits for the author's changes" : p.state === "deferred" ? "is deferred" : p.state === "accepted" ? (p.released === undefined ? "was accepted (not released yet)" : `was accepted and released as ${shown(p.released.version, 20)}`) : `was ${shown(p.state, 20)}`;
+      lines.push(line(`Proposal ${shown(p.id, 40)}: ${shown(p.author, 80)} ${what}; it ${where}${p.round > 1 ? ` (revision ${p.round})` : ""}.${access}`, cite("toolbox-proposal", p.id, p.revision)));
+    }
+    if (state === undefined) {
+      const deferred = await proposals.call(this.#deps.toolbox, by, { state: "deferred", limit: 100 });
+      if (deferred.items.length > 0) lines.push(line(`${deferred.items.length}${deferred.next === undefined ? "" : " or more"} deferred proposal${deferred.items.length === 1 ? " is" : "s are"} set aside and not listed; ask for the deferred ones to see ${deferred.items.length === 1 ? "it" : "them"}.`, cite("installation", "installation")));
+    }
+    if (lines.length === 0) lines.push(line(state === undefined ? "No toolbox proposal is waiting for a decision." : `No toolbox proposal is ${shown(state, 20).replace("_", " ")}.`, cite("installation", "installation")));
+    if (found.next !== undefined) lines.push(line("More proposals exist than are shown here.", cite("installation", "installation")));
     return { observedAt: at, lines };
   }
 
