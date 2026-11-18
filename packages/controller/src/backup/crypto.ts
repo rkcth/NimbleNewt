@@ -184,7 +184,8 @@ const base32 = (bytes: Uint8Array): string => { let bits = 0; let acc = 0; let o
 const codeCheck = (key: Buffer): string => base32(createHash("sha256").update("nn-recovery-code").update(key).digest().subarray(0, 3)).slice(0, 4);
 /**
  * A printable form of the recovery key (card K01b): the 256 random bits (far over the 128 the card asks for) in Crockford base32, then 4 check characters, in dash-separated groups of 4 (e.g. `ABCD-EFGH-...`). The checksum
- * catches a mistyped or misread character before any unlock is tried; it is no secret of its own (it does not shorten the key's strength in any way that matters: it is 20 bits of a hash of the key, not of the key).
+ * catches a mistyped or misread character before any unlock is tried, all but about one change in 2^20 (it is 20 bits of a hash, not an error-detecting code; a change it misses reads
+ * as another key, which opens nothing: `UnlockFailed`); it is no secret of its own (it does not shorten the key's strength in any way that matters: it is 20 bits of a hash of the key, not of the key).
  */
 export function recoveryCodeOf(file: RecoveryFile): string {
   const text = base32(unb64(file.recoveryKey, "recovery key", 32)) + codeCheck(unb64(file.recoveryKey, "recovery key", 32));

@@ -6,6 +6,11 @@ import { retryOnceOnTimeout, runBounded } from "./windows-real.js";
 // CI fix (run 44242108811, Windows node 22): a PowerShell probe in the real Windows host ran out of time and was reported only as "exit null". The time limit of every program the
 // real Windows host runs is now kept by runBounded, and a read-only probe gets one more try only after a timeout. These parts need no Windows: node itself stands in for the program,
 // and a stand-in replaces taskkill, so they run on every operating system. That taskkill /T /F really ends a PowerShell tree can only be seen on Windows (windows-host-real.test.ts).
+// CI fix (run 44258423696, Windows, both nodes): the descendant below is a node program started by a node program. On Windows node (libuv) puts every child it starts without `detached`
+// into a job object that ends with the starting process (kill on job close), so the descendant died with the program: the "descendant outlives the program and holds the pipes" these
+// tests need never happened there. It is started with `detached: true` (no job; its output still goes to the inherited pipes); on Linux and macOS that only gives it its own process group.
+// A program run by the real host (powershell.exe) is not node and puts nothing of its own in such a job, which is why the real tree stop is taskkill /T.
+const DESCENDANT = "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit', detached: true, windowsHide: true });";
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } };
 
@@ -24,7 +29,7 @@ describe("runBounded: the time limit of a program the real Windows host runs", (
     // The program starts a descendant that inherits its output pipes and outlives it, says the descendant's process id, and then waits far past the limit.
     const program = [
       "const { spawn } = require('node:child_process');",
-      "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' });",
+      DESCENDANT,
       "process.stdout.write('descendant=' + g.pid + '\\n');",
       "setTimeout(() => {}, 60000);",
     ].join("\n");
@@ -65,7 +70,7 @@ describe("runBounded: the time limit of a program the real Windows host runs", (
     // The program starts a descendant that inherits its pipes and outlives it, says its id, and ends at once; the descendant keeps the pipes open past the limit.
     const program = [
       "const { spawn } = require('node:child_process');",
-      "const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' });",
+      DESCENDANT,
       "process.stdout.write('descendant=' + g.pid + '\\n');",
       "g.unref();",
     ].join("\n");
@@ -76,10 +81,12 @@ describe("runBounded: the time limit of a program the real Windows host runs", (
       const r = await runBounded(process.execPath, ["-e", program], { timeoutMs: 1500 }, async (pid) => { calls.push(pid); });
       const took = Date.now() - started;
       descendant = Number(/descendant=(\d+)/.exec(r.stdout)?.[1]);
+      assert.ok(Number.isSafeInteger(descendant) && descendant > 0, r.stdout);
+      // What the case needs: the descendant outlived the program and still runs, so only runBounded's limit (closing the pipes) let the result come back.
+      assert.equal(alive(descendant), true, "the descendant ended with the program, so this case did not happen");
       assert.equal(r.timedOut, true);
       assert.deepEqual(calls, [], "no tree stop for a program whose end was already seen");
       assert.ok(took < 1500 + 4_000, `the result came back ${String(took)} ms after the start`);
-      assert.ok(Number.isSafeInteger(descendant) && descendant > 0, r.stdout);
     } finally {
       if (descendant !== undefined && Number.isSafeInteger(descendant)) { try { process.kill(descendant, "SIGKILL"); } catch { /* already gone */ } }
     }

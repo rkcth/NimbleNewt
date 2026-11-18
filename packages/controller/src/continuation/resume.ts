@@ -393,33 +393,39 @@ export class ResumeCheckService {
         continue;
       }
       if (b.phase === "reviewing") {
-        const open = (b.delta?.changed ?? []).filter((i) => b.verdicts[i.id] === undefined);
         if (this.#reviewing.has(id)) return view<ResumeCheckBody>(found);
         let got: Awaited<ReturnType<ResumePorts["review"]>>;
         // Guarded until the verdict is written, not only while the reviewer is asked: between the answer and the write the check still reads "reviewing", and another advance of it
         // (the resume sweep beside the dispatcher's own check) would ask the reviewer a second time (CI repair round 7: seen on PostgreSQL on a slow runner, where that write is slow).
         this.#reviewing.add(id);
         try {
-        try { got = await this.#ports.review({ taskId: b.taskId, changes: open }); } catch (error) {
+        // Read again under the guard: the read above may have been taken before another advance wrote its verdict and come back only after that advance let go of the guard, so a stale
+        // "reviewing" with no guard would ask the reviewer again (CI run 44258423696: PostgreSQL on a loaded macOS runner). A read started after the guard is taken sees any verdict
+        // written before it was free (that advance holds the guard until its write has gone through).
+        const fresh = await this.#get(by, id);
+        const fb = fresh.body as unknown as ResumeCheckBody;
+        if (fb.phase !== "reviewing") continue;
+        const open = (fb.delta?.changed ?? []).filter((i) => fb.verdicts[i.id] === undefined);
+        try { got = await this.#ports.review({ taskId: fb.taskId, changes: open }); } catch (error) {
           if (error instanceof ReviewNotRun) {
             // No reviewer could be asked: recorded as not run, never as reviewed, and every open change is the owner's to accept (the rule from before a reviewer existed).
             const reason = short(error.reason.trim() === "" ? "no reviewer could be asked" : error.reason);
-            const held: Record<string, ResumeVerdict> = { ...b.verdicts };
+            const held: Record<string, ResumeVerdict> = { ...fb.verdicts };
             for (const item of open) held[item.id] = { relevant: true, rationale: short(`not reviewed: ${reason}; so the owner decides whether it matters`), digest: digestOf(item), notReviewed: reason };
             await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts: held, review: { state: "not-run", reason, at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) not reviewed (${reason}); the owner decides`) }), ["reviewing"]);
             continue;
           }
-          await this.#block(by, id, b, "review_failed", `the reviewer could not give a verdict: ${short(error instanceof Error ? error.message : String(error))}`);
+          await this.#block(by, id, fb, "review_failed", `the reviewer could not give a verdict: ${short(error instanceof Error ? error.message : String(error))}`);
           continue;
         }
-        const verdicts: Record<string, ResumeVerdict> = { ...b.verdicts };
+        const verdicts: Record<string, ResumeVerdict> = { ...fb.verdicts };
         for (const item of open) {
           const v = got[item.id];
           if (v === undefined || typeof v.relevant !== "boolean" || typeof v.rationale !== "string" || v.rationale.trim().length === 0) continue; // a change with no reasoned verdict stays open
           verdicts[item.id] = { relevant: v.relevant, rationale: short(v.rationale), digest: digestOf(item) };
         }
-        const done = (b.delta?.changed ?? []).every((i) => verdicts[i.id] !== undefined);
-        if (!done) { await this.#block(by, id, b, "review_failed", "the reviewer gave no reasoned verdict for every change"); continue; }
+        const done = (fb.delta?.changed ?? []).every((i) => verdicts[i.id] !== undefined);
+        if (!done) { await this.#block(by, id, fb, "review_failed", "the reviewer gave no reasoned verdict for every change"); continue; }
         await this.#update(id, (x) => ({ ...x, phase: "ready", verdicts, review: { state: "ran", at: this.#runner.now() }, history: this.#push(x, "ready", by.id, `${open.length} change(s) reviewed`) }), ["reviewing"]);
         continue;
         } finally { this.#reviewing.delete(id); }
