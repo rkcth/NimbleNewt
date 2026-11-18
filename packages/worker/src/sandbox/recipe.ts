@@ -78,6 +78,15 @@ export const sha256 = (text: string): string => createHash("sha256").update(text
 
 const AGENT_PLACES: ReadonlySet<string> = new Set(["workdir", "home", "scratch"]);
 const bad = (message: string): never => { throw new SandboxError("invalid_recipe", message); };
+// A plain copy of a list, read once by index into a fresh array (holes stay holes, as `slice` keeps them). Not `slice`, `map` or `concat` on the caller's list:
+// those build their result with the list's own `constructor[Symbol.species]`, which could return an object of the caller's choosing.
+function copyList(list: readonly unknown[]): unknown[] {
+  const out: unknown[] = [];
+  const length = list.length;
+  for (let i = 0; i < length; i++) if (i in list) out[i] = list[i];
+  out.length = length;
+  return out;
+}
 
 const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(b + sep) || b.startsWith(a + sep);
 const guestOverlaps = (a: string, b: string): boolean => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
@@ -129,21 +138,24 @@ function checkGuestPath(label: string, path: unknown): string {
  */
 export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly string[]): NormalizedRecipe {
   if (recipe === null || typeof recipe !== "object") return bad("a recipe is an object");
-  if (recipe.mode !== "sandboxed" && recipe.mode !== "trusted-host") return bad(`mode: must be "sandboxed" or "trusted-host"`);
+  // The mode and the lists are read once: what is checked is what is returned, even for an object whose properties read differently each time.
+  const mode = recipe.mode;
+  if (mode !== "sandboxed" && mode !== "trusted-host") return bad(`mode: must be "sandboxed" or "trusted-host"`);
   if (recipe.network !== "none") return bad(`network: only "none" is supported`);
   let route: { proxyPort: number } | undefined;
   if (recipe.route !== undefined) {
     const r = recipe.route as { proxyPort?: unknown } | null;
     if (r === null || typeof r !== "object" || Array.isArray(r) || Object.keys(r).some((k) => k !== "proxyPort")) return bad("route: must be { proxyPort }");
     if (typeof r.proxyPort !== "number" || !Number.isInteger(r.proxyPort) || r.proxyPort < 1024 || r.proxyPort > 65535) return bad("route.proxyPort: must be a port from 1024 to 65535");
-    if (recipe.mode !== "sandboxed") return bad("route: a trusted-host run has the host's own network; a route is for a sandboxed run");
+    if (mode !== "sandboxed") return bad("route: a trusted-host run has the host's own network; a route is for a sandboxed run");
     route = { proxyPort: r.proxyPort };
   }
   const workdir = checkHostPath("workdir", recipe.workdir, protectedPaths, "directory");
   const home = checkHostPath("home", recipe.home, protectedPaths, "directory");
   const scratch = checkHostPath("scratch", recipe.scratch, protectedPaths, "directory");
-  if (!Array.isArray(recipe.readOnly)) return bad("readOnly: must be a list");
-  const readOnly = recipe.readOnly.map((m, i) => {
+  const rawReadOnly: unknown = recipe.readOnly;
+  if (!Array.isArray(rawReadOnly)) return bad("readOnly: must be a list");
+  const readOnly = (copyList(rawReadOnly) as SandboxRecipe["readOnly"][number][]).map((m, i) => {
     if (m === null || typeof m !== "object") return bad(`readOnly[${i}]: must be { host, guest }`);
     return { host: checkHostPath(`readOnly[${i}].host`, m.host, protectedPaths, "any"), guest: checkGuestPath(`readOnly[${i}].guest`, m.guest) };
   });
@@ -166,8 +178,9 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
     if (/^(?:DYLD_|LD_|LDR_)/.test(name)) return bad(`env: ${name} would change how programs load libraries and is never passed on`);
     if (typeof value !== "string" || value.length > MAX_ENV_VALUE || value.includes("\0")) return bad(`env: ${name} must be a string of at most ${MAX_ENV_VALUE} characters`);
   }
-  const names = recipe.protectedSubpaths ?? [".git"];
-  if (!Array.isArray(names)) return bad("protectedSubpaths: must be a list of names");
+  const rawNames: unknown = recipe.protectedSubpaths ?? [".git"];
+  if (!Array.isArray(rawNames)) return bad("protectedSubpaths: must be a list of names");
+  const names = copyList(rawNames) as string[];
   for (const name of names) if (typeof name !== "string" || !SUBPATH.test(name) || name === "." || name === "..") return bad(`protectedSubpaths: ${JSON.stringify(name)} must be a plain file or directory name`);
   const protectedSubpaths = [...new Set(names)].sort();
   const unprotectedSubpaths: string[] = [];
@@ -179,7 +192,7 @@ export function normalizeRecipe(recipe: SandboxRecipe, protectedPaths: readonly 
   // With a route the standard proxy variables name it, so every client that honours them goes through the forwarder and nothing else is told of a way out. The loopback is never proxied around: the variables carry no exceptions.
   const proxyUrl = route === undefined ? undefined : `http://127.0.0.1:${route.proxyPort}`;
   const withProxy = proxyUrl === undefined ? entries : [...entries, ...(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] as const).map((n) => [n, proxyUrl] as [string, string])];
-  const body = { mode: recipe.mode, workdir, home, scratch, readOnly, network: "none" as const, ...(route === undefined ? {} : { route }), env: Object.fromEntries(withProxy.sort(([a], [b]) => (a < b ? -1 : 1))), protectedSubpaths };
+  const body = { mode, workdir, home, scratch, readOnly, network: "none" as const, ...(route === undefined ? {} : { route }), env: Object.fromEntries(withProxy.sort(([a], [b]) => (a < b ? -1 : 1))), protectedSubpaths };
   return { ...body, revision: sha256(canonical(body)), unprotectedSubpaths };
 }
 
