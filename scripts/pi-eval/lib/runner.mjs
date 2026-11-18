@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
-import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable } from "./isolation.mjs";
+import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable, workRootHidden } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
 import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
@@ -441,11 +441,13 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
   const iso = await prepareIsolation({ checkoutDir: dir, artifactsDir: artifacts, ownerHome, provider: ctx.set?.agent?.provider, model: ctx.set?.agent?.model, realGit: ctx.realGit ?? findRealGit(), piBin, sourceEnv: ctx.sourceEnv ?? process.env, netns: hideable });
   ctx.isoDirs?.add(iso.base);
   try {
-    const listed = hideable ? defaultHidden({ ownerHome, extra: ctx.hide ?? [] }) : [];
     // Read-only to the agent: the whole file system (in the sandbox), named here as the trees the agent may read: the
     // shared code folder (other worktrees, the reference checkouts, the bench's own scripts), the reference repositories
     // and the work root's parent. Its own checkout, temporary folder and artifacts are bound back writable.
     const readOnlyTrees = ["/srv/code", ctx.repo, ...(ctx.referenceDirs ?? []), BENCH_ROOT, ctx.workRoot ? dirname(ctx.workRoot) : null, ...(ctx.readOnlyTrees ?? [])].filter((p) => typeof p === "string");
+    // The shared work root (every run's checkout) is hidden: the run sees its own checkout only (card W01c).
+    const workHidden = hideable ? workRootHidden({ workRoot: ctx.workRoot, ownDir: dir, keep: readOnlyTrees }) : [];
+    const listed = hideable ? defaultHidden({ ownerHome, extra: [...(ctx.hide ?? []), ...workHidden] }) : [];
     const own = [dir, iso.base, artifacts];
     // Credential-like files and owner-only folders in what stays readable (lib/isolation.mjs credentialPaths) are hidden too.
     const scan = hideable ? credentialPaths(readOnlyTrees.filter((p) => !listed.some((h) => p === h || p.startsWith(h + "/"))), { exclude: [...own, ...listed] }) : { paths: [], truncated: false };
