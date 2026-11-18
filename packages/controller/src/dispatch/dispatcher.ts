@@ -45,14 +45,13 @@ import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND,
 import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
-import { CONTEXT_UPDATE_LIMITS, StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
+import { boundContextUpdates } from "./context-updates.js";
+import { StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
-/** Cut at `max` characters without leaving half of a surrogate pair at the end (card G09: the selected updates' text). */
-const cutWhole = (text: string, max: number): string => { const cut = text.slice(0, max); return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
 /** Finished attempts whose worker was not confirmed stopped (card L02e): a later Stop of their scope still asks their host what their sandboxes hold. Bounded: past the cap the oldest are forgotten. */
@@ -2756,8 +2755,7 @@ export class DispatcherService {
     let contextUpdates: ContextUpdate[] = [];
     if (this.#deps.selectedUpdates !== undefined) {
       try {
-        contextUpdates = (await this.#deps.selectedUpdates({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, credential: credential.token })).slice(-CONTEXT_UPDATE_LIMITS.items)
-          .map((u) => ({ requestId: u.requestId, text: cutWhole(u.text, CONTEXT_UPDATE_LIMITS.text), origin: cutWhole(u.origin, CONTEXT_UPDATE_LIMITS.origin) }));
+        contextUpdates = boundContextUpdates(await this.#deps.selectedUpdates({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, credential: credential.token }));
       } catch (error) { this.#options.onError?.(error); contextUpdates = []; }
     }
     const order: WorkOrder = {

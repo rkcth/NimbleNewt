@@ -94,8 +94,11 @@ export interface WorkOrder {
 
 /** One selected update as a work order carries it (card G09). */
 export interface ContextUpdate { readonly requestId: string; readonly text: string; readonly origin: string }
-/** The bounds of a work order's selected updates: how many, and the characters of each text and origin (longer text is cut). */
-export const CONTEXT_UPDATE_LIMITS = { items: 20, text: 20_000, origin: 300 } as const;
+/**
+ * The bounds of a work order's selected updates: how many, the characters of each text and origin (longer text is cut), and the characters of all their texts together (past that the oldest whole updates are left out
+ * and noted; `boundContextUpdates`).
+ */
+export const CONTEXT_UPDATE_LIMITS = { items: 20, text: 20_000, origin: 300, total: 64_000 } as const;
 
 /**
  * How a turn ended (card W02), as the worker classified its last reply: the worker channel's kinds (`@nimblenewt/contracts` `TURN_END_KINDS`, restated: the controller does not depend on the contracts package) and `unknown` for a worker
