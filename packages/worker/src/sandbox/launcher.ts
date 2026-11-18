@@ -213,7 +213,9 @@ export class SandboxLauncher {
     if (request === null || typeof request !== "object") throw new SandboxError("invalid_recipe", "a launch request is an object");
     const { command, timeoutMs, maxOutputBytes } = request;
     if (!Array.isArray(command) || command.length === 0 || command.some((a) => typeof a !== "string" || a.includes("\0"))) throw new SandboxError("invalid_recipe", "command: a non-empty list of strings");
-    if (typeof command[0] === "string" && !command[0].startsWith("/")) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
+    // A trusted-host run is not confined, so its program is a host path; on a Windows host that is a drive path (C:\...). Every other run names its program as the sandbox sees it.
+    const windowsHostProgram = (this.#config.platform ?? process.platform) === "win32" && (request.recipe as { mode?: unknown } | null | undefined)?.mode === "trusted-host" && typeof command[0] === "string" && /^[A-Za-z]:\\/.test(command[0]);
+    if (typeof command[0] === "string" && !command[0].startsWith("/") && !windowsHostProgram) throw new SandboxError("invalid_recipe", "command: the program must be an absolute path as the sandbox sees it");
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new SandboxError("invalid_recipe", "timeoutMs: a whole number from 1 ms to 24 hours");
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > MAX_OUTPUT_BYTES) throw new SandboxError("invalid_recipe", "maxOutputBytes: a whole number from 1 to 64 MiB");
     if (request.stream !== undefined && (request.stdin !== undefined || typeof request.stream.onStdout !== "function")) throw new SandboxError("invalid_recipe", "stream: needs onStdout and cannot be combined with stdin");

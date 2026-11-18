@@ -371,6 +371,8 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     }) });
 
     // The network: nothing leaves the sandbox. The host's loopback server is the witness (it must see the unconfined attempt and not the confined one).
+    // On Windows the guest is a virtual machine whose 127.0.0.1 is its own, so the loopback attempt cannot reach the host even when the sandbox has a network: there the guest also lists
+    // its network adapters that are up (other than loopback and tunnels), and any adapter fails the case, as a non-loopback interface does on Linux. A missing list is inconclusive.
     await record({ id: "deny-network-loopback", make: () => {
       const before = fixture.connections();
       const script = win
@@ -380,6 +382,7 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
           'if not exist "%PS%" goto g05nops',
           "set tried=1",
           `"%PS%" -NoProfile -NonInteractive -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', ${fixture.port}); 'CONNECTED-PS'; $c.Close() } catch { }"`,
+          `"%PS%" -NoProfile -NonInteractive -Command "$a = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback' -and $_.NetworkInterfaceType -ne 'Tunnel' } | ForEach-Object { $_.Name }); 'adapters=' + ($a -join ',')"`,
           ":g05nops",
           "echo tried=%tried%",
           `echo ${END}`,
@@ -390,6 +393,12 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
         judge: (out) => {
           if (!out.includes("tried=1")) return `inconclusive:no tool (${win ? "PowerShell" : "nc or bash"}) was available to attempt a connection`;
           if (/CONNECTED-/.test(out)) return "the confined program connected to a host service";
+          if (win) {
+            const adapters = /adapters=([^\r\n]*)/.exec(out)?.[1];
+            if (adapters === undefined) return "inconclusive:the confined program could not list its network adapters";
+            if (adapters.trim() !== "") return `the confined program has a network adapter that is up (${adapters.trim()})`;
+            return undefined;
+          }
           const ifaces = /ifaces=([^\n]*)/.exec(out)?.[1];
           if (ifaces !== undefined && ifaces !== "lo,") return `the confined program sees a network interface besides loopback (${ifaces})`;
           return undefined;

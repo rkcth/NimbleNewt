@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -314,9 +315,12 @@ describe("G05 containment suite, Windows cases (recorded launchers, any OS)", ()
   });
 
   test("the Windows evidence backend never throws: off Windows, or misconfigured, it has no capacity and says why", async () => {
-    const off = await windowsEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u", NIMBLENEWT_G05_WSB_BASE: "C:\\nn-g05" }).health();
-    assert.equal(off.healthy, false);
-    assert.ok((off.reason ?? "").length > 0);
+    // On Windows this health check would be the real one (it may start a sandbox), so the off-Windows part runs only elsewhere.
+    if (process.platform !== "win32") {
+      const off = await windowsEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u", NIMBLENEWT_G05_WSB_BASE: "C:\\nn-g05" }).health();
+      assert.equal(off.healthy, false);
+      assert.match(off.reason ?? "", /could not be configured|only on Windows/);
+    }
     const bad = await windowsEvidenceBackend({ NIMBLENEWT_G05_WSB_BASE: "relative\\path" }).health();
     assert.equal(bad.healthy, false);
     assert.match(bad.reason ?? "", /could not be configured|only on Windows/);
@@ -324,6 +328,44 @@ describe("G05 containment suite, Windows cases (recorded launchers, any OS)", ()
     assert.deepEqual(await stub.health(), { healthy: false, backend: "windows-sandbox", reason: "why" });
     const suite = await runContainmentSuite({ backend: stub });
     assert.ok(suite.cases.every((c) => c.verdict === "not_run" && c.detail.includes("why")));
+  });
+});
+
+describe("G05 Windows network case and the trusted-host program path (review)", () => {
+  // The guest's 127.0.0.1 is its own, so the loopback attempt alone cannot fail there; the adapter list is what can. The unconfined recorded launcher really connects to the witness.
+  const connecting = (log: Launched[]): SandboxLauncher => {
+    const inner = recordingLauncher(log, () => "tried=1\r\ng05-end\r\n");
+    return { capacity: inner.capacity, launch: async (req: LaunchRequest) => {
+      const run = await inner.launch(req);
+      const port = /Connect\('127\.0\.0\.1', (\d+)\)/.exec(log[log.length - 1]?.script ?? "")?.[1];
+      if (port !== undefined) await new Promise<void>((resolve) => { const s = connect(Number(port), "127.0.0.1", () => { s.end(); resolve(); }); s.on("error", () => resolve()); });
+      return run;
+    } } as unknown as SandboxLauncher;
+  };
+  const network = async (confinedOut: string): Promise<{ verdict: string; detail: string }> => {
+    const suite = await runContainmentSuite({ dialect: "windows", launcher: recordingLauncher([], () => confinedOut), unconfinedLauncher: connecting([]) });
+    return suite.cases.find((c) => c.id === "deny-network-loopback")!;
+  };
+  test("no adapter up: holds (paired); an adapter up: fails; no list: inconclusive; a connection: fails", async () => {
+    const held = await network("tried=1\r\nadapters=\r\ng05-end\r\n");
+    assert.equal(held.verdict, "pass", held.detail);
+    assert.match(held.detail, /got through without the sandbox/);
+    assert.equal((await network("tried=1\r\nadapters=Ethernet\r\ng05-end\r\n")).verdict, "fail");
+    assert.equal((await network("tried=1\r\ng05-end\r\n")).verdict, "inconclusive");
+    assert.equal((await network("tried=1\r\nCONNECTED-PS\r\nadapters=\r\ng05-end\r\n")).verdict, "fail");
+  });
+  test("a Windows launcher takes a drive path as a trusted-host program: refused without authority (not as a bad path); still refused for a confined run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nn-g05-win-"));
+    try {
+      const d = (n: string): string => { const p = join(dir, n); mkdirSync(p); return p; };
+      const recipe = { mode: "trusted-host" as const, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] };
+      const program = ["C:\\Windows\\System32\\cmd.exe", "/d", "/c", "exit 0"];
+      const win = await SandboxLauncher.create({ platform: "win32", backend: unavailableBackend("windows-sandbox", "stand-in"), protectedPaths: [], audit: () => undefined });
+      await assert.rejects(win.launch({ recipe, command: program, timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "not_authorized");
+      await assert.rejects(win.launch({ recipe: { ...recipe, mode: "sandboxed" }, command: program, timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "invalid_recipe");
+      const posix = await SandboxLauncher.create({ platform: "linux", backend: unavailableBackend("x", "stand-in"), protectedPaths: [], trustedHost: { authority: "t" }, audit: () => undefined });
+      await assert.rejects(posix.launch({ recipe, command: program, timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => (e as { code?: string }).code === "invalid_recipe");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
 
