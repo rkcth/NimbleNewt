@@ -14,6 +14,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { checkConfig, decide, localPath, splitAlias } from "./lib/git-guard.mjs";
 import { PRIVATE_DIRS, PROXY_KEY_PREFIX, PUSH_REFUSED, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
+import { strictJson } from "./lib/arg-clean.mjs";
 import { piBinOf, runOne } from "./lib/runner.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
 
@@ -42,8 +43,12 @@ let set, upstream, listener, engine;
 let engineConnections = 0;
 const upstreamSeen = [];
 let listenerConnections = 0;
-/** What the stand-in model asks Pi to run first (none: it answers at once). */
-const fakeModel = { toolCommand: null };
+/**
+ * What the stand-in model asks Pi to run first (none: it answers at once): a bash command, or (card W01b) the arguments of
+ * an `edit` call. `bodies` keeps every chat request body; with `strictArguments` a body whose tool-call arguments are not
+ * well-formed Unicode JSON is refused with Radiance's 400.
+ */
+const fakeModel = { toolCommand: null, editArguments: null, strictArguments: false, bodies: [] };
 
 /** A stand-in for the model server: an OpenAI-style API on loopback that records the Authorization header of each request. */
 function fakeModelServer() {
@@ -59,6 +64,19 @@ function fakeModelServer() {
           const chunk = (delta, finish = null, extra = {}) => `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
           let messages = [];
           try { messages = JSON.parse(body).messages ?? []; } catch { /* not JSON */ }
+          fakeModel.bodies.push(body);
+          const refused = fakeModel.strictArguments ? messages.findIndex((m) => (m.tool_calls ?? []).some((t) => !strictJson(t.function?.arguments ?? ""))) : -1;
+          if (refused >= 0) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: { message: `messages[${refused}].tool_calls[0].function.arguments is not JSON`, type: "invalid_request_error" } }));
+            return;
+          }
+          if (fakeModel.editArguments && !messages.some((m) => m.role === "tool")) {
+            res.write(chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: "call_e1", type: "function", function: { name: "edit", arguments: fakeModel.editArguments } }] }));
+            res.write(chunk({}, "tool_calls", { usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } }));
+            res.end("data: [DONE]\n\n");
+            return;
+          }
           if (fakeModel.toolCommand && !messages.some((m) => m.role === "tool")) {
             // The model's first answer: one bash call (Pi runs it with its own shell tool, inside the sandbox).
             res.write(chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "bash", arguments: JSON.stringify({ command: fakeModel.toolCommand }) } }] }));
@@ -854,6 +872,37 @@ test("the real Pi runs in the isolated home and reaches the model through the be
     assert.ok(t.guardRefusals >= 2, why(t));
     for (const f of allFiles(t.artifacts)) noMarkers(readFileSync(f, "utf8"), f);
   } finally { fakeModel.toolCommand = null; }
+});
+
+// Card W01b, the night batch's failure through the real Pi (offline, stand-in server): the model sends `edit` with `edits`
+// as a JSON string holding a broken pair (`\ud800-\udfff`) and a whole one (`\ud800\udfff`, U+103FF). Pi's edit tool
+// decodes it into the stored call; without the bench's extension the next request carries lone surrogate escapes and the
+// stand-in refuses it as Radiance did. With it the request arrives well-formed, the whole pair intact, and the run record
+// counts the repair.
+test("W01b: Pi's next request after a string `edits` holding lone surrogates reaches the server as valid Unicode JSON, and the record counts the repair", { skip: needsSandbox.skip || (piBin === null ? "Pi is not installed" : false) }, async () => {
+  const edits = JSON.stringify([{ oldText: "=> 0;", newText: "=> 0; // RANGE" }]).replace("RANGE", "\\ud800-\\udfff \\ud800\\udfff");
+  assert.match(edits, /\\ud800-\\udfff \\ud800\\udfff/, "the escapes are text in the model's JSON string");
+  fakeModel.editArguments = JSON.stringify({ path: "lib.mjs", edits });
+  fakeModel.strictArguments = true;
+  fakeModel.bodies = [];
+  try {
+    const { ctx } = incidentCtx({ agent: ["node", join(here, "pi-agent.mjs")], agentEnv: { PI_EVAL_THINKING: "off" }, piBin });
+    const r = await runOne(ctx, set.tasks[0], "A", 1);
+    let err = ""; try { err = readFileSync(join(r.artifacts, "pi-stderr.log"), "utf8").slice(0, 1500); } catch { /* none */ }
+    const why = `record ${JSON.stringify(r)}\npi stderr: ${err}\nbodies: ${fakeModel.bodies.map((b) => b.slice(-1500)).join("\n---\n")}`;
+    assert.equal(fakeModel.bodies.length, 2, why);
+    const second = JSON.parse(fakeModel.bodies[1]);
+    const calls = second.messages.flatMap((m) => m.tool_calls ?? []);
+    assert.equal(calls.length, 1, why);
+    assert.equal(strictJson(calls[0].function.arguments), true, why);
+    // Pi did decode the string (the stored call holds the array), the broken pair became U+FFFD, the whole pair stayed.
+    assert.deepEqual(JSON.parse(calls[0].function.arguments).edits, [{ oldText: "=> 0;", newText: "=> 0; // \uFFFD-\uFFFD \u{103FF}" }], why);
+    assert.equal(r.stopReason, "stop", why);
+    assert.notEqual(r.outcome, "server-rejected-history", why);
+    assert.deepEqual(r.argClean, { applied: true, requests: 2, requestsChanged: 1, stringsChanged: 1, argumentsChanged: 1, errors: 0 }, why);
+    // Counts only: the record file holds no text of the request.
+    assert.doesNotMatch(readFileSync(join(r.artifacts, "arg-clean.json"), "utf8"), /oldText|=>|ud800/);
+  } finally { fakeModel.editArguments = null; fakeModel.strictArguments = false; }
 });
 
 test("the checkout is still graded by the bench with its own environment (an honest agent under isolation is a verified finish)", needsSandbox, async () => {

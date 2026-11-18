@@ -348,6 +348,8 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     if (stragglers.length > 0) record.stragglersKilled = stragglers.length;
     log(`agent ended after ${(record.wallMs / 60000).toFixed(1)} min (exit ${a.code}${a.timedOut ? ", timed out" : ""})`);
     const summary = await summarizeLogFile(logFile);
+    const argClean = readArgClean(join(artifacts, "arg-clean.json"));
+    if (argClean) record.argClean = argClean;
     const plan = existsSync(join(dir, "PLAN.md")) ? planProgress(readFileSync(join(dir, "PLAN.md"), "utf8")) : null;
     const ch = await changesOf(dir, task.base);
     await writeFile(join(artifacts, "diffstat.txt"), `${ch.fullStat}\n`);
@@ -402,6 +404,20 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
   }
   log(`=> ${record.outcome}: ${record.reason}`);
   return record;
+}
+
+/**
+ * Card W01b: the counts the bench's Pi extension (arg-clean-extension.mjs) left beside the log, or null when it wrote none
+ * (another agent, or Pi without the extension). Only these numeric counts are taken from the file; `applied` says whether
+ * any request was repaired.
+ */
+export function readArgClean(file) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  if (raw === null || typeof raw !== "object") return null;
+  const out = {};
+  for (const k of ["requests", "requestsChanged", "stringsChanged", "argumentsChanged", "errors"]) out[k] = Number.isSafeInteger(raw[k]) && raw[k] >= 0 ? raw[k] : 0;
+  return { applied: out.requestsChanged > 0, ...out };
 }
 
 /** Pi's command-line program: PI_EVAL_PI_BIN, else the owner's ~/.local/pi-cli install (resolved by the bench, whose home is real). */

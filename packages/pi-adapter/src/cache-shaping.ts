@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Model, Models } from "@earendil-works/pi-ai";
 import { collapseSystemMessages } from "@earendil-works/pi-ai/utils/transcript";
+import { cleanPayload } from "./argument-clean.js";
 
 /**
  * Cache shaping for the model calls Pi makes (card C06b). Pi gives the provider one session ID per conversation (a random UUID) and derives Anthropic cache breakpoints and OpenAI's `prompt_cache_key` from it, so two agents
@@ -155,6 +156,19 @@ export function splitSharedSystem(payload: unknown, shared: string): unknown {
   return { ...body, system: [{ type: "text", text: shared, ...mark }, { ...first, text: rest }, ...body.system.slice(1)] };
 }
 
+/**
+ * Card W01b: the onPayload pi-ai is given for every model call: `shape` (the cache shaping, when any), then the caller's own
+ * `earlier`, then argument-clean.ts's repair of lone surrogates (tool-call arguments are the one text pi-ai 1.3.0 re-sends
+ * without cleaning). A body that needs no repair is passed on as the shaping and the caller left it.
+ */
+function withCleanArguments(shape: ((payload: unknown) => unknown) | undefined, earlier: ((payload: unknown, model: unknown) => unknown) | undefined): (payload: unknown, model: unknown) => Promise<unknown> {
+  return async (payload, m) => {
+    const body = shape === undefined ? payload : shape(payload);
+    const after = earlier === undefined ? undefined : await earlier(body, m);
+    return cleanPayload(after ?? body).payload;
+  };
+}
+
 /** The model calls of `models`, shaped. Every other member of `Models` passes through. */
 export function shapeModels(models: Models, shaping: CacheShaping): Models {
   const tracker = new PrefixTracker();
@@ -167,7 +181,8 @@ export function shapeModels(models: Models, shaping: CacheShaping): Models {
           // The call still has no cache key or retention, but on a server whose cache needs state around the call (llama.cpp slots) it goes through the same wrapper as every other call, so it can neither land in another project's slot nor leave the holders unknown.
           let wrap: ModelCachePolicy["fetch"];
           try { wrap = shaping.policy?.({ provider: model.provider, api: model.api, id: model.id })?.fetch; } catch (error) { try { shaping.onReport?.(error); } catch { /* ignored */ } }
-          return (target.streamSimple as (m: unknown, c: unknown, o: unknown) => { result(): Promise<unknown> }).call(target, model, context, { ...(options ?? {}), cacheRetention: "none", ...(wrap === undefined ? {} : { fetch: wrap(options?.fetch ?? globalThis.fetch) }) }).result();
+          const earlier = (options as { onPayload?: (payload: unknown, model: unknown) => unknown } | undefined)?.onPayload;
+          return (target.streamSimple as (m: unknown, c: unknown, o: unknown) => { result(): Promise<unknown> }).call(target, model, context, { ...(options ?? {}), cacheRetention: "none", ...(wrap === undefined ? {} : { fetch: wrap(options?.fetch ?? globalThis.fetch) }), onPayload: withCleanArguments(undefined, earlier) }).result();
         };
       }
       if (property !== "streamSimple") {
@@ -194,16 +209,14 @@ export function shapeModels(models: Models, shaping: CacheShaping): Models {
         const wantsPayload = decided?.payload !== undefined || (shaping.sharedSystem !== undefined && info.api === "anthropic-messages");
         const shaped = {
           ...(options ?? {}),
-          ...(!wantsPayload ? {} : {
-            onPayload: async (payload: unknown, m: unknown) => {
-              let body = payload;
-              const shared = info.api === "anthropic-messages" ? shaping.sharedSystem?.() : undefined;
-              if (shared !== undefined) body = splitSharedSystem(body, shared);
-              if (decided?.payload !== undefined) body = decided.payload(body);
-              const after = earlier === undefined ? undefined : await earlier(body, m);
-              return after ?? body;
-            },
-          }),
+          // Card W01b: every request body is cleaned of lone surrogates last, after the shaping and the caller's own onPayload.
+          onPayload: withCleanArguments(!wantsPayload ? undefined : (payload: unknown) => {
+            let body = payload;
+            const shared = info.api === "anthropic-messages" ? shaping.sharedSystem?.() : undefined;
+            if (shared !== undefined) body = splitSharedSystem(body, shared);
+            if (decided?.payload !== undefined) body = decided.payload(body);
+            return body;
+          }, earlier),
           ...(decided?.key === undefined ? {} : { sessionId: decided.key }),
           ...(decided?.retention === undefined ? {} : { cacheRetention: decided.retention }),
           ...(decided?.fetch === undefined ? {} : { fetch: decided.fetch((options as { fetch?: typeof globalThis.fetch } | undefined)?.fetch ?? globalThis.fetch) }),
