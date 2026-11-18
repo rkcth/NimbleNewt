@@ -341,7 +341,11 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
     // Card G09: the updates a side line of work selected for the task go into the conversation before the turn, each as an update entry that keeps where it came from. The request ID names the update, so one this
     // conversation already holds (a restart, the next round of the same attempt) is applied once. One that cannot be placed fails the start: the turn never runs without it.
-    for (const u of start.updates ?? []) {
+    // While work an earlier process left unfinished is still held (this start brought no review of it), nothing is placed: the turn then fails on the held work exactly as it does without updates (Pi refuses any progress), and
+    // the start after the review places them.
+    const updates = start.updates ?? [];
+    const held = updates.length > 0 && (await adapter.interrupted()).held;
+    for (const u of held ? [] : updates) {
       const placed = await (await adapter.root().submit({ kind: "update", requestId: requestId(u.requestId), content: `[An update selected for this task in a side line of work (${u.origin}):]\n${u.text}`, origin: u.origin, run: false })).result();
       if (placed.status !== "placed" && placed.status !== "completed") throw new Error(`the selected update ${u.requestId} was not placed (${placed.status})`);
     }

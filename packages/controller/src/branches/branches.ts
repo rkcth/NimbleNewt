@@ -400,7 +400,7 @@ export class ContextBranchService {
   /**
    * The updates the branches that returned to this task selected (card G09), for the task's next attempt to be given, read with the viewer's own rights (the attempt's task credential). Only an update whose original is
    * still as it was when it was applied is given: one that changed since, is gone or is not readable by the viewer is left out (a later application of the changed original is its own update). The same original with the
-   * same content selected by two branches is given once (the later branch's). At most `BRANCH_LIMITS.deliveredPerStart`, the newest; in the order they were applied. Each carries a request ID derived from the branch,
+   * same content selected by two branches is given once, named after the first of them (so its request ID does not change when a later branch selects it again). At most `BRANCH_LIMITS.deliveredPerStart`, the newest; in the order they were applied. Each carries a request ID derived from the branch,
    * the original's link and its digest, so a conversation that was already given it applies it once.
    */
   async returnedUpdates(viewer: Principal, taskId: string): Promise<SelectedUpdate[]> {
@@ -408,19 +408,28 @@ export class ContextBranchService {
     const task = (await this.#runner.get("task", tid))?.body as unknown as TaskBody | undefined;
     if (task === undefined || !allows(viewer, "attempt.work", task.projectId, { resource: { kind: "task", id: tid } }) || !inTaskScope(viewer, task.projectId)) return [];
     const ids = ((await this.#runner.get(RETURN_INDEX, tid))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
-    const picked: SelectedUpdate[] = [];
-    const seen = new Set<string>();
-    outer: for (const branchId of [...ids].reverse()) {
+    const listed: { branchId: string; body: BranchBody }[] = [];
+    for (const branchId of ids) {
       const b = (await this.#runner.get("context-branch", branchId))?.body as unknown as BranchBody | undefined;
       if (b === undefined || b.state !== "returned" || b.returnedTo?.taskId !== tid || b.projectId !== task.projectId) continue;
+      listed.push({ branchId, body: b });
+    }
+    // The same original with the same content is named after the FIRST listed branch that returned with it (and that branch's update revision), so a later branch that selects it again does not change its request
+    // ID: a conversation that was already given it under the first branch's ID applies nothing twice.
+    const first = new Map<string, { branchId: string; revision: number }>();
+    for (const { branchId, body } of listed) for (const u of body.applied) { const named = `${keyOf(u.source)}|${u.digest}`; if (!first.has(named)) first.set(named, { branchId, revision: u.revision }); }
+    const picked: SelectedUpdate[] = [];
+    const seen = new Set<string>();
+    outer: for (const { body: b } of [...listed].reverse()) {
       for (const u of [...b.applied].reverse()) {
         const named = `${keyOf(u.source)}|${u.digest}`;
         if (seen.has(named)) continue;
+        seen.add(named);
         const original = await this.#retrieval.fetch(viewer, u.source);
         if (original === undefined || original.digest !== u.digest || original.projectId !== b.projectId) continue;
-        seen.add(named);
-        const requestId = `upd:${branchId}:${createHash("sha256").update(named).digest("hex").slice(0, 24)}`;
-        picked.push({ branchId, source: u.source, revision: u.revision, text: original.text, requestId, origin: `side line ${branchId}, ${sourceWords(u.source)}, update ${u.revision}` });
+        const by = first.get(named)!;
+        const requestId = `upd:${by.branchId}:${createHash("sha256").update(named).digest("hex").slice(0, 24)}`;
+        picked.push({ branchId: by.branchId, source: u.source, revision: by.revision, text: original.text, requestId, origin: `side line ${by.branchId}, ${sourceWords(u.source)}, update ${by.revision}` });
         if (picked.length >= BRANCH_LIMITS.deliveredPerStart) break outer;
       }
     }

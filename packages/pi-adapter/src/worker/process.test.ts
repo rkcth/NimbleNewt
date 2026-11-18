@@ -795,6 +795,52 @@ test("W04: a restart between nudges resumes the count from the conversation's do
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("G09: a start's selected updates are placed before the turn, once by request ID across processes; while earlier work is held nothing is placed and the turn fails on the held work as before", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-g09-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const base: ChannelStart = { ...relayed, model: { ...relayed.model, contextWindow: 131072 } };
+    const update = { requestId: "upd:cbr-x:1", text: "Owner correction: use plan B.", origin: "side line cbr-x, desk record dsk-y, update 2" };
+    const messagesOf = (f: Extract<FromChild, { t: "fetch" }>): string => JSON.stringify((JSON.parse(Buffer.from(f.body ?? "", "base64").toString("utf8")) as { messages: unknown }).messages);
+    const count = (text: string, part: string): number => text.split(part).length - 1;
+    // The first process: the update is in the turn's first model call once, with where it came from, before the turn's own input; the process goes away while that call is in flight.
+    const first = host({ storage });
+    first.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await first.next("ready");
+    first.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const call1 = messagesOf(await first.next("fetch"));
+    assert.equal(count(call1, update.text), 1, call1);
+    assert.equal(count(call1, update.origin), 1);
+    assert.ok(call1.indexOf(update.text) < call1.indexOf("do the plan"), "the update comes before the turn's input");
+    first.end();
+    await first.done;
+
+    // The second process is not told the held work was reviewed: it still says it is ready (no fault from the updates), and the turn fails on the held work as it would without them.
+    const second = host({ storage });
+    second.send({ t: "start", v: 1, start: { ...base, updates: [update] } });
+    await second.next("ready");
+    assert.ok(!second.seen.some((m) => m.t === "fault"), JSON.stringify(second.seen));
+    second.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    assert.equal((await second.next("result")).status, "failed");
+    second.send({ t: "close" });
+    await second.done;
+
+    // The third process is told it was reviewed: the same update again is the recorded one, so the resumed call still holds it once.
+    const third = host({ storage });
+    third.send({ t: "start", v: 1, start: { ...base, recover: { reason: "test restart" }, updates: [update] } });
+    await third.next("ready");
+    third.send({ t: "run", requestId: "req-1", content: "do the plan" });
+    const fetch3 = await third.next("fetch");
+    assert.equal(count(messagesOf(fetch3), update.text), 1);
+    third.send({ t: "fetch.head", id: fetch3.id, status: 200, statusText: "OK", headers: [["content-type", "text/event-stream"]] });
+    for (const c of sseReply("thinking")) third.send({ t: "fetch.chunk", id: fetch3.id, data: Buffer.from(c).toString("base64") });
+    third.send({ t: "fetch.end", id: fetch3.id });
+    assert.equal((await third.next("result")).status, "completed");
+    third.send({ t: "close" });
+    await third.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // Card W06: every Pi agent this process runs carries the completion rules as its system text, the same bytes for every task, role and context switch.
 test("W06: the first model call of every agent carries the completion rules as its system text, the same bytes across agents, tasks, a readmit, a wake and a restart", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-w06-"));

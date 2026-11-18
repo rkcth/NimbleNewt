@@ -363,13 +363,13 @@ for (const backend of backends) {
     assert.deepEqual(await branches.returnedUpdates(eve, task), []);
     assert.deepEqual(await branches.returnedUpdates(ann, urgent), []);
 
-    // A second branch selects the same correction and returns too: it is given once, under the later branch.
+    // A second branch selects the same correction and returns too: it is given once, still under the first branch and its request ID, so a conversation that already holds it is not given a second copy.
     const second = await open(branches, ben, task);
     let w = (await branches.view(ben, second.id))!;
     await branches.applyUpdates(ben, { commandId: cid("u"), branchId: second.id, expectedRevision: w.branch.revision, updates: [{ kind: "desk-record", id: decisionB.id }] });
     w = (await branches.view(ben, second.id))!;
     await branches.resume(ben, { commandId: cid("r"), branchId: second.id, expectedRevision: w.branch.revision });
-    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => [u.branchId, u.text]), [[second.id, "Owner correction: use plan B."]]);
+    assert.deepEqual(await branches.returnedUpdates(ann, task), given, "the same update, request ID and origin as before the second branch returned");
 
     // A branch redirected elsewhere is given there, not to the task it began from; one that applied nothing is listed nowhere.
     const third = await open(branches, ann, task);
@@ -384,7 +384,7 @@ for (const backend of backends) {
     assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.text), ["Owner correction: use plan B."]);
     const empty = await open(branches, ann, task);
     await branches.resume(ann, { commandId: cid("r"), branchId: empty.id, expectedRevision: (await branches.view(ann, empty.id))!.branch.revision });
-    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.branchId), [second.id]);
+    assert.deepEqual((await branches.returnedUpdates(ann, task)).map((u) => u.branchId), [first.id]);
 
     // The correction is itself corrected after the branches returned: what they selected is no longer as it was, so nothing is given.
     await write(ann, "Owner correction: use plan C.", decisionB.id);

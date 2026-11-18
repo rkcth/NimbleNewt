@@ -51,6 +51,8 @@ import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
+/** Cut at `max` characters without leaving half of a surrogate pair at the end (card G09: the selected updates' text). */
+const cutWhole = (text: string, max: number): string => { const cut = text.slice(0, max); return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut; };
 const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
 const LIVE_MAX = 600;
 /** Finished attempts whose worker was not confirmed stopped (card L02e): a later Stop of their scope still asks their host what their sandboxes hold. Bounded: past the cap the oldest are forgotten. */
@@ -224,14 +226,14 @@ export interface DispatcherDeps {
    */
   readonly handedIn?: (taskId: string) => Promise<{ id: string; phase: HandoffPhase; to: { kind: string; id: string } } | undefined>;
   /**
-   * The goal anchor (card W12). `plan` answers, for the attempt about to start, how many characters the block may take (the owner's cap and the route's share of its window) or `undefined` when the owner turned the anchor
-   * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
-   */
-  /**
    * The updates side lines of work selected for the task and brought back when they returned (card G09), read with the attempt's own task credential: they go with the order, and the host places each in the task's
    * conversation once. A failure to read them is reported and the attempt starts without them (its next start is given them again).
    */
   readonly selectedUpdates?: (c: { readonly taskId: string; readonly projectId: string; readonly attemptId: string; readonly credential: string }) => Promise<readonly ContextUpdate[]>;
+  /**
+   * The goal anchor (card W12). `plan` answers, for the attempt about to start, how many characters the block may take (the owner's cap and the route's share of its window) or `undefined` when the owner turned the anchor
+   * off or the route has no room for it; it must answer the same for the same facts. `rules` reads the owner's decisions for the task, as the controller. Neither may stop an attempt: a failure leaves the anchor out and is reported.
+   */
   readonly anchor?: {
     readonly plan: (c: { readonly taskId: string; readonly projectId: string; readonly route: string; readonly harness?: string }) => Promise<{ readonly maxChars: number; /** Card W13: the owner has the memory tool on, so the block says it exists. */ readonly recall?: boolean } | { readonly leftOut: "no-window" | "no-room" } | undefined>;
     readonly rules?: (c: { readonly taskId: string; readonly projectId: string }) => Promise<{ readonly version: number; readonly total: number; readonly items: readonly { readonly id: string; readonly text: string }[] } | undefined>;
@@ -2755,7 +2757,7 @@ export class DispatcherService {
     if (this.#deps.selectedUpdates !== undefined) {
       try {
         contextUpdates = (await this.#deps.selectedUpdates({ taskId: b.taskId, projectId: b.projectId, attemptId: b.attemptId, credential: credential.token })).slice(-CONTEXT_UPDATE_LIMITS.items)
-          .map((u) => ({ requestId: u.requestId, text: u.text.slice(0, CONTEXT_UPDATE_LIMITS.text), origin: u.origin.slice(0, CONTEXT_UPDATE_LIMITS.origin) }));
+          .map((u) => ({ requestId: u.requestId, text: cutWhole(u.text, CONTEXT_UPDATE_LIMITS.text), origin: cutWhole(u.origin, CONTEXT_UPDATE_LIMITS.origin) }));
       } catch (error) { this.#options.onError?.(error); contextUpdates = []; }
     }
     const order: WorkOrder = {
