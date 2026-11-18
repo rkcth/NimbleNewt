@@ -125,3 +125,16 @@ test("H12i: a route must be exactly a loopback port of the process; a trusted-ho
   assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 1024 } }, []).route?.proxyPort, 1024);
   assert.equal(normalizeRecipe({ ...base(), route: { proxyPort: 65535 } }, []).route?.proxyPort, 65535);
 });
+
+test("G05 review: the mode and the lists are read once, so what is checked is what is returned", () => {
+  let reads = 0;
+  const shifting = { ...base(), get mode() { reads += 1; return reads === 1 ? "sandboxed" : "other"; } } as unknown as SandboxRecipe;
+  assert.equal(normalizeRecipe(shifting, []).mode, "sandboxed");
+  const mounts = [] as unknown as { map: unknown };
+  mounts.map = () => [{ host: "/etc", guest: "/inputs/etc" }];
+  assert.deepEqual(normalizeRecipe({ ...base(), readOnly: mounts } as unknown as SandboxRecipe, []).readOnly, []);
+  const names = [".git"] as unknown as { [Symbol.iterator]: unknown };
+  let pass = 0;
+  names[Symbol.iterator] = function* () { pass += 1; yield pass === 1 ? ".git" : ".."; };
+  assert.deepEqual(normalizeRecipe({ ...base(), protectedSubpaths: names } as unknown as SandboxRecipe, []).protectedSubpaths, [".git"]);
+});

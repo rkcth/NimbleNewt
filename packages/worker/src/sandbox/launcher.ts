@@ -211,8 +211,10 @@ export class SandboxLauncher {
   async launch(request: LaunchRequest): Promise<SandboxRun> {
     if (this.#stopped) throw new SandboxError("unavailable", "the launcher has been stopped");
     if (request === null || typeof request !== "object") throw new SandboxError("invalid_recipe", "a launch request is an object");
-    const { command, timeoutMs, maxOutputBytes } = request;
-    if (!Array.isArray(command) || command.length === 0 || command.some((a) => typeof a !== "string" || a.includes("\0"))) throw new SandboxError("invalid_recipe", "command: a non-empty list of strings");
+    const { timeoutMs, maxOutputBytes } = request;
+    // A copy, read once: what is checked here is what is recorded and planned, even if the caller's list changes (or reads differently) while the audit is awaited.
+    const command: readonly string[] = Array.isArray(request.command) ? Object.freeze([...(request.command as readonly unknown[])]) as readonly string[] : [];
+    if (command.length === 0 || command.some((a) => typeof a !== "string" || a.includes("\0"))) throw new SandboxError("invalid_recipe", "command: a non-empty list of strings");
     // A trusted-host run is not confined, so its program is a host path; on a Windows host that is a drive path (C:\...). Every other run names its program as the sandbox sees it.
     // The mode is judged on the normalized recipe below, the same value that picks the trusted-host or the confined path, never on the raw request; here a drive path is only not refused yet on a Windows host.
     const program = command[0] as string;
