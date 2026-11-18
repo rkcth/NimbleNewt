@@ -144,6 +144,8 @@ for (const backend of backends) {
     const log = await c.network.connections(c.owner, taskId);
     assert.deepEqual(log.map((l) => [l.via, l.outcome]).sort(), [["remote-action", "closed"], ["remote-action", "closed"]]);
     assert.equal(again!["state"], "confirmed", JSON.stringify(again));
+    // The repeat answers with the tool's own outcome (the operation keeps it), not the general words.
+    assert.deepEqual(output(again!), out);
     assert.equal(c.host.seen.length, 2, "the repeat sent nothing");
   });
 
@@ -251,7 +253,7 @@ for (const backend of backends) {
     assert.match(String(outs[2]!["note"]), /already holds the maintenance lease/);
     assert.equal(outs[2]!["outcome"], "blocked");
     const own = (await c.leases.list(c.owner, c.project, { resourceId: ownHeld.resource }))![0]!;
-    assert.deepEqual([own.status, own.holderId, own.generation], ["held", ann.id, 1]);
+    assert.deepEqual([own.status, own.holderId, own.generation, own.renewals, own.purpose, own.expiresAt], ["held", ann.id, 1, 0, "a longer change", held.lease.expiresAt], "not renewed: the same end, the same purpose");
     // The credential: refused before the dispatcher records the call or the ledger its intent.
     assert.equal(refused!.ok, false, JSON.stringify(refused));
     assert.match((refused as { message: string }).message, /look like they carry a credential/);
@@ -267,9 +269,11 @@ test("remote action: a failure before the lease is a refusal; a request refused 
   let releaseFails = 0;
   let resourceFails = false;
   let actRefused = false;
+  let renewals = 0;
   const tool = remoteActionTool({
     leases: {
-      acquire: async () => { calls.push("acquire"); return { status: "granted", lease: { responsibilityId: "r1", renewals: 0 } } as never; },
+      acquire: async () => { calls.push("acquire"); return { status: "granted", lease: { responsibilityId: "r1", renewals, holderId: "agent:ann" } } as never; },
+      list: async () => [],
       release: async (_by, cmd) => { calls.push(`release ${cmd.validation}/${cmd.onFailure ?? "-"}`); if (releaseFails-- > 0) throw new Error("storage gave way"); return { lease: {} } as never; },
     },
     resources: { get: async () => { if (resourceFails) throw new Error("storage gave way"); return { projectId: "p1", state: "bound", locator: "http://198.51.100.7:8080/" } as never; } },
@@ -290,6 +294,14 @@ test("remote action: a failure before the lease is a refusal; a request refused 
   await assert.rejects(tool.run(call, input, signal), (e: unknown) => e instanceof Error && e.constructor.name === "DomainError" && /nothing was sent/.test(e.message));
   assert.deepEqual(calls, [], "nothing leased or sent");
   resourceFails = false;
+
+  // Two calls of the agent got past the look at its lease at once: the second one's ask renewed the first one's holding. It sends nothing and releases nothing (the holding is the other call's).
+  renewals = 1;
+  const raced = await tool.run({ ...call, callId: "c0" }, input, signal);
+  assert.deepEqual([raced["outcome"], raced["holder"]], ["blocked", "agent:ann"]);
+  assert.match(String(raced["note"]), /already holds the maintenance lease/);
+  assert.deepEqual(calls, ["acquire"], "nothing sent or released");
+  renewals = 0; calls.length = 0;
 
   actRefused = true;
   const refused = await tool.run({ ...call, callId: "c2" }, input, signal);

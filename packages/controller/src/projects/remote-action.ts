@@ -60,7 +60,7 @@ interface RequestSpec { readonly method: Method; readonly path: string; readonly
 type Sent = { readonly status: number } | { readonly error: string; readonly sent: boolean };
 
 export interface RemoteActionDeps {
-  readonly leases: Pick<MaintenanceLeaseService, "acquire" | "release">;
+  readonly leases: Pick<MaintenanceLeaseService, "acquire" | "release" | "list">;
   readonly resources: Pick<ProjectResourceService, "get">;
   readonly duties: Pick<ResponsibilityService, "get" | "status">;
   /** The web tool's guarded request (`WebFetch.act`) and its grant check, so nothing is leased for a destination the task cannot reach. */
@@ -96,6 +96,7 @@ const good = (sent: Sent, expect?: readonly number[]): boolean => "status" in se
 const said = (sent: Sent): string => ("status" in sent ? `answered ${sent.status}` : sent.sent ? `failed (${sent.error})` : `was refused before it was sent (${sent.error})`);
 /** A refusal of `WebFetch.act` that says nothing went out: admission's `NetworkRefused`, or a typed refusal other than `unavailable` (which the web tool also uses for a request that failed after it was sent). */
 const refusedBeforeSending = (error: unknown): boolean => (error instanceof DomainError ? error.code !== "unavailable" : error instanceof Error && error.name === "NetworkRefused");
+const ownLease = (resourceId: string, holder: string, until: string | undefined): JsonObject => ({ outcome: "blocked", resourceId, holder, until: until ?? "", note: "this agent already holds the maintenance lease on this resource for another call (or one that stopped, until it runs out); nothing was sent" });
 const why = (error: unknown): string => redactText(error instanceof Error ? error.message : "error").slice(0, 160);
 
 /** Builds the tool over the production services. */
@@ -149,11 +150,16 @@ export function remoteActionTool(deps: RemoteActionDeps): RemoteActionTool {
     const claimed = await deps.claimOf(resourceId);
     const status = claimed === undefined ? undefined : await deps.duties.status(agent, claimed);
     if (status?.inMaintenanceWindow === true) throw new DomainError("invalid_transition", "a maintenance window of this responsibility is on: changes are held until it ends; nothing was sent");
+    // The agent's own lease, still in time, is looked at before asking: the lease service would renew it (a later expiry, this call's purpose), so asking would keep extending a holding this call does not own
+    // (one that stopped would never run out while the agent kept trying). Nothing is asked, sent or changed; the renewal check below still covers two calls that both get past this look at once.
+    const [current] = (await deps.leases.list(agent, resource.projectId, { resourceId })) ?? [];
+    if (current !== undefined && current.status === "held" && current.holderId === agent.id) return { blocked: ownLease(resourceId, current.holderId, current.expiresAt) };
     const leased = await deps.leases.acquire(agent, { commandId: `rax-acq-${key}`, resourceId, purpose: `${purpose} (remote action)`.slice(0, 300), minutes: (input["minutes"] as number | undefined) ?? REMOTE_ACTION_LIMITS.defaultMinutes });
-    if (leased.status === "blocked") return { blocked: { outcome: "blocked", resourceId, holder: leased.lease.holderId ?? "", until: leased.lease.expiresAt ?? "", note: "another agent holds the maintenance lease on this resource; nothing was sent" } as JsonObject };
+    // A block names the holder; the holder is this agent when another call of its own renewed the lease between this call's grant and its read.
+    if (leased.status === "blocked") return { blocked: leased.lease.holderId === agent.id ? ownLease(resourceId, agent.id, leased.lease.expiresAt) : { outcome: "blocked", resourceId, holder: leased.lease.holderId ?? "", until: leased.lease.expiresAt ?? "", note: "another agent holds the maintenance lease on this resource; nothing was sent" } as JsonObject };
     // The lease service renews a lease for the agent that already holds it. A renewal here means another call of this agent is acting on the resource (or one that stopped left the lease to run out): this call
     // sends nothing and does not release a holding that is not its own, so two calls never act on one resource at once.
-    if (leased.lease.renewals > 0) return { blocked: { outcome: "blocked", resourceId, holder: leased.lease.holderId ?? agent.id, until: leased.lease.expiresAt ?? "", note: "this agent already holds the maintenance lease on this resource for another call (or one that stopped, until it runs out); nothing was sent" } as JsonObject };
+    if (leased.lease.renewals > 0) return { blocked: ownLease(resourceId, leased.lease.holderId ?? agent.id, leased.lease.expiresAt) };
     return { agent, resourceId, action, check, rollback, actionUrl, checkUrl, rollbackUrl, ctx, key, leased };
   }
 

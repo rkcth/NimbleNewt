@@ -186,7 +186,7 @@ export interface BuiltinTool {
   /**
    * Set for a tool that acts on the outside (an approval class that is not local, such as `mutate`): the dispatcher's tool path then runs it through the effect ledger (card S05), never as a local call. `kind` is the effect's kind
    * and `target` names what it acts on (from the arguments). The run is the effect: a `DomainError` it throws means nothing was done (a failed effect); anything else leaves the effect uncertain, never run again blindly.
-   * Its result is the effect's evidence, and is handed back to the agent as the call's text; a call asked again after it ended is answered from the ledger (the effect's evidence).
+   * Its result is the effect's evidence, and is handed back to the agent as the call's text; a call asked again after it ended is answered from the operation's kept summary of that text (its first 300 characters).
    */
   readonly effect?: { readonly kind: string; target(input: JsonObject): string };
   /** Runs the tool for the attempt. A refusal is thrown (a `DomainError` becomes the call's failure with its message). The result must fit `output`. */
@@ -1004,11 +1004,10 @@ export class ToolExecutionService {
     const call = { attemptId: c.attemptId, taskId: c.taskId, projectId: c.projectId, agent: c.agent, callId: c.callId };
     if (tool.effect !== undefined) {
       const effect = tool.effect;
-      let produced: JsonObject | undefined;
       try {
         const result = await gateway.call(
           { callId: c.callId, tool: { name: tool.name, version: tool.version, kind: "catalog" }, args: input },
-          { kind: "effect", effectKind: effect.kind, target: effect.target(input), input, bridge: { idempotent: false, execute: async () => {
+          { kind: "effect", effectKind: effect.kind, target: effect.target(input), input, evidenceIsResult: true, bridge: { idempotent: false, execute: async () => {
             let out: JsonObject;
             try { out = await tool.run(call, input, guardedSignal(new AbortController().signal)); } catch (error) {
               // A typed refusal: nothing was done. Anything else may have acted, and stays uncertain.
@@ -1018,12 +1017,10 @@ export class ToolExecutionService {
             if (Buffer.byteLength(JSON.stringify(out), "utf8") > BRIDGE_LIMITS.output) throw new Error(`the tool wrote more than ${BRIDGE_LIMITS.output} bytes`);
             const bad = checkValue(tool.output, out);
             if (bad.length > 0) throw new Error(`the tool's output does not match its manifest: ${bad.slice(0, 3).join("; ")}`);
-            produced = out;
             return out;
           } } },
         );
-        const shown = result.state === "confirmed" && produced !== undefined ? { ...result, text: JSON.stringify(produced) } : result;
-        return ok({ ...(shown as unknown as JsonObject), tool: tool.name, version: tool.version });
+        return ok({ ...(result as unknown as JsonObject), tool: tool.name, version: tool.version });
       } finally { this.#bridgeCalls.delete(key); }
     }
     try {
