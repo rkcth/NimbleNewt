@@ -312,6 +312,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the reviewing agents (the resume reviewer and the second agent that questions a done) may use (the chat itself is never stopped by it), who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
   grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
+  toolbox: { keys: [], about: "the shared tools (toolbox): for each one the version in use, who it is for (all agents, roles, teams or projects), the platforms it declares and how many agents keep a personal copy of it; who maintains them is a grant of toolbox.manage (status kind settings, or grant.create)" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
   meeting_procedure: { keys: ["motionId|motionTopic"], about: "where a motion stands in the meeting procedure (card M06): the stage, the round, the objection check, rulings, the vote, and what it waits for and from whom" },
@@ -400,6 +401,7 @@ export type StatusRequest =
   | { readonly kind: "kept_secret_uses" }
   | { readonly kind: "compatibility" }
   | { readonly kind: "catalog_policy" }
+  | { readonly kind: "toolbox" }
   | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
@@ -572,6 +574,11 @@ export interface StatusDeps {
   readonly chatBudget?: { view(by: Principal): Promise<{ readonly maxTokensPerDay: number | null; readonly setBy?: string; readonly setAt?: string; readonly day: string; readonly tokens: number; readonly calls: number; readonly remaining: number | null }> };
   /** The standing answer for calls running when a version is revoked (card T02c). Absent: the view is not offered. */
   readonly catalogPolicy?: { get(by: Principal): Promise<{ readonly revision: number; readonly runningCalls: string | null; readonly damaged: boolean; readonly default: string; readonly effective: string; readonly source: string }> };
+  /** The shared toolbox (card T08). Absent: the view is not offered. */
+  readonly toolbox?: {
+    list(by: Principal): Promise<{ readonly items: readonly { readonly name: string; readonly kind: string; readonly latest: string; readonly os: readonly string[]; readonly arch: readonly string[]; readonly audience: { readonly all?: true; readonly roles?: readonly string[]; readonly teams?: readonly string[]; readonly projects?: readonly string[] } }[]; readonly partial?: true }>;
+    forks(by: Principal, name: string): Promise<{ readonly forks: readonly { readonly baseRevoked: boolean }[] }>;
+  };
   /** The owner's routing controls, the failback policy, route health and the drain report (card R04c). Absent: the view is not offered. */
   readonly routes?: Pick<CutoverService, "controls" | "report" | "healthStates"> & {
     /** Each configured route's length and reasoning budget (card W07), from the routing table. Absent: the view says nothing about budgets. */
@@ -939,6 +946,7 @@ export class StatusService {
       case "chat_budget": { onlyKnown(request, ["kind"]); return this.chatBudgetLines(by); }
       case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
+      case "toolbox": { onlyKnown(request, ["kind"]); return this.toolboxLines(by); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
       case "retention_hold": { onlyKnown(request, ["kind", "recordKind", "id", "name", "version"]); return this.retentionHoldLines(by, request); }
@@ -1756,6 +1764,33 @@ export class StatusService {
       line(`${mine} The default is ${shown(p.default, 20)}.`, c),
       ...(p.damaged ? [line(p.source === "damaged" ? "The stored setting is damaged and reads as cancel until you set it again." : "The stored setting is damaged; it does not apply while the operator's startup option stands, and reads as cancel if that is removed before you set it again.", c)] : []),
     ] };
+  }
+
+  /** The shared tools (card T08), owner only: each one's version in use, its audience, its declared platforms and how many personal copies were made of it. Nothing of its source. */
+  async toolboxLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.toolbox === undefined || by.kind !== "owner") return undefined;
+    let found;
+    try { found = await this.#deps.toolbox.list(by); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      throw error;
+    }
+    const at = this.#runner.now();
+    if (found.items.length === 0) return { observedAt: at, lines: [line("There are no shared tools yet.", cite("installation", "installation"))] };
+    const lines: Line[] = [];
+    for (const t of found.items.slice(0, 50)) {
+      const a = t.audience;
+      const who = a.all === true ? "all agents" : [
+        ...((a.roles ?? []).length === 0 ? [] : [`the roles ${(a.roles ?? []).map((r) => shown(r, 40)).join(", ")}`]),
+        ...((a.teams ?? []).length === 0 ? [] : [`the teams ${(a.teams ?? []).map((r) => shown(r, 40)).join(", ")}`]),
+        ...((a.projects ?? []).length === 0 ? [] : [`agents of the projects ${(a.projects ?? []).map((r) => shown(r, 40)).join(", ")}`]),
+      ].join(", ");
+      let copies = "";
+      try { const f = await this.#deps.toolbox.forks(by, t.name); copies = f.forks.length === 0 ? " No agent has copied it." : ` ${f.forks.length} personal cop${f.forks.length === 1 ? "y was" : "ies were"} made of it${f.forks.some((x) => x.baseRevoked) ? ", some of a version since revoked" : ""}.`; } catch { copies = ""; }
+      lines.push(line(`${shown(t.name, 80)} ${shown(t.latest, 20)} (${t.kind === "skill" ? "skill" : "tool"}) is for ${who}; it declares ${t.os.map((o) => shown(o, 10)).join(", ")} on ${t.arch.map((o) => shown(o, 10)).join(", ")}.${copies}`, cite("catalog-entry", derivedId("cat", t.name))));
+    }
+    if (found.items.length > 50) lines.push(line(`${found.items.length - 50} more shared tool(s) are not shown.`, cite("installation", "installation")));
+    if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more shared tools.", cite("installation", "installation")));
+    return { observedAt: at, lines };
   }
 
   /** The tool versions the owner withdrew, newest first: which, why, by whom, when. Owner only; nothing of the tool itself. */

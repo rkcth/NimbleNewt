@@ -47,6 +47,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "catalog.revoke": { verb: "Revoke tool version (runningCalls: finish, cancel or pause; the choice also reaches calls running in another controller process on the same store, within seconds)", mode: "propose" },
   // The standing answer for running calls when a revoke names none (card T02c): shown first (provisional); the revision is read for the owner.
   "catalog.policy.change": { verb: "Change what happens to running tool calls when a version is revoked (runningCalls: finish, cancel or pause; null for the default)", mode: "propose", revision: "catalog-policy" },
+  // The shared toolbox (card T08): who a shared tool is for, setting a version aside and going back to an earlier one. Always shown first: each changes which agents can find and run a tool, or which version runs.
+  // Giving or taking back the maintainer right is grant.create / grant.revoke with the action toolbox.manage.
+  "toolbox.audience.set": { verb: "Change who a shared tool is for (name: the tool; all: true for every agent, or roles, teams and projects by the owner's own names)", mode: "propose" },
+  "toolbox.deprecate": { verb: "Set a shared tool version aside (no longer chosen by default; work pinned to it keeps it)", mode: "propose" },
+  "toolbox.rollback": { verb: "Return a shared tool to an earlier version", mode: "propose" },
   "events.sources.change": { verb: "Change which event sources are watched", mode: "propose" },
   // Defining a source in settings (card H13f) decides what is looked at on the controller's machine or asked over the network, and what wakes agents: shown first in every profile (provisional, like turning sources on and off). Removing one is shown first too.
   "events.sources.define": { verb: "Watch something outside for a project (a timer, a file or folder, a git repository or a service's health address)", mode: "propose", needsProject: true },
