@@ -295,7 +295,11 @@ export interface ToolCallRequest {
 /** How a call is carried out. A local executor runs inside the worker's sandbox; an effect goes out through the S05 ledger and its bridge, which the controller runs. */
 export type ToolExecutor =
   | { readonly kind: "local"; run(signal: AbortSignal): Promise<{ readonly text: string; readonly cpuMs?: number; readonly memoryMb?: number }> }
-  | { readonly kind: "effect"; readonly effectKind: string; readonly target: string; readonly input: JsonObject; readonly bridge: EffectBridge };
+  | {
+    readonly kind: "effect"; readonly effectKind: string; readonly target: string; readonly input: JsonObject; readonly bridge: EffectBridge;
+    /** Set when the confirmed effect's evidence is meant for the agent (card P04j: a built-in effect tool's own result): it becomes the call's text, kept on the operation, so a repeat of the call ID answers with it too. */
+    readonly evidenceIsResult?: true;
+  };
 
 export type ToolResult =
   | { readonly state: "confirmed"; readonly operationId: string; readonly text: string }
