@@ -92,7 +92,17 @@ export interface ChannelStart {
    * relay lets it through only for a destination the task holds a grant for. Absent: no proxy is served and the process has no way out but the model relay. The port is the one the sandbox recipe's environment names (`HTTP_PROXY` and the like).
    */
   readonly network?: { readonly proxyPort: number };
+  /**
+   * Card G09: updates a side line of work selected for this task, oldest first. Before it says it is ready, the process places each in the conversation as an update entry that keeps `origin`, under `requestId`: one the
+   * conversation already holds (a restart, the next round of the same attempt) is applied once. Absent: nothing is placed.
+   */
+  readonly updates?: readonly ChannelUpdate[];
 }
+
+/** One selected update a start carries (card G09). */
+export interface ChannelUpdate { readonly requestId: string; readonly text: string; readonly origin: string }
+/** The bounds of a start's selected updates: how many, and the characters of each request ID, text and origin. */
+export const CHANNEL_UPDATES = { items: 20, requestId: 200, text: 20_000, origin: 300 } as const;
 
 export type BridgeReplyMessage = { readonly ok: true; readonly result: Obj } | { readonly ok: false; readonly code: string; readonly message: string };
 export type HeaderList = readonly (readonly [string, string])[];
@@ -211,6 +221,14 @@ function parseStart(o: Obj): ChannelStart {
   const leaseObj = o["lease"] === undefined ? undefined : obj(o, "lease");
   const netObj = o["network"] === undefined ? undefined : obj(o, "network");
   const network = netObj === undefined ? undefined : { proxyPort: bounded(netObj, "proxyPort", 1024, 65535) ?? fail("network.proxyPort: required") };
+  const updateList = o["updates"];
+  if (updateList !== undefined && (!Array.isArray(updateList) || updateList.length > CHANNEL_UPDATES.items)) fail(`updates: at most ${CHANNEL_UPDATES.items} updates`);
+  const updates = updateList === undefined ? undefined : (updateList as unknown[]).map((u): ChannelUpdate => {
+    if (!isObj(u)) return fail("updates: each update is an object");
+    const id = str(u, "requestId", CHANNEL_UPDATES.requestId);
+    if (id === "") fail("updates.requestId: required");
+    return { requestId: id, text: str(u, "text", CHANNEL_UPDATES.text), origin: str(u, "origin", CHANNEL_UPDATES.origin) };
+  });
   const lease = leaseObj === undefined ? undefined : { leaseMs: bounded(leaseObj, "leaseMs", 1000, 3_600_000) ?? fail("lease.leaseMs: required"), graceMs: bounded(leaseObj, "graceMs", 0, 600_000) ?? fail("lease.graceMs: required") };
   return {
     attemptId: str(o, "attemptId", 200), agentId: str(o, "agentId", 200), namespaceId: /^[a-z0-9]{6,32}$/.test(str(o, "namespaceId", 40)) ? (o["namespaceId"] as string) : fail("namespaceId: 6 to 32 lower-case letters or digits"), credential: str(o, "credential", 4096),
@@ -221,6 +239,7 @@ function parseStart(o: Obj): ChannelStart {
     ...(context === undefined ? {} : { context }),
     ...(lease === undefined ? {} : { lease }),
     ...(network === undefined ? {} : { network }),
+    ...(updates === undefined || updates.length === 0 ? {} : { updates }),
   };
 }
 

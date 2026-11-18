@@ -1,1 +1,1 @@
-export { BRANCH_LIMITS, ContextBranchService, type BranchBody, type BranchHistory, type BranchState, type BranchView, type DelegationBody, type DelegatedItem, type OpenBranch, type ReturnDestination } from "./branches.js";
+export { BRANCH_LIMITS, ContextBranchService, type BranchBody, type BranchHistory, type BranchState, type BranchView, type DelegationBody, type DelegatedItem, type OpenBranch, type ReturnDestination, type SelectedUpdate } from "./branches.js";

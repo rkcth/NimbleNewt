@@ -6,6 +6,8 @@ import { DomainError, GenerationRefused, HistoryService, type RefusalReason } fr
 import { backends, stopServer } from "@nimblenewt/controller/testing";
 import { InvalidBranchPointError, NoBranchPointError, turnBoundaries, type AdapterTool, type PiAdapter } from "@nimblenewt/pi-adapter";
 import { Mirror, Outside, PiHome, cid, openWorld, provider, type Provider, type World } from "./g09-fixture.js";
+import { workGrants } from "@nimblenewt/controller/testing";
+import { rig, sandbox } from "./w03-rig-support.js";
 
 // Card G09: retained-context inquiry and mid-generation interruption, proved by running the production C05 (retained context branches), L05 (generation interruption), H04 (inquiries) and
 // C04 (continuation) services together with the production Pi adapter (F06b/F06c/F06d) over durable storage and the scripted offline provider. The evidence record is
@@ -93,24 +95,21 @@ for (const backend of backends) {
     await assert.rejects(parent.branch({ requestId: requestId(cid("bad")), at: (await parent.transcript())[0]!.id }), InvalidBranchPointError);
   });
 
-  scenario("an updated resume applies the selected update once, with provenance, and a corrected old owner decision replaces what the parent acts on", async (w, home) => {
+  scenario("an updated resume: the selected update is applied to the branch once, a corrected old owner decision supersedes it, and the destination task is given the correction only (C05 side of the delivery test below)", async (w, home) => {
     const p = provider("offline", "scripted");
     const adapter = await home.open(p, [echo]);
     const parent = adapter.root();
     const mirror = new Mirror(w, w.task);
     p.answers("started on plan A");
     await done(await parent.submit(input(cid("t1"), "start the work")));
-    // The owner's decision (plan A) is part of the task's context, placed without asking the model anything.
+    // The owner's decision (plan A) is a desk record of the task's project.
     const decisionA = await w.desks.write(w.ann, { commandId: cid("d"), projectId: w.a, kind: "decision", title: "Plan", body: "Owner decision: use plan A.", visibility: "shared", status: "accepted" } as never);
-    const placed = await (await parent.submit({ kind: "update", requestId: requestId(cid("place")), content: "Owner decision: use plan A.", run: false })).result();
-    assert.equal(placed.status, "placed");
     p.script();
     const q = await openInquiry(w, adapter, "Which plan are we on?", mirror);
     p.answers("Plan A.");
     await done(await q.fork.conversation.submit(input(cid("ask"), "Which plan are we on?")));
-    assert.deepEqual(p.seen.at(-1), [SYS, "user: start the work", "assistant: started on plan A", "user: Owner decision: use plan A.", "user: Which plan are we on?"]);
 
-    // Decision A was selected into the branch too. The owner then corrects it while the inquiry is open: the branch shows its copy of A as changed, and the correction is selected and applied once.
+    // Decision A was selected into the branch. The owner then corrects it while the inquiry is open: the branch shows its copy of A as changed, and the correction is selected and applied once.
     let v = (await q.branches.view(w.ann, q.branchId))!;
     await q.branches.applyUpdates(w.ann, { commandId: cid("upd"), branchId: q.branchId, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: decisionA.id }] });
     const decisionB = await w.desks.write(w.ann, { commandId: cid("d"), projectId: w.a, kind: "decision", title: "Plan", body: "Owner correction: plan A is withdrawn, use plan B.", visibility: "shared", status: "accepted", supersedes: decisionA.id } as never);
@@ -123,25 +122,17 @@ for (const backend of backends) {
     assert.deepEqual([applied.replayed, again.replayed, again.revision], [false, true, applied.revision]);
     v = (await q.branches.view(w.ann, q.branchId))!;
     assert.deepEqual(v.updates.map((u) => [u.revision, u.state, u.text]).sort(), [[1, "changed", "Owner decision: use plan A."], [2, "current", "Owner correction: plan A is withdrawn, use plan B."]]);
-    const correction = v.updates.find((u) => u.revision === 2)!.text!;
     await assert.rejects(q.branches.applyUpdates(w.ann, { commandId: cid("upd"), branchId: q.branchId, expectedRevision: v.branch.revision, updates: select }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
 
-    // Resume with the update: the parent receives the correction once, with the branch entry it came from, and acts on it. A repeat of the submission does not ask the model again.
-    const answerEntry = (await q.fork.conversation.transcript()).at(-1)!;
+    // Resume with the update. What the dispatcher puts in the task's next order (the production read, as the task's worker): the correction only, once, with the branch and the record it came from. The
+    // conversation itself is not touched here: the delivery into the task's live conversation is the composed test below.
+    const before = JSON.stringify(await parent.transcript());
     await q.branches.resume(w.ann, { commandId: cid("rsm"), branchId: q.branchId, expectedRevision: v.branch.revision });
-    p.answers("switching to plan B");
-    const update = { kind: "update", requestId: requestId(cid("upd-run")), content: correction, source: { conversationId: q.fork.conversation.id, entryId: answerEntry.id } } as const;
-    const first = await parent.submit(update);
-    const second = await parent.submit(update);
-    assert.equal(second.submissionId, first.submissionId);
-    await done(first);
-    assert.deepEqual(p.seen.at(-1), [
-      SYS, "user: start the work", "assistant: started on plan A", "user: Owner decision: use plan A.", "user: Owner correction: plan A is withdrawn, use plan B.",
-    ], "the parent sees its context, the old decision and then the correction, and nothing of the inquiry");
-    assert.equal(p.seen.length, 3, "the model was asked once for the first turn, once for the inquiry and once for the update");
-    const updates = (await parent.transcript()).filter((e) => e.kind === "nimblenewt.update");
-    assert.deepEqual(updates.map((e) => e.data), [{ source: null, run: false }, { source: { conversationId: q.fork.conversation.id, entryId: answerEntry.id }, run: true }]);
-    assert.ok(!JSON.stringify(p.seen.at(-1)).includes("Plan A."), "the inquiry answer did not reach the parent");
+    const given = await q.branches.returnedUpdates(w.ann, w.task);
+    assert.deepEqual(given.map((u) => [u.branchId, u.source, u.revision, u.text]), [[q.branchId, { kind: "desk-record", id: decisionB.id }, 2, "Owner correction: plan A is withdrawn, use plan B."]]);
+    assert.deepEqual(await q.branches.returnedUpdates(w.ann, w.task), given, "the same request ID every time, so a conversation applies it once");
+    assert.equal(JSON.stringify(await parent.transcript()), before, "resuming the branch writes nothing into the parent conversation by itself");
+    assert.equal(p.seen.length, 2, "the model was asked once for the first turn and once for the inquiry");
 
     // The correction also fences generation (L05): a response begun on the old decision cannot act after the owner's correction.
     const gen = w.generation();
@@ -372,3 +363,67 @@ for (const backend of backends) {
     } finally { await empty.dispose(); }
   });
 }
+
+// The delivery of an updated resume, through production code end to end: the composed controller (SQLite), the dispatcher, the real local worker (bubblewrap, the worker process running Pi Durable) and a scripted
+// OpenAI-compatible model. Nothing in the test writes to the task's conversation: the branch is resumed through the C05 service, and the dispatcher's next order carries the selected update, which the worker
+// process places in the conversation before the turn. Skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI). No real model was used.
+test("an updated resume applies the selected update once, with provenance, and a corrected old owner decision replaces what the parent acts on (dispatcher and worker, card G09)", async (t) => {
+  const launcher = await sandbox(t);
+  if (launcher === undefined) return;
+  // Each run is the turn's first reply and three nudged ones (cards W03, W04): the first two runs stop without work.end, so the attempt goes on in the same conversation; the third ends the task.
+  const run = (text: string): { text: string }[] => [{ text }, { text }, { text }, { text }];
+  const x = await rig(launcher, [...run("started on plan A"), ...run("switching to plan B"), { call: { name: "nimblenewt__work-end", args: { report: "Done on plan B.", result: "done", note: "plan B" } } }, { text: "Ended: plan B." }], { bare: true });
+  try {
+    const s = x.c.services;
+    // The task's agent keeps the project's desk records and side chats; it is given what it may read, as itself.
+    const agent = "agt-updatesgivenoncebyid";
+    await s.principals.enroll(x.owner, { commandId: "e-agent", kind: "agent", name: agent, grants: [...workGrants(x.project), { action: "desk.read", project: x.project }, { action: "desk.write", project: x.project }, { action: "history.*", project: x.project }] });
+    const ann = await s.principals.authenticate((await s.principals.issueCredential(x.owner, `agent:${agent}`)).token);
+    const taskId = (await s.projects.createTask({ commandId: "t1", actor: x.owner.id, projectId: x.project, title: "Plant the garden" })).id;
+    await s.projects.transitionTask({ commandId: "r1", actor: x.owner.id, taskId, expectedRevision: 1, to: "ready" });
+    await s.assignments.assignTask({ commandId: "as1", actor: x.owner.id, taskId, owner: { kind: "agent", id: agent } });
+    const a = (await s.assignments.getAssignment(taskId))!;
+    const attemptId = (await s.assignments.admitAttempt({ commandId: "ad1", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: agent }, harness: "pi" })).id;
+    const tick = async (): Promise<void> => { await x.c.dispatch!.dispatcher.tick(); await x.c.dispatch!.dispatcher.idle(); };
+    const get = async () => (await x.c.dispatch!.dispatcher.get(x.c.dispatch!.principal, attemptId))!;
+    const CORRECTION = "Owner correction: plan A is withdrawn, use plan B.";
+    const count = (text: string, part: string): number => text.split(part).length - 1;
+
+    // The first run: nothing has been selected for the task, so nothing is placed.
+    await tick();
+    assert.equal((await get()).state, "waiting");
+    assert.equal(x.answer.seen.length, 4);
+    assert.ok(x.answer.seen.every((m) => !m.includes("side line of work")));
+
+    // An inquiry on the task: a branch selects the owner's decision A, the owner's correction is recorded (B supersedes A), the correction is selected, and the branch returns to the task.
+    const decisionA = await s.desks.write(ann, { commandId: "dA", projectId: x.project, kind: "decision", title: "Plan", body: "Owner decision: use plan A.", visibility: "shared", status: "accepted" } as never);
+    const opened = await s.branches.open(ann, { commandId: "open", taskId, purpose: "Which plan are we on?" });
+    let v = (await s.branches.view(ann, opened.id))!;
+    await s.branches.applyUpdates(ann, { commandId: "uA", branchId: opened.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: decisionA.id }] });
+    const decisionB = await s.desks.write(ann, { commandId: "dB", projectId: x.project, kind: "decision", title: "Plan", body: CORRECTION, visibility: "shared", status: "accepted", supersedes: decisionA.id } as never);
+    v = (await s.branches.view(ann, opened.id))!;
+    await s.branches.applyUpdates(ann, { commandId: "uB", branchId: opened.id, expectedRevision: v.branch.revision, updates: [{ kind: "desk-record", id: decisionB.id }] });
+    v = (await s.branches.view(ann, opened.id))!;
+    await s.branches.resume(ann, { commandId: "rsm", branchId: opened.id, expectedRevision: v.branch.revision });
+
+    // The second run: the dispatcher's order carries the correction, and the worker process places it before the turn, with the branch and record it came from. The superseded decision A is not given.
+    await tick();
+    assert.equal((await get()).turnRound, 2);
+    assert.equal(x.answer.seen.length, 8);
+    const second = x.answer.seen[4]!;
+    assert.equal(count(second, CORRECTION), 1, second);
+    assert.equal(count(second, `side line ${opened.id}, desk record ${decisionB.id}, update 2`), 1, "the update says where it came from");
+    assert.ok(!second.includes("Owner decision: use plan A."), "the superseded decision is not given");
+    const messages = JSON.parse(second) as { role: string; content: unknown }[];
+    const at = (part: string): number => messages.findIndex((m) => JSON.stringify(m.content).includes(part));
+    assert.ok(at("started on plan A") < at(CORRECTION) && at(CORRECTION) < at("This attempt goes on from where it stopped"), "the correction comes after the earlier turn and before this turn's instruction");
+
+    // The third run is a new process on the same conversation, given the same order again: the request ID makes the update apply once, and the task ends on plan B.
+    await tick();
+    const d = await get();
+    assert.equal(d.state, "finished");
+    assert.equal(d.outcome?.status, "succeeded", d.outcome?.summary);
+    assert.equal(x.answer.seen.length, 10);
+    for (const seen of x.answer.seen.slice(5)) assert.equal(count(seen, CORRECTION), 1, "the correction is in the conversation exactly once");
+  } finally { await x.close(); }
+});

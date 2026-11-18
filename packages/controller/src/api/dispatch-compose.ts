@@ -53,6 +53,7 @@ import type { BuiltinTool } from "../toolbridge/index.js";
 import { McpService, RemoteMcpClient, RemoteMcpConnector, type McpHttpOptions } from "../mcp/index.js";
 import type { NameResolver } from "../dispatch/network.js";
 import type { RetrievalService } from "../context/index.js";
+import type { ContextBranchService } from "../branches/index.js";
 import type { AgentService } from "../agents/index.js";
 import type { HistoryService } from "../context/index.js";
 import type { InquiryService } from "../inquiries/index.js";
@@ -337,6 +338,8 @@ export interface ComposeInput {
    * generation and runtime of the attempts it cut, and every tick carries out what the controls leave due (an expired drain becomes a cutover; a cancellation a crash left is done again).
    */
   readonly routes?: { readonly cutover: CutoverService; readonly fallback: FallbackService };
+  /** The retained context branches (card C05): the updates a returned branch selected go with its destination task's next order (card G09). Absent: none are given. */
+  readonly branches?: Pick<ContextBranchService, "returnedUpdates">;
   /** Where the checkpoints workers hand the dispatcher are captured as continuations (card L04d); absent: none are. */
   readonly continuations?: Pick<ContinuationService, "capture" | "latest">;
   /** The checked resume the dispatcher calls when an attempt brings earlier work back (card L04c). */
@@ -884,6 +887,8 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
       activity: async (step) => { await ActivityService.withEpoch(storage, epoch, ro).recordFinishing(principal, { commandId: step.commandId, taskId: step.taskId, kind: step.kind, summary: step.summary, manifest: { refs: step.refs }, outcome: step.outcome } as never, step.finishes); }, routing: i.routing, pauses,
       ...(i.interrogator === undefined ? {} : { interrogator: i.interrogator }),
       ...(i.jobWaits === undefined ? {} : { jobWakes: { waitable: i.jobWaits, ...(i.stops === undefined ? {} : { stopped: async (taskId: string) => { const held = await i.stops!.holding(taskId, undefined, { wider: true }); return held !== undefined && held.mode !== "suspend"; } }) } }), ...(i.stops === undefined ? {} : { heldBy: async (taskId: string) => { const ancestor = await stoppedAncestor(storage, i.stops!, taskId); return ancestor === undefined ? undefined : `its parent task ${ancestor.taskId} is ${ancestor.mode === "suspend" ? "suspended" : "stopped"} (stop ${ancestor.intentId}); its swarm children are not started while that holds`; } }), decisions, ...(i.resumes === undefined ? {} : { resumes: i.resumes }), ...(i.handoffs === undefined ? {} : { handedIn: (taskId: string) => i.handoffs!.latestForTask(taskId) }), prerequisites: async (taskId: string, scan?: Map<string, unknown>) => { const deps = await i.contracts.prerequisitesOf(taskId, scan); if (deps === undefined) throw new DomainError("unavailable", "the task's dependencies could not be read"); const open: string[] = []; const dead: string[] = []; for (const e of deps.dependsOn) { if (e.state === undefined) dead.push(`${e.taskId} (missing)`); else if (e.state === "cancelled") dead.push(`${e.taskId} (cancelled)`); else if (e.state !== "done") open.push(`${e.taskId} (${e.state})`); } return { open, dead }; }, checkouts: ProjectResourceService.withEpoch(storage, epoch, ro), generation, reviews: i.reviews, budgets, meetings: attendance, notifications, loops, context,
+      // Card G09: the updates returned side lines selected for the task, read as the attempt's own task credential (what it may not read is not given to it).
+      ...(i.branches === undefined ? {} : { selectedUpdates: async (c: { readonly taskId: string; readonly credential: string }) => (await i.branches!.returnedUpdates(await i.taskCredentials.authenticate(c.credential), c.taskId)).map((u) => ({ requestId: u.requestId, text: u.text, origin: u.origin })) }),
       // Card W12: the goal anchor of an attempt about to start: on unless the owner turned it off, at most the owner's characters and the route's share of its window, and only where the route states a window.
       anchor: {
         plan: async (c) => {

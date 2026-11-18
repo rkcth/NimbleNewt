@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, taskId as checkTaskId, text, type TaskBody, type View } from "../domain/model.js";
@@ -100,7 +101,24 @@ export interface DelegationBody {
 
 export interface DelegatedItem { readonly source: SourceRef; readonly state: "current" | "changed" | "unavailable"; readonly text?: string; readonly delegationId: string }
 
-export const BRANCH_LIMITS = { purpose: 1000, reason: 500, note: 500, updatesPerCall: 10, applied: 100, refsPerDelegation: 10, delegationsPerChild: 200, page: 200 } as const;
+/**
+ * An update a returned branch selected for its destination task (card G09), as the destination's next attempt is given it: the text of the original as it was when it was applied, the link it came from, and a request ID
+ * that names exactly this original and content (whichever branch selected it), so the task's conversation applies it once however often it is offered.
+ */
+export interface SelectedUpdate {
+  readonly branchId: string;
+  readonly source: SourceRef;
+  /** The branch's update revision that applied it. */
+  readonly revision: number;
+  readonly text: string;
+  readonly requestId: string;
+  /** Where it came from, in words (the branch and the original's link), for the conversation entry that holds it. */
+  readonly origin: string;
+}
+
+export const BRANCH_LIMITS = { purpose: 1000, reason: 500, note: 500, updatesPerCall: 10, applied: 100, refsPerDelegation: 10, delegationsPerChild: 200, page: 200, returnsPerTask: 50, deliveredPerStart: 20 } as const;
+/** The returned branches with selected updates, per destination task, newest last (card G09). */
+const RETURN_INDEX = "context-return-index";
 const BRANCH_ID = /^cbr-[a-z2-7]{20}$/;
 const CONTINUATION_ID = /^cnt-[a-z2-7]{20}$/;
 const INQUIRY_ID = /^inq-[a-z2-7]{20}$/;
@@ -111,6 +129,7 @@ const plain = (value: unknown, field: string, max: number): string => {
   return out;
 };
 const keyOf = (s: SourceRef): string => (s.kind === "desk-record" ? `d:${s.id}` : s.kind === "owner-decision" ? `o:${s.id}` : `h:${s.scopeId}:${s.seq}`);
+const sourceWords = (s: SourceRef): string => (s.kind === "desk-record" ? `desk record ${s.id}` : s.kind === "owner-decision" ? `owner decision ${s.id}` : `history entry ${s.seq} of ${s.scopeId}`);
 const normal = (s: SourceRef): SourceRef => (s.kind === "desk-record" ? { kind: "desk-record", id: s.id } : s.kind === "owner-decision" ? { kind: "owner-decision", id: s.id } : { kind: "history-entry", scopeId: s.scopeId, seq: s.seq });
 
 /**
@@ -346,15 +365,76 @@ export class ContextBranchService {
     });
   }
 
-  /** The work goes back to the recorded destination: the branch is finished and the destination is consumed (kept as `returnedTo`). */
+  /**
+   * The work goes back to the recorded destination: the branch is finished and the destination is consumed (kept as `returnedTo`). A branch that applied updates is listed for its destination in the same write, so the
+   * destination's next attempt is given them (`returnedUpdates`, card G09).
+   */
   async resume(principal: Principal, command: NoActor & { branchId: string; expectedRevision: number }): Promise<{ returnedTo: ReturnDestination }> {
     onlyKnown(command, ["commandId", "branchId", "expectedRevision"]);
-    await this.#transition(principal, "branch.resume", command, {}, async (body) => {
-      if (body.state === "returned") throw new DomainError("invalid_command", `branch ${command.branchId} has already returned`, { field: "branchId" });
-      return { ...body, state: "returned", returnedAt: this.#runner.now(), returnedTo: body.returnTo, suspended: undefined } as unknown as BranchBody;
-    });
-    const stored = (await this.#runner.get("context-branch", command.branchId))!.body as unknown as BranchBody;
+    const expected = checkRevision(command.expectedRevision);
+    const found = await this.#mine(principal, command.branchId);
+    const key = scopedCommandId(principal.id, command.commandId);
+    // The destination's list is guarded by its revision, so two branches returning to one task at once retry (as delegations do).
+    await this.#retrying(() => this.#runner.command("branch.resume", { commandId: key, actor: principal.id }, async () => ({
+      payload: { branchId: found.id, expectedRevision: expected },
+      build: async () => {
+        const { current, body } = await this.#load(found.id, expected);
+        if (body.state === "returned") throw new DomainError("invalid_command", `branch ${found.id} has already returned`, { field: "branchId" });
+        const next = { ...body, state: "returned", returnedAt: this.#runner.now(), returnedTo: body.returnTo, suspended: undefined } as unknown as BranchBody;
+        const step = this.#change(found.id, current.revision, next, {});
+        if (body.applied.length === 0) return step;
+        const indexRef: AggregateRef = { kind: RETURN_INDEX, id: body.returnTo.taskId };
+        const index = await this.#runner.get(indexRef.kind, indexRef.id);
+        const ids = ((index?.body as unknown as { ids: string[] } | undefined)?.ids ?? []).filter((x) => x !== found.id);
+        const listed = { ids: [...ids, found.id].slice(-BRANCH_LIMITS.returnsPerTask) } as unknown as JsonObject;
+        const indexChange: Change = index === undefined ? { type: "create", ref: indexRef, body: listed } : { type: "update", ref: indexRef, expectedRevision: index.revision, body: listed };
+        return { ...step, changes: [...step.changes, indexChange] };
+      },
+    })));
+    const b = found.body as unknown as BranchBody;
+    await this.#told({ branchId: found.id, taskId: b.taskId, projectId: b.projectId, what: "returned", by: principal.id, key });
+    const stored = (await this.#runner.get("context-branch", found.id))!.body as unknown as BranchBody;
     return { returnedTo: stored.returnedTo as ReturnDestination };
+  }
+
+  /**
+   * The updates the branches that returned to this task selected (card G09), for the task's next attempt to be given, read with the viewer's own rights (the attempt's task credential). Only an update whose original is
+   * still as it was when it was applied is given: one that changed since, is gone or is not readable by the viewer is left out (a later application of the changed original is its own update). The same original with the
+   * same content selected by two branches is given once, named after the first of them still listed. At most `BRANCH_LIMITS.deliveredPerStart`, the newest; in the order they were applied. Each carries a request ID derived
+   * from the original's link and its digest only (not the branch), so it stays the same whichever branch names it, also after the first falls off the task's list: a conversation that was already given it applies it
+   * once (the worker process takes an ID it holds under other wording as already placed).
+   */
+  async returnedUpdates(viewer: Principal, taskId: string): Promise<SelectedUpdate[]> {
+    const tid = checkTaskId(taskId);
+    const task = (await this.#runner.get("task", tid))?.body as unknown as TaskBody | undefined;
+    if (task === undefined || !allows(viewer, "attempt.work", task.projectId, { resource: { kind: "task", id: tid } }) || !inTaskScope(viewer, task.projectId)) return [];
+    const ids = ((await this.#runner.get(RETURN_INDEX, tid))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+    const listed: { branchId: string; body: BranchBody }[] = [];
+    for (const branchId of ids) {
+      const b = (await this.#runner.get("context-branch", branchId))?.body as unknown as BranchBody | undefined;
+      if (b === undefined || b.state !== "returned" || b.returnedTo?.taskId !== tid || b.projectId !== task.projectId) continue;
+      listed.push({ branchId, body: b });
+    }
+    // The same original with the same content is named after the FIRST listed branch that returned with it (and that branch's update revision), so a later branch that selects it again does not change its wording.
+    // The request ID does not name the branch at all: when the first branch falls off the list of 50, the next one names it, and the ID (what the conversation applies once by) is still the same.
+    const first = new Map<string, { branchId: string; revision: number }>();
+    for (const { branchId, body } of listed) for (const u of body.applied) { const named = `${keyOf(u.source)}|${u.digest}`; if (!first.has(named)) first.set(named, { branchId, revision: u.revision }); }
+    const picked: SelectedUpdate[] = [];
+    const seen = new Set<string>();
+    outer: for (const { body: b } of [...listed].reverse()) {
+      for (const u of [...b.applied].reverse()) {
+        const named = `${keyOf(u.source)}|${u.digest}`;
+        if (seen.has(named)) continue;
+        seen.add(named);
+        const original = await this.#retrieval.fetch(viewer, u.source);
+        if (original === undefined || original.digest !== u.digest || original.projectId !== b.projectId) continue;
+        const by = first.get(named)!;
+        const requestId = `upd:${createHash("sha256").update(named).digest("hex").slice(0, 32)}`;
+        picked.push({ branchId: by.branchId, source: u.source, revision: by.revision, text: original.text, requestId, origin: `side line ${by.branchId}, ${sourceWords(u.source)}, update ${by.revision}` });
+        if (picked.length >= BRANCH_LIMITS.deliveredPerStart) break outer;
+      }
+    }
+    return picked.reverse();
   }
 
   /** The caller's branches that have not returned (active or suspended), each with its return destination, in ID order, paged. A newer task or branch does not remove an entry. */

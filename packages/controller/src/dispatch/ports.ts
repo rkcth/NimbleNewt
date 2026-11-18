@@ -85,7 +85,20 @@ export interface WorkOrder {
   readonly startParts?: { readonly task: number; readonly rules: number; readonly handoff: number; readonly view: number; readonly refs?: readonly string[] };
   /** The dispatch contract (card H12a). A remote worker confirms it before its first tool call; a local host applies the same figures through its own builder. */
   readonly contract?: DispatchContract;
+  /**
+   * Updates a side line of work selected for this task and brought back when it returned (card G09: C05 `applyUpdates` then `resume`), oldest first. The host places each in the task's conversation before the turn, as
+   * an update entry that keeps `origin`, under `requestId`, so a conversation that already holds one applies it once. Not sent to a remote host.
+   */
+  readonly contextUpdates?: readonly ContextUpdate[];
 }
+
+/** One selected update as a work order carries it (card G09). */
+export interface ContextUpdate { readonly requestId: string; readonly text: string; readonly origin: string }
+/**
+ * The bounds of a work order's selected updates: how many, the characters of each text and origin (longer text is cut), and the characters of all their texts together (past that the oldest whole updates are left out
+ * and noted; `boundContextUpdates`).
+ */
+export const CONTEXT_UPDATE_LIMITS = { items: 20, text: 20_000, origin: 300, total: 64_000 } as const;
 
 /**
  * How a turn ended (card W02), as the worker classified its last reply: the worker channel's kinds (`@nimblenewt/contracts` `TURN_END_KINDS`, restated: the controller does not depend on the contracts package) and `unknown` for a worker

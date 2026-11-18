@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ANCHOR_CHANNEL_MAX, safeTail, safeText, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
+import { ANCHOR_CHANNEL_MAX, CHANNEL_UPDATES, safeTail, safeText, endKindOf, findAnchors, verifyAnchor, type ThinkingReport, type BridgeReplyMessage, type ChannelContext, type ChannelModel, type HostEndKind, type JsonValue } from "@nimblenewt/contracts";
 import { attemptSandbox, type AttemptSandboxPlan } from "../sandbox/attempt.js";
 import type { SandboxLauncher } from "../sandbox/launcher.js";
 import type { LimitEnforcement, ResourceLimits } from "../sandbox/limits.js";
@@ -41,6 +41,8 @@ export interface HostOrder {
   readonly contract?: { readonly limits?: ResourceLimits; /** Card W12: the digest of the goal anchor block the controller put at the top of `content` (the contract's digest covers it). */ readonly anchorDigest?: string };
   /** The order's first prompt (the dispatcher's `WorkOrder.content`); read here only to find the goal anchor the contract names. */
   readonly content?: string;
+  /** Card G09: updates a returned side line of work selected for the task (the dispatcher's `WorkOrder.contextUpdates`). The process places each in the conversation before the turn, once per request ID. */
+  readonly contextUpdates?: readonly { readonly requestId: string; readonly text: string; readonly origin: string }[];
 }
 
 /**
@@ -574,6 +576,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
           ...(lease === undefined ? {} : { lease: { leaseMs: Math.max(1000, Math.min(3_600_000, Math.floor(lease.leaseMs))), graceMs: options.leaseGraceMs ?? LEASE_GRACE_MS } }),
           ...(channelContext === undefined ? {} : { context: channelContext }),
           ...(entry.network === undefined ? {} : { network: { proxyPort: options.network?.proxyPort ?? DEFAULT_PROXY_PORT } }),
+          ...(order.contextUpdates === undefined || order.contextUpdates.length === 0 ? {} : { updates: order.contextUpdates.slice(-CHANNEL_UPDATES.items).map((u) => ({ requestId: u.requestId, text: u.text.slice(0, CHANNEL_UPDATES.text), origin: u.origin.slice(0, CHANNEL_UPDATES.origin) })) }),
           ...(cache === undefined || (cache.key === undefined && cache.retention === undefined) ? {} : { cache: { ...(cache.key === undefined ? {} : { key: cache.key }), ...(cache.retention === undefined ? {} : { retention: cache.retention }) } }),
         }, PROCESS_LIMITS.readyMs);
       } catch (error) {
