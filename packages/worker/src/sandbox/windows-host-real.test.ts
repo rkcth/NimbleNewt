@@ -94,23 +94,32 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     assert.equal((await host.signature(plain)).valid, false);
   });
 
+  // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout. The ceiling that governs here is not a per-test one: the package runner's
+  // --test-timeout (300 s) also bounds this whole file (node --test runs each file as one timed test), and a per-test limit could not fire during spawnSync anyway. In run
+  // 44242108811 the other tests of this file took about 30 s together, so the child gets 250 s: past that it is stopped and this test fails with its own message, and the job
+  // is released whatever happens, so no later test sees it. (Six probes that each time out twice would need 720 s; that is a failure, not a case to wait for.)
+  const ENV_PROBES_CHILD_MS = 250_000;
   test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", async () => {
     const backend = windowsSandboxBackend(options());
     const plan = backend.plan(recipeIn("envjob"), ["/windows/system32/cmd.exe", "/d", "/c", "exit 0"], `ci-${randomUUID()}`);
-    assert.ok(existsSync(plan.env["TEMP"]!), "the runner's temporary folder exists");
-    const script = [
-      `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
-      "const h = windowsRealHost(); const out = {};",
-      // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
-      "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
-      "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
-      "}",
-      "process.stdout.write(JSON.stringify(out));",
-    ].join("\n");
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: 240_000, windowsHide: true });
-    assert.equal(child.status, 0, child.stderr);
-    assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
-    await backend.release!(plan);
+    try {
+      assert.ok(existsSync(plan.env["TEMP"]!), "the runner's temporary folder exists");
+      const script = [
+        `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
+        "const h = windowsRealHost(); const out = {};",
+        // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
+        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
+        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
+        "}",
+        "process.stdout.write(JSON.stringify(out));",
+      ].join("\n");
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CHILD_MS, windowsHide: true });
+      assert.equal(child.status, 0, child.error === undefined ? child.stderr : `the probes did not all answer within ${String(ENV_PROBES_CHILD_MS / 1000)} s (${child.error.message}): ${child.stderr}`);
+      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
+    } finally {
+      await backend.release!(plan);
+    }
+    assert.deepEqual(host.listDir(join(base, "control", "jobs")), [], "the job is released and its folder removed");
   });
 
   test("fail closed: with no Windows Sandbox client there is no capacity, the launcher refuses, and nothing is left behind", async (t) => {
