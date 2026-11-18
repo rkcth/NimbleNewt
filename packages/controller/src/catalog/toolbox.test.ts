@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { AgentService } from "../agents/index.js";
 import { DeskService } from "../context/index.js";
+import { DependencyService } from "../dependencies/index.js";
+import { derivedId } from "../domain/ids.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -24,7 +26,7 @@ const host: HostFacts = { os: "linux", arch: "x64", interpreters: { node: "22.19
 
 for (const backend of backends) {
   interface Ctx {
-    cat: CatalogService; desks: DeskService; agents: AgentService; principals: PrincipalService; owner: Principal; a: string; b: string; ta: string; tb: string; web: string;
+    cat: CatalogService; deps: DependencyService; desks: DeskService; agents: AgentService; principals: PrincipalService; owner: Principal; a: string; b: string; ta: string; tb: string; web: string;
     /** An agent record with roles and a team, and its authenticated principal with these grants. */
     agent(name: string, grants: Grant[], extra?: { roles?: string[]; teamId?: string }): Promise<{ id: string; p: Principal; reauth(): Promise<Principal> }>;
     note(by: Principal, body: string, extra?: Record<string, unknown>): Promise<string>;
@@ -45,7 +47,7 @@ for (const backend of backends) {
         const web = (await agents.createTeam(owner, { commandId: cid("team"), name: "web" })).id;
         const desks = DeskService.withEpoch(world.storage, projects.epoch, options);
         await body({
-          cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), desks, agents, principals, owner, a, b, ta, tb, web,
+          cat: CatalogService.withEpoch(world.storage, projects.epoch, desks, options), deps: DependencyService.withEpoch(world.storage, projects.epoch, options), desks, agents, principals, owner, a, b, ta, tb, web,
           agent: async (friendlyName, grants, extra = {}) => {
             const id = (await agents.create(owner, { commandId: cid("ag"), friendlyName, ...(extra.roles === undefined ? {} : { roles: extra.roles }), ...(extra.teamId === undefined ? {} : { teamId: extra.teamId }) })).id;
             const pid = `agent:${id}`;
@@ -219,5 +221,26 @@ for (const backend of backends) {
     assert.notEqual(await c.cat.get(cody.p, mine), undefined);
     // A host or the owner keeps no personal copies.
     await refuses("forbidden", () => c.cat.copy(c.owner, { commandId: cid("cp"), name: "lint", as: "x" }));
+  });
+
+  suite("dependency records judge a shared tool by its audience too: an agent outside it learns neither that a version exists nor whether a digest is right (review fix)", async (c) => {
+    const work = (p: string): Grant[] => [...worker(p), { action: "attempt.work", project: p }];
+    const cody = await c.agent("Cody", work(c.a), { roles: ["coder"] });
+    const rex = await c.agent("Rex", work(c.a), { roles: ["reviewer"] });
+    const readme = await c.note(cody.p, "Run lint on the changed files."); const code = await c.note(cody.p, "console.log('lint')");
+    const v = await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.0.0", manifest, instructionsRecordId: readme, executableRecordId: code, audience: { roles: ["coder"] } } as never);
+    const wrong = `sha256:${"0".repeat(64)}`;
+    const toolDep = (hash: string) => [{ kind: "tool-version" as const, key: v.versionId, hash }];
+    const absent = [{ kind: "negative" as const, key: `catalog-entry:${derivedId("cat", "toolbox.lint")}` }];
+    // In the audience: a wrong digest and a false "it does not exist" are refused, as before.
+    await refuses("invalid_command", () => c.deps.record(cody.p, { commandId: cid("dep"), taskId: c.ta, dependencies: toolDep(wrong) }), /not the version's digest/);
+    await refuses("invalid_command", () => c.deps.record(cody.p, { commandId: cid("dep"), taskId: c.ta, dependencies: absent }), /exists/);
+    await c.deps.record(cody.p, { commandId: cid("dep"), taskId: c.ta, dependencies: toolDep(v.digest.startsWith("sha256:") ? v.digest : `sha256:${v.digest}`) });
+    // Outside it (catalog.read and work in the project, but not a coder): both are recorded unverified, so neither answer tells it anything.
+    await c.deps.record(rex.p, { commandId: cid("dep"), taskId: c.ta, dependencies: toolDep(wrong) });
+    await c.deps.record(rex.p, { commandId: cid("dep"), taskId: c.ta, dependencies: absent });
+    // Once the owner widens the audience, the same reader is checked.
+    await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { all: true } });
+    await refuses("invalid_command", () => c.deps.record(rex.p, { commandId: cid("dep"), taskId: c.ta, dependencies: toolDep(wrong) }), /not the version's digest/);
   });
 }

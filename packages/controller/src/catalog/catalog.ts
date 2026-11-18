@@ -167,6 +167,34 @@ export function mayManage(by: Principal, audience: Audience | undefined): boolea
   const projects = audience.projects ?? [];
   return projects.length > 0 && projects.every((p) => allows(by, TOOLBOX_MANAGE, p));
 }
+/** Reads one stored record (a `CommandRunner.get`): what the visibility rule below needs from storage. */
+export type CatalogRecordReader = (kind: string, id: string) => Promise<{ readonly body: unknown } | undefined>;
+/**
+ * Whether `by` may see a catalog entry (card T08 for shared entries). The one rule for every path that reveals an entry, its versions or their digests: the catalogue itself, and the dependency records
+ * that name a tool version or a shared entry. The owner sees all; an agent its own personal entries; a holder of `catalog.read` system entries and the shared entries whose audience includes it. A
+ * maintainer whose grant covers a shared entry sees and reads it; a run (`projectId` given) still needs the audience.
+ */
+export async function mayReadCatalogEntry(get: CatalogRecordReader, by: Principal, e: Pick<EntryBody, "layer" | "owner" | "audience">, projectId?: string): Promise<boolean> {
+  if (by.kind === "owner") return true;
+  if (e.layer === "agent") return e.owner === by.id;
+  if (!allows(by, "catalog.read", undefined)) return false;
+  if (e.layer !== "toolbox") return true;
+  return (projectId === undefined && mayManage(by, e.audience)) || inAudience(get, by, e.audience, projectId);
+}
+/**
+ * Whether an agent belongs to a shared entry's audience (card T08). Roles and team come from the agent record behind the principal's durable identity (`agent:<ID>`), so a rename changes nothing and a
+ * retired agent belongs to nothing. A project audience counts a grant naming that project exactly (a grant for every project is not membership of each), and for a run (`projectId` given) only that project.
+ */
+async function inAudience(get: CatalogRecordReader, by: Principal, audience: Audience | undefined, projectId?: string): Promise<boolean> {
+  if (by.kind === "owner" || audience === undefined || audience.all === true) return true;
+  if (by.kind !== "agent") return false;
+  const projects = audience.projects ?? [];
+  if (projectId !== undefined ? projects.includes(projectId) : projects.some((p) => holdsIn(by, p))) return true;
+  if ((audience.roles ?? []).length === 0 && (audience.teams ?? []).length === 0) return false;
+  const agent = by.id.startsWith("agent:") ? (await get("agent", by.id.slice("agent:".length)))?.body as { roles?: readonly string[]; teamId?: string; state?: string; principalId?: string } | undefined : undefined;
+  if (agent === undefined || agent.state !== "active" || agent.principalId !== by.id) return false;
+  return (agent.roles ?? []).some((r) => (audience.roles ?? []).includes(r)) || (agent.teamId !== undefined && (audience.teams ?? []).includes(agent.teamId));
+}
 
 function checkSchema(value: unknown, field: string): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid(field, "must be a JSON object (a schema)");
@@ -973,27 +1001,7 @@ export class CatalogService {
   }
 
   async #mayReadEntry(by: Principal, e: EntryBody, projectId?: string): Promise<boolean> {
-    if (by.kind === "owner") return true;
-    if (e.layer === "agent") return e.owner === by.id;
-    if (!allows(by, "catalog.read", undefined)) return false;
-    if (e.layer !== "toolbox") return true;
-    // A maintainer whose grant covers the entry sees and reads it; a run (`projectId` given) still needs the audience.
-    return (projectId === undefined && mayManage(by, e.audience)) || this.#inAudience(by, e.audience, projectId);
-  }
-
-  /**
-   * Whether an agent belongs to a shared entry's audience (card T08). Roles and team come from the agent record behind the principal's durable identity (`agent:<ID>`), so a rename changes nothing and a
-   * retired agent belongs to nothing. A project audience counts a grant naming that project exactly (a grant for every project is not membership of each), and for a run (`projectId` given) only that project.
-   */
-  async #inAudience(by: Principal, audience: Audience | undefined, projectId?: string): Promise<boolean> {
-    if (by.kind === "owner" || audience === undefined || audience.all === true) return true;
-    if (by.kind !== "agent") return false;
-    const projects = audience.projects ?? [];
-    if (projectId !== undefined ? projects.includes(projectId) : projects.some((p) => holdsIn(by, p))) return true;
-    if ((audience.roles ?? []).length === 0 && (audience.teams ?? []).length === 0) return false;
-    const agent = by.id.startsWith("agent:") ? (await this.#runner.get("agent", by.id.slice("agent:".length)))?.body as unknown as { roles?: readonly string[]; teamId?: string; state?: string; principalId?: string } | undefined : undefined;
-    if (agent === undefined || agent.state !== "active" || agent.principalId !== by.id) return false;
-    return (agent.roles ?? []).some((r) => (audience.roles ?? []).includes(r)) || (agent.teamId !== undefined && (audience.teams ?? []).includes(agent.teamId));
+    return mayReadCatalogEntry((kind, id) => this.#runner.get(kind, id), by, e, projectId);
   }
 
   /** Checks an audience and stores it by durable identity: roles by name (they must be defined), teams and projects by ID or by their exact name (exactly one must match; a name that matches several is refused). */
