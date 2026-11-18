@@ -396,6 +396,16 @@ test("W01d follow-up: goneFolderTests and the log form of a gone-folder refusal"
   assert.equal(goneFolderTests(["status"], { ...c, pwd: join(checkout, "gone") }), false); // the checkout
   assert.equal(goneFolderTests(["-C", "..", "status"], { ...c, pwd: gonePwd }), false); // -C leads to the existing tmp
   assert.equal(goneFolderTests(["status"], { ...c, pwd: gonePwd, env: { ...plainEnv, GIT_DIR: join(scratch, ".git") } }), false);
+  // A `..` after a link into the checkout: resolve() reads a gone folder in tmp, the system the checkout (follow-up check).
+  mkdirSync(join(checkout, "w01d-sub"), { recursive: true });
+  const intoCheckout = join(tmp, "nn-link-into-checkout");
+  symlinkSync(join(checkout, "w01d-sub"), intoCheckout);
+  assert.equal(goneFolderTests(["-C", `${intoCheckout}/../nn-not-in-tmp`, "push"], { ...c, pwd: gonePwd }), false);
+  assert.equal(goneFolderTests(["fetch", "--no-recurse-submodules", `${intoCheckout}/..`], { ...c, pwd: gonePwd }), false);
+  assert.equal(goneFolderTests(["fetch", "--no-recurse-submodules", `file://${intoCheckout}/%2e%2e`], { ...c, pwd: gonePwd }), false);
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: `${tmp}/x/../nn-gone-unit` }), false);
+  assert.equal(goneFolderTests(["status"], { ...c, pwd: gonePwd, env: { ...plainEnv, GIT_DIR: `${intoCheckout}/../.git` } }), false);
+  assert.equal(goneFolderTests(["log", "HEAD..main"], { ...c, pwd: gonePwd }), true); // a revision range is not a path
   assert.equal(GONE_FOLDER, "gone-folder");
   // The last known folder: the system's record when it names a removed folder; PWD only where there is no record.
   const links = join(base, "proc-links");

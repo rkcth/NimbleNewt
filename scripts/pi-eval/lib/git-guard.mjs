@@ -386,6 +386,9 @@ export function inProjectTests(args, { cwd, roots, testRoots, checkout, env, git
 /** The conditions of inProjectTests after the refused settings (shared with goneFolderTests). */
 function testsOwnCall(args, g, { cwd, roots, testRoots, checkout, env, git }) {
   if (typeof g.sub !== "string" || !NOT_ALIASES.has(g.sub)) return false;
+  // A `..` segment is collapsed by resolve() but taken after any link by the system (`<tmp>/link/../x` with the link into
+  // the checkout reaches the checkout): no argument, git folder setting or folder may contain one (W01d follow-up check).
+  if (args.some(climbs) || [cwd, env.GIT_DIR, env.GIT_WORK_TREE, env.GIT_COMMON_DIR].some(climbs)) return false;
   // The address may also follow an option's `=` (`--upload-pack=...`, `--reference=...`): read both forms.
   if (args.some((a) => typeof a !== "string" || NETWORK_ADDRESS.test(a) || NETWORK_ADDRESS.test(a.replace(/^--[^=]*=/, "")))) return false;
   const stripped = withoutAskpass(args, env);
@@ -420,7 +423,7 @@ function testsOwnCall(args, g, { cwd, roots, testRoots, checkout, env, git }) {
   const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
   // A local address counts only when it lies in the run's temporary folder and outside its checkout: a fetch, clone or push
   // between a scratch repository and the checkout or another checkout is not the tests' own (W01d second review).
-  const testLocal = (u) => { const p = localPath(u, dir); return p !== null && inside(p, tests) && !inside(p, own); };
+  const testLocal = (u) => { if (climbs(u)) return false; const p = localPath(u, dir); return p !== null && inside(p, tests) && !inside(p, own); };
   const remoteNames = new Set();
   const named = []; // a branch's remote: a remote's name or an address of its own
   let fetchRecurseOff = false; // submodule.recurse or fetch.recurseSubmodules set to false
@@ -458,6 +461,14 @@ function testsOwnCall(args, g, { cwd, roots, testRoots, checkout, env, git }) {
     if (existsSync(join(common.trim(), "modules"))) return false; // a repository with submodules checked out
   }
   return places.every((p) => { const r = realish(p); return inside(r, tests) && !inside(r, own); });
+}
+
+/** Whether a path names a `..` segment (also percent-encoded, as in a file:// URL). */
+function climbs(p) {
+  if (typeof p !== "string") return false;
+  let d = p;
+  try { d = decodeURIComponent(p); } catch { /* not encoded */ }
+  return [p, d].some((s) => /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(s));
 }
 
 /** The folders a call acts in: its folder after -C, and any --git-dir, --work-tree, GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR. */
@@ -504,7 +515,7 @@ export function lastKnownFolder(env = process.env, procCwd = "/proc/self/cwd") {
 
 export function goneFolderTests(args, { pwd, roots, testRoots, checkout, env, git }) {
   if (!Array.isArray(testRoots) || testRoots.length === 0) return false;
-  if (typeof pwd !== "string" || !isAbsolute(pwd) || existsSync(pwd)) return false;
+  if (typeof pwd !== "string" || !isAbsolute(pwd) || climbs(pwd) || existsSync(pwd)) return false;
   const g = parseGlobal(args, env);
   const tests = testRoots.map((r) => realish(r));
   const own = typeof checkout === "string" && checkout !== "" ? [realish(checkout)] : [];
