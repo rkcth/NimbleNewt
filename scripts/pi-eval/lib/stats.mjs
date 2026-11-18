@@ -106,6 +106,9 @@ export function renderReport(records, { title = "Pi completion bench" } = {}) {
     const info = shipped.length > 0 ? [`- matches shipped wording (informational, not a gate): ${shipped.filter((x) => x.shipped.passed).length}/${shipped.length} run(s) pass the card's shipped test files`] : [];
     const mism = clean.filter((x) => String(x.variant ?? "?") === v && x.outcome === "interface-mismatch").length;
     if (vDirty.length > 0) info.push(`- contaminated (left out, never a finish): ${vDirty.length} run(s), ${vDirty.filter((x) => x.outcome === "verified-finish").length} of them otherwise a verified finish; kinds: ${[...new Set(vDirty.flatMap((x) => [...(x.credentialAttempts ?? []), ...(x.guardRefusals > 0 ? ["git refused"] : []), ...((x.foreignPaths ?? []).length > 0 ? ["another checkout"] : [])]))].join(", ") || "-"}`);
+    // Refusals the git guard tagged as a project test's own (card W01d): refused, reported here, never contamination.
+    const inTests = [...clean, ...vDirty].filter((x) => String(x.variant ?? "?") === v && x.guardRefusalsInTests > 0);
+    if (inTests.length > 0) info.push(`- refused inside project tests: ${inTests.reduce((n, x) => n + x.guardRefusalsInTests, 0)}, not counted (${inTests.length} run(s); an askpass, proxy or protocol setting the project's own tests gave to repositories they made in the temporary folder)`);
     if (mism > 0) info.push(`- interface mismatch (said done; the acceptance tests do not type-check against its code): ${mism} run(s), counted as non-finishes and in the false-done gate`);
     // A timeout whose acceptance tests pass at the limit: the work was done, the agent never ended (it is still a non-finish).
     const timeouts = clean.filter((x) => String(x.variant ?? "?") === v && x.outcome === "timeout");

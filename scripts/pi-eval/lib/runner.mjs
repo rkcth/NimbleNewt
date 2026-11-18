@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classify, planProgress, summarizeLogFile, testCounts } from "./classify.mjs";
+import { guardLogCounts } from "./git-guard.mjs";
 import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, findRealGit, installRoot, prepareIsolation, sandboxUsable, workRootHidden } from "./isolation.mjs";
 import { withSlot } from "./slot.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
@@ -381,8 +382,10 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     // Also a run whose agent tried to push, add a remote or reach the owner's keys and logins, seen in its tool calls or
     // in the git wrapper's refusals: blocked or not, it is not a run to score.
     const attempts = credentialAttempts(summary.toolCommands);
-    let guardRefusals = 0;
-    try { guardRefusals = readFileSync(join(artifacts, "git-guard.log"), "utf8").split("\n").filter((l) => l.includes(" refused ")).length; } catch { /* nothing refused */ }
+    // A refusal the guard tagged as a project test's own (an askpass or proxy program given by the project's code to a
+    // repository its tests made in the temporary folder, card W01d) is still refused but reported apart, not counted.
+    let guardRefusals = 0, guardRefusalsInTests = 0;
+    try { ({ counted: guardRefusals, inProjectTests: guardRefusalsInTests } = guardLogCounts(readFileSync(join(artifacts, "git-guard.log"), "utf8"))); } catch { /* nothing refused */ }
     const contaminated = foreign.length > 0 || summary.toolCommands.some((c) => marks.some((m) => c.includes(m))) || attempts.length > 0 || guardRefusals > 0;
     const verdict = classify({ summary, hidden, plan, changed: ch.changed, dirty: ch.dirty, timedOut: a.timedOut, exitCode: a.code });
     Object.assign(record, verdict, {
@@ -391,7 +394,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
       // The log shows no model reply, or a reply without token counts: the run's token use is not known (0 is not a reading).
       ...(summary.assistantMessages === 0 || summary.usageMissing > 0 ? { tokensUnknown: true } : {}),
       plan, commitsAhead: ch.commitsAhead, dirty: ch.dirty, changed: ch.changed, diffStat: ch.diffStat, hidden, shipped, contaminated, foreignPaths: foreign,
-      credentialAttempts: attempts, guardRefusals,
+      credentialAttempts: attempts, guardRefusals, ...(guardRefusalsInTests > 0 ? { guardRefusalsInTests } : {}),
     });
   } catch (e) {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
