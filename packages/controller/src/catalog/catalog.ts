@@ -52,8 +52,19 @@ export interface VersionBody {
   readonly registeredAt: string;
   /** Set by retention for the moment between deciding to drop this version and dropping it (card T02c): no new run of it starts meanwhile. A claim older than `CLAIM_MS`, or stamped in the future, is void. */
   readonly dropping?: string;
+  /** A personal copy of a shared version (card T08): which shared tool, which exact version and its digest. Part of this version's identity. The copy uses the same recorded sources, read back by digest. */
+  readonly copiedFrom?: CopiedFrom;
 }
-export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[] }
+/**
+ * Who may discover, read and run a shared (`toolbox.`) entry (card T08). Stored by durable identity only: role names (a role's ID), team IDs and project IDs, never a display name. `all` stands alone;
+ * otherwise an agent belongs when one of its roles or its team is listed, or (for a project) when it holds a grant naming that project and, for a run, the run is in that project. Absent: every holder
+ * of `catalog.read` (the behaviour before audiences existed).
+ */
+export interface Audience { readonly all?: true; readonly roles?: readonly string[]; readonly teams?: readonly string[]; readonly projects?: readonly string[] }
+export interface CopiedFrom { readonly name: string; readonly version: string; readonly digest: string }
+/** The fork lineage of one shared entry (card T08): every personal copy made of it, so a maintainer sees who forked which version and a revocation can be told to each fork. Bounded by `CATALOG_LIMITS.forks`. */
+export interface ForkBody { readonly name: string; readonly forks: readonly { readonly copy: string; readonly version: string; readonly owner: string; readonly baseVersion: string; readonly baseDigest: string; readonly at: string }[] }
+export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[]; /** Shared entries only (card T08): who it is for. */ readonly audience?: Audience }
 /** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, cancel them, or stop them and pause their tasks (`pause` was added by card T02c). Absent: nobody was asked (the caller is not chat, or gave no answer), and the policy in force answers (the operator's startup option, else the owner's standing setting, default `finish`). */
 export type RunningCallsChoice = "finish" | "cancel" | "pause";
 export interface RevocationBody { readonly revokedBy: string; readonly reason: string; readonly at: string; /** The owner's choice for calls that were running (card T02d: recorded so a process that did not take the revoke command applies the same choice to its own running calls). Absent: nobody was asked. */ readonly runningCalls?: RunningCallsChoice }
@@ -79,7 +90,12 @@ export interface HostFacts {
 }
 export interface HostCheck { readonly ok: boolean; readonly reasons: readonly string[] }
 
-export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500 } as const;
+export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500, audience: 20, forks: 500 } as const;
+/** The action that lets an agent maintain shared toolbox entries (card T08). Granted for every project (`*`) it covers every audience; granted for one project it covers entries whose audience is only that project (or several it holds it in). */
+export const TOOLBOX_MANAGE = "toolbox.manage";
+const ROLE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const TEAM_ID = /^team-[a-z2-7]{20}$/;
+const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const VERSION = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const ACCESS = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
 const PLAIN_NAME = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -111,6 +127,46 @@ export function protectedVersions(e: Pick<EntryBody, "latest" | "versions" | "re
 }
 /** The personal namespace of a principal: `a_` plus a fixed digest of its ID, so it can be neither chosen nor reused. */
 export const personalNamespace = (principalId: string): string => `a_${sha(`agent-namespace\0${principalId}`).slice(0, 16)}`;
+/** The canonical shared name for `toolbox.<name>` or the short `<name>` (card T08: the owner says "the lint tool", not its namespace). Anything else is refused. */
+export function toolboxName(value: unknown): string {
+  if (typeof value !== "string") return invalid("name", "must be a shared tool name (toolbox.<name> or <name>)");
+  const full = parseName(value);
+  if (full !== null) return full.layer === "toolbox" ? full.canonical : invalid("name", "must be a shared tool name (toolbox.<name> or <name>)");
+  const short = parseName(`toolbox.${value}`);
+  return short !== null && short.layer === "toolbox" ? short.canonical : invalid("name", "must be a shared tool name (toolbox.<name> or <name>)");
+}
+const quote = (v: string): string => JSON.stringify(v.slice(0, 60));
+/** An audience in words, for records and screens: "all agents", or the roles, teams and projects it lists (by their IDs; a screen may add names). */
+export function audienceWords(audience: Audience | undefined): string {
+  if (audience === undefined || audience.all === true) return "all agents";
+  const parts = [
+    ...((audience.roles ?? []).length === 0 ? [] : [`roles ${audience.roles!.join(", ")}`]),
+    ...((audience.teams ?? []).length === 0 ? [] : [`teams ${audience.teams!.join(", ")}`]),
+    ...((audience.projects ?? []).length === 0 ? [] : [`projects ${audience.projects!.join(", ")}`]),
+  ];
+  return parts.join("; ");
+}
+/** Whether a principal holds a live grant naming exactly this project (a grant for every project does not count): what "in the project" means for a project audience. */
+const holdsIn = (by: Principal, project: string): boolean => {
+  if (by.taskScope !== undefined && by.taskScope.projectId !== project) return false;
+  const now = new Date().toISOString();
+  return by.asOf !== undefined && by.grants.some((g) => g.project === project && (g.expiresAt === undefined || g.expiresAt > now));
+};
+/** Whether an agent holds `toolbox.manage` anywhere (for every project, or for at least one). */
+export const maintainsAnywhere = (by: Principal): boolean => by.kind === "agent" && (allows(by, TOOLBOX_MANAGE, undefined) || by.grants.some((g) => g.project !== "*" && allows(by, TOOLBOX_MANAGE, g.project)));
+/**
+ * Whether `by` may manage an entry with this audience (card T08): the owner always; an agent holding `toolbox.manage` for every project, any audience; an agent holding it for some projects only, an
+ * audience made of those projects alone (no roles, teams or all agents, which reach beyond them). An absent audience means all agents, so only a holder for every project manages it. Authority is the
+ * grant on the principal's durable identity: a role, title or name gives none.
+ */
+export function mayManage(by: Principal, audience: Audience | undefined): boolean {
+  if (by.kind === "owner") return true;
+  if (by.kind !== "agent") return false;
+  if (allows(by, TOOLBOX_MANAGE, undefined)) return true;
+  if (audience === undefined || audience.all === true || (audience.roles ?? []).length > 0 || (audience.teams ?? []).length > 0) return false;
+  const projects = audience.projects ?? [];
+  return projects.length > 0 && projects.every((p) => allows(by, TOOLBOX_MANAGE, p));
+}
 
 function checkSchema(value: unknown, field: string): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid(field, "must be a JSON object (a schema)");
@@ -194,6 +250,8 @@ export interface RegisterCommand extends NoActor {
   readonly instructionsRecordId: string;
   /** For a tool: the registrant's own accepted desk record holding the executable. */
   readonly executableRecordId?: string;
+  /** Shared names only (card T08): who the entry is for. Left out, the entry keeps the audience it has; a maintainer's first release of a name must give one. */
+  readonly audience?: unknown;
 }
 
 /**
@@ -222,15 +280,22 @@ export class CatalogService {
 
   /** Registers a version. A personal one by an agent from its own work; a shared or system one by the owner. */
   async register(by: Principal, command: RegisterCommand): Promise<{ versionId: string; name: string; digest: string }> {
-    onlyKnown(command, ["commandId", "name", "kind", "version", "manifest", "instructionsRecordId", "executableRecordId"]);
+    onlyKnown(command, ["commandId", "name", "kind", "version", "manifest", "instructionsRecordId", "executableRecordId", "audience"]);
     if (command.kind !== "skill" && command.kind !== "tool") invalid("kind", "must be skill or tool");
     if (typeof command.version !== "string" || !VERSION.test(command.version)) invalid("version", "must be major.minor.patch");
     if ((command.kind === "tool") !== (command.executableRecordId !== undefined)) invalid("executableRecordId", command.kind === "tool" ? "a tool needs its executable record" : "a skill has no executable record");
     let canonical: string;
+    // A maintainer (card T08): an agent holding `toolbox.manage` releases shared names, never system ones, from an accepted shared record it can read.
+    const named = by.kind === "agent" ? parseName(command.name) : null;
+    const maintainer = named !== null && named.layer !== "agent";
     if (by.kind === "owner") {
       const parsed = parseName(command.name);
       if (parsed === null || parsed.layer === "agent") return invalid("name", "the owner registers shared (toolbox.<name>) or system (nimblenewt.<name>) names");
       canonical = parsed.canonical;
+    } else if (maintainer) {
+      if (named.layer === "protected") throw new DomainError("forbidden", "toolbox.manage does not cover NimbleNewt's own (nimblenewt.) commands; only the owner releases those");
+      if (!maintainsAnywhere(by)) throw new DomainError("forbidden", `${by.id} may not publish shared tools (it needs ${TOOLBOX_MANAGE})`);
+      canonical = named.canonical;
     } else {
       if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not register skills or tools`);
       if (!allows(by, "catalog.register", undefined)) throw new DomainError("forbidden", `${by.id} may not register skills or tools`);
@@ -238,10 +303,13 @@ export class CatalogService {
       if (parseName(canonical) === null) invalid("name", "must be lower-case letters, digits and single hyphens, at most 28 characters");
     }
     const parsed = parseName(canonical)!;
+    if (command.audience !== undefined && parsed.layer !== "toolbox") invalid("audience", "only a shared (toolbox.) name has an audience");
+    const audience = command.audience === undefined ? undefined : await this.#checkAudience(command.audience);
+    if (maintainer && audience !== undefined && !mayManage(by, audience)) throw new DomainError("forbidden", `${by.id} may not publish to that audience (its ${TOOLBOX_MANAGE} does not cover it)`);
     const manifest = checkManifest(command.manifest, command.kind);
     // Only the registrant's own accepted original work is accepted: the desk refuses another desk's content and copies of it.
-    const instructions = await this.#source(by, command.instructionsRecordId);
-    const executable = command.executableRecordId === undefined ? undefined : await this.#source(by, command.executableRecordId);
+    const instructions = await this.#source(by, command.instructionsRecordId, maintainer);
+    const executable = command.executableRecordId === undefined ? undefined : await this.#source(by, command.executableRecordId, maintainer);
     const version = command.version;
     const entryId = derivedId("cat", canonical);
     const versionId = derivedId("cav", `${canonical}|${version}`);
@@ -251,13 +319,18 @@ export class CatalogService {
     const digest = sha(canonicalJson(identity as unknown as JsonObject));
     const full: VersionBody = { ...body, digest };
     await this.#runner.command("catalog.register", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { name: canonical, kind: command.kind, version, digest },
+      payload: { name: canonical, kind: command.kind, version, digest, ...(audience === undefined ? {} : { audience: audience as unknown as JsonObject }) },
       build: async () => {
         const entry = await this.#runner.get("catalog-entry", entryId);
         const existing = await this.#runner.get("catalog-version", versionId);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (prior !== undefined && prior.layer === "agent" && prior.owner !== by.id) throw new DomainError("forbidden", "that name belongs to another agent");
         if (prior !== undefined && prior.kind !== command.kind) throw new DomainError("invalid_command", `${canonical} is a ${prior.kind}; a name keeps its kind`, { field: "kind" });
+        if (maintainer) {
+          // A maintainer changes only entries whose audience its grant covers; a name's first release names who it is for.
+          if (prior === undefined && audience === undefined) throw new DomainError("invalid_command", "audience: a maintainer names who a new shared tool is for (all agents, roles, teams or projects)", { field: "audience" });
+          if (prior !== undefined && !mayManage(by, prior.audience)) throw new DomainError("forbidden", `${by.id} may not change ${canonical}: its ${TOOLBOX_MANAGE} does not cover that tool's audience`);
+        }
         const vref: AggregateRef = { kind: "catalog-version", id: versionId };
         const eref: AggregateRef = { kind: "catalog-entry", id: entryId };
         if (existing !== undefined) {
@@ -267,7 +340,8 @@ export class CatalogService {
         }
         if (prior !== undefined && compare(version, prior.latest) <= 0) throw new DomainError("invalid_command", `${canonical} is at ${prior.latest}; a new version must be higher`, { field: "version" });
         if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
-        const nextEntry: EntryBody = { name: canonical, layer: parsed.layer, kind: command.kind, ...(parsed.layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }) };
+        const keepAudience = audience ?? prior?.audience;
+        const nextEntry: EntryBody = { name: canonical, layer: parsed.layer, kind: command.kind, ...(parsed.layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }), ...(keepAudience === undefined ? {} : { audience: keepAudience }) };
         return {
           ref: vref, creates: true,
           changes: [
@@ -348,7 +422,9 @@ export class CatalogService {
   }
 
   async #setAside(owner: Principal, op: string, command: NoActor & { name: string; version: string; reason: string }, choose: (prior: EntryBody) => string[], mustBeLive = false): Promise<void> {
-    if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner changes which version is chosen`);
+    // A toolbox maintainer (card T08) may do this for a shared entry its grant covers; nothing else but the owner may.
+    const maintainer = owner.kind === "agent" && parseName(command.name)?.layer === "toolbox" && maintainsAnywhere(owner);
+    if (owner.kind !== "owner" && !maintainer) throw new DomainError("forbidden", `${owner.id} is not the owner; only the owner (or, for a shared tool, a holder of ${TOOLBOX_MANAGE}) changes which version is chosen`);
     onlyKnown(command, ["commandId", "name", "version", "reason", "toVersion"]);
     const parsed = parseName(command.name);
     if (parsed === null) invalid("name", "is not a canonical name");
@@ -361,6 +437,7 @@ export class CatalogService {
         const entry = await this.#runner.get(eref.kind, eref.id);
         const prior = entry?.body as unknown as EntryBody | undefined;
         if (entry === undefined || prior === undefined || !prior.versions.includes(command.version)) throw new DomainError("not_found", `${command.name} ${command.version} is not in the catalog`);
+        if (maintainer && (prior.layer !== "toolbox" || !mayManage(owner, prior.audience))) throw new DomainError("forbidden", `${owner.id} may not change ${command.name}: its ${TOOLBOX_MANAGE} does not cover that tool's audience`);
         if (mustBeLive && prior.revoked.includes(command.version)) throw new DomainError("invalid_command", "that version is revoked; roll back to one that is not", { field: "toVersion" });
         const add = choose(prior).filter((v) => !(prior.deprecated ?? []).includes(v));
         const aside = [...(prior.deprecated ?? []), ...add];
@@ -580,7 +657,7 @@ export class CatalogService {
       for (const a of page) {
         after = a.id;
         const e = a.body as unknown as EntryBody;
-        if (!this.#mayReadEntry(by, e)) continue;
+        if (!(await this.#mayReadEntry(by, e))) continue;
         const live = await this.#latestLive(e.name);
         if (live !== undefined) out.push({ name: e.name, kind: e.kind, layer: e.layer, latest: live.body.version });
       }
@@ -598,7 +675,8 @@ export class CatalogService {
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as { projectId?: string } | undefined;
     if (task?.projectId !== projectId) throw new DomainError("forbidden", `${by.id} may not run tools for that task`);
-    const resolved = await this.#resolve(by, command.name, command.version);
+    // A shared tool's audience is judged for the task's project (card T08): an entry for project A does not run in project B.
+    const resolved = await this.#resolve(by, command.name, command.version, projectId);
     if (resolved === undefined) throw new DomainError("forbidden", `${by.id} may not use ${String(command.name).slice(0, 64)}`);
     const v = resolved.version;
     if (v.revoked !== undefined) throw new DomainError("forbidden", `${v.name} ${v.version} was revoked (${v.revoked.reason})`);
@@ -672,7 +750,7 @@ export class CatalogService {
     const found = (await this.#runner.get("catalog-version", versionId))?.body as unknown as VersionBody | undefined;
     if (found === undefined) return false;
     const entry = (await this.#runner.get("catalog-entry", derivedId("cat", found.name)))?.body as unknown as EntryBody | undefined;
-    return entry !== undefined && this.#mayReadEntry(by, entry) && !entry.revoked.includes(found.version);
+    return entry !== undefined && (await this.#mayReadEntry(by, entry)) && !entry.revoked.includes(found.version);
   }
 
   /**
@@ -687,17 +765,203 @@ export class CatalogService {
     return digest === undefined ? undefined : `sha256:${digest}`;
   }
 
+  // ---- shared toolbox (card T08) --------------------------------------------------------------------------------------------
+
+  /**
+   * Sets who a shared entry is for. The owner may set any audience; a holder of `toolbox.manage` only one its grant covers, on an entry whose present audience its grant also covers (so a project
+   * maintainer can neither take over an entry for all agents nor widen one beyond its projects). Changing the entry makes a run being recorded at that moment ask again.
+   */
+  async setAudience(by: Principal, command: NoActor & { name: string; audience: unknown; expectedRevision?: number }): Promise<{ name: string; audience: Audience; revision: number }> {
+    onlyKnown(command, ["commandId", "name", "audience", "expectedRevision"]);
+    if (by.kind !== "owner" && !maintainsAnywhere(by)) throw new DomainError("forbidden", `${by.id} may not change who a shared tool is for (it needs ${TOOLBOX_MANAGE})`);
+    const name = toolboxName(command.name);
+    if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1)) invalid("expectedRevision", "must be a whole number from 1");
+    const audience = await this.#checkAudience(command.audience);
+    if (!mayManage(by, audience)) throw new DomainError("forbidden", `${by.id} may not give a shared tool that audience (its ${TOOLBOX_MANAGE} does not cover it)`);
+    const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", name) };
+    const done = await this.#runner.command("toolbox.audience.set", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { name, audience: audience as unknown as JsonObject, expectedRevision: command.expectedRevision ?? null },
+      build: async () => {
+        const entry = await this.#runner.get(eref.kind, eref.id);
+        const prior = entry?.body as unknown as EntryBody | undefined;
+        if (entry === undefined || prior === undefined || prior.layer !== "toolbox") throw new DomainError("not_found", `${name} is not a shared tool`);
+        if (!mayManage(by, prior.audience)) throw new DomainError("forbidden", `${by.id} may not change ${name}: its ${TOOLBOX_MANAGE} does not cover that tool's present audience`);
+        if (command.expectedRevision !== undefined && entry.revision !== command.expectedRevision) throw new DomainError("stale_revision", `${name} is at revision ${entry.revision}, not ${command.expectedRevision}`, { currentRevision: entry.revision });
+        const next: EntryBody = { ...prior, audience };
+        return { ref: eref, creates: false, changes: [{ type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name, audience: audienceWords(audience), before: audienceWords(prior.audience) }, contention: async () => new DomainError("stale_revision", `${name} changed at the same moment; ask again`) };
+      },
+    }));
+    return { name, audience, revision: done.revision };
+  }
+
+  /**
+   * The shared entries the reader may see (its audience), with what a reader needs to choose one: the version chosen now, every live version, the platforms and interpreter it declares (so an
+   * incompatibility is visible before anyone runs it), its purpose and its audience. `maintainable` says whether the reader may change it.
+   */
+  async toolbox(by: Principal): Promise<{ items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean }[]; partial?: true }> {
+    const items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean }[] = [];
+    let scanned = 0;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const e = a.body as unknown as EntryBody;
+        if (e.layer !== "toolbox" || !(await this.#mayReadEntry(by, e))) continue;
+        const live = await this.#latestLive(e.name);
+        if (live === undefined) continue;
+        const m = live.body.manifest;
+        items.push({ name: e.name, kind: e.kind, latest: live.body.version, versions: e.versions.filter((v) => !e.revoked.includes(v)).sort(compare), purpose: m.purpose, os: m.os, arch: m.arch, ...(m.interpreter === undefined ? {} : { interpreter: m.interpreter }), audience: e.audience ?? { all: true }, maintainable: mayManage(by, e.audience) });
+      }
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) return { items, partial: true };
+    }
+    return { items: items.sort((x, y) => (x.name < y.name ? -1 : 1)) };
+  }
+
+  /**
+   * The read-only source of a version the reader may see (a shared one in its audience, its own personal one): manifest, instructions and executable text, checked against the recorded digests.
+   * Needs no manage permission. Nothing else is shown: no desk record IDs of the author's other work, no history, no paths beyond the manifest's own entry point.
+   */
+  async source(by: Principal, name: string, version?: string): Promise<{ name: string; version: string; kind: ArtifactKind; digest: string; manifest: Manifest; author: string; instructions: string; executable?: string; copiedFrom?: CopiedFrom; revoked?: { reason: string; at: string } }> {
+    const canonical = parseName(name) !== null ? name : toolboxName(name);
+    const resolved = await this.#resolve(by, canonical, version);
+    if (resolved === undefined) throw new DomainError("not_found", `no tool ${String(name).slice(0, 64)} you may read`);
+    const v = resolved.version;
+    const instructions = await this.content(by, v.name, v.version, "instructions");
+    const executable = v.executable === undefined ? undefined : await this.content(by, v.name, v.version, "executable");
+    return { name: v.name, version: v.version, kind: v.kind, digest: v.digest, manifest: v.manifest, author: v.instructional.author, instructions, ...(executable === undefined ? {} : { executable }), ...(v.copiedFrom === undefined ? {} : { copiedFrom: v.copiedFrom }), ...(v.revoked === undefined ? {} : { revoked: { reason: v.revoked.reason, at: v.revoked.at } }) };
+  }
+
+  /**
+   * Copies an exact shared version into the agent's own namespace (card T08): a new personal entry `a_<id>.<as>` whose version keeps the shared tool's name, version and digest as provenance and the
+   * same recorded sources. The copy is independent: a later shared release does not change it, the shared entry's audience no longer applies to it, and it inherits no grant (running it needs a grant
+   * naming the copy), approval or credential. It never takes the shared name: `/toolbox.<name>` stays bound to the shared release. The copy is recorded in the shared entry's fork lineage.
+   */
+  async copy(by: Principal, command: NoActor & { name: string; version?: string; as: string; copyVersion?: string }): Promise<{ versionId: string; name: string; version: string; digest: string; copiedFrom: CopiedFrom }> {
+    onlyKnown(command, ["commandId", "name", "version", "as", "copyVersion"]);
+    if (by.kind !== "agent" || !allows(by, "catalog.register", undefined)) throw new DomainError("forbidden", `${by.id} may not keep personal tools (it needs catalog.register)`);
+    const source = toolboxName(command.name);
+    if (command.version !== undefined && (typeof command.version !== "string" || !VERSION.test(command.version))) invalid("version", "must be major.minor.patch");
+    const version = command.copyVersion ?? "1.0.0";
+    if (typeof version !== "string" || !VERSION.test(version)) invalid("copyVersion", "must be major.minor.patch");
+    const canonical = `${personalNamespace(by.id)}.${typeof command.as === "string" ? command.as : ""}`;
+    const parsed = parseName(canonical);
+    if (parsed === null || parsed.layer !== "agent") return invalid("as", "must be lower-case letters, digits and single hyphens, at most 28 characters");
+    const resolved = await this.#resolve(by, source, command.version);
+    if (resolved === undefined) throw new DomainError("not_found", `no shared tool ${source}${command.version === undefined ? "" : ` ${command.version}`} you may read`);
+    const base = resolved.version;
+    if (base.revoked !== undefined) throw new DomainError("invalid_command", `${base.name} ${base.version} was revoked (${base.revoked.reason}); copy a version that is not`, { field: "version" });
+    // The recorded text must still be exactly what was released, so the copy is of the released bytes.
+    const sources = [base.instructional, ...(base.executable === undefined ? [] : [base.executable])];
+    const records = new Map<string, number>();
+    for (const s of sources) {
+      const live = await this.#runner.get("desk-record", s.recordId);
+      const body = live?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
+      if (live === undefined || body === undefined || body.deleted !== undefined || typeof body.body !== "string" || sha(body.body) !== s.digest || live.revision !== s.revision) throw new DomainError("invalid_command", `${base.name} ${base.version}: its recorded text is no longer as released, so it cannot be copied`);
+      records.set(s.recordId, live.revision);
+    }
+    const copiedFrom: CopiedFrom = { name: base.name, version: base.version, digest: base.digest };
+    const body: Omit<VersionBody, "digest"> = { name: canonical, layer: "agent", kind: base.kind, version, manifest: base.manifest, instructional: base.instructional, ...(base.executable === undefined ? {} : { executable: base.executable }), copiedFrom, registeredBy: by.id, registeredAt: this.#runner.now() };
+    const { registeredBy: _by, registeredAt: _at, ...identity } = body;
+    void _by; void _at;
+    const digest = sha(canonicalJson(identity as unknown as JsonObject));
+    const full: VersionBody = { ...body, digest };
+    const entryId = derivedId("cat", canonical);
+    const versionId = versionIdOf(canonical, version);
+    const sref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", base.name) };
+    const fref: AggregateRef = { kind: "catalog-forks", id: derivedId("cfk", base.name) };
+    await this.#runner.command("toolbox.copy", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { source: base.name, baseVersion: base.version, name: canonical, version, digest },
+      build: async () => {
+        const entry = await this.#runner.get("catalog-entry", entryId);
+        const prior = entry?.body as unknown as EntryBody | undefined;
+        if (prior !== undefined && prior.owner !== by.id) throw new DomainError("forbidden", "that name belongs to another agent");
+        if (prior !== undefined && prior.kind !== base.kind) throw new DomainError("invalid_command", `${canonical} is a ${prior.kind}; a name keeps its kind`, { field: "as" });
+        // The shared entry must still be as it was read (not revoked in between), and the lineage gains this copy in the same write.
+        const shared = await this.#runner.get(sref.kind, sref.id);
+        if (shared === undefined || (shared.body as unknown as EntryBody).revoked.includes(base.version)) throw new DomainError("invalid_command", `${base.name} ${base.version} was revoked`, { field: "version" });
+        const vref: AggregateRef = { kind: "catalog-version", id: versionId };
+        const existing = await this.#runner.get(vref.kind, vref.id);
+        if (existing !== undefined) {
+          if ((existing.body as unknown as VersionBody).digest !== digest) throw new DomainError("invalid_command", `${canonical} ${version} already exists with different content (versions are immutable); name a higher copyVersion`, { field: "copyVersion" });
+          return { ref: vref, creates: false, changes: [{ type: "check", ref: vref, expectedRevision: existing.revision }], detail: { name: canonical, version, existing: true } };
+        }
+        if (prior !== undefined && compare(version, prior.latest) <= 0) throw new DomainError("invalid_command", `${canonical} is at ${prior.latest}; name a higher copyVersion`, { field: "copyVersion" });
+        if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
+        const forks = await this.#runner.get(fref.kind, fref.id);
+        const lineage = (forks?.body as unknown as ForkBody | undefined)?.forks ?? [];
+        if (lineage.length >= CATALOG_LIMITS.forks) throw new DomainError("unavailable", `${base.name} already has ${CATALOG_LIMITS.forks} recorded copies`);
+        const nextForks: ForkBody = { name: base.name, forks: [...lineage, { copy: canonical, version, owner: by.id, baseVersion: base.version, baseDigest: base.digest, at: this.#runner.now() }] };
+        const nextEntry: EntryBody = { name: canonical, layer: "agent", kind: base.kind, owner: by.id, latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }) };
+        const eref: AggregateRef = { kind: "catalog-entry", id: entryId };
+        return {
+          ref: vref, creates: true,
+          changes: [
+            { type: "create", ref: vref, body: full as unknown as JsonObject },
+            ...[...records].map(([id, revision]) => ({ type: "check" as const, ref: { kind: "desk-record", id }, expectedRevision: revision })),
+            { type: "check", ref: sref, expectedRevision: shared.revision },
+            forks === undefined ? { type: "create", ref: fref, body: nextForks as unknown as JsonObject } : { type: "update", ref: fref, expectedRevision: forks.revision, body: nextForks as unknown as JsonObject },
+            entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
+          ],
+          detail: { name: canonical, version, source: base.name, baseVersion: base.version },
+          contention: async () => new DomainError("stale_revision", `${base.name} or ${canonical} changed at the same moment; copy again`),
+        };
+      },
+    }));
+    return { versionId, name: canonical, version, digest, copiedFrom };
+  }
+
+  /**
+   * The agent's own copies of shared tools, newest version of each, with what has happened to the shared version each was copied from: revoked (with the reason and when: the revocation notice a fork
+   * receives) and the version the shared tool is at now, when the agent may still see it (a later shared release is never applied to a copy; the agent compares and copies again if it wants it).
+   */
+  async copies(by: Principal): Promise<{ items: { name: string; version: string; copiedFrom: CopiedFrom; baseRevoked?: { reason: string; at: string }; sharedLatest?: string; newerShared: boolean }[]; partial?: true }> {
+    if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} has no personal tools`);
+    const items: { name: string; version: string; copiedFrom: CopiedFrom; baseRevoked?: { reason: string; at: string }; sharedLatest?: string; newerShared: boolean }[] = [];
+    let scanned = 0; let partial = false;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const e = a.body as unknown as EntryBody;
+        if (e.layer !== "agent" || e.owner !== by.id) continue;
+        const newest = [...e.versions].sort(compare).reverse()[0];
+        const v = newest === undefined ? undefined : (await this.#runner.get("catalog-version", versionIdOf(e.name, newest)))?.body as unknown as VersionBody | undefined;
+        if (v?.copiedFrom === undefined) continue;
+        const shared = (await this.#runner.get("catalog-entry", derivedId("cat", v.copiedFrom.name)))?.body as unknown as EntryBody | undefined;
+        const revoked = shared !== undefined && shared.revoked.includes(v.copiedFrom.version) ? (await this.#runner.get("catalog-revocation", versionIdOf(v.copiedFrom.name, v.copiedFrom.version)))?.body as unknown as RevocationBody | undefined : undefined;
+        const visible = shared !== undefined && (await this.#mayReadEntry(by, shared)) ? (await this.#latestLive(shared.name))?.body.version : undefined;
+        items.push({ name: e.name, version: v.version, copiedFrom: v.copiedFrom, ...(revoked === undefined ? {} : { baseRevoked: { reason: revoked.reason, at: revoked.at } }), ...(visible === undefined ? {} : { sharedLatest: visible }), newerShared: visible !== undefined && compare(visible, v.copiedFrom.version) > 0 });
+      }
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) { partial = true; break; }
+    }
+    return { items: items.sort((x, y) => (x.name < y.name ? -1 : 1)), ...(partial ? { partial: true as const } : {}) };
+  }
+
+  /** The fork lineage of a shared entry (the owner, or a maintainer whose grant covers its audience): each copy, whose it is, which base version, and whether that base has since been revoked. */
+  async forks(by: Principal, name: string): Promise<{ name: string; forks: (ForkBody["forks"][number] & { baseRevoked: boolean })[] }> {
+    const canonical = toolboxName(name);
+    const entry = (await this.#runner.get("catalog-entry", derivedId("cat", canonical)))?.body as unknown as EntryBody | undefined;
+    if (entry === undefined || entry.layer !== "toolbox" || !(await this.#mayReadEntry(by, entry))) throw new DomainError("not_found", `${canonical} is not a shared tool you may read`);
+    if (!mayManage(by, entry.audience)) throw new DomainError("forbidden", `${by.id} may not read who copied ${canonical} (it needs ${TOOLBOX_MANAGE} covering that tool's audience)`);
+    const lineage = ((await this.#runner.get("catalog-forks", derivedId("cfk", canonical)))?.body as unknown as ForkBody | undefined)?.forks ?? [];
+    return { name: canonical, forks: lineage.map((f) => ({ ...f, baseRevoked: entry.revoked.includes(f.baseVersion) })) };
+  }
+
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   /**
    * The source of a version. An agent registers only its own accepted original work (the desk refuses another desk's content and copies of it). The owner, releasing a shared or system version,
    * takes an agent's accepted, shared (not private) original record, never a draft or a copy; the author stays recorded, and the release is a separate version with its own digest.
    */
-  async #source(by: Principal, recordId: string): Promise<SourceRef> {
-    if (by.kind !== "owner") {
+  async #source(by: Principal, recordId: string, maintainer = false): Promise<SourceRef> {
+    if (by.kind !== "owner" && !maintainer) {
       const found = await this.#desks.executableSource(by, recordId);
       return { recordId: found.id, revision: found.revision, digest: sha(found.body), author: by.id };
     }
+    // A maintainer (card T08) releases only a record the desk lets it read; the rules below (accepted, shared, original) are the owner's own.
+    if (maintainer) await this.#desks.read(by, recordId);
     const found = typeof recordId === "string" && /^dsk-[a-z2-7]{20}$/.test(recordId) ? await this.#runner.get("desk-record", recordId) : undefined;
     const record = found?.body as unknown as { owner: string; status: string; visibility: string; body: string; origin?: unknown; copiedFrom?: unknown } | undefined;
     if (found === undefined || record === undefined) throw new DomainError("not_found", "no such record");
@@ -708,10 +972,67 @@ export class CatalogService {
     return { recordId: found.id, revision: found.revision, digest: sha(record.body), author: record.owner };
   }
 
-  #mayReadEntry(by: Principal, e: EntryBody): boolean {
+  async #mayReadEntry(by: Principal, e: EntryBody, projectId?: string): Promise<boolean> {
     if (by.kind === "owner") return true;
     if (e.layer === "agent") return e.owner === by.id;
-    return allows(by, "catalog.read", undefined);
+    if (!allows(by, "catalog.read", undefined)) return false;
+    if (e.layer !== "toolbox") return true;
+    // A maintainer whose grant covers the entry sees and reads it; a run (`projectId` given) still needs the audience.
+    return (projectId === undefined && mayManage(by, e.audience)) || this.#inAudience(by, e.audience, projectId);
+  }
+
+  /**
+   * Whether an agent belongs to a shared entry's audience (card T08). Roles and team come from the agent record behind the principal's durable identity (`agent:<ID>`), so a rename changes nothing and a
+   * retired agent belongs to nothing. A project audience counts a grant naming that project exactly (a grant for every project is not membership of each), and for a run (`projectId` given) only that project.
+   */
+  async #inAudience(by: Principal, audience: Audience | undefined, projectId?: string): Promise<boolean> {
+    if (by.kind === "owner" || audience === undefined || audience.all === true) return true;
+    if (by.kind !== "agent") return false;
+    const projects = audience.projects ?? [];
+    if (projectId !== undefined ? projects.includes(projectId) : projects.some((p) => holdsIn(by, p))) return true;
+    if ((audience.roles ?? []).length === 0 && (audience.teams ?? []).length === 0) return false;
+    const agent = by.id.startsWith("agent:") ? (await this.#runner.get("agent", by.id.slice("agent:".length)))?.body as unknown as { roles?: readonly string[]; teamId?: string; state?: string; principalId?: string } | undefined : undefined;
+    if (agent === undefined || agent.state !== "active" || agent.principalId !== by.id) return false;
+    return (agent.roles ?? []).some((r) => (audience.roles ?? []).includes(r)) || (agent.teamId !== undefined && (audience.teams ?? []).includes(agent.teamId));
+  }
+
+  /** Checks an audience and stores it by durable identity: roles by name (they must be defined), teams and projects by ID or by their exact name (exactly one must match; a name that matches several is refused). */
+  async #checkAudience(value: unknown): Promise<Audience> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid("audience", "must say all, roles, teams or projects");
+    const a = value as Record<string, unknown>;
+    onlyKnown(a, ["all", "roles", "teams", "projects"]);
+    if (a["all"] !== undefined) {
+      if (a["all"] !== true) invalid("audience.all", "must be true when given");
+      if (a["roles"] !== undefined || a["teams"] !== undefined || a["projects"] !== undefined) invalid("audience", "all agents stands alone; leave roles, teams and projects out");
+      return { all: true };
+    }
+    const words = (field: string): string[] => {
+      const raw = a[field] ?? [];
+      if (!Array.isArray(raw) || raw.length > CATALOG_LIMITS.audience || raw.some((x) => typeof x !== "string" || x.length < 1 || x.length > 120)) invalid(`audience.${field}`, `must be a list of at most ${CATALOG_LIMITS.audience} names`);
+      return [...new Set(raw as string[])];
+    };
+    const roles: string[] = [];
+    for (const r of words("roles")) {
+      if (!ROLE_NAME.test(r) || (await this.#runner.get("role", r)) === undefined) invalid("audience.roles", `role ${quote(r)} is not defined`);
+      roles.push(r);
+    }
+    const byName = async (kind: "team" | "project", id: RegExp, v: string, field: string): Promise<string> => {
+      if (id.test(v)) return (await this.#runner.get(kind, v)) !== undefined ? v : invalid(field, `${kind} ${quote(v)} does not exist`);
+      const hits: string[] = []; let scanned = 0;
+      for (let after: string | undefined; ;) {
+        const page = await this.#runner.list(kind, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+        for (const p of page) { after = p.id; scanned += 1; if ((p.body as { name?: unknown }).name === v) hits.push(p.id); }
+        if (page.length < 200) break;
+        if (scanned >= CATALOG_LIMITS.scan) return invalid(field, `too many ${kind}s to find ${quote(v)} by name; give its ID`);
+      }
+      if (hits.length !== 1) invalid(field, hits.length === 0 ? `no ${kind} is called ${quote(v)}` : `several ${kind}s are called ${quote(v)}; give its ID`);
+      return hits[0]!;
+    };
+    const teams: string[] = []; for (const t of words("teams")) teams.push(await byName("team", TEAM_ID, t, "audience.teams"));
+    const projects: string[] = []; for (const p of words("projects")) projects.push(await byName("project", PROJECT_ID, p, "audience.projects"));
+    if (roles.length + teams.length + projects.length === 0) invalid("audience", "must name all agents, or at least one role, team or project");
+    const sorted = (x: string[]): string[] => [...new Set(x)].sort();
+    return { ...(roles.length === 0 ? {} : { roles: sorted(roles) }), ...(teams.length === 0 ? {} : { teams: sorted(teams) }), ...(projects.length === 0 ? {} : { projects: sorted(projects) }) };
   }
 
   /** The highest published version that is neither revoked nor set aside. */
@@ -727,11 +1048,11 @@ export class CatalogService {
     return undefined;
   }
 
-  async #resolve(by: Principal, name: string, version?: string): Promise<{ version: View<VersionBody> & { revoked?: RevocationBody } } | undefined> {
+  async #resolve(by: Principal, name: string, version?: string, projectId?: string): Promise<{ version: View<VersionBody> & { revoked?: RevocationBody } } | undefined> {
     const parsed = parseName(name);
     if (parsed === null) return undefined;
     const entry = (await this.#runner.get("catalog-entry", derivedId("cat", parsed.canonical)))?.body as unknown as EntryBody | undefined;
-    if (entry === undefined || !this.#mayReadEntry(by, entry)) return undefined;
+    if (entry === undefined || !(await this.#mayReadEntry(by, entry, projectId))) return undefined;
     let id: string;
     if (version === undefined) {
       const live = await this.#latestLive(parsed.canonical);

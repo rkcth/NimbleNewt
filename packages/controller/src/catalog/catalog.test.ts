@@ -103,8 +103,8 @@ for (const backend of backends) {
     await c.cat.register(c.ann, { commandId: cid("r"), name: "fetch", kind: "skill", version: "2.0.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: note2 });
     assert.equal((await c.cat.get(c.ben, "toolbox.fetch"))!.version, "1.0.0");
     assert.equal((await c.cat.get(c.ben, "toolbox.fetch"))!.digest, shared.digest, "the shared release did not move");
-    // An agent cannot register shared or system names, or another agent's namespace.
-    await refuses("invalid_command", () => c.cat.register(c.ann, { commandId: cid("r"), name: "toolbox.evil", kind: "skill", version: "1.0.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: note }));
+    // An agent cannot register shared or system names, or another agent's namespace. (Card T08: a shared name from an agent is the maintainer path, refused without toolbox.manage.)
+    await refuses("forbidden", () => c.cat.register(c.ann, { commandId: cid("r"), name: "toolbox.evil", kind: "skill", version: "1.0.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: note }));
     await refuses("invalid_command", () => c.cat.register(c.ann, { commandId: cid("r"), name: `${personalNamespace(c.ben.id)}.evil`, kind: "skill", version: "1.0.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: note }));
     await refuses("invalid_command", () => c.cat.register(c.owner, { commandId: cid("r"), name: mine.name, kind: "skill", version: "9.0.0", manifest: manifest({ entryPoint: undefined, interpreter: undefined }), instructionsRecordId: ownerNote.id }));
     // Visibility.
