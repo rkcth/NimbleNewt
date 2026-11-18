@@ -13398,3 +13398,51 @@ Reviewed with a clean context and fixed on the branch; card not flipped, nothing
 - **Added: a seeded property test** (`arg-clean.test.mjs`) comparing the bench copy with the adapter's build on 20 000 generated inputs (escapes, raw halves, pairs in every form, backslashes, broken JSON, keys): both agree on text, counts and payload; the result is well-formed and strict; cleaning again changes nothing; already strict input and a payload needing nothing come back unchanged. Before the two fixes it found both. Exact cases for both fixes in both suites.
 - Checked, no change needed: escapes inside a string that is itself JSON (a `\\ud800` written out) are left alone; key order, number formatting and duplicate keys inside arguments text are untouched (the text is only edited at a replaced escape); the caller's `onPayload` sees the body before the repair, which is intended (anything it adds is cleaned too) and no production caller passes one; the repair runs on `streamSimple` and on `completeSimple`, the only two model calls pi-durable makes; prompt-cache keys and the prefix tracker are computed from the context, not the body, so a body that needs nothing is byte-for-byte as before; tool executions get the arguments as the model sent them. Five megabyte inputs take at most about a second in either copy (linear).
 - Limits kept: only the OpenAI chat and responses shapes are read as arguments text (Mistral's and Google's carry them elsewhere and get only the raw-surrogate rule); containers deeper than 64 levels are not walked. That Radiance accepts `�` in place of the escapes is still inferred from JSON's rule, not seen.
+
+## W01 batch 2 on Radiance, after W01b: stopped after its second run on a contamination flag (Claude agent, Opus 5.5, 2026-11-18)
+
+Card W01 stays planned. Branch `card-w01-batch2` off origin/main `f5b8390b` (the W01b merge); bench commit `f5b8390b`; Radiance `qwen3.8-flash-next-iq4r`, thinking medium, server 2.1.0. Rob ended the Radiance maintenance window. Rules followed: one request at a time (the bench's own gate plus one read of `/stats` by the driver before each run), nothing loaded, unloaded, switched or restarted, the key read only from Pi's configuration and only put in an Authorization header (never printed), the bench's builds and grading through `--test-slot /tmp/nn-slot.sh`, the build and self-tests through `/tmp/nn-slot.sh`.
+
+**Gate and self-tests before the first model request.** `/stats` at 00:01:41 UTC: in_flight, running and waiting 0, total_requests 300 (the same count as after the night batch, so nothing had used the server since). `scripts/pi-eval/isolation.test.mjs` 16 of 16 passed and `arg-clean.test.mjs` 12 of 12 (offline guard, `NIMBLENEWT_REQUIRE_SANDBOX=1`, none skipped). `--dry-run` reported bubblewrap isolation (owner's folders hidden, file system read-only, `/tmp` and `/run` private, no network but the model route), Radiance gate on, token budget 6,000,000.
+
+**Plan (12 runs, each its own one-run `run.mjs` invocation, the same plan as the night batch).** Variant B on the three medium tasks, variant A on the same three, variant A on the three small tasks, variant B on the three large tasks; 1 repeat each, the task's own limit (M 120, S 60, L 180 min). A driver ran them in order and was to stop, without retrying, after a run that was contaminated, not isolated, had no `argClean` (the extension not loaded), ended in an outcome that is not a normal task ending (`error`, `server-rejected-history`, `unclassified`), was not recorded, or if `/stats` answered other than 200 or stayed busy past 10 one-minute retries.
+
+### Results
+
+| # | batch | task (size), variant | outcome | agent time | turns / tool calls | tokens (input / output / cache read) | acceptance tests | PLAN.md | argClean | isolation / contaminated |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `batch-20261118T000234` | landing-proposal (M), B | **verified finish** (done claim "done") | 25.5 min | 137 / 141 | 358,387 / 86,092 / 13.3M | 28 of 28 pass, build ok | 7 of 7 | present, not applied (137 requests, 0 changed, 0 errors) | isolated / no |
+| 2 | `batch-20261118T002912` | c07n (M), B | verified finish, but **contaminated**: left out of the table and the gates | 29.6 min | 215 / 225 | 504,691 / 109,258 / 19.8M | 16 of 16 pass, build ok | 8 of 8 | present, not applied (215 requests, 0 changed, 0 errors) | isolated / **yes** |
+
+- **Run 1** is the first verified finish of a medium task under the W06 completion rules. It is also the night batch's run (landing-proposal B) done again: that run was refused by the server at its 35th request; this one made 137 requests with no refusal. Shipped wording (informational) 12 of 34.
+- **Run 2: why it was flagged.** At tool call 220 of 225, after its work was done and while deciding whether to commit PLAN.md, the agent ran `ls /srv/code/worktrees-pi/eval-work/` and a loop over `/srv/code/worktrees-pi/eval-work/eval-c07*-r1-*` (its own reasoning: "In prior eval worktrees, PLAN.md is untracked. Let me check other eval worktrees to see the convention."). The detector (`foreignPaths` in `lib/runner.mjs`) flagged the parent folder and the glob, as designed. The listing's output shows only the run's own checkout (runs go one at a time and each checkout is removed after its run), and the held-back tests were not in the checkout until after the agent ended, so nothing was read from another run or a solution; but the rule says stop, so the batch was stopped there and not resumed. The agent also committed its work (`df9bdf72`) although the W06 rules say not to commit; the bench scores the checkout as it stands either way. Shipped wording 51 of 74.
+- **Not started:** the other 10 runs (phrase-hints B; landing-proposal, c07n, phrase-hints A; quote-lines, flaky-proposal, grant-proposals A; m03h-1, l02e-2, c07m B).
+- **Server.** `/stats` 200 in about 35 ms on every read; idle before each run and afterwards (00:59:56 UTC, total_requests 654). total_requests went 300 to 438 over run 1 (137 agent requests, so one other request) and 438 to 654 over run 2 (215, so one other). No 4xx or 5xx reached the agent in either run. No `pi-eval-iso-*` folder, checkout or bench process left afterwards. Batch reports: `/srv/code/worktrees-pi/eval-results/batch-20261118T000234-report.md` and `batch-20261118T002912-report.md`.
+
+### Gates (this batch, contaminated run left out, as the report does)
+
+- Variant B medium verified finish **1 of 1** (100 %, 95 % interval 21 % to 100 %; gate 85 %: met, but the interval reaches far below it). Counting the contaminated run, which would otherwise be a verified finish, it would be 2 of 2; it is not counted.
+- False done **0 of 1** (gate at most 5 %; interval 0 to 79 %). Unclassified 0. Small and large not measured, so the batch's report prints `RESULT: FAIL` (B: S and L not measured), not a failure of a measured rate.
+- **False-done count tonight: 0** (0 of 2 runs, including the contaminated one).
+
+### Against the old baselines (unchanged; nothing was added to them)
+
+- The 30-run baseline of 2026-11-10/11 (batches `batch-20261110T165811` and `batch-20261111T130627`): A small 6 of 9, A medium 6 of 7; old B (plan and commit per step) small 4 of 9, old B medium 3 of 5; false done A 0 of 16, old B 1 of 14.
+- This morning's W06 B small reading (`batch-20261117T064116`): 2 of 6 verified, 2 false done, 2 timeouts (1 with passing tests at the limit); FAIL on both gates.
+- The night batch (`batch-20261117T230051`): 1 run, landing-proposal B, recorded `error` (the W01b classifier would name that ending `server-rejected-history`; the record was not rescored), 0 of 1.
+- W06 B medium, all clean readings so far: 1 of 2 (the night run's server refusal and tonight's finish). Not a rate.
+
+### U+FFFD: still not shown
+
+`argClean.applied` was false in both runs: no request needed repairing (0 of 352 requests changed), so no request carrying U+FFFD in place of a lone-surrogate escape reached Radiance. **Whether Radiance accepts the cleaned history is still unproven.** What tonight does show: the extension loaded in the real sandboxed Pi (`argClean` written with request counts equal to the turns in both runs, 0 errors) and it passed every request through unchanged. The lone surrogate of the night run came from one specific model output (an `edit` call whose `edits` was a JSON string holding a `\ud800`-style escape); it did not recur in either run.
+
+### Not proven / not measured
+
+- Radiance's handling of U+FFFD in the history (above).
+- Any rate: 1 counted run. Medium B on phrase-hints; the same-day A rerun (medium and small); large B; more tasks per size.
+- Whether agents looking into the bench's work folder is common. It was harmless here only because runs go one at a time and the hidden tests come in after the agent ends; with `--concurrency` above 1 the same glob would have listed another run's checkout. Hiding `eval-work` (except the run's own checkout) from the sandbox with `--hide`, or a work root the agent cannot list, would turn this from detection into prevention; not done here (bench change, separately scoped).
+
+- ASSUMPTION: a contaminated flag stops the batch even when the run's own log shows it read nothing from another run, because tonight's rules say stop on any contaminated run and the judgement of "harmless" is mine, not the detector's. The other 10 runs can be started by the next driver with the same plan and commands.
+- ASSUMPTION: the per-run token budget (6,000,000 per one-run batch, as in the night batch) is a guard against one runaway run, not a budget for the night; both runs used well under it (444,479 and 613,949 input+output).
+- ASSUMPTION: run identifiers are given here by batch only, since full run folder names have tripped the secret scanner on these notes before.
+- **Checks on this change:** `security/secret-scan.test` 12 of 12 over these notes (offline guard, through `/tmp/nn-slot.sh`); a substring count of the Radiance key over these notes, the driver's logs and both runs' folders found it 0 times.
