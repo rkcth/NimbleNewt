@@ -26,6 +26,7 @@
         ],
         "win32": [
           "worker/sandbox/windows",
+          "worker/sandbox/windows-host-real",
           "worker/sandbox/windows-real"
         ]
       },

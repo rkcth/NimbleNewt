@@ -455,6 +455,11 @@ describe("Windows launcher: planning a job", () => {
     assert.ok(jobDir.toLowerCase().startsWith(`${CONTROL.toLowerCase()}\\jobs\\`));
     assert.equal(plan.cwd, CONTROL);
     assert.equal(plan.env["NIMBLENEWT_WSB_JOB"], jobDir);
+    // The runner gets the system's own folders and a temporary folder of the supervisor's (its PowerShell probes compile a type there), and nothing of the user's.
+    assert.deepEqual(Object.keys(plan.env).sort(), ["NIMBLENEWT_WSB_JOB", "ProgramData", "ProgramFiles", "SystemDrive", "SystemRoot", "TEMP", "TMP"]);
+    assert.equal(plan.env["TEMP"], `${CONTROL}\\tmp`);
+    assert.equal(plan.env["TMP"], `${CONTROL}\\tmp`);
+    assert.ok(host.exists(`${CONTROL}\\tmp`), "the runner's temporary folder exists before it starts");
     assert.equal(job.settings.mode, "owner-session");
     assert.deepEqual(job.command, COMMAND);
     // None of the folders the guest gets reaches the control directory, the runner or the staging of another job.
