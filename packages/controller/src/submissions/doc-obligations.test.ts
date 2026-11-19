@@ -226,13 +226,15 @@ for (const backend of backends) {
       const rolesOf = async (id: string): Promise<string[]> => roles.get(id) ?? [];
       const qa = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf }, moving);
       let failReady = false;
+      let failAssign = false;
       const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
         rolesOf,
         gate: (by, sub) => qa.gate(by, sub),
         newestChecked: async (by, t) => (await qa.list(by, t)).items.find((e) => e.source === "independent")?.submissionId,
         // Making an update task ready fails once, as a crash between the steps of opening it would.
         projects: { createTask: (c) => projects.createTask(c), transitionTask: async (c) => { if (failReady) { failReady = false; throw new Error("stopped between steps"); } return projects.transitionTask(c); } },
-        assignments,
+        // Assigning an update task fails once the same way: the task is left ready with no assignment.
+        assignments: { assignTask: async (c) => { if (failAssign) { failAssign = false; throw new Error("stopped between steps"); } return assignments.assignTask(c); } },
       }, moving);
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
@@ -276,8 +278,16 @@ for (const backend of backends) {
       // The same command ID with other arguments is refused even when nothing new is to be written, for the impact check and the release check alike.
       await refuses("command_conflict", () => docs.impact(owner, { commandId: "impact-a", taskId: login, submissionId: sub1 }));
       assert.equal((await docs.impact(owner, { commandId: "impact-a", taskId: login, submissionId: sub2 })).replayed, true, "the same command again is a replay");
-      await docs.release(owner, { commandId: "rel-a", projectId: project, version: "2.0" });
+      // The release's update task is made ready but the assignment step stops; the exact repeat is a replay and finishes it.
+      failAssign = true;
+      await assert.rejects(() => docs.release(owner, { commandId: "rel-a", projectId: project, version: "2.0" }), /stopped between steps/);
       await refuses("command_conflict", () => docs.release(owner, { commandId: "rel-a", projectId: project, version: "1.0" }));
+      const unassigned = (await get(page.id)).updates.filter((u) => u.state === "open").map((u) => u.taskId).find((t) => t !== half)!;
+      assert.equal(((await runner.get("task", unassigned))?.body as unknown as { state: string }).state, "ready");
+      assert.equal(await runner.get("assignment", assignmentIdOf(unassigned)), undefined);
+      const again = await docs.release(owner, { commandId: "rel-a", projectId: project, version: "2.0" });
+      assert.deepEqual([again.replayed, again.flagged, again.tasks], [true, [], [{ obligationId: page.id, taskId: unassigned, assigned: true }]], "the repeat assigns the ready, unassigned update task");
+      assert.equal(((await runner.get("assignment", assignmentIdOf(unassigned)))?.body as unknown as { owner: { id: string } }).owner.id, "dora");
 
       // Re-recording the flagged document with another claim makes it unverified but keeps what flagged it: the old code, the old version and the old document change still do not verify it.
       const flagged = await get(page.id);
