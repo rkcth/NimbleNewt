@@ -9,7 +9,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { packageFromProbe, signatureFromProbe } from "./windows-real.js";
+import { ownerFromProbe, packageFromProbe, signatureFromProbe } from "./windows-real.js";
 import { MICROSOFT_STORE_PUBLISHER_ID, SANDBOX_PACKAGES, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
@@ -76,6 +76,9 @@ class SimHost implements WindowsHost {
   async autologon(): Promise<WindowsAutologon> { return this.auto; }
   async lockTask(): Promise<WindowsLockTask> { return this.task; }
   async writableBy(path: string): Promise<readonly string[]> { return this.writable.get(key(path)) ?? []; }
+  /** Each path's owner by SID; SYSTEM unless set. */
+  owners = new Map<string, string>();
+  async ownerSid(path: string): Promise<string> { return this.owners.get(key(path)) ?? "S-1-5-18"; }
   async run(file: string, args: readonly string[], options: { cwd?: string }): Promise<ProcessResult> {
     this.runs.push({ file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
     if (file.toLowerCase().endsWith("\\icacls.exe")) return this.icacls(args);
@@ -249,6 +252,17 @@ describe("Windows launcher: pure rules", () => {
     assert.deepEqual(parseIcaclsWritable(more, "C:\\x").sort(), ["NT AUTHORITY\\LOCAL SERVICE", "NT-AUTORITÄT\\SYSTEM", "PC\\erin", 'unrecognised entry "BUILTIN\\\\Guests:(OI)(CI)(F) (Exists WIN://SYSAPPID)"']);
     const clean = ["C:\\x NT SERVICE\\TrustedInstaller:(F)", "      NT AUTHORITY\\SYSTEM:(OI)(CI)(RX)", "      BUILTIN\\Administrators:(OI)(CI)(RX)", "      BUILTIN\\Users:(OI)(CI)(RX)", "      APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(OI)(CI)(RX)", "Successfully processed 1 files; Failed processing 0 files"].join("\r\n");
     assert.deepEqual(parseIcaclsWritable(clean, "C:\\x"), []);
+
+    // Fails closed on output it cannot read: no entry at all (empty output, only the path, only a summary), or any other text among the entries (before the blank line that
+    // separates them from the summary) is reported, never read as "nobody else can write". Text after that blank line that is not entry-like is the summary and is ignored.
+    for (const empty of ["", "\r\n", "C:\\x\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files", "Successfully processed 1 files; Failed processing 0 files"]) {
+      assert.deepEqual(parseIcaclsWritable(empty, "C:\\x"), ["no access entry could be read"], JSON.stringify(empty));
+    }
+    assert.deepEqual(parseIcaclsWritable("C:\\x NULL DACL\r\n\r\nSuccessfully processed 1 files", "C:\\x").sort(), ["no access entry could be read", 'unrecognised entry "NULL DACL"']);
+    const odd = ["C:\\x NT AUTHORITY\\SYSTEM:(F)", "      something icacls did not print before", "      BUILTIN\\Administrators:(F)", "", "Successfully processed 1 files"].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(odd, "C:\\x"), ['unrecognised entry "something icacls did not print before"']);
+    const afterSummary = ["C:\\x NT AUTHORITY\\SYSTEM:(F)", "", "Successfully processed 1 files", "PC\\erin:(F)"].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(afterSummary, "C:\\x"), ["PC\\erin"], "an entry after the summary still counts");
   });
 });
 
@@ -507,6 +521,17 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     for (const p of [INSTALL, WSB]) { const linked = variant({}); linked.links.add(key(p)); await refused(linked, /is a link, a junction or a short name, not the package's own path/, `link at ${p}`); }
     const unreadable = variant({}); unreadable.writableBy = async () => { throw new Error("icacls: Access is denied."); };
     await refused(unreadable, /access list of .* could not be read: icacls: Access is denied\./, "access list unreadable");
+    // The owner of the file and of the folder must be SYSTEM, Administrators or TrustedInstaller, compared by exact SID.
+    for (const owner of ["S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"]) {
+      const h = variant({}); h.owners.set(key(WSB), owner); h.owners.set(key(INSTALL), owner);
+      const r = await verify(h); assert.equal(r.ok, true, r.ok ? "" : r.reason);
+    }
+    for (const [p, owner] of [[WSB, "S-1-5-21-1-2-3-1001"], [INSTALL, "S-1-5-21-1-2-3-1001"], [WSB, "S-1-5-32-545"], [INSTALL, "S-1-5-19"], [WSB, "S-1-5-18 "], [WSB, "S-1-5-180"], [INSTALL, "S-1-5-80-956008885-3418522649-1831038044-1853292631-227147846"], [WSB, "NT AUTHORITY\\SYSTEM"], [WSB, ""]] as const) {
+      const h = variant({}); h.owners.set(key(p), owner);
+      await refused(h, new RegExp(`is owned by ${owner.replace(/[\\.*+?^${}()|[\]]/g, "\\$&")}, not by SYSTEM, Administrators or TrustedInstaller`), `owner ${JSON.stringify(owner)} of ${p}`);
+    }
+    const ownerUnreadable = variant({}); ownerUnreadable.ownerSid = async (p) => { if (p === INSTALL) throw new Error("Attempted to perform an unauthorized operation."); return "S-1-5-18"; };
+    await refused(ownerUnreadable, /the owner of .*cw5n1h2txyewy could not be read: Attempted to perform an unauthorized operation\./, "folder owner unreadable");
     // Only the exact status NotSigned opens the package proof.
     for (const status of ["notsigned", "NotSigned ", "Incompatible", "NotSupportedFileFormat"]) await refused(variant({}, { ...unsigned, status }), /does not carry a valid Microsoft signature/, `status ${status}`);
     for (const status of ["notsigned", "Incompatible"]) { const h = variant({}, { ...unsigned, status }); const r = await verify(h); assert.ok(!r.ok && !/part of Windows/.test(r.reason)); }
@@ -544,6 +569,12 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     assert.equal(shortStatusMessage(`${path} and ${path}`, path), "<file> and <file>");
     assert.equal(describeSignature({ valid: false, status: "NotSigned", statusMessage: "The file <file> is not digitally signed.", signatureType: "None" }), 'status NotSigned, "The file <file> is not digitally signed.", type None, signer none');
     assert.equal(describeSignature({ valid: false }), "status not reported, type not reported, signer none");
+    // The owner probe: only a SID passes; a name, an empty or missing answer, or extra text is an error (a refusal on the package proof).
+    assert.equal(ownerFromProbe({ owner: "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464" }, path), "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
+    assert.equal(ownerFromProbe({ owner: "S-1-5-18" }, path), "S-1-5-18");
+    for (const raw of [null, {}, { owner: null }, { owner: "" }, { owner: "NT AUTHORITY\\SYSTEM" }, { owner: "S-1-5-18\r\n" }, { owner: " S-1-5-18" }, { owner: "S-1-5" + "-" }, { owner: "S-1" }, { owner: 18 }, { owner: ["S-1-5-18"] }]) {
+      assert.throws(() => ownerFromProbe(raw as { owner?: unknown } | null, path), /was not reported as a SID/, JSON.stringify(raw));
+    }
   });
 });
 

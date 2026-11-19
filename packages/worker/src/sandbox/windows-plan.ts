@@ -223,23 +223,34 @@ const TRUSTED = /^(?:nt authority\\system|builtin\\administrators|nt service\\tr
 const WRITE_RIGHTS = new Set(["F", "M", "W", "D", "WD", "AD", "DC", "DE", "GA", "GW", "WDAC", "WO"]);
 /**
  * From the text `icacls <path>` prints, the accounts other than the trusted ones that are allowed to write. Deny entries are ignored. A line that looks like an access entry
- * (`name:(`) but is not one in the expected form is reported as `unrecognised entry "..."`, so a caller that requires an empty list refuses it rather than skipping it.
+ * (`name:(`) but is not one in the expected form is reported as `unrecognised entry "..."`, so a caller that requires an empty list refuses it rather than skipping it. The same
+ * holds for any other text inside the block of entries (from the first line to the first blank line, which separates the entries from the summary icacls prints in the system's
+ * language), and an output with no readable entry at all is reported as `no access entry could be read`: neither is ever read as "nobody else can write".
  */
 export function parseIcaclsWritable(output: string, path: string): string[] {
   const found = new Set<string>();
+  let entries = 0, started = false, inBlock = false;
   for (const raw of output.split(/\r?\n/)) {
     let line = raw.trim();
-    if (line === "" || /^successfully processed/i.test(line)) continue;
+    if (line === "") { if (started) inBlock = false; continue; }
+    if (!started) { started = true; inBlock = true; }
+    if (/^successfully processed/i.test(line)) continue;
     if (line.toLowerCase().startsWith(path.toLowerCase())) line = line.slice(path.length).trim();
+    if (line === "") continue;
     const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
-    if (m === null) { if (line.includes(":(")) found.add(`unrecognised entry ${JSON.stringify(line.slice(0, 120))}`); continue; }
+    if (m === null) { if (inBlock || line.includes(":(")) found.add(`unrecognised entry ${JSON.stringify(line.slice(0, 120))}`); continue; }
+    entries++;
     const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
     if (tokens.includes("DENY")) continue;
     if (TRUSTED.test(m[1]!)) continue;
     if (tokens.some((t) => WRITE_RIGHTS.has(t))) found.add(m[1]!);
   }
+  if (entries === 0) found.add("no access entry could be read");
   return [...found];
 }
+
+/** The accounts accepted as the owner of a client file or its package folder on the package proof, by well-known SID (the same in every language): SYSTEM, Administrators, TrustedInstaller. */
+export const TRUSTED_OWNER_SIDS: readonly string[] = Object.freeze(["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"]);
 
 // ---------- package and session checks ----------
 
@@ -279,7 +290,8 @@ export function shortStatusMessage(message: string, path: string): string {
  * - `Get-AuthenticodeSignature` says `NotSigned` (no signature at all; any other failure, such as HashMismatch or NotTrusted, is refused, never explained away);
  * - Windows says the package is signed by Windows itself (`SignatureKind` exactly `System`) and its state is exactly `Ok` (not Tampered, Modified or anything else);
  * - neither the package folder nor the file is a link, a junction or a short name (their real paths are the paths themselves);
- * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls).
+ * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls);
+ * - the file and the package folder are owned by one of those three, by SID (`TRUSTED_OWNER_SIDS`; an owner can rewrite an access list without any entry in it).
  * The package's name, publisher and family and its folder under `%ProgramFiles%\WindowsApps` were already checked before this is asked.
  */
 async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
@@ -292,6 +304,11 @@ async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, lo
     let writable: readonly string[];
     try { writable = await host.writableBy(p); } catch (error) { return { ok: false, reason: `the access list of ${p} could not be read: ${(error as Error).message}` }; }
     if (writable.length > 0) return { ok: false, reason: `${p} can be changed by ${writable.join(", ")}` };
+  }
+  for (const p of [file, location]) {
+    let owner: string;
+    try { owner = await host.ownerSid(p); } catch (error) { return { ok: false, reason: `the owner of ${p} could not be read: ${(error as Error).message}` }; }
+    if (!TRUSTED_OWNER_SIDS.includes(owner)) return { ok: false, reason: `${p} is owned by ${owner}, not by SYSTEM, Administrators or TrustedInstaller` };
   }
   return { ok: true, value: undefined };
 }

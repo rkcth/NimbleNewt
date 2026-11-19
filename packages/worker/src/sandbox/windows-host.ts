@@ -90,6 +90,8 @@ export interface WindowsHost {
   lockTask(taskName: string): Promise<WindowsLockTask>;
   /** The accounts other than SYSTEM, Administrators and TrustedInstaller that can write to the path (from its ACL). */
   writableBy(path: string): Promise<readonly string[]>;
+  /** The SID of the path's owner (for example `S-1-5-18`), read from its security descriptor. Throws when it cannot be read or is not a SID. */
+  ownerSid(path: string): Promise<string>;
   /** Starts a program (no shell) and waits for it. Used for wsb.exe and icacls.exe. */
   run(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
 }

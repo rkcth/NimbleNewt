@@ -11,7 +11,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { checkWindowsHostPath, packageFamilyName, SANDBOX_PACKAGES, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
+import { checkWindowsHostPath, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
 import { windowsRealHost } from "./windows-real.js";
 
 // Card A03b: the Windows launcher's own parts on a REAL Windows machine, without Windows Sandbox itself. They run on every Windows CI cell (GitHub's hosted Windows runners,
@@ -102,10 +102,19 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     assert.ok((unsigned.statusMessage ?? "").length <= 200);
   });
 
+  test("owners: a Windows system program is owned by one of the accounts the package proof trusts, read as a SID; a missing path is an error", async () => {
+    const owner = await host.ownerSid(`${sysRoot()}\\System32\\icacls.exe`);
+    assert.ok(TRUSTED_OWNER_SIDS.includes(owner), owner);
+    const mine = join(dir("owner"), "mine.txt");
+    writeFileSync(mine, "x");
+    assert.match(await host.ownerSid(mine), /^S-1-\d+(?:-\d+)+$/);
+    await assert.rejects(host.ownerSid(join(dir("owner"), "absent.txt")));
+  });
+
   // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout. The ceiling that governs here is not a per-test one: the package runner's
   // --test-timeout (300 s) also bounds this whole file (node --test runs each file as one timed test), and a per-test limit could not fire during spawnSync anyway. In run
   // 44242108811 the other tests of this file took about 30 s together, so the child gets 250 s: past that it is stopped and this test fails with its own message, and the job
-  // is released whatever happens, so no later test sees it. (Six probes that each time out twice would need 720 s; that is a failure, not a case to wait for.)
+  // is released whatever happens, so no later test sees it. (Seven probes that each time out twice would need 840 s; that is a failure, not a case to wait for.)
   const ENV_PROBES_CHILD_MS = 250_000;
   test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", async () => {
     const backend = windowsSandboxBackend(options());
@@ -116,14 +125,14 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
         `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
         "const h = windowsRealHost(); const out = {};",
         // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
-        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
-        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
+        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), owner: () => h.ownerSid(process.env.NIMBLENEWT_WSB_JOB), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
+        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : k === 'owner' ? /^S-1-/.test(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
         "}",
         "process.stdout.write(JSON.stringify(out));",
       ].join("\n");
       const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CHILD_MS, windowsHide: true });
       assert.equal(child.status, 0, child.error === undefined ? child.stderr : `the probes did not all answer within ${String(ENV_PROBES_CHILD_MS / 1000)} s (${child.error.message}): ${child.stderr}`);
-      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
+      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, owner: true, writable: true });
     } finally {
       await backend.release!(plan);
     }

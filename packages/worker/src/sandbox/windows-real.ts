@@ -47,6 +47,13 @@ $s = Get-AuthenticodeSignature -LiteralPath $env:NN_PATH
 $type = if ($s.PSObject.Properties['SignatureType']) { "$($s.SignatureType)" } else { $null }
 @{ valid = ($s.Status -eq 'Valid'); status = "$($s.Status)"; statusMessage = "$($s.StatusMessage)"; signatureType = $type; subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null } } | ConvertTo-Json -Compress
 `;
+// The owner by SID, so the answer is the same in every language. Get-Acl reads the owner, group and access list (not the audit list), which needs the same read-control
+// right icacls needs for the access list.
+const OWNER_SCRIPT = `
+$a = Get-Acl -LiteralPath $env:NN_PATH
+$o = $a.GetOwner([System.Security.Principal.SecurityIdentifier])
+@{ owner = if ($null -eq $o) { $null } else { $o.Value } } | ConvertTo-Json -Compress
+`;
 const TASK_SCRIPT = `
 $t = Get-ScheduledTask -TaskName $env:NN_TASK -ErrorAction SilentlyContinue
 if ($null -eq $t) { '{"present":false}' } else { @{ present = $true; enabled = [bool]$t.Settings.Enabled -and ($t.State -ne 'Disabled'); executable = $t.Actions[0].Execute } | ConvertTo-Json -Compress }
@@ -74,6 +81,13 @@ export function signatureFromProbe(raw: RawSignature, path: string): WindowsSign
     ...(subject === undefined ? {} : { subject }), ...(status === undefined ? {} : { status }),
     ...(message === undefined ? {} : { statusMessage: shortStatusMessage(message, path) }), ...(signatureType === undefined ? {} : { signatureType }),
   };
+}
+
+/** The owner probe's answer: a SID in its usual form (`S-1-` and numbers), or an error; anything else is never passed on as an owner. */
+export function ownerFromProbe(raw: { owner?: unknown } | null, path: string): string {
+  const owner = raw === null ? undefined : raw.owner;
+  if (typeof owner !== "string" || !/^S-1-\d+(?:-\d+)+$/.test(owner)) throw new Error(`the owner of ${path} was not reported as a SID`);
+  return owner;
 }
 
 /** One PowerShell probe's time limit. Each probe starts a fresh powershell.exe, which on a busy machine, or in the bare environment the launcher gives its runner process, can be slow. */
@@ -176,6 +190,9 @@ export function windowsRealHost(): WindowsHost {
       const out = await run(`${sysRoot()}\\System32\\icacls.exe`, [path], { timeoutMs: 30_000 });
       if (out.code !== 0) throw new Error(`icacls ${path} failed: ${out.stderr.trim().slice(0, 200)}`);
       return parseIcaclsWritable(out.stdout, path);
+    },
+    async ownerSid(path) {
+      return ownerFromProbe(await powershell<{ owner?: unknown } | null>(OWNER_SCRIPT, { NN_PATH: path }), path);
     },
     run: (file, args, options) => run(file, args, options),
   };
