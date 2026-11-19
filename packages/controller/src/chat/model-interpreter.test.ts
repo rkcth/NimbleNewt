@@ -176,6 +176,10 @@ test("the model is told how a first-run owner gives a task to an agent and makes
   assert.match(system, /task\.transfer\([^)]*agentName[^)]*\)/);
   assert.match(system, /grant\.create\([^)]*agentName[^)]*\)/, "a right is given by the agent's name (review)");
   assert.match(system, /grant\.create \(agentName: the agent's name/);
+  // Card D01 (second review): the bundle is listed as an argument and described, so "let Ann work on Garden" reaches it in any words.
+  assert.match(system, /grant\.create\([^)]*\bbundle\b[^)]*\)/, "grant.create lists bundle among its arguments");
+  assert.match(system, /use one grant\.create with agentName, projectName and bundle roles and no action/);
+  assert.match(system, /a bundle is for one project, never every project/);
   assert.match(system, /To give a task to an agent[\s\S]*?task\.assign with taskTitle[\s\S]*?agentName[\s\S]*?never an ID/);
   assert.match(system, /the controller itself starts the attempt on the worker host/);
 });
