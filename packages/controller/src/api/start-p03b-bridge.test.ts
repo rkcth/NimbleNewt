@@ -31,7 +31,7 @@ type Send = (op: string, args: Record<string, unknown>, callId: string) => Promi
 test("a worker repairs a service, publishes its findings and drafts and submits its deliverables through the bridge, with the API's scope, fence and ledger rules; nothing names its task (card P03b)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-p03b-bridge-"));
   const sim = new SimulatedServices({
-    billing: { db: { state: { size: 10 }, dependents: [{ service: "billing", resource: "api" }] }, api: { state: {} }, cache: { state: {} } },
+    billing: { db: { state: { size: 10 }, dependents: [{ service: "billing", resource: "api" }] }, api: { state: {} }, cache: { state: {} }, queue: { state: {}, dependents: [{ service: "billing", resource: "api" }] } },
   });
   let services: BuildServices | undefined;
   let script: (ctx: { order: WorkOrder; gateway: ToolGateway }) => Promise<any> = async () => ({ status: "completed", text: "done" });
@@ -61,6 +61,8 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
     const ann = (await s.agents.create(owner, { commandId: "ag-ann", friendlyName: "Ann", roles: ["author", "docs"] } as never)).id;
     const grants: { action: string; resource?: { kind: string; id: string } }[] = [
       { action: "attempt.work" }, { action: "review.request" }, { action: "task.read" }, { action: "artifact.publish" }, { action: "effect.perform", resource: { kind: "service", id: "billing/cache" } },
+      // ...and billing/queue, whose restart also restarts billing/api (no right there): the reach of the action is judged, not only the named resource.
+      { action: "effect.perform", resource: { kind: "service", id: "billing/queue" } },
     ];
     for (const [i, g] of grants.entries()) await s.grants.grant(owner, { commandId: `g-${i}`, grantee: `agent:${ann}`, action: g.action, project, ...(g.resource === undefined ? {} : { resource: g.resource }), source: "direct", basis: "work" } as never);
     const taskId = (await s.projects.createTask({ commandId: "t-1", actor: owner.id, projectId: project, title: "Tune the billing cache" })).id;
@@ -98,6 +100,12 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
         const dbBefore = sim.versionOf(db);
         refused(await send("service.operate", { ...db, action: { type: "restart" } }, "op-2"), "forbidden");
         assert.equal(sim.versionOf(db), dbBefore, "nothing changed");
+        assert.equal(sim.calls.filter((x) => x.applied).length, 1);
+        // A cascade: the right on the named resource (billing/queue) but not on the one its restart reaches (billing/api); refused, neither changed.
+        const queue = { service: "billing", resource: "queue" }, api = { service: "billing", resource: "api" };
+        const [queueBefore, apiBefore] = [sim.versionOf(queue), sim.versionOf(api)];
+        assert.match(refused(await send("service.operate", { ...queue, action: { type: "restart" } }, "op-2b"), "forbidden"), /also changes billing\/api/);
+        assert.deepEqual([sim.versionOf(queue), sim.versionOf(api)], [queueBefore, apiBefore], "nothing changed by the refused cascade");
         assert.equal(sim.calls.filter((x) => x.applied).length, 1);
         refused(await send("service.operate", { ...set, taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "op-3"), "invalid_command");
         // The findings, and two deliverables: a report naming them and the operational outcome naming the verified operation.
