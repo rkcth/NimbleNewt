@@ -38,6 +38,7 @@ import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } 
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import type { StaleDeliverable } from "../submissions/acceptance.js";
+import type { DefectService } from "../submissions/defects.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
@@ -274,6 +275,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
+  defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
@@ -379,6 +381,7 @@ export type StatusRequest =
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
+  | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -706,6 +709,8 @@ export interface StatusDeps {
    * read rule; `reads` is the number of records it read, counted against the attention scan. Absent: deliverables are never listed as stale.
    */
   readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
+  /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
+  readonly defects?: Pick<DefectService, "forTask">;
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -922,6 +927,7 @@ export class StatusService {
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
+      case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
@@ -1990,6 +1996,27 @@ export class StatusService {
       if (i === 0) { for (const text of reportLines(d)) lines.push(line(text, c, cite("task", taskId))); continue; }
       const r = d.report;
       lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at}${r.result === "done" && d.outcome !== undefined && d.outcome.status !== "succeeded" ? ` (the attempt itself finished ${d.outcome.status})` : ""} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
+    }
+    return { observedAt: at, lines };
+  }
+
+  /** What was checked in a task's deliverables and what was found (card Q04): one line per deliverable, then one per defect. What the caller may not read reads as missing. */
+  async defectLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.defects === undefined) return { observedAt: at, lines: [line("Defects are not tracked on this controller.")] };
+    const found = await this.#deps.defects.forTask(by, taskId);
+    if (found === undefined) return undefined;
+    if (found.deliverables.length === 0) return { observedAt: at, lines: [line(`${shown(found.title)} has no deliverable yet, so nothing of it has been checked.`, cite("task", taskId))] };
+    const lines: Line[] = [];
+    const words: Record<string, string> = { open: "open, waiting for a repair", "repair-submitted": "repaired, waiting for a check", resolved: "resolved", escalated: "escalated to you: it waits for your decision (accept it as is, or let the repair go on)", overridden: "overridden by you (accepted as is; its failed checks stay failed)" };
+    for (const d of found.deliverables) {
+      const open = d.defects.filter((x) => x.state !== "resolved" && x.state !== "overridden").length;
+      lines.push(line(`Deliverable ${d.id} ${quoted(d.title, 80)}: version ${d.version} is ${d.state}; ${d.defects.length === 0 ? "no defect was found in it" : `${d.defects.length} defect(s) found, ${open} unresolved`}.`, cite("deliverable", d.id)));
+      for (const x of d.defects.slice(0, 20)) {
+        lines.push(line(`Defect ${x.id} (${x.severity}, found in version ${x.version}${x.repairVersion === undefined ? "" : `, repair in version ${x.repairVersion}`}): ${words[x.state] ?? x.state}; ${x.cycles} of ${found.limit} repair and review cycles used. Finding: ${quoted(x.finding.text, 160)}.`, cite("defect", x.id), cite("deliverable", d.id)));
+      }
+      if (d.defects.length > 20) lines.push(line(`${d.defects.length - 20} more defects of ${d.id} are not shown; defect.list lists them all.`, cite("deliverable", d.id)));
     }
     return { observedAt: at, lines };
   }

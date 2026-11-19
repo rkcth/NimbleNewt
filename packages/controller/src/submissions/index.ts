@@ -1,3 +1,5 @@
 export { KIND_ROLES, SUBMISSION_KINDS, REVIEW_DISABLED_SINGLE_AGENT, SubmissionService, type CheckResult, type Evidence, type RecordSubmission, attemptOfAssignments, type AttemptOf, type RolesOf, type SubmissionOptions, type SubmissionBody, type SubmissionKind, type SubmissionApproval } from "./submissions.js";
 
 export { AcceptanceService, CONTRACT_WORK_FIELDS, ACCESS_SCOPES, AUDIENCES, DELIVERABLE_STATES, DELIVERABLE_TYPES, type AcceptancePorts, type DeliverableBody, type DeliverableState, type DeliverableType, type EventBody, type StaleDeliverable, type VersionBody } from "./acceptance.js";
+
+export { DefectService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DEFECT_SEVERITIES, DEFECT_STATES, OVERRIDE_OUTCOMES, type DefectBody, type DefectCheckBody, type DefectOverrideBody, type DefectPorts, type DefectSeverity, type DefectState, type OverrideOutcome } from "./defects.js";
