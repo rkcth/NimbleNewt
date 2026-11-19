@@ -106,6 +106,8 @@ test("the escape fixture's report lines become the controls; a line must match e
   assert.deepEqual(controlsFromEscapeOutput(out, false).aclsRestored, false);
   const leaked = out.replace("2_write_git=denied", "2_write_git=ALLOWED").replace("3_write_work=allowed", "3_write_work=FAILED").replace("8_write_through_junction=denied", "x 8_write_through_junction=denied");
   assert.deepEqual(controlsFromEscapeOutput(leaked, true), { writesCheckout: false, readOnlyInputDenied: true, gitDenied: false, junctionDenied: false, aclsRestored: true });
+  // A longer line that only contains the expected text does not count either.
+  assert.deepEqual(controlsFromEscapeOutput("13_write_work=allowed\n1_write_readonly_input=denied_not\n", true), { writesCheckout: false, readOnlyInputDenied: false, gitDenied: false, junctionDenied: false, aclsRestored: true });
 });
 
 test("the session comes from SESSIONNAME: none or Services is the service session, Console or RDP is interactive", () => {

@@ -52,7 +52,11 @@ if (command === "run") {
   const file = join(resolve(out), `containment-${report.platform}.json`);
   const redact = rest.includes("--redact");
   // With --redact, what is printed is the redacted report too: a job log or summary is as public as the artifact.
-  const shown = redact ? worker.redactReport(report) : report;
+  // On Windows the account at the console (and a configured owner or share account) is often not the account this runs as, so it is not among the names redaction knows by
+  // itself: look it up and hide it too. A failed lookup leaves the general rules (any `<machine>\account`, home folders, SIDs).
+  const names = { users: [process.env["NIMBLENEWT_WSB_OWNER"], process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"]].filter((n) => typeof n === "string" && n.length >= 2) };
+  if (redact && process.platform === "win32") { try { const s = await worker.windowsRealHost().session(); if (typeof s.consoleUser === "string") names.users.push(s.consoleUser); } catch { /* the general rules still apply */ } }
+  const shown = redact ? worker.redactReport(report, names) : report;
   if (redact) {
     const local = flag("local");
     if (local !== undefined) { mkdirSync(resolve(local), { recursive: true }); writeFileSync(join(resolve(local), `containment-${report.platform}.json`), `${JSON.stringify(report, null, 2)}\n`); }

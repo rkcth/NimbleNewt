@@ -1,7 +1,9 @@
 // Cards G05, G06, Y02: the workflow steps that produce hardware-chain evidence keep the properties the evidence relies on. Text checks (the repository has no YAML parser and no
 // actionlint); the files are also parsed with PyYAML when the change is made.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -40,6 +42,39 @@ test("own-hardware: the Windows evidence job runs only by hand from main, every 
   assert.match(outcome, /if \[ "\$o" != "success" \]; then .*exit 1; fi/);
   // The Git Bash fix stays the first thing after the checkout (run 44453704944).
   assert.ok(j.indexOf("Use Git Bash for bash steps") < j.indexOf("id: fs"));
+});
+
+test("own-hardware: the outcome step, run as bash runs it on the runner, passes only when every evidence step succeeded", { skip: process.platform === "win32" ? "runs the step with a POSIX bash" : false }, () => {
+  const j = job(read("own-hardware.yml"), "sandbox-windows");
+  const from = j.indexOf("- name: Job summary and outcome");
+  const block = j.slice(from, j.indexOf("\n      - ", from + 1));
+  const lines = block.slice(block.indexOf("        run: |\n") + "        run: |\n".length).split("\n");
+  const script = lines.filter((l) => l.startsWith("          ") || l.trim() === "").map((l) => l.slice(10)).join("\n");
+  assert.doesNotMatch(script, /\$\{\{/, "the script reads the outcomes from its environment only");
+  const dir = mkdtempSync(join(tmpdir(), "nn-evidence-wf-"));
+  try {
+    const run = (outcomes, logs = {}) => {
+      const summary = join(dir, "summary.md");
+      writeFileSync(summary, "");
+      for (const [f, text] of Object.entries(logs)) { const p = join(dir, f); spawnSync("mkdir", ["-p", dirname(p)]); writeFileSync(p, text); }
+      // The runner's own options for `shell: bash`.
+      const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: summary, ...outcomes } });
+      return { status: r.status, summary: readFileSync(summary, "utf8") };
+    };
+    const ids = ["FS", "WSB", "WD", "G05", "G06", "Y02"];
+    const all = Object.fromEntries(ids.map((k) => [k, "success"]));
+    const ok = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n" });
+    assert.equal(ok.status, 0, ok.summary);
+    assert.match(ok.summary, /\| Y02 scenarios \| success \|/);
+    for (const k of ids) for (const bad of ["failure", "skipped", "cancelled", ""]) assert.equal(run({ ...all, [k]: bad }).status, 1, `${k}=${bad}`);
+    // A Y02 log without any scenario line (the run stopped early) still reaches the outcome check, and the table is written.
+    const early = run({ ...all, Y02: "failure" }, { "y02-wsb-local/y02.log": "the build failed\n" });
+    assert.equal(early.status, 1);
+    assert.match(early.summary, /\| Y02 scenarios \| failure \|/);
+    // Home folders in the copied log lines are replaced.
+    const home = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n", "g05-local/g05.log": "wrote C:\\Users\\someone\\x\n" });
+    assert.doesNotMatch(home.summary, /someone/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("own-hardware: only redacted or data-only evidence is uploaded; the unredacted report and local findings stay on the machine; auto-login is never switched on", () => {

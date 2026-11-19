@@ -126,7 +126,9 @@ jobs:
           $os = Try-Get { Get-CimInstance Win32_OperatingSystem }
           $longPaths = Try-Get { (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled).LongPathsEnabled }
           # Only the words enabled or disabled are kept from fsutil's output (its full text can name the checkout's path, which holds the account name).
-          function State([string]$t) { if ($t -match 'is disabled|: disabled') { 'disabled' } elseif ($t -match 'is enabled|: enabled') { 'enabled' } else { 'unknown' } }
+          # fsutil 8dot3name prints the volume's and the registry's state and then the result ("Based on the above ... settings, 8dot3 name creation is disabled on C:"): when that
+          # result line is there it alone is read, since the first two can disagree with it.
+          function State([string]$t) { $r = ($t -split "`r?`n") | Where-Object { $_ -match 'Based on the above' } | Select-Object -First 1; if ($r) { $t = $r }; if ($t -match 'is disabled|: disabled') { 'disabled' } elseif ($t -match 'is enabled|: enabled') { 'enabled' } else { 'unknown' } }
           $short = Try-Get { State (fsutil 8dot3name query "$($drive):" | Out-String) }
           $case = Try-Get { State (fsutil file queryCaseSensitiveInfo "$env:GITHUB_WORKSPACE" | Out-String) }
           $facts = [ordered]@{
@@ -142,7 +144,10 @@ jobs:
           }
           $json = $facts | ConvertTo-Json -Depth 4
           [System.IO.File]::WriteAllText((Join-Path $out 'g06-host.json'), $json, (New-Object System.Text.UTF8Encoding $false))
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## G06: this machine's filesystem`n``````json`n$json`n``````" -Encoding utf8
+          # UTF-8 without a byte-order mark (Add-Content -Encoding utf8 in Windows PowerShell 5.1 writes one).
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## G06: this machine's filesystem`n``````json`n$json`n```````n", (New-Object System.Text.UTF8Encoding $false))
+          # The step's exit status is not left to whichever native program (fsutil) ran last.
+          exit 0
       - name: Run the real Windows Sandbox tests
         id: wsb
         continue-on-error: true
@@ -239,7 +244,8 @@ jobs:
             for f in "$RUNNER_TEMP/g05-local/workdir.log" "$RUNNER_TEMP/g05-local/g05.log" "$RUNNER_TEMP/g06-host/long-paths-counts.txt"; do
               if [ -f "$f" ]; then echo; echo '```'; tail -n 15 "$f" | sed -e 's/[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ ]*/<home>/g'; echo '```'; fi
             done
-            if [ -f "$RUNNER_TEMP/y02-wsb-local/y02.log" ]; then echo; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02-wsb-local/y02.log" | tail -n 12 | sed -e 's/[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ ]*/<home>/g'; echo '```'; fi
+            # `|| true`: bash steps run with -e and pipefail, and a log with no scenario line (the run stopped early) must not end this step before the outcome check below.
+            if [ -f "$RUNNER_TEMP/y02-wsb-local/y02.log" ]; then echo; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02-wsb-local/y02.log" | tail -n 12 | sed -e 's/[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ ]*/<home>/g' || true; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
           for o in "$FS" "$WSB" "$WD" "$G05" "$G06" "$Y02"; do if [ "$o" != "success" ]; then echo "at least one step did not succeed (see the table in the job summary)"; exit 1; fi; done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
