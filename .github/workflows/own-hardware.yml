@@ -82,7 +82,9 @@ jobs:
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, nimblenewt-windows]
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
-    timeout-minutes: 300
+    # The job's limit is above the sum of every step's own limit (365 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
+    # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
+    timeout-minutes: 420
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -152,7 +154,7 @@ jobs:
       - name: Run the real Windows Sandbox tests
         id: wsb
         continue-on-error: true
-        # Step timeouts: a stuck step ends with a failure and the later steps (the cleanup, the outcome, the uploads) still run inside the job's 300 minutes.
+        # Step timeouts: a stuck step ends with a failure and the later steps (the cleanup, the outcome, the uploads) still run inside the job's limit.
         timeout-minutes: 90
         shell: bash
         env:

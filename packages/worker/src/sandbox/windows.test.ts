@@ -757,6 +757,21 @@ describe("Windows launcher: running a job", () => {
     assert.equal(again.released, 0);
     assert.match(again.kept.join(), /in use/);
     assert.ok(host.exists(`${live}\\control\\jobs\\job-4\\job.json`));
+    // A control folder reached through a junction (the real host reports the base's junction on the control path), or a job folder that is one, is not touched, and its base stays.
+    const linked = "C:\\ProgramData\\nn-wsb-real-link01";
+    leave(`${linked}\\control`, "job-5", "00000000-0000-4000-8000-0000000000b5", `${linked}\\w\\work`);
+    host.links.add(key(`${linked}\\control`));
+    const viaLink = await releaseLeftovers(host, [`${linked}\\control`], ident);
+    assert.deepEqual([viaLink.released, viaLink.removedBases], [0, 0]);
+    assert.match(viaLink.kept.join(), /link or junction/);
+    assert.ok(host.exists(`${linked}\\control\\jobs\\job-5\\acl.json`) && host.sandboxes.has("00000000-0000-4000-8000-0000000000b5"));
+    host.links.clear();
+    host.links.add(key(`${linked}\\control\\jobs\\job-5`));
+    const jobLink = await releaseLeftovers(host, [`${linked}\\control`], ident);
+    assert.deepEqual([jobLink.released, jobLink.removedBases], [0, 0]);
+    assert.match(jobLink.kept.join(), /job-5 is a link or junction/);
+    assert.ok(host.exists(`${linked}\\control\\jobs\\job-5\\acl.json`) && host.exists(linked));
+    host.links.clear();
     // Nothing else is reported as running once only the kept job's sandbox is stopped by hand.
     host.sandboxes.clear();
     assert.equal(await sandboxRunning(host, ident), "none");

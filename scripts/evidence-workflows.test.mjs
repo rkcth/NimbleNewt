@@ -38,6 +38,9 @@ test("own-hardware: the Windows evidence job runs only by hand from main, every 
   for (const id of ids) assert.match(step(j, id), /\n {8}continue-on-error: true\n/, id);
   // Every evidence step has its own timeout, so a stuck one ends as a failure and the cleanup, outcome and upload steps still run inside the job's limit.
   for (const id of ids) assert.match(step(j, id), /\n {8}timeout-minutes: \d+\n/, id);
+  // ... and the job's own limit is above their sum with room for set-up and uploads (30 minutes), so a job timeout cannot cut off the cleanup or the outcome step.
+  const stepSum = ids.reduce((sum, id) => sum + Number(/\n {8}timeout-minutes: (\d+)\n/.exec(step(j, id))[1]), 0);
+  assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
   // The leftovers of a step stopped by its timeout are released whatever happened before.
   assert.match(step(j, "cleanup"), /\n {8}if: always\(\)\n/);
   assert.match(step(j, "cleanup"), /node scripts\/wsb-cleanup\.mjs --local "\$RUNNER_TEMP\/g05-local"/);

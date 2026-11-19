@@ -7,7 +7,8 @@ import { verifyClient, type WindowsSettings } from "./windows-plan.js";
  * its own jobs; a killed one cannot, and the folders it used are per-run, so the next run's health check would never see them. This looks only in the folders those runs use
  * (`%ProgramData%\nn-wsb-real-*` and `nn-wsb-host-*` of the real tests, and the G05 suite's base under the runner's temporary folder), and releases each job left there through the
  * backend's own `releaseJob`: the sandbox the job recorded is stopped, the saved access lists are restored, the lock and the job folder go. A control folder whose lock a live process
- * holds is not touched at all. A test's base folder is removed only when nothing is left in its jobs folder. Nothing else on the machine is looked at.
+ * holds is not touched at all, nor one that is or passes through a link or junction. A test's base folder is removed only when nothing is left in its jobs folder. Nothing else on the
+ * machine is looked at.
  */
 
 /** The control folders the evidence runs use, as found on this machine. */
@@ -45,9 +46,13 @@ export async function releaseLeftovers(host: WindowsHost, controlDirs: readonly 
     const base = controlDir.slice(0, controlDir.lastIndexOf("\\"));
     // A folder whose lock a live process holds is in use (a run going on now): nothing in it is touched, not even the job that holds the lock.
     if (lockHeld(host, controlDir)) { kept.push(`${controlDir} is in use by a running process`); if (TEST_BASE.test(base)) bases.set(base, false); continue; }
+    // A folder reached through a link or junction (its own name, its base or its jobs folder) may lead outside the evidence runs' folders: nothing in it is touched.
+    if (host.isLinkOrJunction(controlDir) || host.isLinkOrJunction(`${controlDir}\\jobs`)) { kept.push(`${controlDir} is or passes through a link or junction; not touched`); if (TEST_BASE.test(base)) bases.set(base, false); continue; }
     let left = 0;
     for (const job of host.listDir(`${controlDir}\\jobs`)) {
-      const result = await releaseJob(host, settings, `${controlDir}\\jobs\\${job}`).catch((error: unknown) => ({ ok: false as const, reason: (error as Error).message }));
+      const jobDir = `${controlDir}\\jobs\\${job}`;
+      if (host.isLinkOrJunction(jobDir)) { kept.push(`${jobDir} is a link or junction; not touched`); left++; continue; }
+      const result = await releaseJob(host, settings, jobDir).catch((error: unknown) => ({ ok: false as const, reason: (error as Error).message }));
       if (result.ok) released++; else { kept.push(result.reason); left++; }
     }
     if (TEST_BASE.test(base)) bases.set(base, (bases.get(base) ?? true) && left === 0);
