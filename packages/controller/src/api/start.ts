@@ -107,7 +107,7 @@ import { MaintenanceService, EnvironmentChangeApplier, type MaintenanceNotice, A
 import { EnvironmentService } from "../environments/index.js";
 import { CleanupSettingsService, ScratchCleanupService, ownerNotices, supervisorNotice, scratchRecordId, type ScratchMode, type ScratchPorts } from "../work-end/index.js";
 import { WorkspaceOpService, type WorkspacePort } from "../workspace-ops/index.js";
-import { IntegratorLeaseOps, IntegratorLeaseService, describeLeases, integratorLeaseHandover } from "../landing/index.js";
+import { IntegratorLeaseOps, IntegratorLeaseService, LandingGate, describeLeases, integratorLeaseHandover } from "../landing/index.js";
 import { ArtifactService, DeliverableService, FileBlobStore, TaskArtifactPublisher } from "../artifacts/index.js";
 import { ServiceOperations, type ServiceTarget } from "../service-ops/index.js";
 import { composeDispatch, type DispatchHandle, type DispatchStartOptions } from "./dispatch-compose.js";
@@ -909,6 +909,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       attempts: { live: async (taskId) => (await dispatch?.attemptControl.live(taskId)) ?? [], frozenReason: async (id) => dispatch?.attemptControl.frozenReason(id), release: async (id) => { await dispatch?.attemptControl.release(id); }, tell: async (id, text) => (await dispatch?.attemptControl.tell(id, text)) ?? false, stop: async (id, reason) => { await dispatch?.attemptControl.stop(id, reason); } },
       // Card H12o: a release may commit an approved submission; whether it is approved is the submissions' word (built below, reached only when a request is made).
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card P09: a landing is made only when the project's required checks (its integration policy) passed on the exact tree it would make; a refusal goes back to the author with the results.
+      landingGate: (call) => landingGate.evaluate(call),
+      tellAuthor: async (n) => { await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "your landing was refused by the required checks", text: n.text }); },
+    });
+    const landingGate = new LandingGate({
+      requiredChecks: async (projectId) => (await integration.effective(projectId)).requiredChecks,
+      tests: (taskId, author) => contracts.landingTests(taskId, author),
+      approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      now: () => new Date().toISOString(),
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
     // Card C09h: an artifact published for a task through the API (by the owner, or by an agent, including a local worker through its tool bridge) is an `artifact-version` step of the task's activity.

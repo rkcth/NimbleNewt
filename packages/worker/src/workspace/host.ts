@@ -48,6 +48,11 @@ export interface HostWorkspaceCall {
    * `NimbleNewt-Submission:` trailer, and is made once: a commit this checkout already made for it is answered again (`detail.recovered`) instead of a second one.
    */
   readonly submission?: ApprovedSubmission;
+  /**
+   * A `landing` only (card P09): the tree the controller's landing checks ran on. The landing is then made only when the checkout's head commit still has exactly this tree; otherwise it is refused and nothing is written (the
+   * checks would not be about what lands).
+   */
+  readonly checkedTree?: string;
 }
 export interface HostSecurityEvent {
   readonly kind: "protected-path-touched" | "sandbox-escape-attempt";
@@ -144,6 +149,7 @@ export class WorkspaceHost {
     if (typeof operation !== "string" || !OPERATIONS.includes(operation)) return no(`the operation ${JSON.stringify(String(operation).slice(0, 30))} is not one this host knows`);
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
     if (call.submission !== undefined && (operation !== "release" || !isApprovedSubmission(call.submission))) return no(operation !== "release" ? "only a release commits a submission" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
+    if (call.checkedTree !== undefined && (operation !== "landing" || typeof call.checkedTree !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(call.checkedTree))) return no(operation !== "landing" ? "only a landing names the tree its checks ran on" : "the checked tree is not a full object ID");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
     if (call.assignee !== undefined && (typeof call.assignee !== "string" || !IDENT.test(call.assignee))) return no("the assignee name is malformed");
     if (operation === "release" && this.#options.release !== true) return no("this host does not commit reviewed work through this request: the commit needs the commit permit of the review gate (A06, H12o), which a workspace request does not carry");
@@ -262,6 +268,12 @@ export class WorkspaceHost {
       this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
+    }
+    // The controller's landing checks (card P09) ran on one tree: what lands must be exactly that tree, or the checks are not about it.
+    if (call.checkedTree !== undefined) {
+      let now: { head: string; tree: string } | undefined;
+      try { now = await git.committedChange({ gitDir: where.gitDir }); } catch { now = undefined; }
+      if (now === undefined || now.head !== plan.head || now.tree !== call.checkedTree) return no(`the checkout's committed work is not the tree the landing's checks ran on (${call.checkedTree.slice(0, 12)}); nothing was landed (ask for the landing again, so the checks run on what lands)`);
     }
     const files = plan.files.filter((f) => !f.modeOnly);
     if (files.length === 0) return nothing(false);

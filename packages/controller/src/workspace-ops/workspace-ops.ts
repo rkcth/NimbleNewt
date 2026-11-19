@@ -4,6 +4,7 @@ import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { QuiesceCoordinator } from "../dispatch/quiesce.js";
 import { QuiesceRefused } from "../dispatch/quiesce.js";
+import { landingChecksText, type LandingCheckHost, type LandingChecksRecord } from "../landing/landing-gate.js";
 import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -54,6 +55,8 @@ export interface WorkspaceCall {
   readonly landing?: CarriedLanding;
   /** A `release` of an approved submission only (card H12o): the submission and the base and tree that were approved. The host commits exactly that, once. */
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string };
+  /** A `landing` only (card P09): the integrated tree the landing's required checks ran on. The host lands only when the checkout's head still has exactly this tree. Absent when the project requires no check. */
+  readonly checkedTree?: string;
 }
 /** The owner's landing figures that travel to a remote host: the owner-set values only (branch, whether the commit permit is required, extra protected paths, whether the built-in protected list applies). */
 export interface CarriedLanding {
@@ -63,8 +66,11 @@ export interface CarriedLanding {
   readonly protectDefaults?: boolean;
 }
 export type WorkspaceOutcome = { readonly ok: true; readonly summary: string; readonly detail?: JsonObject } | { readonly ok: false; readonly reason: string };
-/** The host side of the operations. A host that cannot do one answers `ok: false` with why (a typed refusal, not a fault). */
-export interface WorkspacePort { run(call: WorkspaceCall): Promise<WorkspaceOutcome> }
+/**
+ * The host side of the operations. A host that cannot do one answers `ok: false` with why (a typed refusal, not a fault). `landingChecks` (card P09, optional): the change a landing would carry and the project's test commands run
+ * on exactly its tree in the sandbox; a host without it cannot make a landing that requires checks pass.
+ */
+export interface WorkspacePort extends LandingCheckHost { run(call: WorkspaceCall): Promise<WorkspaceOutcome> }
 
 export interface WorkspaceRecordBody {
   readonly operation: WorkspaceOperation;
@@ -94,6 +100,12 @@ export interface WorkspaceRecordBody {
   readonly lease?: { readonly leaseId: string; readonly fence: number };
   /** A `release` of an approved submission (card H12o): which submission, the base and tree that were approved, and who approved it (a reviewer, or `review_disabled_single_agent`). */
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string; readonly approvedBy: string };
+  /** A `landing` that names the reviewed code submission it lands (card P09): the review check is judged against it. */
+  readonly landedSubmission?: string;
+  /** A `landing` of a project that requires checks (card P09): what each required check came to on the integrated tree, bound to that tree's ID. Absent when the gate was not reached (a refusal before the host was asked). */
+  readonly checks?: LandingChecksRecord;
+  /** Card P09: the agent told (in its inbox) that its landing was refused by the checks, with the results. */
+  readonly toldAuthor?: string;
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
 export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
@@ -122,7 +134,14 @@ export interface WorkspaceDeps {
    * Whether a code submission is approved (card H12o, `SubmissionService.approvalOf`). Needed for a `release` that names `submissionId`; without it such a release is `unavailable`. Asked when the request is made and again
    * right before the host is asked (a review may say `changes` while the task is made quiet).
    */
-  readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string } | undefined>;
+  readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string; readonly submittedBy?: string } | undefined>;
+  /**
+   * The landing gate (card P09, `LandingGate.evaluate`): asked for every `landing`, inside the quiesce right before the host is asked to land. A landing is made only when it answers `passed`; its answer is kept on the request's
+   * record. A throw (the required checks cannot be read) refuses the landing. Absent: landings are not gated (unit rigs).
+   */
+  readonly landingGate?: (call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: WorkspacePort }) => Promise<LandingChecksRecord>;
+  /** Card P09: tells the author agent (a notice in its inbox, delivered when it next reads) that its landing was refused by the checks, with the results. A throw is recorded as not told. */
+  readonly tellAuthor?: (notice: { readonly commandId: string; readonly taskId: string; readonly to: string; readonly text: string }) => Promise<void>;
 }
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -180,9 +199,12 @@ export class WorkspaceOpService {
     else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing is made under an integrator lease");
     // A release may name an approved submission of the task (card H12o): checked before anything is recorded or frozen, and again right before the host is asked.
     let submission: WorkspaceRecordBody["submission"];
+    let landedSubmission: string | undefined;
     if (command.submissionId !== undefined) {
-      if (operation !== "release") invalid("submissionId", "only a release commits a submission");
-      submission = await this.#approved(command.submissionId, taskId);
+      // A landing may name the reviewed code submission it lands (card P09): only that it is one of this task's is checked here; whether its review applies is the landing gate's judgement on the integrated tree.
+      if (operation === "landing") landedSubmission = await this.#codeOfTask(command.submissionId, taskId);
+      else if (operation !== "release") invalid("submissionId", "only a release commits a submission, and only a landing names the submission it lands");
+      else submission = await this.#approved(command.submissionId, taskId);
     }
     // One operation per task: two would race on the same checkout and one's release would lift the other's freeze.
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
@@ -193,8 +215,8 @@ export class WorkspaceOpService {
       const intended = (await this.#deps.attempts?.live(taskId)) ?? [];
       let assignee: string | undefined;
       try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
-      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }) };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }) }, body: () => make, also: () => this.#openChange(taskId, id) });
+      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }), ...(landedSubmission === undefined ? {} : { landedSubmission }) };
+      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }), ...(landedSubmission === undefined ? {} : { submissionId: landedSubmission }) }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
       const pinned = leased;
       const approvedNow = submission;
@@ -272,6 +294,15 @@ export class WorkspaceOpService {
     if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
     if (!OID.test(a.base) || !OID.test(a.tree)) throw new DomainError("invalid_command", `submission ${value} does not name a base commit and a tree`, { field: "submissionId" });
     return { id: value, base: a.base, tree: a.tree, approvedBy: a.approvedBy.slice(0, 200) };
+  }
+
+  /** The code submission a landing names (card P09): a code submission of this very task, approved or not (the gate judges its review). */
+  async #codeOfTask(value: unknown, taskId: string): Promise<string> {
+    if (typeof value !== "string" || !SUBMISSION_ID.test(value)) return invalid("submissionId", "is not a submission ID");
+    if (this.#deps.approvalOf === undefined) throw new DomainError("unavailable", "submissions are not known to this controller, so a landing cannot name one now");
+    const a = await this.#deps.approvalOf(value);
+    if (a === undefined || a.taskId !== taskId) throw new DomainError("not_found", `submission ${value} is not a code submission of task ${taskId}`);
+    return value;
   }
 
   /** Right before the host is asked: the submission is still approved, for the same base and tree. */
@@ -435,6 +466,9 @@ export class WorkspaceOpService {
     const told: string[] = [];
     let changed = false;
     let notLanded: string | undefined;
+    // The landing gate's answer (card P09), kept on the record whatever the outcome.
+    let gated: LandingChecksRecord | undefined;
+    let gateRefused = false;
     try {
       const outcome = await this.#deps.quiesce.around({ taskId: body.taskId }, body.operation, async (quiet) => {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
@@ -442,7 +476,16 @@ export class WorkspaceOpService {
         if (stillLeased !== undefined) {
           try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
         }
-        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }) });
+        // The required checks (card P09), judged on the exact tree the landing would make, after the lease was shown again and before anything is written. Not all passed (not run counts as failed): nothing is landed.
+        if (body.operation === "landing" && this.#deps.landingGate !== undefined) {
+          try { gated = await this.#deps.landingGate({ taskId: body.taskId, projectId: body.projectId, ...(body.landedSubmission === undefined ? {} : { submissionId: body.landedSubmission }), ...(body.assignee === undefined ? {} : { author: body.assignee }), host: port! }); } catch (error) { return { ok: false as const, reason: `the project's required checks could not be read, so nothing was landed: ${safe(error, 300)}` }; }
+          if (!gated.passed) {
+            gateRefused = true;
+            const failed = gated.results.filter((r) => r.result !== "pass").map((r) => `${r.check} ${r.result === "fail" ? "failed" : "not run"}`);
+            return { ok: false as const, reason: `the required checks did not all pass on the integrated tree${gated.tree === undefined ? "" : ` ${gated.tree.slice(0, 12)}`} (${failed.join(", ")}; a check that did not run counts as failed), so nothing was landed; the author was sent the results` };
+          }
+        }
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(gated?.tree === undefined || gated.required.length === 0 ? {} : { checkedTree: gated.tree }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
           const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
           changed = found.changed !== false;
@@ -462,6 +505,7 @@ export class WorkspaceOpService {
         }
         return answer;
       }, async (attemptId) => {
+        if (gateRefused && gated !== undefined && this.#deps.attempts?.tell !== undefined) { if (await this.#deps.attempts.tell(attemptId, `[workspace] ${landingChecksText(body.taskId, id, gated, 1500)}`)) told.push(attemptId); return; }
         if (notLanded !== undefined && this.#deps.attempts?.tell !== undefined) { if (await this.#deps.attempts.tell(attemptId, `[workspace] Your checkout ${notLanded} (request ${id}).`)) told.push(attemptId); return; }
         if (!changed || body.operation === "quarantine" || this.#deps.attempts?.tell === undefined) return;
         const what = body.operation === "refresh" ? "was refreshed to the shared workspace's current head: files in it may differ from what you read earlier, so read them again before you rely on them" : body.operation === "landing" ? "was landed on the landing branch (the landed files wait, uncommitted, to be committed by the integrator or owner)" : body.operation === "release" ? "was committed by the platform in the task's own history (your files did not change)" : "was integrated into the shared workspace";
@@ -477,16 +521,24 @@ export class WorkspaceOpService {
           try { await this.#deps.notify({ commandId: `wsn-${id}`, taskId: body.taskId, text: text.slice(0, 400) }); } catch { /* the outcome is recorded either way; the notice is retried by a repeat of the request only */ }
         }
       }
-      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };
+      // A landing the checks refused goes back to its author (card P09): the agent that submitted the reviewed code, else the agent the task is assigned to, gets the results in its inbox.
+      let toldAuthor: string | undefined;
+      if (gateRefused && gated !== undefined && this.#deps.tellAuthor !== undefined) {
+        let author: string | undefined;
+        if (body.landedSubmission !== undefined) { try { author = (await this.#deps.approvalOf?.(body.landedSubmission))?.submittedBy; } catch { author = undefined; } }
+        author ??= body.assignee;
+        if (author !== undefined) { try { await this.#deps.tellAuthor({ commandId: `lgc-${id}`, taskId: body.taskId, to: author, text: landingChecksText(body.taskId, id, gated) }); toldAuthor = author; } catch { /* recorded as not told */ } }
+      }
+      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         return done("done", { summary: safe(outcome.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }), ...more });
       }
-      return done("refused", { summary: `the host did not do it: ${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts });
+      return done("refused", { summary: `${gateRefused ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(told.length === 0 ? {} : { told }) });
     } catch (error) {
       if (error instanceof QuiesceRefused) return done("refused", { summary: safe(error.message, WORKSPACE_LIMITS.summary), ...(error.blockerId === undefined ? {} : { blocker: error.blockerId }) });
       // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.
-      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }), ...(stopped.length === 0 ? {} : { stopped }) });
+      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }) });
     }
   }
 
