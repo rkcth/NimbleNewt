@@ -49,6 +49,7 @@ export function profileFor(recipe: NormalizedRecipe, libraryReads: readonly stri
   ];
   recipe.readOnly.forEach((_m, i) => lines.push(`(allow file-read* process-exec* (subpath (param "RO${i}")))`));
   // The program's own libraries outside the system (Homebrew's node links libuv, openssl, icu from /opt/homebrew/opt/<formula>, symbolic links into the Cellar): each exact file and link, read only (card H12b remainder).
+  // The same list carries the OpenSSL configuration file that a linked Homebrew libcrypto reads at start (<OPENSSLDIR>/openssl.cnf), when there is one: also exact and read only.
   libraryReads.forEach((_p, i) => lines.push(`(allow file-read* (literal (param "LIB${i}")))`));
   recipe.protectedSubpaths.forEach((_n, i) => lines.push(`(deny file-write* (subpath (param "PROT${i}")))`));
   lines.push("(deny network*)");

@@ -66,8 +66,14 @@ export interface SubmissionApproval {
   readonly projectId: string;
   readonly base: string;
   readonly tree: string;
+  /** The patch ID the submission names (card P09: a reviewer's approval carries over to a landing only while the patch ID is unchanged). */
+  readonly patchId?: string;
   readonly submittedBy: string;
+  /** When the submission was recorded. */
+  readonly submittedAt: string;
   readonly approved: boolean;
+  /** What the newest review of it says, when it has one (card P09 tells a review that asked for changes apart from one that has not been given). */
+  readonly newest?: "approve" | "changes" | "reject";
   readonly approvedBy?: string;
   /** The review submission that approved it, when a reviewer did. */
   readonly reviewId?: string;
@@ -388,8 +394,8 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     const newest = reviews[reviews.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, submittedBy: found.submittedBy };
-    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id } : { ...base, approved: false, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt };
+    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve" } : { ...base, approved: false, newest: newest.verdict, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
   }
