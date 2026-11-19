@@ -2765,6 +2765,19 @@ Arguments:
 
 Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again with `next`.
 
+#### `submission.documents`
+
+The newest document submissions (kind `document`, made in the docs role) of a project, newest first (card Q03b), from the project's index of its newest 100 document changes: what an owner or docs agent passes as `documentSubmissionId` to `doc.obligation.verify`. Each is visible exactly as `submission.get`: the owner sees all; an agent that may read the project's tasks sees the ones of tasks it may read that it made or was asked to review. A project the caller may not read is `not_found`. `since` keeps those recorded no earlier than that time (a flagged document's `flaggedAt`: only a document change made since the flag verifies it).
+
+Arguments:
+
+- `projectId`: the project
+- `since` (optional): a time (`2026-11-19T10:00:00.000Z`): only document changes recorded no earlier
+- `limit` (optional): 1 to 50, default 20
+- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this project)
+
+Result: `{ items, next? }`: each item is the submission with its revision and `createdAt` (when it was recorded).
+
 #### `submission.get`
 
 One submission record. The owner reads any; an agent needs to read the submission's task (task read, and with a task credential only that task) and to have made the submission or been asked to review it; anyone else gets not found.
@@ -7804,7 +7817,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.verify`
 
-Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged, and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
 
 Arguments:
 
