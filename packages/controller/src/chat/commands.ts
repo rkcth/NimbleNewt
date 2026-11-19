@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "database-transfer";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "database-transfer" | "defect";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -120,6 +120,12 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
+  // Defects (card Q04): recording a finding, or a repair, adds a record and changes no decision, so it applies at once; judging a repair and the owner's override decide whether work goes on, so they are shown first in every profile
+  // and pinned to the defect's revision when shown (a repair checked or repaired again in between, now in another version, makes the proposal stale).
+  "defect.report": { verb: "Record a defect found in a version of a deliverable (finding in the owner's words, severity critical, major or minor)", mode: "apply" },
+  "defect.repair": { verb: "Say which newer version of the deliverable repairs a defect", mode: "apply" },
+  "defect.review": { verb: "Judge the repair of a defect (verdict fixed or not-fixed, with what is still wrong)", mode: "propose", revision: "defect" },
+  "defect.override": { verb: "Decide a defect yourself (outcome accept-as-is, keeping the finding on the record, or repair-again, keeping the cycle count; reason in the owner's words)", mode: "propose", revision: "defect" },
   // QA evidence (card Q02): invalidating evidence whose criteria or owner decisions changed, and scheduling its re-check, only applies what the records already say; it applies at once.
   "qa.evidence.check": { verb: "Check whether a task's QA evidence still holds (its acceptance criteria and the owner decisions it was judged against unchanged); evidence that no longer holds is invalidated and a re-check is scheduled", mode: "apply" },
   // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
@@ -595,6 +601,11 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
  * `context.route.change` names the settings it turns on, off or back to their defaults (`enable`, `disable`, `unset`) from a fixed list the service checks (`check`, `floorChars`, `anchor`, `anchorChars`, `recall`, `recallCalls`; cards W12, W13): the owner says
  * "stop reminding the agents of their goal when their memory is cut", the interpreter chooses `anchor`, and the proposal shows the name before anything is applied. The names are not words an owner has to say; an unknown one is refused by the service.
  */
+/**
+ * The defect commands (card Q04) name a defect or a deliverable by the ID the `defects` status view showed the owner, and the outcome and severity from a fixed list the service checks: the owner says
+ * "ship the guide as it is" or "that is a big problem", the interpreter chooses the ID and the value, and the service refuses an unknown or unreadable one. The finding and the reason are still the owner's own words.
+ */
+export const DEFECT_EXEMPT: ReadonlySet<string> = new Set(["id", "deliverableId", "outcome", "severity"]);
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
 export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);

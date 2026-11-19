@@ -9,7 +9,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
-import type { AcceptanceService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
+import type { AcceptanceService, DefectService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
 import type { SimulationService } from "../simulation/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
@@ -151,6 +151,8 @@ export interface StateApiDeps {
   /** Simulation scopes (card P07). */
   readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
+  /** Defects, repair and review cycles and owner overrides (card Q04). */
+  readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "get" | "list">;
   /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
   readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
@@ -399,6 +401,7 @@ export class StateApi {
         ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
         ...(this.#deps.submissions === undefined ? {} : { submissions: this.#deps.submissions }),
         ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
+        ...(this.#deps.defects === undefined ? {} : { defects: this.#deps.defects }),
         ...(this.#deps.qaEvidence === undefined ? {} : { qaEvidence: this.#deps.qaEvidence }),
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
