@@ -93,7 +93,29 @@ const isRedactedHead = (sid: string, after: string): boolean => after.startsWith
 const WELL_KNOWN = /^(?:nt authority|builtin|nt service|nt virtual machine|window manager|font driver host|everyone|users|administrators|guests|system|creator owner|authenticated users|all application packages|trustedinstaller|<host>|<user>)$/i;
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const SEP = String.raw`(?:\\\\|\\|/)+`;
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+/** An e-mail address, tried only where `eachEmail` starts it (sticky). */
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/y;
+const isEmailLocal = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
+/**
+ * Replaces every e-mail address in `text` with what `as` returns, finding the same addresses as a plain global search with `EMAIL` but in linear time. A plain search
+ * retries at every character of a long run of name characters with no `@` (40 KB of letters took over a second, 3 MB never finished); here an address is tried only at
+ * the start of such a run or where the previous address ended, and when that fails the rest of the run is skipped: every later start in the run reaches the same next
+ * character, so it fails the same way.
+ */
+function replaceEmails(text: string, as: (email: string) => string): string {
+  let out = "";
+  let copied = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (!isEmailLocal(text.charCodeAt(i))) { i++; continue; }
+    EMAIL.lastIndex = i;
+    const m = EMAIL.exec(text);
+    if (m !== null) { out += text.slice(copied, i) + as(m[0]); i = copied = i + m[0].length; continue; }
+    while (i < text.length && isEmailLocal(text.charCodeAt(i))) i++;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+const hasEmail = (text: string): boolean => { let found = false; replaceEmails(text, (m) => { found = true; return m; }); return found; };
 
 function localNames(): { users: string[]; hosts: string[] } {
   const users: string[] = [];
@@ -119,7 +141,9 @@ export function redact(text: string, names: RedactionNames = {}): string {
   // Microsoft-account, Azure AD and e-mail forms; the local part of an e-mail is also a name to hide elsewhere.
   const fromEmail: string[] = [];
   out = out.replace(/(?:MicrosoftAccount|AzureAD)\\{1,2}[^\s:"'\\]+/gi, "<user>");
-  out = out.replace(EMAIL, (m) => { const local = m.split("@")[0]!; fromEmail.push(local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)); return "<email>"; });
+  // Only names of at most 64 characters (the longest local part an address may have) are searched for elsewhere: a longer run is not a person's name, and a pattern made
+  // from it can be too large to build (100 KB of letters before an @ made redact throw).
+  out = replaceEmails(out, (m) => { const local = m.split("@")[0]!; fromEmail.push(...[local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)].filter((p) => p.length <= 64)); return "<email>"; });
   out = out.replace(SID_IN_TEXT, (m: string, star: string, sid: string, at: number, all: string) => (isRedactedHead(sid, all.slice(at + m.length)) ? m : `${star}${redactSid(sid)}`));
   // Addresses (loopback and 0.x, which are version numbers, stay).
   out = out.replace(/\b(?!127\.|0\.)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, "<ip>");
@@ -148,8 +172,9 @@ export function redact(text: string, names: RedactionNames = {}): string {
     const cr = line.endsWith("\r") ? "\r" : "";
     const body = line.replace(/\r$/, "");
     // A line that starts in column 0 begins with the folder's path; one that starts with blanks is a continuation holding only the account.
-    const first = /^(\S+\s+)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
-    const more = /^(\s+)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
+    // `(?!\s)` keeps the blank runs from being retried shorter, which could never match where the longest did not and took time growing with the square of their length.
+    const first = /^(\S+\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
+    const more = /^(\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
     const m = more ?? first;
     if (m === null) return line;
     const account = m[2]!.trim();
@@ -176,7 +201,7 @@ export function scrub(text: string, names: RedactionNames = {}, limit = 2048): s
   // written with them, which the text pattern above does not see, is withheld rather than passed (Windows does not write SIDs that way; this only fails closed).
   const loose = bare.normalize("NFKC").replace(/[\p{Pd}\u2212]/gu, "-");
   const sidLeft = [...loose.matchAll(SID_IN_TEXT)].some((m) => !isRedactedHead(m[2]!, loose.slice(m.index + m[0].length)) && (redactSid(m[2]!) !== m[2]!.toUpperCase() || m[2]! !== m[2]!.toUpperCase()));
-  if (watched.some((n) => wholeWord(n).test(bare)) || new RegExp(EMAIL.source).test(bare) || sidLeft || bare.includes("\0")) return WITHHELD;
+  if (watched.some((n) => wholeWord(n).test(bare)) || hasEmail(bare) || sidLeft || bare.includes("\0")) return WITHHELD;
   return out;
 }
 

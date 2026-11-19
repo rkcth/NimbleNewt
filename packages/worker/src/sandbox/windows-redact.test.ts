@@ -236,3 +236,27 @@ test("property: no machine, domain, account, session or virtual-machine number s
   assert.equal(scrub("owner S\u22121\u22125\u221221\u2212111\u2212222\u2212333\u22121001", names), WITHHELD);
   assert.equal(scrub(`owner ${wide("S-1-5-18")}`, names), `owner ${wide("S-1-5-18")}`);
 });
+
+test("redaction time grows with the length of the text, not its square: 3 MB on one line finishes quickly, and e-mails and access lists are still redacted", { timeout: 30_000 }, () => {
+  // redact runs on a whole field (scripts/redact-log.mjs passes whole lines of a job log) before the cut, so one long run must not take time growing with its square.
+  const big = 3_000_000;
+  for (const [kind, text] of [["letters", "x".repeat(big)], ["name characters", "a.b_c%d+e-".repeat(big / 10)], ["an address with no domain end", `a@${"x".repeat(big)}`], ["blanks", `${" ".repeat(big)}x`], ["a path then blanks", `C:\\x${" ".repeat(big)}y:`]] as const) {
+    const started = process.hrtime.bigint();
+    const out = scrub(text, names, 100);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 1500, `${kind}: ${ms} ms`);
+    assert.ok(out.length < 200, kind);
+  }
+  // Real addresses are found as before: at the start of a run of name characters, right after another address, inside longer text, next to punctuation.
+  assert.equal(redact("mail jim.bob+x@example.co.uk, or (a_b@mail.example.org).", names), "mail <email>, or (<email>).");
+  assert.equal(redact("a@b.cd+x@e.fg", names), "<email><email>");
+  assert.equal(redact("ab@c", names), "ab@c");
+  // The last gate still finds an address that only appears once placeholders are taken out (here one written around a literal "<sid>").
+  assert.equal(redact("x@ab<sid>.com", names), "x@ab<sid>.com");
+  assert.equal(scrub("x@ab<sid>.com", names), WITHHELD);
+  assert.equal(scrub(`${"y".repeat(100_000)} reach someone.else@example.com now`, names, 200_000), `${"y".repeat(100_000)} reach <email> now`);
+  assert.ok(!scrub(`${"z".repeat(100_000)}someone@example.com`, names, 200_000).includes("someone"));
+  // The access-list rule still keeps the indented account form and redacts a person's account after long blanks.
+  assert.equal(redact(`C:\\work${" ".repeat(50_000)}DESKTOP-4F2K9\\Kim:(F)`, names), `C:\\work${" ".repeat(50_000)}<host>\\<user>:(F)`);
+  assert.equal(redact(`${" ".repeat(50_000)}Kim Lee:(OI)(CI)(RX)`, names), `${" ".repeat(50_000)}<user>:(OI)(CI)(RX)`);
+});
