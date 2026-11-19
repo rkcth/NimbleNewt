@@ -187,6 +187,11 @@ export function createBridge(transport: BridgeTransport, options: { maxTools?: n
   return Object.freeze({ tools: Object.freeze(tools), declarations: new DeclarationBoard(transport, options), seed });
 }
 
+/** The characters the tools' schemas take in a model call, as the worker measures and reports them at start (its `toolSchemaChars`): each tool's name, description and parameters, as JSON. The controller's fixed-part budget test measures with this too. */
+export function toolSchemaCharsOf(tools: readonly Pick<AdapterTool, "name" | "description" | "parameters">[]): number {
+  return JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
+}
+
 /**
  * The tools a worker is started with: the bridge's, always, and the agent's personal ones. A personal tool must be named in the agent's own namespace (`a_<id>__<name>`); one that is named in the
  * `nimblenewt` or `toolbox` namespace, in another agent's, or without a namespace is refused, as is one that repeats any name. There is no way to leave a bridge tool out.

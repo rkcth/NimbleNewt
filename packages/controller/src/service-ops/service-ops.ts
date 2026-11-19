@@ -233,6 +233,8 @@ export class ServiceOperations {
     const e = await this.#ports.effects.get(outcome.reference);
     if (e === undefined || e.kind !== "service-op") return bad("is not a service operation of this controller");
     if (e.taskId !== taskId) return bad("is an operation done for another task");
+    // Card P07: a result of a simulation scope is never a real outcome, whatever it says; the owner grants real access separately and the operation is done again for real.
+    if (e.simulation !== undefined || e.evidence?.["simulated"] === true) return bad("is a simulated operation of a simulation scope; a simulated result cannot be named as a real outcome");
     if (e.status !== "confirmed") return bad(`is an operation that is ${e.status}, not confirmed`);
     const ev = e.evidence;
     if (ev === undefined || ev["verified"] !== true) return bad("is an operation whose result was not verified against the target");

@@ -234,7 +234,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     // The two answers are sized for the window below: each attempt's first call fits the startup share alone, both together do not, and after the compaction (the older part only extracted) the call fits again.
     const answer = await model([{ text: big(1, 700) }, { text: big(2, 650) }, { text: "continued" }]);
     const x = await rig(real, answer);
-    // 65,536 tokens (cards W06 and W10 merged: the completion rules, work.note, work.answer and the report put the fixed part at about 4,200 tokens; on 49,152 the compacted call no longer fit). At 65,536 the worker's background
+    // 65,536 tokens (cards W06 and W10 merged: the completion rules, work.note, work.answer and the report put the fixed part at about 4,200 tokens, and card T08's toolbox tools at about 5,900, `WORKER_FIXED_PART_ABOUT_TOKENS` in the controller; on 49,152 the compacted call no longer fit). At 65,536 the worker's background
     // compaction threshold (card CMP: window - reserve 8,192 - background 16,384) is 40,960, so the first two attempts are never compacted in the background.
     x.window.value = 65536;
     try {
