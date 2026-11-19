@@ -5,11 +5,15 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { startController } from "../api/index.js";
 import { replyOf } from "../chat/chat.js";
-import { stopServer } from "../domain/testing/backends.js";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { cid, openWorld } from "../chat/testing/harness.js";
 import { DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS } from "../context/route-settings.js";
-import { MIN_STARTABLE_WINDOW, WORKER_FIXED_PART_CHARS, smallWindowWarning, windowCanStartTask } from "../context/fixed-part.js";
+import { anchorBudget } from "../context/anchor.js";
+import { contextBudget } from "../context/budget.js";
+import { admitFirstCall } from "../context/dispatch.js";
+import { MIN_STARTABLE_WINDOW, WORKER_FIXED_PART, WORKER_FIXED_PART_CHARS, smallWindowWarning, windowCanStartTask } from "../context/fixed-part.js";
 import { SETUP_GUIDE } from "./readiness.js";
-import { MIN_WORKABLE_CONTEXT_TOKENS } from "./providers.js";
+import { MIN_WORKABLE_CONTEXT_TOKENS, SetupProviderService } from "./providers.js";
 
 after(stopServer);
 
@@ -55,4 +59,32 @@ test("the figures: the floor covers the measured fixed part, every accepted wind
   for (const w of [MIN_STARTABLE_WINDOW, 32_768, 40_960, 131_072]) { assert.equal(windowCanStartTask(w), true, String(w)); assert.equal(smallWindowWarning(w), undefined, String(w)); }
   const q = SETUP_GUIDE["model-route"].question;
   assert.ok(q.includes("about 5,900 tokens") && q.includes("32,768 or more is needed in practice") && !q.includes("4,200"), q);
+});
+
+test("in the chat, the owner gives a window too small to start a task: the proposal is shown first, and once applied the reply carries the warning with the window that is needed", async () => {
+  const script: Record<string, unknown> = {};
+  const w = await openWorld(backends[0]!, script, undefined, (storage, epoch) => ({ setupProviders: SetupProviderService.withEpoch(storage, epoch, { clock: () => "2026-11-18T10:00:00.000Z", pause: async () => undefined }, {}) }));
+  try {
+    const chat = w.chat();
+    const say = async (text: string, plan: unknown[]) => { script[text] = plan; return chat.submit(w.ownerToken, { messageId: cid("m"), text }); };
+    const text = "Register my local server called tiny at http://127.0.0.1:8002/v1 with the model m (16384 tokens), and another local one called big at http://127.0.0.1:8003/v1 with the model m (65536 tokens).";
+    const proposed = await say(text, [{ kind: "command", op: "routing.provider.add", args: { providers: [provider("tiny", 8002, 16_384), provider("big", 8003, 65_536)] }, evidence: text, basis: "owner" }]);
+    assert.equal(proposed.outcomes[0]!.status, "proposed", JSON.stringify(proposed.outcomes));
+    const done = await say("Yes, do that.", [{ kind: "apply_proposal", proposalId: (proposed.outcomes[0] as { proposalId: string }).proposalId, evidence: "Yes, do that.", basis: "owner" }]);
+    assert.equal(done.outcomes[0]!.status, "applied", JSON.stringify(done.outcomes));
+    const line = done.reply.find((l) => l.startsWith("Provider tiny: a context window of 16,384 tokens is accepted, but no task can start on it"));
+    assert.ok(line !== undefined && line.includes(`at least ${MIN_STARTABLE_WINDOW.toLocaleString("en-US")} tokens`), done.reply.join("\n"));
+    assert.ok(!done.reply.some((l) => l.startsWith("Provider big:")), "the large window is not warned about");
+  } finally { await w.close(); }
+});
+
+test("the smallest startable window is what the first-call admission itself decides: the fixed part, the anchor at its default size and the smallest task pass its startup limit exactly from that window", () => {
+  // The same first call the dispatcher admits (card C07b): the measured fixed part, and as the call's own content the goal anchor at its default size for the window plus the smallest task.
+  const startupRefused = (w: number): boolean => {
+    const call = { ...WORKER_FIXED_PART, startupTokens: Math.ceil((anchorBudget(w) ?? 0) / 3) + Math.ceil(3_000 / 3), replyReserveTokens: 0 };
+    return admitFirstCall(call, contextBudget(w)).reasons.some((r) => r.includes("over the startup limit"));
+  };
+  for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w <= 2 * MIN_STARTABLE_WINDOW; w += 256) assert.equal(windowCanStartTask(w), !startupRefused(w), String(w));
+  assert.equal(startupRefused(MIN_STARTABLE_WINDOW), false);
+  assert.equal(startupRefused(MIN_STARTABLE_WINDOW - 1_024), true);
 });
