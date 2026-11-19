@@ -207,6 +207,9 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     sub["owner was explicitly configured"] = process.env["NIMBLENEWT_WSB_OWNER"] !== undefined;
     sub["console user is the configured owner"] = session?.consoleUser !== undefined && session.consoleUser.toLowerCase() === owner.toLowerCase();
     sub["lock state known"] = session?.locked !== undefined;
+    // Windows Sandbox refuses a start (0x80070005) unless the runner runs in the console session as the console user: started interactively with run.cmd, not as a service.
+    sub["runner in the active console session"] = session?.processInConsoleSession ?? "not determined";
+    sub["runner is the console user"] = session?.processIsConsoleUser ?? "not determined";
     await attempt("auto-login flags readable", () => host.autologon());
     await attempt("lock task readable", () => host.lockTask("NimbleNewt-LockOnLogon"));
     await attempt("supervisor folder ACL readable", () => host.writableBy(join(runnerScript, "..")));

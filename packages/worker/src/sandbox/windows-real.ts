@@ -28,7 +28,13 @@ $q = Query $sid 7; if ($q) { $domain = [Runtime.InteropServices.Marshal]::PtrToS
 $q = Query $sid 25; if ($q) { $flags = [Runtime.InteropServices.Marshal]::ReadInt32($q.p, 16); [NNWts]::WTSFreeMemory($q.p) }
 # Another session's user name can be refused to an ordinary account; the console user is also known to WMI without special rights.
 if (-not $user) { try { $cu = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName; if ($cu) { $parts = $cu -split '\\\\', 2; if ($parts.Count -eq 2) { $domain = $parts[0]; $user = $parts[1] } else { $user = $cu } } } catch { } }
-@{ sessionId = [int]$sid; user = $user; domain = $domain; flags = $flags } | ConvertTo-Json -Compress
+# This PowerShell is a child of the process asking, so it runs in that process's session and with its account: whether that is the console session and the console user
+# (Windows Sandbox refuses a start from a service with E_ACCESSDENIED). The account is compared by SID when the console user's name resolves to one; the name is sent only for that comparison.
+$me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$procSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+$sameSid = $null
+if ($user) { try { $acct = if ($domain) { New-Object System.Security.Principal.NTAccount($domain, $user) } else { New-Object System.Security.Principal.NTAccount($user) }; $sameSid = ($acct.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $me.User.Value) } catch { } }
+@{ sessionId = [int]$sid; user = $user; domain = $domain; flags = $flags; processSessionId = [int]$procSession; processUser = $me.Name; sameSid = $sameSid } | ConvertTo-Json -Compress
 `;
 const AUTOLOGON_SCRIPT = `
 $k = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'
@@ -74,6 +80,31 @@ if ($null -eq $t) { '{"present":false}' } else { @{ present = $true; enabled = [
 type RawPackage = { name?: unknown; publisherId?: unknown; familyName?: unknown; version?: unknown; installLocation?: unknown; signatureKind?: unknown; status?: unknown; nonRemovable?: unknown; isFramework?: unknown };
 type RawSignature = { valid?: unknown; subject?: unknown; status?: unknown; statusMessage?: unknown; signatureType?: unknown };
 const text = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+
+export interface RawSession { readonly sessionId?: unknown; readonly user?: unknown; readonly domain?: unknown; readonly flags?: unknown; readonly processSessionId?: unknown; readonly processUser?: unknown; readonly sameSid?: unknown }
+
+/**
+ * The session probe's answer as the host interface reports it. Nobody signed in is `{}`. The two facts about this process are reported only when the probe determined them: in the
+ * console session when both session ids are numbers; the console user by SID when the probe could compare SIDs, otherwise only by the exact full name (case aside). Anything else is
+ * absent, which the session check refuses.
+ */
+export function sessionFromProbe(raw: RawSession): WindowsSession {
+  const user = text(raw.user);
+  if (user === undefined) return {};
+  const domain = text(raw.domain);
+  const consoleUser = domain === undefined ? user : `${domain}\\${user}`;
+  const id = (v: unknown): number | undefined => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined);
+  const consoleId = id(raw.sessionId), processId = id(raw.processSessionId);
+  const processUser = text(raw.processUser);
+  const isUser = typeof raw.sameSid === "boolean" ? raw.sameSid : processUser === undefined ? undefined : processUser.toLowerCase() === consoleUser.toLowerCase();
+  return {
+    consoleUser,
+    // WTS_SESSIONSTATE_LOCK is 0, WTS_SESSIONSTATE_UNLOCK is 1; anything else is not trusted.
+    ...(raw.flags === 0 ? { locked: true } : raw.flags === 1 ? { locked: false } : {}),
+    ...(consoleId === undefined || processId === undefined ? {} : { processInConsoleSession: consoleId === processId }),
+    ...(isUser === undefined ? {} : { processIsConsoleUser: isUser }),
+  };
+}
 
 /** The package probe's answer as the host interface reports it. A field that is missing or not text is reported empty (required ones) or absent (optional ones), so the checks refuse it. */
 export function packageFromProbe(raw: RawPackage | null): WindowsPackageInfo | undefined {
@@ -212,10 +243,7 @@ export function windowsRealHost(): WindowsHost {
       return signatureFromProbe(await powershell<RawSignature>(SIGNATURE_SCRIPT, { NN_PATH: path }), path);
     },
     async session(): Promise<WindowsSession> {
-      const s = await powershell<{ sessionId: number | null; user: string | null; domain?: string; flags: number | null }>(SESSION_SCRIPT);
-      if (s.user === null || s.user === "") return {};
-      // WTS_SESSIONSTATE_LOCK is 0, WTS_SESSIONSTATE_UNLOCK is 1; anything else is not trusted.
-      return { consoleUser: s.domain === undefined || s.domain === "" ? s.user : `${s.domain}\\${s.user}`, ...(s.flags === 0 ? { locked: true } : s.flags === 1 ? { locked: false } : {}) };
+      return sessionFromProbe(await powershell<RawSession>(SESSION_SCRIPT));
     },
     async autologon(): Promise<WindowsAutologon> {
       const a = await powershell<{ enabled: boolean; user: string | null; domain: string | null; plain: boolean }>(AUTOLOGON_SCRIPT);

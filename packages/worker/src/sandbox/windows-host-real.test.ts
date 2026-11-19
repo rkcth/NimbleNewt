@@ -69,6 +69,8 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     const session = await host.session();
     if (session.consoleUser !== undefined) assert.match(session.consoleUser, /\S/);
     if (session.locked !== undefined) assert.equal(typeof session.locked, "boolean");
+    for (const fact of [session.processInConsoleSession, session.processIsConsoleUser]) if (fact !== undefined) assert.equal(typeof fact, "boolean");
+    if (session.consoleUser === undefined) assert.deepEqual(session, {}, "with nobody signed in nothing about this process is reported");
     const auto = await host.autologon();
     assert.equal(typeof auto.enabled, "boolean");
     assert.equal(typeof auto.plaintextPasswordStored, "boolean");
@@ -247,7 +249,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
       exists: (p) => fakeFiles.has(lower(p)) || host.exists(p),
       findPackage: async () => ({ name: SANDBOX_PACKAGES[0]!.name, publisherId: SANDBOX_PACKAGES[0]!.publisherId, familyName: packageFamilyName(SANDBOX_PACKAGES[0]!), version: "0.8.107.0", installLocation: install }),
       signature: async () => ({ valid: true, subject: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }),
-      session: async () => ({ consoleUser: OWNER, locked: false }),
+      session: async () => ({ consoleUser: OWNER, locked: false, processInConsoleSession: true, processIsConsoleUser: true }),
       run: async (file, args, opts): Promise<ProcessResult> => {
         if (!lower(file).endsWith("\\wsb.exe")) return host.run(file, args, opts);
         wsb.push([...args]);

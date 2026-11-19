@@ -153,11 +153,16 @@ test("the monitor is told when a call starts, when its first bytes arrive, at a 
   const usage = "data: {\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":300}}}\n\n";
   // A normal stream: start, first bytes once, no progress inside the interval, the end with what the provider reported.
   assert.deepEqual(await watch(() => sse(["data: a\n\n", "data: b\n\n", usage])), ["started:true", "first", "finished:true:900:300:40"]);
-  // With a short interval progress is told, not more often than the interval allows.
-  const slow = await watch(() => sse(["data: a\n\n", "data: b\n\n", "data: c\n\n", "data: d\n\n", usage]), "chat/completions", { progressMs: 20 });
+  // With a short interval progress is told, not more often than the interval allows. The bound comes from the time the stream really took:
+  // timers are coarse on Windows (about 15.6 ms), so a fixed count flaked there (own-hardware run 44501483353). Every report needs a full
+  // interval since the first bytes or the last report, all inside the measured span, so at most floor(span / interval) can be told.
+  const interval = 40;
+  const t0 = Date.now();
+  const slow = await watch(() => sse(["data: a\n\n", "data: b\n\n", "data: c\n\n", "data: d\n\n", "data: e\n\n", "data: f\n\n", "data: g\n\n", "data: h\n\n", usage]), "chat/completions", { progressMs: interval });
+  const span = Date.now() - t0;
   assert.equal(slow[0], "started:true"); assert.equal(slow[1], "first");
   const progress = slow.filter((x) => x === "progress:true").length;
-  assert.ok(progress >= 1 && progress <= 3, `${progress} progress reports for about 60 ms at 20 ms`);
+  assert.ok(progress >= 1 && progress <= Math.floor(span / interval), `${progress} progress reports in ${span} ms at ${interval} ms`);
   assert.equal(slow.at(-1), "finished:true:900:300:40");
   // Anthropic-style counts: input and the two cache counts.
   assert.equal((await watch(() => sse(["event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":700,\"cache_creation_input_tokens\":50}}}\n\n", "data: {\"usage\":{\"output_tokens\":12}}\n\n"], )))[2], "finished:true:850:700:12");

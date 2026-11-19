@@ -1,7 +1,7 @@
 import { win32 } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { NormalizedRecipe } from "./recipe.js";
-import { GUEST_PATHS, aclSteps, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
+import { GUEST_PATHS, INTERACTIVE_RUNNER_HINT, aclSteps, isWsbAccessDenied, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
 import type { WindowsHost } from "./windows-host.js";
 
 /** The job file the backend writes (in the supervisor's control directory) and the runner process reads. */
@@ -183,7 +183,9 @@ async function execute(host: WindowsHost, job: WindowsJob, supervisorPaths: read
     if (id !== undefined) host.writeText(statusFile(jobDir), JSON.stringify({ id }));
     if (started.code !== 0 || id === undefined) {
       const text = `${started.stdout}\n${started.stderr}`;
-      const why = /0x8000401A/i.test(text) ? "Windows Sandbox could not start because no user session is available (0x8000401A, the server's configured identity)" : `wsb start failed (exit ${String(started.code)}): ${text.trim().slice(0, 300)}`;
+      const why = /0x8000401A/i.test(text) ? "Windows Sandbox could not start because no user session is available (0x8000401A, the server's configured identity)"
+        : isWsbAccessDenied(started.code, text) ? `Windows Sandbox refused this process (access denied, 0x80070005; wsb start exit ${String(started.code)}): ${INTERACTIVE_RUNNER_HINT}`
+        : `wsb start failed (exit ${String(started.code)}): ${text.trim().slice(0, 300)}`;
       return { exitCode: EXIT_FAILED, stdout: "", stderr: `failed: ${why}\n` };
     }
     // The session conditions are checked again between start and exec: the start takes long enough for a lock to be undone.

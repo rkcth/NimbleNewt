@@ -136,6 +136,12 @@ test("the platform-specific files are part of what a report must have run", () =
   assert.ok(filesFor(map.scenarios[0], "win32").includes("worker/sandbox/windows-host-real"));
   const present = /const PRESENT = "([^"]+)";/.exec(readFileSync(join(here, "..", "packages", "worker", "src", "sandbox", "windows-host-real.test.ts"), "utf8"))?.[1];
   assert.ok(present !== undefined && map.scenarios[0].notApplicable.win32.includes(present), "the no-client skip reason of windows-host-real is named for win32");
+  // Every reason the resource-limit tests give for skipping only because the host is Windows is named for win32, word for word
+  // (own-hardware run 44501483353 failed the scenario on "needs a shell and ps", which the map lacked). Host-load skips are not of this form.
+  const limitsScenario = map.scenarios.find((s) => s.id === "sandbox-resource-limits");
+  const winOnly = [...readFileSync(join(here, "..", "packages", "worker", "src", "sandbox", "resource-watch.test.ts"), "utf8").matchAll(/process\.platform === "win32"[^;\n]*?t\.skip\("([^"]+)"\)/g)].map((m) => m[1]);
+  assert.ok(winOnly.includes("needs a shell and ps") && winOnly.length >= 5, `found ${winOnly.length} Windows-only skips`);
+  for (const r of winOnly) assert.ok(notApplicableHere(r, limitsScenario.notApplicable.win32), `the Windows-only skip "${r}" is named for win32`);
   const v = judgeAltered((raws) => { const r = JSON.parse(raws[evidenceNames("win32").scenarios]); r.scenarios[0].files = filesFor(map.scenarios[0], "linux"); raws[evidenceNames("win32").scenarios] = JSON.stringify(r); });
   blocked(v, /win32: scenarios: scenario sandbox-escape-refused: ran other test files/);
 });
