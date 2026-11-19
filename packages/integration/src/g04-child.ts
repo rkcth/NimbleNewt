@@ -3,13 +3,15 @@
  * (scenario `path`, or `wait`, see g04-wait.ts, or `tool`, see g04-tool.ts) over the given real database with the REAL Pi adapter (durable JSONL storage in <directory>/pi) in the same
  * process, and kills itself with SIGKILL at boundary <crashAt>.
  */
+import { writeSync } from "node:fs";
 import { join } from "node:path";
-import { ANSWER, Chaos, Clock, openAdapter, openStore, piConversation, runPath, startProcess, type StoreSpec } from "./g04-fixture.js";
+import { ANSWER, Chaos, Clock, KILLED_AT, openAdapter, openStore, piConversation, runPath, startProcess, type StoreSpec } from "./g04-fixture.js";
 import { childToolRun } from "./g04-tool.js";
 import { waitScenario } from "./g04-wait.js";
 
 const [specJson, directory, crashAt, scenario] = process.argv.slice(2) as [string, string, string, string];
-const chaos = new Chaos(Number(crashAt), () => (process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)));
+// The label the process dies at goes to stderr first (synchronously), so the parent can check the kill landed on the boundary it meant.
+const chaos: InstanceType<typeof Chaos> = new Chaos(Number(crashAt), () => (writeSync(2, `${KILLED_AT}${JSON.stringify(chaos.labels.at(-1))}\n`), process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)));
 const storage = await openStore(JSON.parse(specJson) as StoreSpec);
 if (scenario === "tool" || scenario === "tool-replay") {
   // The protected effect inside a tool the model calls (g04-tool.ts): its own adapter, with the tool and the reading model.

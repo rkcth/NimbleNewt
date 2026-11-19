@@ -10,7 +10,7 @@ import {
 import * as harness from "@nimblenewt/controller/testing";
 import { BRIDGE_REPLAY, PiAdapter, type AdapterTool } from "@nimblenewt/pi-adapter";
 import { piConversation } from "./conversation.js";
-import { Chaos, Clock, OperationSpy, acknowledgedSurvive, describe, openStore, operationsOf, runChild, type Clean, type Slice, type SliceWorld, type StoreSpec } from "./g04-fixture.js";
+import { Chaos, Clock, KILLED_AT, OperationSpy, acknowledgedSurvive, describe, openStore, operationsOf, runChild, type Clean, type Slice, type SliceWorld, type StoreSpec } from "./g04-fixture.js";
 
 // Card G04, slice "a kill during a protected tool the model calls". The G04 path (`g04-kill.ts`) runs its protected effect from the worker's own code;
 // here the effect is started by a tool the Pi model calls, through the production route a tool bridge write takes (card L05d): the call is recorded
@@ -181,6 +181,7 @@ export function toolInvariants(s: ToolState): string[] {
   expect(s.applied <= 1, `the outside world holds ${s.applied} pushes`);
   expect(s.effects.length <= 1, `${s.effects.length} effects in the ledger`);
   expect(s.text !== DONE_TEXT || s.applied === 1, "the model was told the push happened but the outside world does not hold it");
+  expect(s.text !== DONE_TEXT || s.effects[0]?.status === "confirmed", "the model was told the push happened but the ledger does not hold it as confirmed");
   expect(s.effects.length > 0 || s.executed === 0, "the target was reached with no effect in the ledger");
   // The admission records the call as admitted and creates its effect in one commit: a call's state and the ledger agree.
   expect((s.effects.length === 1) === (s.call === "admitted"), `the call is ${s.call ?? "not recorded"} while the ledger holds ${s.effects.length} effect(s)`);
@@ -254,6 +255,8 @@ export async function killToolAndRestart(spec: StoreSpec, directory: string, cle
   const label = describe(clean, crashAt);
   const child = await runChild(spec, directory, crashAt, replay === undefined ? "tool" : "tool-replay");
   if (!child.killed || child.out.includes("finished")) return { index: crashAt, label, problems: [`${label}: the child was not killed (${child.err.slice(0, 300)})`], outcome: "not killed", modelCalls: 0 };
+  // The kill landed on the boundary the uncrashed run numbered (a child whose route took other steps would otherwise die somewhere else unnoticed).
+  if (!child.err.includes(`${KILLED_AT}${JSON.stringify(clean.labels[crashAt])}\n`)) return { index: crashAt, label, problems: [`${label}: the child died elsewhere (${child.err.slice(0, 300)})`], outcome: "killed elsewhere", modelCalls: 0 };
   const storage = await openStore(spec);
   let controller: ToolController | undefined;
   const { adapter, model } = await openToolAdapter(join(directory, "pi"), () => controller!, replay);
