@@ -67,7 +67,8 @@ export interface AgentOptions extends RunnerOptions {
  * so a one-agent project still works.
  */
 export const STANDARD_ROLES: readonly { readonly name: string; readonly capabilities: readonly string[]; readonly description: string }[] = [
-  { name: "author", capabilities: ["project.read", "task.read", "attempt.work", "desk.read", "desk.write", "history.append", "artifact.read", "artifact.publish"], description: "Does the work of a task and submits it." },
+  // An author's bundle holds what a task on the worker host needs to run (card D01): work the attempt, take its actions, ask for review and receive its messages. "Let Ann work on Garden" gives it.
+  { name: "author", capabilities: ["project.read", "task.read", "attempt.work", "effect.perform", "review.request", "message.receive", "desk.read", "desk.write", "history.append", "artifact.read", "artifact.publish"], description: "Does the work of a task and submits it." },
   { name: "reviewer", capabilities: ["project.read", "task.read", "desk.read", "history.read", "artifact.read", "review.decide"], description: "Reads submitted work and gives an independent verdict." },
   { name: "integrator", capabilities: ["project.read", "task.read", "desk.read", "history.read", "artifact.read"], description: "Orders submitted work and asks the controller to land it; writes no content." },
   { name: "qa", capabilities: ["project.read", "task.read", "desk.read", "desk.write", "history.read", "artifact.read", "artifact.publish"], description: "Tests submitted work and reports what it finds." },

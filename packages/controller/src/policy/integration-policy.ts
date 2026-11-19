@@ -132,6 +132,17 @@ export class IntegrationPolicyService {
     return { ...settings, revision: found.revision, source: body.source, lockedMainAutomatic: locked, ...(settings.landing !== body.landing ? { heldFrom: body.landing } : {}) };
   }
 
+  /**
+   * The project's effective settings for the controller's own code (card P09: the landing gate reads the required checks here, through the service and never from the raw record, so the lock and the record made at first
+   * read apply). It takes no caller and is not an API operation: whoever asks has been checked already (a landing needs `workspace.manage` and the integrator lease).
+   */
+  async effective(projectId: string): Promise<IntegrationSettings> {
+    await this.ensure(projectId);
+    const found = await this.#runner.get(KIND, this.#id(projectId));
+    if (found === undefined) throw new DomainError("unavailable", `the integration policy of project ${projectId} could not be read`);
+    return this.#coerce(found.body as unknown as IntegrationBody, await this.#locked());
+  }
+
   /** The owner changes the project's policy; fields left out stay. A landing of `main-automatic` is refused while the installation lock is set. */
   async set(owner: Principal, command: NoActor & { projectId: string; landing?: Landing; integrator?: Integrator; requiredChecks?: readonly Check[]; refreshRounds?: number; expectedRevision?: number }): Promise<{ revision: number }> {
     this.#owner(owner, "change");

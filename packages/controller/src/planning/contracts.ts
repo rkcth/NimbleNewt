@@ -68,6 +68,8 @@ export interface DependencyBody {
 
 export const DEFAULT_CONTRACT: ContractFields = { acceptanceCriteria: [], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [], permissions: [], recovery: "native-continuation" };
 export const CONTRACT_LIMITS = { result: 4000, criterion: 500, criteria: 50, evidence: 30, evidenceItem: 200, permissions: 100, scan: 5000, budgetMax: 1_000_000, checks: 10, checkName: 80, checkArgs: 32, checkArg: 1000, checkSeconds: 600, checkMaxSeconds: 3600 } as const;
+/** How many stored versions `landingTests` reads at most before it gives up (no test commands: the landing's tests do not pass). */
+const LANDING_TEST_LOOKBACK = 200;
 const ACTION = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*(?:\.\*)?)$/;
 const FIELDS = ["expectedResult", "acceptanceCriteria", "priority", "difficulty", "budget", "workClass", "requiredEvidence", "checks", "permissions", "recovery"] as const;
 
@@ -164,6 +166,37 @@ export class ContractService {
     const task = await this.#readableTask(by, checkTaskId(taskId));
     if (task === undefined) return undefined;
     return this.#current(taskId, task.projectId);
+  }
+
+  /**
+   * The test commands a landing runs (card P09): the contract's `checks` as last SET by someone who is none of `authors`, so an author holding `task.contract.write` cannot loosen the checks its own landing runs. What counts
+   * is who introduced the checks, not who stored the newest version: a later version by someone else (the owner changing the priority, an escalation setting the difficulty) carries the checks forward unchanged and does
+   * not make an author's loosened checks count (P09 second review). Each step walks back to the version that introduced the checks it holds; an author's is skipped to the version before it. `undefined` (no tests run, so
+   * the landing's tests do not pass) when the task has no contract, when only authors set its checks, past `LANDING_TEST_LOOKBACK` reads, or at a stored version that cannot be read. It takes no caller and is not an API
+   * operation: whoever asks has been checked already (a landing needs `workspace.manage`).
+   */
+  async landingTests(taskId: string, authors: readonly string[]): Promise<{ version: number; checks: readonly ContractCheck[] } | undefined> {
+    const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
+    const by = new Set(authors.map(bare).filter((a) => a !== ""));
+    const checksOf = (b: ContractBody): readonly ContractCheck[] => (Array.isArray(b.checks) ? b.checks : []);
+    const same = (a: ContractBody, b: ContractBody): boolean => JSON.stringify(checksOf(a)) === JSON.stringify(checksOf(b));
+    const version = async (v: number): Promise<ContractBody | undefined> => (await this.#runner.get("task-contract-version", `${taskId}.${v}`))?.body as unknown as ContractBody | undefined;
+    let found = (await this.#runner.get("task-contract", checkTaskId(taskId)))?.body as unknown as ContractBody | undefined;
+    let reads = 0;
+    while (found !== undefined) {
+      let introduced = found;
+      while (introduced.version > 1) {
+        if (++reads > LANDING_TEST_LOOKBACK) return undefined;
+        const before = await version(introduced.version - 1);
+        if (before === undefined) return undefined;
+        if (!same(before, introduced)) break;
+        introduced = before;
+      }
+      if (!by.has(bare(introduced.changedBy))) return { version: found.version, checks: checksOf(found) };
+      if (introduced.version <= 1 || ++reads > LANDING_TEST_LOOKBACK) return undefined;
+      found = await version(introduced.version - 1);
+    }
+    return undefined;
   }
 
   async history(by: Principal, taskId: string): Promise<View<ContractVersionBody>[] | undefined> {

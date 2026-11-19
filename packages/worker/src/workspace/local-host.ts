@@ -7,6 +7,7 @@ import { WorkspaceError } from "./errors.js";
 import type { GitBridge } from "./git.js";
 import { WipBackupHost, type HostRestoreTarget } from "./wip-host.js";
 import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy } from "./host.js";
+import { landingChecks, type LandingCheckCall, type LandingCheckReport, type LandingChecksOptions } from "./landing-checks.js";
 import { fold, plainName } from "./names.js";
 import { NOFOLLOW } from "./paths.js";
 
@@ -38,6 +39,11 @@ export interface LocalWorkspacesOptions {
   /** The worker-side hook for security events (see `WorkspaceHostOptions.security`). */
   readonly security?: WorkspaceHostOptions["security"];
   readonly clock?: () => string;
+  /**
+   * The sandbox the landing gate's checks run in (card P09): the launcher, the read-only inputs (a language runtime), the environment and the owner's limits. When given, the port answers `landingChecks` (each required test
+   * command run on a fresh copy of the tree the landing would make); without it the port has no `landingChecks` and a landing that requires tests is refused by the controller as not run.
+   */
+  readonly checks?: Omit<LandingChecksOptions, "git" | "locate">;
 }
 
 /** A project folder cannot take the name of one of the host's own folders. */
@@ -51,7 +57,7 @@ export class LocalWorkspaces {
   readonly #options: LocalWorkspacesOptions;
   readonly host: WorkspaceHost;
   /** What a `LocalWorker` takes as its `workspace` option (and what a remote worker's responder runs). */
-  readonly port: { run(call: HostWorkspaceCall): Promise<HostWorkspaceOutcome> };
+  readonly port: { run(call: HostWorkspaceCall): Promise<HostWorkspaceOutcome>; /** Card P09: present when `checks` was given. */ landingChecks?(call: LandingCheckCall): Promise<LandingCheckReport> };
 
   constructor(options: LocalWorkspacesOptions) {
     if (typeof options.root !== "string" || !isAbsolute(options.root) || normalize(options.root) !== options.root) throw new WorkspaceError("invalid_path", "the workspace root must be an absolute, normalised path");
@@ -68,7 +74,8 @@ export class LocalWorkspaces {
       ...(options.security === undefined ? {} : { security: options.security }),
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     });
-    this.port = { run: (call) => this.host.run(call) };
+    const checks = options.checks === undefined ? undefined : landingChecks({ ...options.checks, git: options.git, locate: (call) => this.locate(call) });
+    this.port = { run: (call) => this.host.run(call), ...(checks === undefined ? {} : { landingChecks: checks }) };
   }
 
   /** The folder of a task, when it exists exactly as named, is finished (its `complete` mark is there) and no other spelling of the name stands beside it. */

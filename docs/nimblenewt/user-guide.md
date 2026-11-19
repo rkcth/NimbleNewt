@@ -83,8 +83,8 @@ NimbleNewt: Proposed, nothing has happened yet (it changes what someone may do o
 You: yes, add her
 NimbleNewt: Applied proposal
 
-You: Give Ann the rights attempt.work, effect.perform, review.request, task.read, desk.write, desk.read and message.receive in the project Garden, because Ann works on Garden
-NimbleNewt: Proposed, nothing has happened yet (a right is shown first). ... Grant right (no end: it never runs out and stays until you revoke it; only in "Garden"): action=attempt.work
+You: Let Ann work on Garden
+NimbleNewt: Proposed, nothing has happened yet (a right is shown first). ... Grant right (no end: it never runs out and stays until you revoke it; only in "Garden"): action=attempt.work ... These are the rights the role author of "Ann" stands for, each only in "Garden".
 
 You: yes, give them
 NimbleNewt: Applied proposal
@@ -111,7 +111,7 @@ What to notice:
 - **You use your own words.** There are no special phrases to learn; the lines above are just one way to say it. A model reads what you mean, so if it gets you wrong, nothing has happened yet: discard the proposal and say it differently.
 - **Everything that matters is shown first.** NimbleNewt answers "Proposed, nothing has happened yet" and waits. Say yes (in any words) to go ahead, or say you do not want it to drop it. Small changes that are easy to undo, such as marking a task ready, are done at once ("Done: ...").
 - **The setup list tells you what is next** after each step, so you are never left guessing. Say "help me get started" at any time to see the whole list again.
-- **Giving an agent rights is still technical.** An agent can do nothing until you give it rights in a project, and today you have to name each right, as in the example. Copy that sentence and change the names. A plain "let Ann work on Garden" is not understood yet (see [What is not finished yet](#what-is-not-finished-yet)).
+- **Giving an agent what it needs is one sentence.** An agent can do nothing until you give it rights in a project. "Let Ann work on Garden" gives Ann every right her role (author) stands for, only in Garden, and lists each one before you say yes; rights she already has there are left out. To give fewer or other rights, say no and name them instead ("give Ann the rights task.read and desk.read in Garden").
 
 ### After the conversation: the work starts
 
@@ -226,7 +226,6 @@ Then tell the chat only the **name** you gave the key ("use the free route; its 
 ## What is not finished yet
 
 - **Agents run on Linux only.** macOS and Windows machines can host the controller and the chat, but not agents yet.
-- **Rights are named one by one.** Giving an agent what it needs to work means naming each right (see the example). A plain-words "let Ann work on Garden" is a planned improvement.
 - **No installer.** You run NimbleNewt from the downloaded folder with `node scripts/nimblenewt.mjs`, and starting it automatically with the computer is a manual step ([maintenance and updates](maintenance-and-updates.md)).
 - **A second model server is required**, even for a first try.
 - **Notifications stay inside NimbleNewt.** You see them in the chat and the phone page; no email or messaging channel is built in.
