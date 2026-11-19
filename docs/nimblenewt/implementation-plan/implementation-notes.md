@@ -14683,3 +14683,5 @@ First review of the follow-up (clean-context Opus 5.5, 2026-11-19):
   - A call presented again while the controller (same epoch, worker-only crash) is still running the first request is answered `effect_busy`; a model may then make a new call. Waiting for the running one would be better.
   - With `admitCall` off, `tool.invoke` and `job.start` presented again under a different number are new calls (no ledger).
   - The tests ran on Linux only.
+- **Merged** `card-g04-s1` 36035bf5 (its second review: the child reports the boundary it dies at, and the model told "pushed" needs a confirmed effect); `g04-evidence.md` keeps both the fix's replay setting and the label check.
+- **Verified** (Linux, Node 22, `/tmp/nn-slot.sh`, `NIMBLENEWT_REQUIRE_SANDBOX=1`, after the merge and a build): G04 tool files on SQLite, the SQLite worker thread (`NIMBLENEWT_G04_HEAVY=1`) and PostgreSQL 6 of 6, every kill on its numbered boundary under both flipped tests; the pi-adapter suite 270 of 270; controller `generation` 222 of 222; `toolbridge/service` and `api/start-l05d` 200 of 200. Not rerun: effects, reconcile and the dispatch shards (no change of this review touches them).
