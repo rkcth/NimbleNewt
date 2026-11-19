@@ -698,7 +698,10 @@ for (const backend of backends) {
     const gated = (route: string, out: string): Summariser => ({ route, summarise: () => new Promise<string>((resolve) => { gates.set(route, () => resolve(out)); }) });
     const a = enf.compact(owner, compactCmd(t, "ka", [src]), [gated("a", "Summary A.")]);
     const b = enf.compact(owner, { ...compactCmd(t, "kb", [src]), attemptId: "att-2" }, [gated("b", "Summary B.")]);
-    while (!(gates.has("a") && gates.has("b"))) await new Promise((r) => setTimeout(r, 5));
+    // Bounded: a summariser that is never reached fails the test here instead of waiting for the file's timeout.
+    for (const until = Date.now() + 60_000; !(gates.has("a") && gates.has("b")); await new Promise((r) => setTimeout(r, 5))) {
+      if (Date.now() > until) assert.fail(`only ${[...gates.keys()].join(", ") || "no"} summariser was reached within 60 seconds`);
+    }
     gates.get("a")!(); const first = await a;
     gates.get("b")!(); const second = await b;
     assert.deepEqual([first.kind, second.kind], ["summary", "superseded"]);
