@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { EffectService, SIMULATED_EFFECT_LABEL, SIMULATION_REFUSAL, type EffectBridge } from "../domain/effects.js";
+import { derivedId } from "../domain/ids.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
@@ -183,6 +185,57 @@ for (const backend of backends) {
       assert.equal((await sims.close(owner, { commandId: "close-2", scopeId })).scope.state, "closed");
       await refuses("invalid_command", () => sims.operate(owner, { commandId: cid("late"), scopeId, service: "shop", resource: "cart", action: { type: "restart" } }));
       assert.equal((await sims.get(owner, scopeId)).effects.length, 6);
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: an operation intended before a crash is finished once on the scope's stand-in, a closed scope runs nothing more, and a change the scope's record could not keep is refused before it is done (card P07, review)`, async () => {
+    const { w, owner, task, effects, sims } = await world(backend);
+    try {
+      const scopeId = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+      // The process stopped after the intent was recorded and before it ran: the same command again runs it, once, on the stand-in.
+      const intendOnly = async (commandId: string, fields: JsonObject): Promise<string> => {
+        const input = { service: "shop", resource: "cart", action: { type: "set", params: { fields } }, allowed: [{ service: "shop", resource: "cart" }], before: {}, baseline: {} } as unknown as JsonObject;
+        return (await effects.intend({ commandId: `simop:${scopeId}:${scopedCommandId(owner.id, commandId)}`, actor: owner.id, kind: "service-op", target: `simulation:${scopeId}/service:shop/cart`, input, taskId: task, simulation: scopeId })).id;
+      };
+      const crashed = await intendOnly("crash-1", { replicas: 5 });
+      assert.equal(crashed, derivedId("eff", `simop:${scopeId}:${scopedCommandId(owner.id, "crash-1")}`));
+      const resumed = await sims.operate(owner, { commandId: "crash-1", scopeId, service: "shop", resource: "cart", action: { type: "set", params: { fields: { replicas: 5 } } } });
+      assert.equal(resumed.effectId, crashed);
+      assert.equal(resumed.status, "confirmed");
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).state["replicas"], 5);
+      assert.ok((await sims.get(owner, scopeId)).effects.some((e) => e.effectId === crashed), "listed in the scope");
+      // Another left unrun, then the scope is closed: repeating its command reports it as recorded and runs nothing.
+      const left = await intendOnly("crash-2", { replicas: 7 });
+      await sims.close(owner, { commandId: cid("c"), scopeId });
+      const late = await sims.operate(owner, { commandId: "crash-2", scopeId, service: "shop", resource: "cart", action: { type: "set", params: { fields: { replicas: 7 } } } });
+      assert.equal(late.effectId, left);
+      assert.equal(late.status, "intended");
+      assert.match(String(late.note), /closed/);
+      assert.equal((await effects.get(left))?.started, false, "never started");
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).state["replicas"], 5, "the stand-in is unchanged");
+
+      // The whole stand-in lives in one record: a layout or a change that would not fit is refused before anything is recorded or done.
+      const big = "x".repeat(7000);
+      const wide = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`r${i}`, { state: { a: big } }]));
+      await refuses("invalid_command", () => sims.open(owner, { commandId: cid("o"), taskId: task, layout: { s: wide, t: wide } }));
+      const roomy = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: { s: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`r${i}`, { state: {} }])) } })).id;
+      let refused = 0;
+      for (let i = 0; i < 12; i++) {
+        const before = (await sims.get(owner, roomy)).effects.length;
+        try {
+          const r = await sims.operate(owner, { commandId: cid("g"), scopeId: roomy, service: "s", resource: `r${i}`, action: { type: "set", params: { fields: { f: "y".repeat(30000) } } } });
+          assert.equal(r.status, "confirmed");
+          assert.equal((await sims.observe(owner, { scopeId: roomy, service: "s", resource: `r${i}` })).systemVersion, "v2", "what the ledger confirmed is what the record holds");
+        } catch (error) {
+          assert.ok(error instanceof DomainError && error.code === "invalid_command" && /would not fit/.test(error.message), String(error));
+          refused += 1;
+          assert.equal((await sims.get(owner, roomy)).effects.length, before, "nothing recorded");
+          assert.equal((await sims.observe(owner, { scopeId: roomy, service: "s", resource: `r${i}` })).systemVersion, "v1", "nothing done");
+        }
+      }
+      assert.ok(refused > 0, "the record's bound was reached");
+      const view = await sims.get(owner, roomy);
+      assert.ok(view.effects.every((e) => e.status === "confirmed"));
     } finally { await w.close(); }
   });
 

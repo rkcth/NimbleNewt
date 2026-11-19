@@ -6,7 +6,8 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { Principal } from "../security/principals.js";
 import { canonicalJson } from "../storage/json.js";
-import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
+import { LIMITS, type AggregateRef, type ControllerStorage, type JsonObject } from "../storage/types.js";
+import { checkBody } from "../storage/validate.js";
 import { operationBridge } from "../service-ops/service-ops.js";
 import { SimulatedServices, type SimulatedFaults, type SimulatedLayout, type SimulatedSnapshot } from "../service-ops/simulated.js";
 import type { Observation, ServiceAction, ServiceRef, ServiceTarget } from "../service-ops/target.js";
@@ -102,15 +103,29 @@ function checkLayout(raw: unknown): SimulatedLayout {
  * bridge goes on, so what the ledger later settles is what the record holds.
  */
 class ScopeWorld implements ServiceTarget {
+  /** Set when an apply could not be saved to the scope's record: the in-memory stand-in then holds a change the record does not, so it answers nothing more (review: a lost save never reads as confirmed). */
+  #unsaved: unknown;
   constructor(readonly inner: SimulatedServices, private readonly save: () => Promise<void>) {}
-  observe(ref: ServiceRef) { return this.inner.observe(ref); }
+  #check(): void { if (this.#unsaved !== undefined) throw new Error(`the simulation scope's record could not be saved, so the stand-in's answer is not trusted (${this.#unsaved instanceof Error ? this.#unsaved.message : String(this.#unsaved)})`); }
+  async observe(ref: ServiceRef) { this.#check(); return this.inner.observe(ref); }
   affects(ref: ServiceRef, action: ServiceAction) { return this.inner.affects(ref, action); }
   neighbours(ref: ServiceRef) { return this.inner.neighbours(ref); }
-  applied(key: string) { return this.inner.applied(key); }
+  async applied(key: string) { this.#check(); return this.inner.applied(key); }
   verify(ref: ServiceRef, action: ServiceAction, before: Observation, after: Observation) { return this.inner.verify(ref, action, before, after); }
   async apply(key: string, ref: ServiceRef, action: ServiceAction, context?: JsonObject): Promise<void> {
-    try { await this.inner.apply(key, ref, action, context); } finally { await this.save(); }
+    try { await this.inner.apply(key, ref, action, context); } finally {
+      try { await this.save(); } catch (error) { this.#unsaved = error; throw error; }
+    }
   }
+}
+
+/** Room kept in a scope's record for what is added after the size check (the effect's ID, the closing time). */
+const BODY_RESERVE = 1024;
+/** Throws `invalid_command` when a scope's record holding `body` would not fit the store (size or depth), so nothing is recorded or done that the record could not keep. */
+function fits(body: SimulationScopeBody, what: string): void {
+  let size: number;
+  try { checkBody(body, "scope"); size = Buffer.byteLength(canonicalJson(body as unknown as JsonObject), "utf8"); } catch { size = Number.POSITIVE_INFINITY; }
+  if (size > LIMITS.bodyBytes - BODY_RESERVE) throw new DomainError("invalid_command", `${what}: a simulation scope keeps its whole stand-in in one record of at most ${LIMITS.bodyBytes - BODY_RESERVE} bytes (nested at most ${LIMITS.bodyDepth} deep), and this would not fit; use smaller states or open another scope`, { field: what });
 }
 
 export class SimulationService {
@@ -162,6 +177,7 @@ export class SimulationService {
       taskId, projectId: task.projectId, openedBy: by.id, openedAt: this.#runner.now(), ...(command.purpose === undefined ? {} : { purpose: command.purpose }), state: "open", label: SIMULATION_SCOPE_LABEL,
       isolation: { world: "stand-in", realServices: false, tools: false, providers: false, messages: false, grants: false }, world, effects: [],
     };
+    fits(body, "layout");
     const r = await this.#runner.command("simulation.open", { commandId: scoped, actor: by.id }, async () => ({
       payload: { taskId, layout: layout as unknown as JsonObject, ...(command.purpose === undefined ? {} : { purpose: command.purpose }) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: JSON.parse(JSON.stringify(body)) as JsonObject }], detail: { taskId, simulated: true } }),
@@ -230,6 +246,9 @@ export class SimulationService {
       if (known !== undefined) {
         const was = known.input;
         if (known.simulation !== scopeId || known.kind !== "service-op" || was["service"] !== ref.service || was["resource"] !== ref.resource || canonicalJson(was["action"] as JsonObject) !== canonicalJson(action as unknown as JsonObject)) throw new DomainError("command_conflict", `command ID ${commandId} was already used for a different operation`);
+        const now = await this.#scope(scopeId);
+        // A closed scope runs nothing more: an operation it had not finished is only reported as the ledger has it.
+        if (now.body.state !== "open") return this.#result(scopeId, effectId, { status: known.status, ...(known.evidence === undefined ? {} : { evidence: known.evidence }), ...(known.status === "confirmed" || known.status === "failed" ? {} : { note: "the simulation scope is closed, so this operation is not run further" }) });
         await this.#listEffect(scopeId, effectId);
         return this.#result(scopeId, effectId, await this.#ports.effects.run(effectId, this.#bridge(scopeId, (await this.#scope(scopeId)).body.world)));
       }
@@ -248,6 +267,11 @@ export class SimulationService {
         service: ref.service, resource: ref.resource, action: action as unknown as JsonObject, allowed: all.map((r) => ({ service: r.service, resource: r.resource })),
         before: before as unknown as JsonObject, baseline: baseline as unknown as JsonObject, ...(command.inject === undefined ? {} : { inject: command.inject }),
       };
+      // The world after the change must fit the scope's record, or the change could be done on the stand-in and not kept: tried first on a copy (worst case of an injected fault).
+      const trial = SimulatedServices.fromSnapshot(s.body.world, () => this.#runner.now());
+      if (command.inject === "leak" && guarded[0] !== undefined) trial.faults.leakInto = guarded[0];
+      try { await trial.apply(effectId, ref, action, { baseline: baseline as unknown as JsonObject }); } catch { /* refused on the copy: it will be refused (and change nothing) for real too */ }
+      fits({ ...s.body, world: trial.snapshot(), effects: [...s.body.effects, effectId] }, "action");
       await this.#ports.effects.intend({ commandId: intentId, actor: by.id, kind: "service-op", target: `simulation:${scopeId}/service:${refKey(ref)}`, input, taskId: s.body.taskId, simulation: scopeId });
       await this.#listEffect(scopeId, effectId);
       const faults: SimulatedFaults = command.inject === "refuse" ? { refuseNext: "the simulated service refused the action (injected)" } : command.inject === "lose-answer" ? { loseNextAnswer: true } : command.inject === "corrupt" ? { corruptNext: true } : command.inject === "leak" && guarded[0] !== undefined ? { leakInto: guarded[0] } : {};
