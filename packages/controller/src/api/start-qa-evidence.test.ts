@@ -138,7 +138,7 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     const ev = { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] };
     const first = await call(qa.token, "qa.evidence.record", ev, "q1");
     assert.equal(first.ok, true, JSON.stringify(first));
-    assert.equal((await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item.verdict, "passed", "with no required checks, the newest record's checks all passed");
+    assert.equal((await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item.verdict, "passed", "with no required checks, every check named in current independent evidence passed");
 
     // A change of priority is not a change of what the work must be: nothing goes stale.
     await call(boot.token, "contract.set", { taskId: task, expectedVersion: 1, priority: 8 }, "c2");

@@ -63,7 +63,7 @@ export interface QaRecheckBody {
   readonly requestedBy: string;
   readonly requestedAt: string;
   readonly state: "pending" | "done";
-  /** The independent evidence for the same submission that settled it. */
+  /** The evidence for the same submission that settled it (independent evidence, or the author's new self-check for a re-check of a self-check). */
   readonly doneBy?: string;
   readonly doneAt?: string;
 }
@@ -119,7 +119,7 @@ const work = (c: Record<string, unknown> | undefined): Record<string, unknown> =
  *   it is kept and shown, never counted by the gate.
  * - **Bound to what it was judged on.** The contract version named must be the one in force, every decision named must be active and apply to the task, and every decision the task relies on
  *   (`decision.link`) must be named; a task relying on a superseded decision cannot be checked until it is revalidated (card C08).
- * - **Gate.** `gate` passes only when every required check (the contract's check names and required evidence items; with none, every check of the newest record) has a `passed` result in current
+ * - **Gate.** `gate` passes only when every required check (the contract's check names and required evidence items; with none, every check named in any current independent record) has a `passed` result in current
  *   independent evidence for that submission. Missing evidence fails, and so does evidence whose criteria or decisions changed since.
  * - **Invalidation.** `check` compares every current record of a task with what it was bound to; one whose acceptance criteria, required evidence or checks changed, or whose decisions were
  *   superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, and the owner is told. New independent evidence
@@ -283,11 +283,14 @@ export class QaEvidenceService {
         for (const r of index.body.rechecks) {
           const found = await this.#runner.get("qa-recheck", r);
           const rb = found?.body as unknown as QaRecheckBody | undefined;
-          if (found === undefined || rb === undefined || rb.state !== "pending") continue;
-          if (source === "independent" && rb.submissionId === command.submissionId) {
+          if (found === undefined || rb === undefined) continue;
+          // Independent evidence settles every pending re-check of the submission; the author's new self-check settles only the re-check of its own earlier self-check.
+          if (rb.state === "pending" && rb.submissionId === command.submissionId && (source === "independent" || rb.assignee === by.id)) {
             settled.push(r);
             changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneBy: id, doneAt: now }) });
-          } else rechecks.push(r);
+          }
+          // Done re-checks stay listed (at most one per evidence record, so the index stays bounded).
+          rechecks.push(r);
         }
         if (contract.revision !== undefined) changes.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
         const nextIndex = json({ ids: [...index.body.ids, id], rechecks });
@@ -401,7 +404,7 @@ export class QaEvidenceService {
 
   /**
    * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does. Every required check needs a `passed`
-   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, the newest record's checks must all pass, and
+   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so, and
    * no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> {
@@ -429,7 +432,9 @@ export class QaEvidenceService {
     if ((reliance?.links ?? []).some((l) => l.state !== "current")) reasons.add("decision_superseded");
     const newestFirst = [...usable].reverse();
     const required = this.#required(contract.body);
-    const names = required.length > 0 ? required : [...(newestFirst[0]?.checks.map((c) => c.name) ?? [])];
+    // With no required checks, every check named in any current independent record is judged (by the newest record naming it): a later record that leaves a check out does not hide an
+    // earlier failure of it.
+    const names = required.length > 0 ? required : [...new Set(newestFirst.flatMap((e) => e.checks.map((c) => c.name)))];
     const checks: QaGateCheck[] = names.map((name) => {
       for (const e of newestFirst) { const c = e.checks.find((x) => x.name === name); if (c !== undefined) return { name, result: c.result, evidenceId: e.id }; }
       return { name, result: "missing" as const };

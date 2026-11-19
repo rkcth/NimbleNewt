@@ -95,6 +95,34 @@ for (const backend of backends) {
       await refuses("invalid_command", () => svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 3 }), /superseded|is superseded/);
       assert.equal((await svc.check(owner, { commandId: cid("k"), taskId: task })).invalidated[0], again.id);
       void ok;
+
+      // A task whose contract names no checks: every check named in current independent evidence is judged, so a newer record that leaves a check out does not hide its earlier failure.
+      const task2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T2" })).id;
+      const sub2 = derivedId("sbm", cid("sub"));
+      await plant("submission", sub2, { taskId: task2, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+      const ev2 = { submissionId: sub2, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-18T09:30:00.000Z" };
+      const selfOld = await svc.record(ann, { commandId: cid("r"), ...ev2, checks: [{ name: "smoke", result: "passed" }] });
+      const both = await svc.record(qa, { commandId: cid("r"), ...ev2, checks: [{ name: "smoke", result: "failed" }, { name: "unit", result: "passed" }] });
+      await svc.record(qa, { commandId: cid("r"), ...ev2, checks: [{ name: "unit", result: "passed" }] });
+      const g2 = await svc.gate(owner, sub2);
+      assert.deepEqual([g2.verdict, g2.reasons, g2.counts.failed, g2.checks.find((c) => c.name === "smoke")?.evidenceId], ["failed", ["check_failed"], 1, both.id], "an earlier failure is not hidden by a newer record that omits the check");
+      await svc.record(qa, { commandId: cid("r"), ...ev2, checks: [{ name: "smoke", result: "passed" }] });
+      assert.equal((await svc.gate(owner, sub2)).verdict, "passed", "a newer record naming the check decides it");
+
+      // The author's new self-check settles only the re-check of its own self-check; done re-checks stay listed.
+      const c2 = { taskId: task2, projectId: project, version: 1, changedBy: owner.id, acceptanceCriteria: ["works"], priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [], permissions: [], recovery: "native-continuation" };
+      await plant("task-contract", task2, c2);
+      await plant("task-contract-version", `${task2}.1`, { ...c2, changedAt: "2026-11-18T09:40:00.000Z" });
+      const k3 = await svc.check(owner, { commandId: cid("k"), taskId: task2 });
+      assert.equal(k3.invalidated.length, 4);
+      const selfRecheck = derivedId("qrc", selfOld.id);
+      const reSelf = await svc.record(ann, { commandId: cid("r"), ...ev2, criteriaRevision: 1, checks: [{ name: "smoke", result: "passed" }] });
+      assert.deepEqual(reSelf.settled, [selfRecheck], "the author settles only its own self-check's re-check");
+      assert.equal((await svc.gate(owner, sub2)).verdict, "failed", "a self-check still never counts");
+      const reQa = await svc.record(qa, { commandId: cid("r"), ...ev2, criteriaRevision: 1, checks: [{ name: "smoke", result: "passed" }] });
+      assert.equal(reQa.settled.length, 3, "independent evidence settles the rest");
+      const l2 = await svc.list(owner, task2);
+      assert.deepEqual([l2.rechecks.length, l2.rechecks.every((r) => r.state === "done")], [4, true], "done re-checks stay listed");
     } finally { await world.close(); }
   });
 }

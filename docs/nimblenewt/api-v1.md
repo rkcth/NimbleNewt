@@ -2672,7 +2672,7 @@ Result: `{ item }`.
 
 #### `qa.evidence.gate`
 
-Whether the independent QA evidence for one code submission passes, read only (card Q02). Required checks are the task contract's check names and required evidence items; each needs `passed` in the newest current independent record that names it. `failed`, `blocked`, `not-run` and `missing` are each counted and each fail; no evidence fails; evidence whose criteria or decisions changed since does not count (`stale`), and a task relying on a superseded decision fails. With no required checks, the newest record's checks must all pass. Self-checks never count.
+Whether the independent QA evidence for one code submission passes, read only (card Q02). Required checks are the task contract's check names and required evidence items; each needs `passed` in the newest current independent record that names it. `failed`, `blocked`, `not-run` and `missing` are each counted and each fail; no evidence fails; evidence whose criteria or decisions changed since does not count (`stale`), and a task relying on a superseded decision fails. With no required checks, every check named in any current independent record is judged the same way (a newer record that leaves a check out does not hide an earlier failure of it). Self-checks never count.
 
 Arguments:
 
@@ -7522,7 +7522,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.evidence.record`
 
-Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks. Repeating the same command ID records once.
+Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks; the author's new self-check settles only the re-check of its own earlier self-check. Repeating the same command ID records once.
 
 Arguments:
 
