@@ -801,7 +801,12 @@ export class ToolExecutionService {
       body = { ...args, contractVersion: attempt.revisions?.contract ?? 0 };
     }
     const response = await this.#deps.state.handle(token, { v: 1, op, commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: body });
-    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+    if (response.ok) return ok(response.result);
+    // Review: the API's words for a changed contract ("read it and check the deliverable against it") suggest a retry this agent cannot make, as it never names a version. Say what it can do instead.
+    if (op === "deliverable.submit" && response.error.code === "stale_revision" && /^the task contract is at version/.test(response.error.message)) {
+      return refusal("stale_revision", `the task contract changed after this attempt began (it was version ${String(body["contractVersion"])}); this attempt cannot submit. Say so when you end your work: the next attempt works against the new contract`);
+    }
+    return refusal(response.error.code, response.error.message);
   }
 
   /**

@@ -65,6 +65,10 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
     for (const [i, g] of grants.entries()) await s.grants.grant(owner, { commandId: `g-${i}`, grantee: `agent:${ann}`, action: g.action, project, ...(g.resource === undefined ? {} : { resource: g.resource }), source: "direct", basis: "work" } as never);
     const taskId = (await s.projects.createTask({ commandId: "t-1", actor: owner.id, projectId: project, title: "Tune the billing cache" })).id;
     const otherTask = (await s.projects.createTask({ commandId: "t-2", actor: owner.id, projectId: project, title: "Someone else's report" })).id;
+    // The task has a contract (version 1) before the attempt begins: a submission is checked against THAT version, not against 0.
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => (await c.api.handle(ownerToken, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as Reply;
+    const setContract = async (expectedVersion: number, criterion: string, commandId: string): Promise<void> => { const r = await call("contract.set", { taskId, expectedVersion, acceptanceCriteria: [criterion] }, commandId); assert.equal(r["ok"], true, JSON.stringify(r)); };
+    await setContract(0, "the cache keeps entries for a minute", "ct-1");
     await s.projects.transitionTask({ commandId: "r-1", actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
     await s.assignments.assignTask({ commandId: "as-1", actor: owner.id, taskId, owner: { kind: "agent", id: ann } });
     const a = (await s.assignments.getAssignment(taskId))!;
@@ -108,6 +112,24 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
         refused(await send("deliverable.submit", { id: report["id"], expectedRevision: report["revision"], contractVersion: 0 }, "ds-0"), "invalid_command");
         good(await send("deliverable.submit", { id: report["id"], expectedRevision: report["revision"] }, "ds-1"));
         good(await send("deliverable.submit", { id: outcome["id"], expectedRevision: outcome["revision"] }, "ds-2"));
+        // A deliverable of another task (the owner made Ann responsible for it) is not reached through this attempt's credential.
+        const foreign = await call("deliverable.draft", { taskId: otherTask, type: "report", title: "Elsewhere", responsibleAgent: `agent:${ann}` }, "dd-foreign");
+        assert.equal(foreign["ok"], true, JSON.stringify(foreign));
+        refused(await send("deliverable.submit", { id: foreign["result"]["id"], expectedRevision: foreign["result"]["revision"] }, "ds-3"), "not_found");
+        // An operation the service refuses, and one whose read-back does not match: answered with their real standing, never confirmed, and no outcome to name.
+        sim.faults.refuseNext = "the cache is busy";
+        const refusedOp = good(await send("service.operate", { ...cache, action: { type: "set", params: { fields: { ttl: 61 } } } }, "op-4"));
+        assert.deepEqual([refusedOp["status"], refusedOp["outcome"]], ["failed", undefined], JSON.stringify(refusedOp));
+        sim.faults.corruptNext = true;
+        const unsure = good(await send("service.operate", { ...cache, action: { type: "set", params: { fields: { ttl: 62 } } } }, "op-5"));
+        assert.deepEqual([unsure["status"], unsure["outcome"]], ["uncertain", undefined], JSON.stringify(unsure));
+        // The owner changes the contract while the attempt runs: a submission is now refused as stale, and the agent cannot name the new version to get past it.
+        await setContract(1, "the cache keeps entries for two minutes", "ct-2");
+        const late = good(await send("deliverable.draft", { type: "report", title: "Late findings", artifacts: [{ artifactId: art["id"] }] }, "dd-6"));
+        assert.match(refused(await send("deliverable.submit", { id: late["id"], expectedRevision: late["revision"] }, "ds-4"), "stale_revision"), /changed after this attempt began \(it was version 1\); this attempt cannot submit/);
+        assert.match(refused(await send("deliverable.submit", { id: late["id"], expectedRevision: late["revision"] + 5 }, "ds-6"), "stale_revision"), /the deliverable is at revision/, "a stale deliverable revision keeps the API's words");
+        refused(await send("deliverable.submit", { id: late["id"], expectedRevision: late["revision"], contractVersion: 2 }, "ds-5"), "invalid_command");
+        Object.assign(seen, { refusedOp, unsure, late });
         Object.assign(seen, { op, art, report, outcome });
       } catch (error) { failure = error; throw error; }
       return { status: "completed", text: "done" };
@@ -124,6 +146,15 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
     assert.deepEqual([o.state, o.type, o.version.content.outcome.reference], ["submitted", "operational-outcome", seen["op"]["effectId"]]);
     const row = await c.storage.getEffect(seen["op"]["effectId"]);
     assert.deepEqual([row!.status, row!.target, (row!.evidence as Reply)["verified"]], ["confirmed", "service:billing/cache", true]);
+    assert.equal(r.version.contractVersion, 1, "checked against the contract version the attempt began with");
+    assert.equal((await read(seen["late"]["id"])).state, "draft", "the stale submission left it in draft");
+    // The task's activity: each service operation is a step carrying where the operation really stands (a repeat is one step); a read is no step.
+    const steps = ((await call("activity.steps", { taskId })) ["result"]["steps"] as { kind: string; summary: string; outcome?: string; manifest: { refs: { kind: string; id: string }[] } }[]).filter((x) => x.kind === "tool-call");
+    const of = (effectId: string) => steps.filter((x) => x.manifest.refs.some((ref) => ref.kind === "effect" && ref.id === effectId)).map((x) => x.outcome);
+    assert.deepEqual([of(seen["op"]["effectId"]), of(seen["refusedOp"]["effectId"]), of(seen["unsure"]["effectId"])], [["confirmed"], ["failed"], ["uncertain"]], JSON.stringify(steps));
+    assert.equal(steps.filter((x) => /drafted deliverable/.test(x.summary)).length, 3, "three drafts through the bridge");
+    assert.equal(steps.filter((x) => /submitted deliverable/.test(x.summary)).length, 2, "two submissions; the refused ones are no step");
+    assert.ok(!steps.some((x) => /observe/.test(x.summary)), "a read is no step");
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
