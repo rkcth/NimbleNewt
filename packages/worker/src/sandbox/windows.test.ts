@@ -283,6 +283,28 @@ describe("Windows launcher: pure rules", () => {
     assert.deepEqual(icaclsWriterEntries("", "C:\\x"), [{ problem: "no access entry could be read" }]);
   });
 
+  test("a process trust label (S-1-19-<type>-<level>, kept in the SACL, only ever restricts) is not a writer; nothing else that looks like one is skipped", () => {
+    // The shape icacls printed for the Store package of Windows Sandbox on a real machine (own-hardware run 44479324035): the folder, wsb.exe and WindowsSandboxServer.exe each
+    // carried a trust label entry alongside their ordinary access entries.
+    const real = (label: string): string => [
+      "C:\\x NT SERVICE\\TrustedInstaller:(F)", "      NT AUTHORITY\\SYSTEM:(I)(F)", "      BUILTIN\\Administrators:(I)(RX)", "      BUILTIN\\Users:(I)(RX)",
+      "      APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(I)(RX)", `      ${label}`, "", "Successfully processed 1 files; Failed processing 0 files",
+    ].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(real("S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)"), "C:\\x"), []);
+    assert.deepEqual(parseIcaclsWritable(real("S-1-19-512-8192:(OI)(CI)(RX,D,WDAC,WO,WA)"), "C:\\x"), []);
+    assert.deepEqual(parseIcaclsWritable(real("S-1-19-1024-8192:(I)(F)"), "C:\\x"), []);
+    assert.deepEqual(icaclsWriterEntries(real("S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)"), "C:\\x"), []);
+    // A real extra writer next to the label is still reported.
+    const both = real("S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)").replace("      BUILTIN\\Users:(I)(RX)", "      BUILTIN\\Users:(I)(RX)\r\n      S-1-5-21-1-2-3-1001:(I)(M)");
+    assert.deepEqual(parseIcaclsWritable(both, "C:\\x"), ["S-1-5-21-1-2-3-1001"]);
+    // Lookalikes are read like any other account: too few parts, too many, a different authority, letters, lower case, or text around the SID.
+    for (const sid of ["S-1-19-1", "S-1-19-5-6-7", "S-1-190-1-2", "S-1-19-512-8192x", "S-1-19-x-8192", "S-1-19--8192", "s-1-19-512-8192", "S-1-19-512-8192 ", "PC\\S-1-19-512-8192", "S-1-19-512-"]) {
+      assert.deepEqual(parseIcaclsWritable(real(`${sid}:(I)(RX,D,WDAC,WO,WA)`), "C:\\x"), [sid], sid);
+    }
+    // A label alone is not an access entry: a list with nothing else still cannot be read as "nobody else can write".
+    assert.deepEqual(parseIcaclsWritable("C:\\x S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)\r\n\r\nSuccessfully processed 1 files", "C:\\x"), ["no access entry could be read"]);
+  });
+
   test("access lists by SID: rights written as icacls writes them, and who can change the object read the same way as the icacls reader", () => {
     assert.deepEqual(rightsTokens(0x1f01ff), ["F"]);
     assert.deepEqual(rightsTokens(0x1301bf), ["M"]);

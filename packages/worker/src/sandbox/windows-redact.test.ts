@@ -46,6 +46,13 @@ test("SIDs are redacted by class, with and without the icacls asterisk: machine,
   assert.equal(sidClass("S-1-5-21-1-2-3-1001"), "machine or domain account or group");
   assert.equal(sidClass("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"), "TrustedInstaller");
   assert.equal(sidClass("x"), "not a SID");
+  // Process trust labels (S-1-19-<type>-<level>) are fixed values, the same on every machine: kept, in text and in an access-list line, and passed by the last gate.
+  assert.equal(redactSid("S-1-19-512-8192"), "S-1-19-512-8192");
+  assert.equal(sidClass("S-1-19-512-8192"), "process trust label");
+  assert.equal(redactSid("S-1-190-1-2"), "S-1-190-<other>", "S-1-190 is not S-1-19-");
+  const label = "C:\\x NT AUTHORITY\\SYSTEM:(I)(F)\r\n      S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)";
+  assert.equal(redact(label, names), label);
+  assert.equal(scrub("wsb.exe can be changed by S-1-19-512-8192", names), "wsb.exe can be changed by S-1-19-512-8192");
   // In text and in the last gate: a machine SID is replaced (with its asterisk kept), the result is stable when redacted again, and an access-list line with a kept SID keeps it.
   const once = redact("C:\\x S-1-5-21-111-222-333-1001:(OI)(CI)(F)\r\n    *S-1-15-3-1024-1-2:(RX)\r\n    S-1-5-21-111-222-333-1001-5", names);
   assert.ok(!/111|222|333|1001/.test(once), once);
@@ -75,6 +82,19 @@ test("known user and machine names go as whole words, in quotes too, and case do
 test("UNC server names go", () => {
   assert.equal(redact("\\\\fileserver01\\share\\dir", names), "\\\\<host>\\share\\dir");
   assert.equal(redact("\\\\?\\C:\\x \\\\.\\pipe\\y", names), "\\\\?\\C:\\x \\\\.\\pipe\\y");
+  // Escaped as in JSON, a UNC path still loses its server name (the run of backslashes kept), after a space, a quote, an equals sign or a word's colon.
+  assert.equal(redact("\\\\\\\\fileserver01\\\\share", names), "\\\\\\\\<host>\\\\share");
+  assert.equal(redact('at "\\\\fileserver01\\share" path=\\\\fs2\\s file:\\\\fs3\\s', names), 'at "\\\\<host>\\share" path=\\\\<host>\\s file:\\\\<host>\\s');
+});
+
+test("a JSON-escaped local path keeps its folder names: two backslashes after a drive or inside a path are a separator, not a UNC server", () => {
+  const escaped = JSON.stringify("C:\\Program Files\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.114.0_x64__cw5n1h2txyewy\\wsb.exe can be changed by S-1-19-512-8192");
+  assert.equal(redact(escaped, names), escaped);
+  const twice = JSON.stringify(escaped);
+  assert.equal(redact(twice, names), twice);
+  assert.equal(redact("D:\\\\Program Files (x86)\\\\Tools\\\\a.b\\\\c", names), "D:\\\\Program Files (x86)\\\\Tools\\\\a.b\\\\c");
+  // A home folder in the escaped form is still replaced.
+  assert.ok(!/Alice/.test(redact(JSON.stringify("C:\\Users\\Alice\\x"), names)));
 });
 
 test("accounts in an access list go unless they are well known; rights stay", () => {

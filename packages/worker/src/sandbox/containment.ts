@@ -224,7 +224,7 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   try {
     const launcher = options.launcher ?? await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined, ...(options.backend === undefined ? {} : { backend: options.backend }) });
     const capacity = launcher.capacity;
-    if (!capacity.available) return { capacity, cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: CATEGORY[id]!, verdict: "not_run" as const, detail: `no capacity: ${capacity.reason ?? "unavailable"}` })), trustedHost: undefined };
+    if (!capacity.available) return { capacity, cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: CATEGORY[id]!, verdict: "not_run" as const, detail: short(`no capacity: ${capacity.reason ?? "unavailable"}`) })), trustedHost: undefined };
     const linuxView = capacity.backend === "bubblewrap";
     const authority = "G05 containment evidence (the suite's own test authority)";
     let unconfined: SandboxLauncher | undefined;

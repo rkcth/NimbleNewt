@@ -230,6 +230,8 @@ const WRITE_RIGHTS = new Set(["F", "M", "W", "D", "WD", "AD", "DC", "DE", "GA", 
  * attached"); it only shapes what children inherit, through `(OI)` (files) and `(CI)` (folders). An `(IO)` entry with neither `(OI)` nor `(CI)` therefore gives no right to anything
  * and is not a writer. An `(IO)` entry WITH `(OI)` or `(CI)` is still reported: on a folder it makes the files and folders inside writable (inherited), and the callers use a
  * folder's list as the proof for what the folder holds (the package proof checks only two of the package's files one by one, not the libraries next to them).
+ * Process trust labels: an entry for a SID of exactly the form `S-1-19-<type>-<level>` is a trust label from the system access list, which only restricts; it is skipped
+ * (see `scanIcacls`), and it is not counted as an access entry.
  */
 export function parseIcaclsWritable(output: string, path: string): string[] {
   const found = new Set<string>();
@@ -257,6 +259,11 @@ function scanIcacls(output: string, path: string): ({ readonly account: string; 
     if (line === "") continue;
     const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
     if (m === null) { if (inBlock || line.includes(":(")) found.push({ problem: `unrecognised entry ${JSON.stringify(line.slice(0, 120))}` }); continue; }
+    // A process trust label (`S-1-19-<type>-<level>`, e.g. `S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)` on the Store package of Windows Sandbox) is not a grant: it is a
+    // SYSTEM_PROCESS_TRUST_LABEL_ACE kept in the system access list (SACL), which icacls prints among the access entries. Its rights only limit what processes below that trust
+    // level may do; it never gives an account a right, so it is not a writer. Only a SID of exactly that shape is skipped (not counted as an entry either); anything else that
+    // merely starts the same way (`S-1-19-1`, `S-1-19-5-6-7`, `S-1-190-1-2`) is read like any other account.
+    if (/^S-1-19-\d+-\d+$/.test(m[1]!)) continue;
     entries++;
     const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
     if (tokens.includes("DENY")) continue;

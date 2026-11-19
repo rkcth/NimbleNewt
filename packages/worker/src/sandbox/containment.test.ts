@@ -105,6 +105,16 @@ describe("G05 containment suite on the production launcher (Linux, bubblewrap)",
     assert.ok(suite.cases.every((c) => c.verdict === "not_run"));
   });
 
+  test("a long no-capacity reason is cut, so the report it goes into still parses (a case detail is at most 400 characters)", async () => {
+    const reason = `Windows Sandbox refused the client: ${"C:\\Program Files\\WindowsApps\\x can be changed by S-1-5-21-1-2-3-1001; ".repeat(20)}`;
+    assert.ok(reason.length > 400);
+    const dead: SandboxBackend = { name: "dead", health: async () => ({ healthy: false, backend: "dead", reason }), plan: () => { throw new Error("never"); }, guestView: () => { throw new Error("never"); } };
+    const suite = await runContainmentSuite({ launcher: await SandboxLauncher.create({ backend: dead, protectedPaths: [], audit: () => undefined }) });
+    assert.ok(suite.cases.every((c) => c.verdict === "not_run" && c.detail.startsWith("no capacity: Windows Sandbox refused the client") && c.detail.length <= 400), JSON.stringify(suite.cases[0]));
+    const parsed = parseReport(JSON.stringify(report("win32", { capacityAvailable: false, capacityReason: "short", cases: suite.cases, trustedHost: undefined, windows: undefined })));
+    assert.ok("report" in parsed, JSON.stringify(parsed));
+  });
+
   test("a probe that cannot be made is inconclusive, which the gate does not accept", async (t) => {
     if (!onLinux) return t.skip("Linux only");
     // A backend whose program prints nothing: every attempt misses its end marker.
