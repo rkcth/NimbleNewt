@@ -2191,8 +2191,9 @@ export class ChatService {
     const waiver = actions.find((a) => a.startsWith("approve."));
     if (waiver !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(waiver, 60)}, an approval that lets actions through without asking you, so no bundle was drawn up. Name the rights one by one.`);
     // A right held for good already covers whatever times the new one would have; one that starts later, ends, lapses, rests on another right or holds only under terms (hours, environments, a spend limit) does not.
+    // Only the agent's own rights count (second review): the list is asked for by grantee, and each item is checked again, so another agent's right in the project never leaves one of Ann's out.
     const held = new Set((await this.#listAll(token, "grant.list", { grantee: agent.principal }))
-      .filter((g) => g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined && g["terms"] === undefined)
+      .filter((g) => g["grantee"] === agent.principal && g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined && g["terms"] === undefined)
       .map((g) => String(g["action"])));
     const fresh = actions.filter((a) => !held.has(a));
     const where = quotedText(projectName, 80);

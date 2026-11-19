@@ -59,12 +59,16 @@ for (const backend of backends) {
     // A right taken back is no longer held: it is drawn up again.
     const back = (await call(w, "grant.create", { grantee: `agent:${ann}`, action: "desk.write", project: garden, basis: "Ann writes Garden" }, cid("g"))).result;
     assert.equal((await call(w, "grant.revoke", { grantId: back.id, expectedRevision: back.revision, reason: "not now" }, cid("rv"))).error, undefined);
+    // Another agent's right in Garden is not Ann's (second review): it is still drawn up for her.
+    const cara = (await w.agents.create(w.owner, { commandId: cid("c"), friendlyName: "Cara", roles: ["author"] })).id;
+    await call(w, "grant.create", { grantee: `agent:${cara}`, action: "attempt.work", project: garden, basis: "Cara works on Garden" }, cid("g"));
     const words = "set Ann up to work on Garden";
     script[words] = [cmd("grant.create", { agentName: "Ann", projectName: "Garden", bundle: "roles" }, words)];
     const o = (await say(w, words)).outcomes[0]!;
     assert.equal(o.status, "proposed", JSON.stringify(o));
     const preview = (o as { preview?: readonly string[] }).preview ?? [];
     assert.equal(preview.filter((l) => l.startsWith("Grant right")).length, union.length - 1, preview.join("\n"));
+    assert.ok(preview.some((l) => /\): action=attempt\.work(,|$)/.test(l)), "a right another agent holds in Garden is drawn up for Ann");
     assert.ok(preview.some((l) => l.includes("roles author, reviewer") && l.includes("already held there and left out: task.read")), preview.join("\n"));
     await apply(w, o.proposalId!);
     assert.deepEqual((await rightsOf(w, ann)).filter((g) => g.project === garden).map((g) => g.action).sort(), [...union].sort(), "each right once");
