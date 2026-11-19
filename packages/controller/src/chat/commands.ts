@@ -116,6 +116,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
+  // QA evidence (card Q02): invalidating evidence whose criteria or owner decisions changed, and scheduling its re-check, only applies what the records already say; it applies at once.
+  "qa.evidence.check": { verb: "Check whether a task's QA evidence still holds (its acceptance criteria and the owner decisions it was judged against unchanged); evidence that no longer holds is invalidated and a re-check is scheduled", mode: "apply" },
   // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
   "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, kind = what the model server is: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic, which decides how a route's reply limit and reasoning cap are sent; credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
