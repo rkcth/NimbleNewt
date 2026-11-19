@@ -1,6 +1,6 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
-import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
+import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import type { NormalizedRecipe } from "./recipe.js";
 
 /** Microsoft's publisher id for packages that ship with Windows itself (publisher `CN=Microsoft Windows, O=Microsoft Corporation, ...`). */
@@ -39,10 +39,23 @@ export const VM_FALLBACK_DECISION =
   "VM fallback not qualified and not implemented: Windows Sandbox meets the service lifecycle in its session-dependent forms (owner session present, or the owner's explicit auto-login and lock mode), and a separate Windows VM would need its own licence and deployment review; the owner declined evaluation media on 2026-10-16. With nobody signed in and no opt-in, capacity stays unavailable.";
 
 /**
- * What the owner is told when Windows Sandbox cannot be started from this process: by the session checks before a start (the process is not in the active console session, or not
- * the console user's), and when `wsb start` itself answers E_ACCESSDENIED (0x80070005, exit 2147942405), as it did for a runner installed as a service (own-hardware run 44501483353).
+ * What the owner is told when `wsb start` answers E_ACCESSDENIED (0x80070005, exit 2147942405) and this process is not known to run in the active console session as the console
+ * user, as for the own-hardware runner of run 44501483353 (most likely installed as a service; not confirmed on that machine).
  */
 export const INTERACTIVE_RUNNER_HINT = "start the runner interactively with run.cmd as the console user (not as a service)";
+
+/**
+ * The explanation of an access-denied `wsb start`, from the session facts about this process at that moment (undefined when they could not be read). These facts are not a
+ * condition of admission: the research of 2026-10-16 started Windows Sandbox from SYSTEM in session 0 while the owner was signed in, and saw this same error from a mapped output
+ * folder the sandbox could not use. So both causes are named, the session one first when a fact is not "yes".
+ */
+export function describeWsbAccessDenied(session: WindowsSession | undefined): string {
+  const fact = (v: boolean | undefined): string => (v === undefined ? "not determined" : v ? "yes" : "no");
+  const facts = `in the active console session: ${fact(session?.processInConsoleSession)}; the console user: ${fact(session?.processIsConsoleUser)}`;
+  const folders = "check that Windows Sandbox may use the shared folders (the research of 2026-10-16 saw this error from an output folder it could not use)";
+  if (session?.processInConsoleSession === true && session.processIsConsoleUser === true) return `this process (${facts}) is where Windows Sandbox expects it; ${folders}`;
+  return `this process (${facts}): ${INTERACTIVE_RUNNER_HINT}; otherwise ${folders}`;
+}
 
 /** Whether a `wsb start` result is Windows' access-denied answer: exit 2147942405 (0x80070005 read unsigned), its signed form, or the code in the text. */
 export function isWsbAccessDenied(code: number | null, text: string): boolean {
@@ -449,10 +462,6 @@ export async function verifySession(host: WindowsHost, settings: WindowsSettings
   try { session = await host.session(); } catch (error) { return { ok: false, reason: `the Windows session could not be examined: ${(error as Error).message}` }; }
   if (session.consoleUser === undefined) return { ok: false, reason: "nobody is signed in at the console; Windows Sandbox cannot start without a user session (a start with nobody signed in failed with 0x8000401A in the research of 2026-10-16). The owner can choose the explicit auto-login and lock mode" };
   if (!sameAccount(session.consoleUser, settings.owner)) return { ok: false, reason: `the console session belongs to ${session.consoleUser}, not the configured owner ${settings.owner}` };
-  // Windows Sandbox answers a start from outside the console user's interactive session with E_ACCESSDENIED (own-hardware run 44501483353: a runner installed as a service).
-  // Both facts are required in both modes, and one that cannot be determined refuses like one that is false.
-  if (session.processInConsoleSession !== true) return { ok: false, reason: `${session.processInConsoleSession === false ? "this process does not run in the active console session" : "whether this process runs in the active console session could not be determined"}; Windows Sandbox refuses a start from there (0x80070005): ${INTERACTIVE_RUNNER_HINT}` };
-  if (session.processIsConsoleUser !== true) return { ok: false, reason: `${session.processIsConsoleUser === false ? "this process does not run as the console user" : "whether this process runs as the console user could not be determined"}; Windows Sandbox refuses a start from another account (0x80070005): ${INTERACTIVE_RUNNER_HINT}` };
   if (settings.mode === "owner-session") return { ok: true, value: undefined };
   // Auto-login and lock mode: the session must be the automatic one, and it must be locked before any work is admitted.
   if (session.locked !== true) return { ok: false, reason: session.locked === undefined ? "the lock state of the console session could not be determined; no work is admitted while it is unknown" : "the console session is not locked; no work is admitted on an unlocked desktop in auto-login mode" };

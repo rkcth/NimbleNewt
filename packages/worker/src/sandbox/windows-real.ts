@@ -29,7 +29,7 @@ $q = Query $sid 25; if ($q) { $flags = [Runtime.InteropServices.Marshal]::ReadIn
 # Another session's user name can be refused to an ordinary account; the console user is also known to WMI without special rights.
 if (-not $user) { try { $cu = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName; if ($cu) { $parts = $cu -split '\\\\', 2; if ($parts.Count -eq 2) { $domain = $parts[0]; $user = $parts[1] } else { $user = $cu } } } catch { } }
 # This PowerShell is a child of the process asking, so it runs in that process's session and with its account: whether that is the console session and the console user
-# (Windows Sandbox refuses a start from a service with E_ACCESSDENIED). The account is compared by SID when the console user's name resolves to one; the name is sent only for that comparison.
+# (reported to explain an E_ACCESSDENIED start, own-hardware run 44501483353). The account is compared by SID when the console user's name resolves to one; the name is sent only for that comparison.
 $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $procSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
 $sameSid = $null
