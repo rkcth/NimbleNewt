@@ -167,6 +167,13 @@ export interface LibraryOptions {
  * configured prefix, and must begin with a Mach-O signature; otool's report must be genuine. A library that cannot be found (other than a weak one), or an `otool` that fails, refuses the launch.
  */
 export function dependentLibraryReads(executable: string, probe: LibraryProbe, alreadyReadable: readonly string[] = [], options: LibraryOptions = {}): string[] {
+  const found = resolveReads(executable, probe, alreadyReadable, options);
+  const writable = options.writable ?? [];
+  return [...new Set([...found.libraries, ...found.configs.filter((g) => !g.some((p) => under(p, writable))).flat()])].sort();
+}
+
+/** The files a program needs: its libraries, and per linked libcrypto the group of paths (file, links, real path) of the OpenSSL configuration it reads, checked against everything except the agent's writable places (applied by the caller: a group with any path there is left out, never a refusal); `configPaths` are the configuration paths looked at, present or not, so a remembered answer can notice one that appears later. */
+function resolveReads(executable: string, probe: LibraryProbe, alreadyReadable: readonly string[], options: LibraryOptions): { readonly libraries: string[]; readonly configs: string[][]; readonly configPaths: string[] } {
   const writable = options.writable ?? [];
   const arch = options.arch ?? process.arch;
   const now = options.now ?? Date.now;
@@ -232,49 +239,58 @@ export function dependentLibraryReads(executable: string, probe: LibraryProbe, a
   visit(executable, []);
   // Homebrew's node links Homebrew's OpenSSL, which reads <OPENSSLDIR>/openssl.cnf when node starts; a refused read (not a missing file) stops node at launch. That one file is added, read
   // only, with its links, when it exists, is a regular file and lies in the same allowed places as the libraries (found on Rob's Mac, CI run 44453704944).
+  const configs: string[][] = [];
+  const configPaths: string[] = [];
   for (const lib of [...seen].filter((p) => /^libcrypto[.-]/.test(posix.basename(p)) && !skip(p)).sort()) {
     const dir = probe.opensslDir(lib);
     if (dir === undefined) continue;
     const config = posix.join(dir, "openssl.cnf");
-    if (skip(config) || !probe.exists(config)) continue;
+    if (skip(config)) continue;
+    configPaths.push(config);
+    if (!probe.exists(config)) continue;
     const { links, real } = symlinkChain(config, probe);
     const paths = [config, ...links, real].filter((p) => !skip(p));
-    if (paths.some((p) => under(p, writable) || !under(p, allowed)) || !probe.isFile(real)) continue;
-    paths.forEach((p) => reads.add(p));
+    if (paths.some((p) => !under(p, allowed)) || !probe.isFile(real)) continue;
+    configs.push(paths);
   }
-  return [...reads].filter((p) => !skip(p)).sort();
+  return { libraries: [...reads].filter((p) => !skip(p)).sort(), configs, configPaths };
 }
 
 const CACHE_SIZE = 64;
 
 /**
  * `dependentLibraryReads` remembered per program path (an LRU of 64). The remembered answer is the one for the system alone, so per-run directories do not make new entries; it is checked against
- * the program's and every listed file's modification time and size on each use, and recomputed when any changed or is gone. The agent's directories are applied on every call.
+ * the program's and every listed file's modification time and size on each use (and an OpenSSL configuration path looked at, present or absent), and recomputed when any changed, is gone or
+ * appeared. The agent's directories are applied on every call: a library there refuses, a configuration there is left out.
  */
 export function cachedLibraryReads(probe: LibraryProbe = realProbe, extraPrefixes: readonly string[] = [], options: Omit<LibraryOptions, "writable" | "extraPrefixes"> = {}): (executable: string, alreadyReadable: readonly string[], writable?: readonly string[]) => string[] {
-  const cache = new Map<string, { reads: string[]; stamps: Map<string, string> }>();
+  type Entry = { libraries: string[]; configs: string[][]; stamps: Map<string, string>; optional: Map<string, string> };
+  const cache = new Map<string, Entry>();
+  // A configuration path may be absent: its stamp then says so, and the answer is looked at again when one appears.
+  const optionalStamp = (p: string): string => { try { return probe.stamp(p); } catch { return "absent"; } };
   return (executable, alreadyReadable, writable = []) => {
     const name = posix.basename(executable);
     let exeStamp: string;
     try { exeStamp = probe.stamp(executable); } catch (error) { throw new SandboxError("invalid_recipe", `${name} cannot be read to find its libraries`, { cause: error }); }
     const key = executable;
     const hit = cache.get(key);
-    const valid = (e: { stamps: Map<string, string> }): boolean => {
-      try { return [...e.stamps].every(([p, s]) => probe.stamp(p) === s); } catch { return false; }
+    const valid = (e: Entry): boolean => {
+      try { return [...e.stamps].every(([p, s]) => probe.stamp(p) === s) && [...e.optional].every(([p, s]) => optionalStamp(p) === s); } catch { return false; }
     };
     let entry = hit !== undefined && hit.stamps.get(executable) === exeStamp && valid(hit) ? hit : undefined;
     if (entry === undefined) {
-      // Run with the writable list too, so a program in an agent directory is refused before anything is cached.
-      const reads = dependentLibraryReads(executable, probe, [], { ...options, writable, extraPrefixes });
+      // Run with the writable list too, so a program or library in an agent directory is refused before anything is cached. The configuration is remembered without it and left out per call.
+      const found = resolveReads(executable, probe, [], { ...options, writable, extraPrefixes });
       const stamps = new Map<string, string>([[executable, exeStamp]]);
-      try { reads.forEach((p) => stamps.set(p, probe.stamp(p))); } catch (error) { throw new SandboxError("invalid_recipe", `a library of ${name} disappeared while it was being inspected`, { cause: error }); }
-      entry = { reads, stamps };
+      try { [...found.libraries, ...found.configs.flat()].forEach((p) => stamps.set(p, probe.stamp(p))); } catch (error) { throw new SandboxError("invalid_recipe", `a library of ${name} disappeared while it was being inspected`, { cause: error }); }
+      entry = { libraries: found.libraries, configs: found.configs, stamps, optional: new Map(found.configPaths.map((p) => [p, optionalStamp(p)])) };
     }
     cache.delete(key); cache.set(key, entry);
     while (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value!);
     const exeChain = symlinkChain(executable, probe);
     if (under(executable, writable) || under(exeChain.real, writable)) throw new SandboxError("invalid_recipe", `${name} is in one of the agent's writable directories; its libraries are not looked up`);
-    if (entry.reads.some((p) => under(p, writable))) throw new SandboxError("invalid_recipe", `a library of ${name} is in one of the agent's writable directories; refusing`);
-    return entry.reads.filter((p) => !under(p, alreadyReadable));
+    if (entry.libraries.some((p) => under(p, writable))) throw new SandboxError("invalid_recipe", `a library of ${name} is in one of the agent's writable directories; refusing`);
+    const reads = [...new Set([...entry.libraries, ...entry.configs.filter((g) => !g.some((p) => under(p, writable))).flat()])].sort();
+    return reads.filter((p) => !under(p, alreadyReadable));
   };
 }

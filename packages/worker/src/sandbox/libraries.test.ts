@@ -350,6 +350,38 @@ describe("Homebrew OpenSSL's configuration file (macOS probe on Rob's Mac, run 4
     assert.ok(!reads(NODE, []).includes(CNF), "a removed configuration is dropped");
   });
 
+  test("a configuration that appears after the answer was remembered is picked up on the next launch (second review)", () => {
+    const base = brewWithOpenssl({ missingCnf: true });
+    let present = false;
+    const probe: LibraryProbe = {
+      ...base,
+      exists: (p) => p === CNF ? present : base.exists(p),
+      isFile: (p) => p === CNF ? present : base.isFile(p),
+      stamp: (p) => { if (p !== CNF) return base.stamp(p); if (!present) throw Object.assign(new Error("gone"), { code: "ENOENT" }); return "2:10"; },
+    };
+    const reads = cachedLibraryReads(probe);
+    assert.ok(!reads(NODE, []).includes(CNF));
+    const scans = (): number => base.calls.filter((c) => c.startsWith("ssldir")).length;
+    const before = scans();
+    assert.ok(!reads(NODE, []).includes(CNF));
+    assert.equal(scans(), before, "an unchanged answer (still no configuration) is reused");
+    present = true;
+    assert.ok(reads(NODE, []).includes(CNF), "the new configuration is added");
+    assert.equal(scans(), before + 1);
+  });
+
+  test("the remembered answer leaves the configuration out of a launch whose writable places hold it, without refusing, and does not keep that answer for later launches (second review)", () => {
+    const reads = cachedLibraryReads(brewWithOpenssl());
+    assert.ok(reads(NODE, []).includes(CNF));
+    const out = reads(NODE, [], [SSLDIR]);
+    assert.ok(!out.includes(CNF) && out.includes(CRYPTO_OPT), "left out, libraries kept, no refusal");
+    assert.ok(reads(NODE, []).includes(CNF), "a later launch without that writable place gets it again");
+    // The other order: the first, uncached launch has the writable place; the answer remembered from it still carries the configuration for later launches.
+    const fresh = cachedLibraryReads(brewWithOpenssl());
+    assert.ok(!fresh(NODE, [], [SSLDIR]).includes(CNF));
+    assert.ok(fresh(NODE, []).includes(CNF));
+  });
+
   test("the OpenSSL directory is read from the library's own text, only as a plain absolute path", () => {
     const b = (s: string): Buffer => Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(s, "latin1"), Buffer.from([0])]);
     assert.equal(opensslDirIn(b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"')), "/opt/homebrew/etc/openssl@3");
@@ -376,12 +408,20 @@ describe("Homebrew OpenSSL's configuration file (macOS probe on Rob's Mac, run 4
   });
 
   const hostCrypto = ["/usr/lib/x86_64-linux-gnu/libcrypto.so.3", "/usr/lib/aarch64-linux-gnu/libcrypto.so.3", "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib", "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"].find((p) => existsSync(p));
-  test("this machine's OpenSSL library gives the same directory as its openssl program", { skip: hostCrypto === undefined ? "no OpenSSL 3 library in a known place" : false }, async () => {
+  test("this machine's OpenSSL library gives the same directory as its openssl program", { skip: hostCrypto === undefined ? "no OpenSSL 3 library in a known place" : false }, async (t) => {
     const { execFileSync } = await import("node:child_process");
     const prog = hostCrypto!.startsWith("/usr/lib") ? "/usr/bin/openssl" : join(hostCrypto!, "..", "..", "bin", "openssl");
-    if (!existsSync(prog)) return;
-    const said = /OPENSSLDIR: "(.*)"/.exec(execFileSync(prog, ["version", "-d"], { encoding: "utf8" }))?.[1];
-    assert.equal(hostProbe.opensslDir(hostCrypto!), said);
+    if (!existsSync(prog)) { t.skip(`no openssl program at ${prog}`); return; }
+    let version: string;
+    let dirLine: string;
+    try { version = execFileSync(prog, ["version", "-v"], { encoding: "utf8", timeout: 10_000 }); dirLine = execFileSync(prog, ["version", "-d"], { encoding: "utf8", timeout: 10_000 }); } catch { t.skip(`${prog} did not run`); return; }
+    const said = /OPENSSLDIR: "(.*)"/.exec(dirLine)?.[1];
+    // Compare only when the program reports a directory and runs on this very library (its library version text is in the file); another OpenSSL, or one whose text differs, is no evidence either way.
+    const libraryVersion = /\(Library: (OpenSSL [^)]+)\)/.exec(version)?.[1] ?? /^(OpenSSL \S+ \d+ \w+ \d{4})/.exec(version)?.[1];
+    const { readFileSync } = await import("node:fs");
+    const bytes = readFileSync(hostCrypto!);
+    if (said === undefined || libraryVersion === undefined || !bytes.includes(Buffer.from(libraryVersion, "latin1")) || !bytes.includes(Buffer.from("OPENSSLDIR: \"", "latin1"))) { t.skip("the openssl program does not report on this library in the expected form"); return; }
+    assert.equal(hostProbe.opensslDir(hostCrypto!), said.replace(/(.)\/+$/, "$1"));
   });
 });
 
