@@ -74,6 +74,8 @@ test("landing waits for the running attempt's call in flight to settle, is done 
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const owner = await c.services.principals.authenticate(boot.token);
     projectId = (await c.services.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    // This test is about the landing itself, not its gate: the project requires no check (card P09's gate has tests of its own).
+    assert.equal((await api(c, boot.token, "integration.set", { project: projectId, requiredChecks: [] }, "no-checks")).ok, true);
     await c.services.principals.enroll(owner, { commandId: "e-w1", kind: "host", name: "w1", grants: [] });
     const self = await c.services.principals.authenticate((await c.services.principals.issueCredential(owner, "host:w1")).token);
     await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap-w1", actor: owner.id, host: "host:w1", capacity: { cpus: 1, memoryMb: 1024 } });

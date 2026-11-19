@@ -15,6 +15,9 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import { probeUrl } from "../projects/probes.js";
+import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import { WINDOW_DEFAULTS } from "../release/windows.js";
+import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
@@ -198,6 +201,58 @@ export interface ChatDeps {
  * every other command that changes things still is. They need nothing from the model, so a provider outage does not stand between the owner and a stop.
  */
 const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke", "routing.disable", "routing.drain", "routing.cutover", "routing.reenable"]);
+
+/**
+ * What a maintenance window proposal (card K07) shows about its time and limits: the owner's local time and zone, the instants it comes to in UTC (a time the clocks skip, or one they pass twice, is
+ * said so), how long it lasts, how early preparation starts and how much free space it needs, with the defaults filled in, so every number the window would be set with is on the proposal.
+ */
+export function windowTimeNote(args: Readonly<Record<string, unknown>>): string {
+  const num = (v: unknown, fallback: number): string => (v === undefined ? `${fallback} (the default)` : typeof v === "number" ? String(v) : quotedText(String(v), 20));
+  const parts = [`The window opens on ${quotedText(String(args["date"]), 20)} at ${quotedText(String(args["time"]), 10)} in ${quotedText(String(args["timeZone"]), 64)}`];
+  const zone = knownZone(args["timeZone"]);
+  const minutes = args["durationMinutes"];
+  if (zone !== undefined && isLocalDate(args["date"]) && isLocalTime(args["time"])) {
+    const opens = instantOf(args["date"], args["time"], zone);
+    const wall = wallClock(opens, zone);
+    const shownAt = `${wall.date} ${String(wall.hour).padStart(2, "0")}:${String(wall.minute).padStart(2, "0")}`;
+    if (shownAt !== `${args["date"]} ${args["time"]}`) parts.push(`(that time does not exist that day, because the clocks go forward; it opens at ${shownAt} local time instead)`);
+    else if (wallClock(opens + 3_600_000, zone).hour === wall.hour && wallClock(opens + 3_600_000, zone).minute === wall.minute && wallClock(opens + 3_600_000, zone).date === wall.date) parts.push("(that time happens twice that night, because the clocks go back; it opens at the first of the two)");
+    parts.push(`= ${new Date(opens).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+    if (typeof minutes === "number" && Number.isSafeInteger(minutes)) parts.push(`until ${new Date(opens + minutes * 60_000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+  }
+  return `${parts.join(" ")}; it lasts ${typeof minutes === "number" ? String(minutes) : quotedText(String(minutes), 20)} minutes. Preparation starts ${num(args["prepareLeadMinutes"], WINDOW_DEFAULTS.prepareLeadMinutes)} minutes before it opens and needs ${num(args["minFreeBytes"], WINDOW_DEFAULTS.minFreeBytes)} bytes free under the release folder. Check that this is the time you meant.`;
+}
+
+/** What the staged-release picker reads from `release.status`. */
+export interface ReleaseStatusForPick { readonly current?: { id: string }; readonly previous?: { id: string }; readonly lastKnownGood?: { id: string }; readonly history?: readonly { kind?: string; to?: string; from?: string }[]; readonly failedStarts?: readonly { id: string }[]; readonly staged?: readonly { candidateId: string; stagedAt?: string }[] }
+
+/**
+ * The one staged release waiting to be installed, for a maintenance window set without a release named (card K07), or what to ask the owner. A release that ran here stays staged for going back
+ * and is never "the update waiting": the current, previous and last known good releases and every release the activation history shows switched to or from (an aborted switch, or a resolve that
+ * may have aborted, does not count as having run). The history is trimmed, so a release staged before the current one could have run long ago: such a release is never picked silently, nor is one
+ * of several, and when the status's page of staged releases is full the owner is asked too.
+ */
+export function pickWaitingRelease(s: ReleaseStatusForPick, quarantined: readonly string[]): { id: string } | { ask: string } {
+  const ran = new Set<string>();
+  for (const id of [s.current?.id, s.previous?.id, s.lastKnownGood?.id]) if (typeof id === "string") ran.add(id);
+  for (const h of s.history ?? []) {
+    if (typeof h.from === "string") ran.add(h.from);
+    if (typeof h.to === "string" && h.kind !== "aborted" && h.kind !== "resolved") ran.add(h.to);
+  }
+  const q = new Set(quarantined);
+  const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
+  const staged = s.staged ?? [];
+  const eligible = staged.filter((x) => !ran.has(x.candidateId) && !q.has(x.candidateId) && !failed.has(x.candidateId));
+  const name = (xs: readonly { candidateId: string }[]): string => `${xs.slice(0, 5).map((x) => x.candidateId).join(", ")}${xs.length > 5 ? ", ..." : ""}`;
+  if (staged.length >= ACTIVATION_LIMITS.listed) return { ask: `Many staged releases are kept (${staged.length} or more), so the one waiting cannot be told from the list: which one should the window install? Name its rcn- ID.` };
+  if (eligible.length === 0) return { ask: "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." };
+  if (eligible.length > 1) return { ask: `${eligible.length} staged releases could be installed (${name(eligible)}): which one should the window install?` };
+  const only = eligible[0]!;
+  // Staged before the running release: it may be an older build (or one that ran before the history kept), so it is offered by name, not taken.
+  const currentStagedAt = s.current === undefined ? undefined : staged.find((x) => x.candidateId === s.current!.id)?.stagedAt;
+  if (s.current !== undefined && (currentStagedAt === undefined || only.stagedAt === undefined || only.stagedAt <= currentStagedAt)) return { ask: `The only staged release that has not run here, ${only.candidateId}, was staged before the running release ${s.current.id}, so it may be older: name it if that is the one the window should install.` };
+  return { id: only.candidateId };
+}
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
@@ -728,7 +783,7 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.window.set" ? ["digest", "date", "time", "timeZone"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
       const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op.startsWith("simulation.") ? SIMULATION_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_EXEMPT : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : intent.op.startsWith("defect.") ? DEFECT_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // A probe's address is the reach the owner approves (card P04i): it must be written out whole in the owner's message, exactly as given; a part of a longer address or one in other letter case is not theirs.
@@ -986,6 +1041,38 @@ export class ChatService {
     }
     // Activation names the digest from the staged record, never from the interpreter or the owner's words (the owner sees it in the preview and the controller binds the word to it).
     const fillNotes: string[] = [];
+    // A maintenance window names the digest from the staged record too (card K07); its date, time and zone are the interpreter's reading of the owner's words, so the proposal shows them before anything is set.
+    if (intent.op === "release.window.set") {
+      delete args["digest"];
+      let wanted = args["candidateId"];
+      // No release named ("put the update on tonight at 2"): the one staged release that never ran here (not current, previous, last known good or in the activation history), is not quarantined and never failed to start is meant; with several, the owner is asked which.
+      if (wanted === undefined) {
+        const st = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.status", args: {} });
+        if (!st.ok) return refuse(st.error.code, st.error.message);
+        const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+        if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+        const pick = pickWaitingRelease(st.result["item"] as ReleaseStatusForPick, ((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId));
+        if ("ask" in pick) return refuse("invalid_command", pick.ask);
+        wanted = pick.id;
+        args["candidateId"] = wanted;
+        fillNotes.push(`Release ${wanted}: the one staged release waiting to be installed (you did not name one).`);
+      }
+      if (typeof wanted !== "string") return refuse("invalid_command", "Which staged release should the window activate? Nothing in your message names one.");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.verify", args: { releaseId: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      args["digest"] = String(found.result["digest"]);
+      fillNotes.push(`Digest of the staged release, filled in from its record: ${String(found.result["digest"])}${found.result["ok"] === true ? "" : " (its files do not match this digest now; the window will fail its preparation)"}`);
+      if (args["durationMinutes"] === undefined) return refuse("invalid_command", "How long should the maintenance window last (15 minutes to 24 hours)?");
+      fillNotes.push(windowTimeNote(args));
+    }
+    // Cancelling a maintenance window without naming it ("cancel the maintenance window") means the one window that is open; there is at most one, and with none the owner is told so.
+    if (intent.op === "release.window.cancel" && args["windowId"] === undefined) {
+      const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+      if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+      const open = ((wl.result["windows"] ?? []) as { windowId: string; status: string }[]).filter((w) => w.status === "scheduled" || w.status === "prepared" || w.status === "activated");
+      if (open.length !== 1) return refuse(open.length === 0 ? "not_found" : "invalid_command", open.length === 0 ? "No maintenance window is open, so there is nothing to cancel." : `${open.length} maintenance windows are open (${open.slice(0, 5).map((w) => w.windowId).join(", ")}): which one should be cancelled?`);
+      args["windowId"] = open[0]!.windowId;
+    }
     if (intent.op === "release.activate") {
       delete args["digest"];
       delete args["migrationPlan"];

@@ -39,7 +39,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -201,7 +201,7 @@ export interface BuiltinTool {
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "service.operate", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
@@ -514,6 +514,8 @@ export class ToolExecutionService {
               case "task.get": case "task.update": case "task.transition": return await this.#task(token, context, request.op as BridgeOperation, args);
               case "message.send": return await this.#message(context, args);
               case "artifact.publish": return await this.#artifact(token, context, args);
+              case "deliverable.draft": case "deliverable.submit": return await this.#deliverable(token, context, request.op as "deliverable.draft" | "deliverable.submit", args);
+              case "service.observe": case "service.operate": return await this.#service(token, context, request.op as "service.observe" | "service.operate", args);
               case "tool.register": return await this.#register(context, args);
               case "tool.discover": return await this.#discover(context, args);
               case "tool.describe": return await this.#describe(context, args);
@@ -772,11 +774,16 @@ export class ToolExecutionService {
       : op === "dependency.record" ? { summary: `${c.agent.id} recorded ${typeof result["recorded"] === "number" ? result["recorded"] : "?"} input(s) its work relied on through the bridge, so a resume is checked against them.`, refs: [{ kind: "task", id: c.taskId }] }
       : op === "toolbox.copy" ? { summary: `${c.agent.id} copied shared tool ${id("source")} into its own namespace as ${id("name")} ${id("version")} through the bridge.`, refs: [{ kind: "catalog-version", id: id("versionId") }] }
       : op === "toolbox.propose" ? { summary: `${c.agent.id} proposed a change to shared tool ${id("name")}, proposal ${id("proposalId")}, through the bridge (a suggestion: it changes nothing until a maintainer decides).`, refs: [{ kind: "toolbox-proposal", id: id("proposalId") }] }
+      : op === "deliverable.draft" ? { summary: `${c.agent.id} drafted deliverable ${id("id")} through the bridge.`, refs: [{ kind: "deliverable", id: id("id") }] }
+      : op === "deliverable.submit" ? { summary: `${c.agent.id} submitted deliverable ${id("id")} for review through the bridge (submitting is not acceptance).`, refs: [{ kind: "deliverable", id: id("id") }] }
+      : op === "service.operate" ? { summary: `${c.agent.id} operated on a service through the bridge: effect ${id("effectId")} is ${id("status")}.`, refs: [{ kind: "effect", id: id("effectId") }] }
       : op === "job.cancel" ? { summary: `${c.agent.id} asked job ${id("jobId")} to stop${result["force"] === true ? " at once (Force Stop)" : ""} through the bridge.`, refs: [{ kind: "job", id: id("jobId") }] }
       : undefined;
     if (step === undefined) return;
     // A job that was started is running, not finished; a maintenance request waits for the owner; every other write has been made.
-    const outcome = op === "job.start" ? "dispatched" : op === "maintenance.request" ? "proposed" : "confirmed";
+    // A service operation stands where the service left it: only a verified one is confirmed.
+    const operated = (): "dispatched" | "confirmed" | "failed" | "uncertain" => (result["status"] === "confirmed" ? "confirmed" : result["status"] === "failed" ? "failed" : result["status"] === "pending" ? "dispatched" : "uncertain");
+    const outcome = op === "job.start" ? "dispatched" : op === "maintenance.request" ? "proposed" : op === "service.operate" ? operated() : "confirmed";
     try { await this.#deps.activity({ commandId: `brs:${createHash("sha256").update(`${c.attemptId}|${c.callId}`).digest("hex").slice(0, 40)}`, taskId: c.taskId, kind: "tool-call", ...step, outcome }); } catch { /* the record of a step never changes what happened */ }
   }
 
@@ -789,6 +796,44 @@ export class ToolExecutionService {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
     onlyKnown(args, ["name", "files"]);
     const response = await this.#deps.state.handle(token, { v: 1, op: "artifact.publish", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: { ...args, taskId: c.taskId } });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * Card P03b: the agent drafts and submits the deliverable of its own task through the same door every client uses (`deliverable.draft` / `deliverable.submit` with the worker's task credential, so the
+   * role, the task scope and the content rules are checked there). The task comes from the attempt, never from the request; the responsible agent is the agent itself (naming another is the owner's).
+   * A submission is checked against the task contract version the attempt began with (the dispatch record's), never one the agent names: a contract changed since makes it `stale_revision`.
+   */
+  async #deliverable(token: unknown, c: Context, op: "deliverable.draft" | "deliverable.submit", args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    let body: JsonObject;
+    if (op === "deliverable.draft") {
+      onlyKnown(args, ["type", "title", "audience", "accessScope", "artifacts", "submissionIds", "outcome", "note"]);
+      body = { ...args, taskId: c.taskId };
+    } else {
+      onlyKnown(args, ["id", "expectedRevision"]);
+      const attempt = await this.#deps.dispatch.get(this.#deps.principal, c.attemptId);
+      if (attempt === undefined) return refusal("fenced", "the attempt is not known; its requests are refused");
+      body = { ...args, contractVersion: attempt.revisions?.contract ?? 0 };
+    }
+    const response = await this.#deps.state.handle(token, { v: 1, op, commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: body });
+    if (response.ok) return ok(response.result);
+    // Review: the API's words for a changed contract ("read it and check the deliverable against it") suggest a retry this agent cannot make, as it never names a version. Say what it can do instead.
+    if (op === "deliverable.submit" && response.error.code === "stale_revision" && /^the task contract is at version/.test(response.error.message)) {
+      return refusal("stale_revision", `the task contract changed after this attempt began (it was version ${String(body["contractVersion"])}); this attempt cannot submit. Say so when you end your work: the next attempt works against the new contract`);
+    }
+    return refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * Card P03b: the agent reads (`service.observe`) or changes (`service.operate`) one resource of a service for its own task, through the same door every client uses: the per-resource right
+   * `effect.perform`, the reach of the action, the attempt's fence, the effect ledger and the read-back from the service are all checked there, exactly as for the API. The call ID is the
+   * operation's command ID, so asking again applies nothing again.
+   */
+  async #service(token: unknown, c: Context, op: "service.observe" | "service.operate", args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, op === "service.observe" ? ["service", "resource"] : ["service", "resource", "action"]);
+    const response = await this.#deps.state.handle(token, { v: 1, op, ...(op === "service.operate" ? { commandId: bridgeCommandId("bridge", c.attemptId, c.callId) } : {}), args: { ...args, taskId: c.taskId } });
     return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 

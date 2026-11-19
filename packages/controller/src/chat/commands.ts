@@ -190,6 +190,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },
   "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  // A maintenance window (card K07) is a standing word to activate one exact release at a stated time: always shown first. Cancelling one only stops it: the safe direction, applied at once.
+  "release.window.set": { verb: "Set a maintenance window that activates a staged release at a stated time", mode: "propose" },
+  "release.window.cancel": { verb: "Cancel a maintenance window", mode: "apply" },
   "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
   "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
@@ -214,7 +217,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Changing a task's checkout on the host that holds it (card H12m): carrying its work into the shared workspace, landing it, refreshing it to the shared head, quarantining it (its attempt is stopped) or committing
   // reviewed work. Each changes files or stops an agent, so it is shown first in every profile (provisional); the operation is a fixed choice, the reason must be the owner's own words.
   // Kept short: the proposal line the owner confirms is this verb followed by the operation, the task and the reason, and it is cut at CHAT_LIMITS.line.
-  "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release commits its work in the task's own checkout; a landing lands the task's queued approved submission when it is the oldest in the landing queue; submissionId (release only): the approved submission to commit, exactly as reviewed and once; reason: the owner's words)", mode: "propose" },
+  "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release commits its work in the task's own checkout; a landing lands the task's queued approved submission when it is the oldest in the landing queue, and only when the project's required checks pass on that tree; submissionId (release only): the approved submission to commit, exactly as reviewed and once; reason: the owner's words)", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   // Ending an integrator lease by force (card P10): the owner names the project's branch; shown first because it stops the integrator's landing at once.
   // Taking a task's approved submission out of the landing queue (card P10): it changes what lands next, so it is shown first.
@@ -608,7 +611,7 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
 export const DEFECT_EXEMPT: ReadonlySet<string> = new Set(["id", "deliverableId", "outcome", "severity"]);
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
-export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
+export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId", "windowId"]);
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
