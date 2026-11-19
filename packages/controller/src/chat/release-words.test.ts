@@ -112,3 +112,28 @@ test("a maintenance window proposal shows its numbers and the UTC instants, and 
   // What the model gave that is not a number is shown as text, not hidden.
   assert.match(windowTimeNote({ date: "2027-11-07", time: "01:30", timeZone: "America/New_York", durationMinutes: "an hour" }), /lasts "an hour" minutes/);
 });
+
+test("the release a maintenance window takes from loose words is the one staged release that never ran here; otherwise the owner is asked (card K07)", async () => {
+  const { pickWaitingRelease } = await import("./chat.js");
+  const st = (id: string, at: string) => ({ candidateId: id, stagedAt: `2026-11-${at}T00:00:00.000Z` });
+  // Nothing installed yet: the one staged release is taken; two are asked about; none is said.
+  assert.deepEqual(pickWaitingRelease({ staged: [st("rcn-a", "01")] }, []), { id: "rcn-a" });
+  assert.match((pickWaitingRelease({ staged: [st("rcn-a", "01"), st("rcn-b", "02")] }, []) as { ask: string }).ask, /2 staged releases.*rcn-a, rcn-b.*which one/);
+  assert.match((pickWaitingRelease({ staged: [] }, []) as { ask: string }).ask, /No staged release is waiting/);
+  // The current and previous releases stay staged for going back; the newer one is the update.
+  const base = { current: { id: "rcn-b" }, previous: { id: "rcn-a" }, staged: [st("rcn-a", "01"), st("rcn-b", "02"), st("rcn-c", "03")] };
+  assert.deepEqual(pickWaitingRelease(base, []), { id: "rcn-c" });
+  assert.match((pickWaitingRelease(base, ["rcn-c"]) as { ask: string }).ask, /No staged release is waiting/, "a quarantined release is not waiting");
+  assert.match((pickWaitingRelease({ ...base, failedStarts: [{ id: "rcn-c" }] }, []) as { ask: string }).ask, /No staged release is waiting/, "one that failed to start is not waiting");
+  // A release the history shows switched to or from ran; an aborted switch (or a resolve, which may have aborted) did not run it.
+  assert.match((pickWaitingRelease({ ...base, history: [{ kind: "activated", to: "rcn-c", from: "rcn-b" }] }, []) as { ask: string }).ask, /No staged release is waiting/);
+  assert.match((pickWaitingRelease({ ...base, history: [{ kind: "rolled_back", to: "rcn-b", from: "rcn-c" }] }, []) as { ask: string }).ask, /No staged release is waiting/);
+  assert.deepEqual(pickWaitingRelease({ ...base, history: [{ kind: "aborted", to: "rcn-c" }, { kind: "resolved", to: "rcn-c" }] }, []), { id: "rcn-c" });
+  // An old release staged before the running one (it may have run before the trimmed history) is offered by name, never taken silently.
+  const old = { current: { id: "rcn-b" }, staged: [st("rcn-o", "01"), st("rcn-b", "02")] };
+  assert.match((pickWaitingRelease(old, []) as { ask: string }).ask, /rcn-o, was staged before the running release rcn-b/);
+  assert.ok("ask" in pickWaitingRelease({ current: { id: "rcn-b" }, staged: [st("rcn-c", "03")] }, []), "the running release's own staged time unknown: asked");
+  // A full page of staged releases: others may lie beyond it, so the owner is asked even when none on the page qualifies.
+  const many = Array.from({ length: 50 }, (_, i) => st(`rcn-${String(i).padStart(2, "0")}`, "01"));
+  assert.match((pickWaitingRelease({ current: { id: "rcn-00" }, previous: { id: "rcn-01" }, staged: many.slice(0, 50) }, many.slice(2).map((x) => x.candidateId)) as { ask: string }).ask, /Many staged releases/);
+});

@@ -223,6 +223,37 @@ export function windowTimeNote(args: Readonly<Record<string, unknown>>): string 
   return `${parts.join(" ")}; it lasts ${typeof minutes === "number" ? String(minutes) : quotedText(String(minutes), 20)} minutes. Preparation starts ${num(args["prepareLeadMinutes"], WINDOW_DEFAULTS.prepareLeadMinutes)} minutes before it opens and needs ${num(args["minFreeBytes"], WINDOW_DEFAULTS.minFreeBytes)} bytes free under the release folder. Check that this is the time you meant.`;
 }
 
+/** What the staged-release picker reads from `release.status`. */
+export interface ReleaseStatusForPick { readonly current?: { id: string }; readonly previous?: { id: string }; readonly lastKnownGood?: { id: string }; readonly history?: readonly { kind?: string; to?: string; from?: string }[]; readonly failedStarts?: readonly { id: string }[]; readonly staged?: readonly { candidateId: string; stagedAt?: string }[] }
+
+/**
+ * The one staged release waiting to be installed, for a maintenance window set without a release named (card K07), or what to ask the owner. A release that ran here stays staged for going back
+ * and is never "the update waiting": the current, previous and last known good releases and every release the activation history shows switched to or from (an aborted switch, or a resolve that
+ * may have aborted, does not count as having run). The history is trimmed, so a release staged before the current one could have run long ago: such a release is never picked silently, nor is one
+ * of several, and when the status's page of staged releases is full the owner is asked too.
+ */
+export function pickWaitingRelease(s: ReleaseStatusForPick, quarantined: readonly string[]): { id: string } | { ask: string } {
+  const ran = new Set<string>();
+  for (const id of [s.current?.id, s.previous?.id, s.lastKnownGood?.id]) if (typeof id === "string") ran.add(id);
+  for (const h of s.history ?? []) {
+    if (typeof h.from === "string") ran.add(h.from);
+    if (typeof h.to === "string" && h.kind !== "aborted" && h.kind !== "resolved") ran.add(h.to);
+  }
+  const q = new Set(quarantined);
+  const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
+  const staged = s.staged ?? [];
+  const eligible = staged.filter((x) => !ran.has(x.candidateId) && !q.has(x.candidateId) && !failed.has(x.candidateId));
+  const name = (xs: readonly { candidateId: string }[]): string => `${xs.slice(0, 5).map((x) => x.candidateId).join(", ")}${xs.length > 5 ? ", ..." : ""}`;
+  if (staged.length >= ACTIVATION_LIMITS.listed) return { ask: `Many staged releases are kept (${staged.length} or more), so the one waiting cannot be told from the list: which one should the window install? Name its rcn- ID.` };
+  if (eligible.length === 0) return { ask: "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." };
+  if (eligible.length > 1) return { ask: `${eligible.length} staged releases could be installed (${name(eligible)}): which one should the window install?` };
+  const only = eligible[0]!;
+  // Staged before the running release: it may be an older build (or one that ran before the history kept), so it is offered by name, not taken.
+  const currentStagedAt = s.current === undefined ? undefined : staged.find((x) => x.candidateId === s.current!.id)?.stagedAt;
+  if (s.current !== undefined && (currentStagedAt === undefined || only.stagedAt === undefined || only.stagedAt <= currentStagedAt)) return { ask: `The only staged release that has not run here, ${only.candidateId}, was staged before the running release ${s.current.id}, so it may be older: name it if that is the one the window should install.` };
+  return { id: only.candidateId };
+}
+
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
 const PROPOSAL_ID = /^prop-[0-9a-f]{32}$/;
@@ -1018,18 +1049,11 @@ export class ChatService {
       if (wanted === undefined) {
         const st = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.status", args: {} });
         if (!st.ok) return refuse(st.error.code, st.error.message);
-        const s = st.result["item"] as { current?: { id: string }; previous?: { id: string }; lastKnownGood?: { id: string }; history?: { to?: string; from?: string }[]; failedStarts?: { id: string }[]; staged?: { candidateId: string }[] };
         const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
         if (!wl.ok) return refuse(wl.error.code, wl.error.message);
-        const quarantined = new Set(((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId));
-        const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
-        // A release that already ran here (the current one, the one before it, the last known good, any the activation history names) stays staged for going back; it is not an update waiting.
-        const ran = new Set([s.current?.id, s.previous?.id, s.lastKnownGood?.id, ...(s.history ?? []).flatMap((h) => [h.to, h.from])].filter((x): x is string => typeof x === "string"));
-        const eligible = (s.staged ?? []).map((x) => x.candidateId).filter((id) => !ran.has(id) && !quarantined.has(id) && !failed.has(id));
-        // The status lists a bounded page of staged releases: when it is full, others may be waiting too, so the owner is asked rather than one picked.
-        if ((s.staged ?? []).length >= ACTIVATION_LIMITS.listed && eligible.length > 0) return refuse("invalid_command", `Many staged releases are kept (${(s.staged ?? []).length} or more): which one should the window install? Name its rcn- ID.`);
-        if (eligible.length !== 1) return refuse("invalid_command", eligible.length === 0 ? "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." : `${eligible.length} staged releases could be installed (${eligible.slice(0, 5).join(", ")}${eligible.length > 5 ? ", ..." : ""}): which one should the window install?`);
-        wanted = eligible[0]!;
+        const pick = pickWaitingRelease(st.result["item"] as ReleaseStatusForPick, ((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId));
+        if ("ask" in pick) return refuse("invalid_command", pick.ask);
+        wanted = pick.id;
         args["candidateId"] = wanted;
         fillNotes.push(`Release ${wanted}: the one staged release waiting to be installed (you did not name one).`);
       }
