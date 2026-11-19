@@ -98,11 +98,22 @@ export const DOC_INDEX_KEPT = 100;
  */
 class VerdictRace extends DomainError {}
 const VERDICT_RACE_TRIES = 5;
+/**
+ * A document change whose write met another document change of the same project (card Q03b second review): both added to the project's index. Document changes of DIFFERENT tasks did not meet before
+ * the index existed, so a burst of them (a release flags many documents at once) must not fail: each lost write is built again after a short random wait, many more times than a review race
+ * (20 at once all succeed), and only then answered `unavailable`.
+ */
+class DocIndexRace extends VerdictRace {}
+const DOC_INDEX_RACE_TRIES = 40;
+const docIndexRaceWait = (tries: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, Math.random() * Math.min(2 ** tries, 50)); });
 /** The service's runner, whose `command` builds a command again when its write lost a `VerdictRace`; everything else is the runner's own. */
 function rebuildOnVerdictRace(runner: CommandRunner): CommandRunner {
   const command: CommandRunner["command"] = async (type, meta, prepare) => {
     for (let tries = 1; ; tries++) {
-      try { return await runner.command(type, meta, prepare); } catch (error) { if (!(error instanceof VerdictRace) || tries >= VERDICT_RACE_TRIES) throw error; }
+      try { return await runner.command(type, meta, prepare); } catch (error) {
+        if (!(error instanceof VerdictRace) || tries >= (error instanceof DocIndexRace ? DOC_INDEX_RACE_TRIES : VERDICT_RACE_TRIES)) throw error;
+        if (error instanceof DocIndexRace) await docIndexRaceWait(tries);
+      }
     }
   };
   return new Proxy(runner, { get: (target, key) => { if (key === "command") return command; const value: unknown = Reflect.get(target, key, target); return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value; } });
@@ -378,7 +389,7 @@ export class SubmissionService {
   async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
     if ((await this.#runner.get("submission", id)) === undefined && body.kind === "review") return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
     // Two document changes of one project at the same moment both add to the project's index (card Q03b): the one that lost is built again from the index as it now is.
-    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new VerdictRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
+    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new DocIndexRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
     return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
   }
 
@@ -424,7 +435,12 @@ export class SubmissionService {
     if (by.kind !== "owner" && (by.kind !== "agent" || (by.taskScope !== undefined && !inTaskScope(by, projectId)) || !allows(by, "task.read", projectId))) throw new DomainError("not_found", "no such project");
     const index = [...(((await this.#runner.get(DOC_INDEX, projectId))?.body as unknown as DocIndexBody | undefined)?.items ?? [])].reverse();
     let start = 0;
-    if (after !== undefined) { const at = index.findIndex((x) => x.id === after); start = at < 0 ? index.length : at + 1; }
+    if (after !== undefined) {
+      // The cursor's entry dropped off the index (newer document changes pushed it out): a clear refusal, not an empty page that reads as "no more".
+      const at = index.findIndex((x) => x.id === after);
+      if (at < 0) bad("after", `the listing moved on: the document change this cursor follows is no longer among the project's newest ${this.#docKept}; list again without after`);
+      start = at + 1;
+    }
     const items: (Item & { createdAt: string })[] = [];
     const tasks = new Map<string, { task: TaskBody | undefined; assigned: ReadonlySet<string> }>();
     for (let k = start; k < index.length; k++) {
@@ -438,8 +454,9 @@ export class SubmissionService {
         if (seen === undefined) { const task = await this.#readableTask(by, body.taskId); seen = { task, assigned: task === undefined ? new Set() : await this.#assignedTo(by, task, body.taskId) }; tasks.set(body.taskId, seen); }
         if (seen.task === undefined || (body.submittedBy !== by.id && !seen.assigned.has(entry.id))) continue;
       }
+      // One more readable item past the page: only then is `next` offered (entries the caller may not read, or older than `since`, do not make a next page).
+      if (items.length >= query.limit) return { items, next: this.#seal(by, scope, items[items.length - 1]!.id) };
       items.push({ ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: found.id, revision: found.revision, createdAt: found.createdAt });
-      if (items.length >= query.limit) return { items, ...(k + 1 < index.length ? { next: this.#seal(by, scope, entry.id) } : {}) };
     }
     return { items };
   }

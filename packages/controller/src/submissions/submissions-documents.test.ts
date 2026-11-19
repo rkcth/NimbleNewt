@@ -82,6 +82,9 @@ for (const backend of backends) {
       // An agent sees exactly what submission.get lets it see: its own changes, and one it was asked to review.
       assert.deepEqual((await svc.documents(dora, project, { limit: 10 })).items.map((x) => x.id), [d3, d1]);
       assert.deepEqual((await svc.documents(dan, project, { limit: 10 })).items.map((x) => x.id), [d2]);
+      // No next page is offered when what is left is nothing the caller may read, or nothing since the time asked (second review).
+      assert.deepEqual(await svc.documents(dan, project, { limit: 1 }).then((r) => [r.items.map((x) => x.id), r.next]), [[d2], undefined], "d1 is left but dan may not read it");
+      assert.deepEqual(await svc.documents(owner, project, { limit: 1, since: mid }).then((r) => [r.items.map((x) => x.id), r.next]), [[d3], undefined], "d2 and d1 are older than the time asked");
       assert.deepEqual((await svc.documents(rita, project, { limit: 10 })).items.map((x) => x.id), [], "a reviewer reads none it was not asked to review");
       assigned.set(`${rita.id}|${login}`, [d1]);
       assert.deepEqual((await svc.documents(rita, project, { limit: 10 })).items.map((x) => x.id), [d1]);
@@ -106,11 +109,23 @@ for (const backend of backends) {
       const d5 = await doc(dan, search, "6");
       assert.deepEqual((await svc.documents(owner, project, { limit: 10 })).items.map((x) => x.id), [d5, d4, d3, d2]);
       assert.ok(await svc.get(owner, d1), "the record itself stays");
+      // A cursor whose place drops out of the index is refused, not answered with an empty page (second review).
+      const held = await svc.documents(owner, project, { limit: 3 });
+      assert.deepEqual(held.items.map((x) => x.id), [d5, d4, d3]);
+      assert.ok(held.next !== undefined);
       // Two document changes of one project at the same moment are both indexed (the one that lost the index write is built again).
       const [d6, d7, d8] = await Promise.all([doc(dora, login, "7"), doc(dan, search, "8"), doc(dora, search, "9")]);
       const newest = (await svc.documents(owner, project, { limit: 10 })).items.map((x) => x.id);
       assert.deepEqual(new Set(newest.slice(0, 3)), new Set([d6, d7, d8]));
       assert.deepEqual(newest.slice(3), [d5], "the index keeps the newest 4, in the order they were written");
+      await refuses("invalid_command", () => svc.documents(owner, project, { limit: 3, afterId: held.next! }), /moved on/);
+      // A burst: 20 document changes of one project at the same moment all succeed (before the index they never met; each lost index write is built again after a short wait), and the index keeps the newest.
+      const burst = await Promise.allSettled(Array.from({ length: 20 }, (_, i) => doc(i % 2 === 0 ? dora : dan, i % 2 === 0 ? login : search, String.fromCharCode(97 + (i % 6)))));
+      assert.deepEqual(burst.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason)), [], "no document change of the burst fails");
+      const burstIds = new Set(burst.map((r) => (r as PromiseFulfilledResult<string>).value));
+      const kept = (await svc.documents(owner, project, { limit: 10 })).items.map((x) => x.id);
+      assert.equal(kept.length, 4);
+      assert.ok(kept.every((id) => burstIds.has(id)), "the newest 4 are from the burst");
     } finally { await world.close(); }
   });
 }

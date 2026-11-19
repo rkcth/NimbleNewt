@@ -137,6 +137,11 @@ test("the owner's chat verifies a document (card Q03b): the docs view lists the 
     assert.equal(which.outcomes[0].status, "asked", JSON.stringify(which.outcomes));
     assert.match(which.outcomes[0].question, /2 document changes of this project made since it was flagged .* could verify "user guide"/);
     assert.deepEqual((which.outcomes[0].options as string[]).map((o) => o.split(":")[0]), [final, draft]);
+    // An answer naming a document change that was not offered (one made before the release flag) is refused and proposes nothing (second review).
+    const wrong = "the one from before";
+    const refusedAnswer = (await turn("m13b", wrong, [{ kind: "answer", turnId: which.turnId, choice: fresh, evidence: wrong, basis: "owner" }])).outcomes;
+    assert.ok(refusedAnswer.every((o: any) => o.status !== "proposed"), JSON.stringify(refusedAnswer));
+    assert.ok(refusedAnswer.some((o: any) => o.status === "refused" && /not one of the answers offered/.test(String(o.message))), JSON.stringify(refusedAnswer));
     const answer = "the newer one";
     const picked = (await turn("m14", answer, [{ kind: "answer", turnId: which.turnId, choice: final, evidence: answer, basis: "owner" }])).outcomes;
     const shown = picked.find((o: any) => o.status === "proposed");

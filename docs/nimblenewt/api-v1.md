@@ -2774,9 +2774,9 @@ Arguments:
 - `projectId`: the project
 - `since` (optional): a time (`2026-11-19T10:00:00.000Z`): only document changes recorded no earlier
 - `limit` (optional): 1 to 50, default 20
-- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this project)
+- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this project; once newer document changes have pushed its place out of the newest 100 it is refused with `invalid_command`: list again without it)
 
-Result: `{ items, next? }`: each item is the submission with its revision and `createdAt` (when it was recorded).
+Result: `{ items, next? }`: `next` only when another item you may read follows; each item is the submission with its revision and `createdAt` (when it was recorded).
 
 #### `submission.get`
 
