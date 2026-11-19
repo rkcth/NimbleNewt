@@ -380,6 +380,13 @@ describe("Homebrew OpenSSL's configuration file (macOS probe on Rob's Mac, run 4
     const fresh = cachedLibraryReads(brewWithOpenssl());
     assert.ok(!fresh(NODE, [], [SSLDIR]).includes(CNF));
     assert.ok(fresh(NODE, []).includes(CNF));
+    // The whole group counts: a configuration that is a link whose real file lies in a writable place is left out (file, link and real path), again without a refusal (re-check of 812ff75e).
+    const realDir = "/opt/homebrew/Cellar/openssl@3/3.6.3/.bottle/etc/openssl@3";
+    const linked = cachedLibraryReads(brewWithOpenssl({ missingCnf: true, files: [`${realDir}/openssl.cnf`], links: { [CNF]: "../../Cellar/openssl@3/3.6.3/.bottle/etc/openssl@3/openssl.cnf" } }));
+    assert.ok(linked(NODE, []).includes(`${realDir}/openssl.cnf`));
+    const narrowed = linked(NODE, [], [realDir]);
+    assert.ok(!narrowed.includes(CNF) && !narrowed.includes(`${realDir}/openssl.cnf`) && narrowed.includes(CRYPTO_OPT), "the group is left out when its real path is writable");
+    assert.ok(linked(NODE, []).includes(CNF), "and comes back for a launch without that writable place");
   });
 
   test("the OpenSSL directory is read from the library's own text, only as a plain absolute path", () => {
