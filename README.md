@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **285 of 364 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **288 of 364 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -105,9 +105,9 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 
 | Part | Progress | Done |
 | --- | --- | --- |
-| Scope and early proofs | `▓▓▓▓▓▓░░░░░░` 50% | 2 of 4 |
+| Scope and early proofs | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
-| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 33% | 8 of 24 |
+| Pi runtime and inference caching | `▓▓▓▓░░░░░░░░` 37% | 9 of 24 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 29 of 30 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 19 of 22 |
@@ -120,7 +120,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓░░` 89% | 17 of 19 |
-| Projects, repositories and workspaces | `▓▓▓▓░░░░░░░░` 38% | 7 of 18 |
+| Projects, repositories and workspaces | `▓▓▓▓▓░░░░░░░` 44% | 8 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -131,13 +131,13 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 ### The parts in detail
 
 <details>
-<summary><strong>Scope and early proofs</strong> — ▓▓▓▓▓▓░░░░░░ 2 of 4</summary>
+<summary><strong>Scope and early proofs</strong> — ▓▓▓▓▓▓▓▓▓░░░ 3 of 4</summary>
 
 The accepted scope and the experiments that proved the foundations (durable engine, remote stop and failover).
 
 - [x] **G01** · P1 · Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
 - [x] **G07** · P2 · Record current architecture and executable task manifest _(needs G01)_
-- [ ] **G04** · P31 · Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
+- [x] **G04** · P31 · Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
 - [ ] **G08** · P41 · Prove remote stop and failover authority contracts _(needs H09, K05)_
 
 </details>
@@ -170,7 +170,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 8 of 24</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓░░░░░░░░ 9 of 24</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
@@ -183,7 +183,7 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [x] **C06** · P26 · Implement inference-cache adapters with per-backend tuning _(needs C05)_
 - [x] **C06b** · P27 · Make Pi agent prompts cache-stable across context switches _(needs C06, F05, F06)_
 - [ ] **G10** · P27 · Benchmark native backend caching and branch markers _(needs C06)_
-- [ ] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
+- [x] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
 - [ ] **W01** · P33 · Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline _(needs H12k, C06b)_
 - [ ] **W01b** · P34 · Keep tool-call arguments in Pi's history valid Unicode JSON on the bench, and check the production serialiser for the same gap _(needs W01)_
 - [ ] **W02** · P34 · Tell how a Pi turn ended, from the worker to the dispatcher _(needs W01)_
@@ -546,7 +546,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓░░░░░░░░ 7 of 18</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓░░░░░░░ 8 of 18</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
@@ -555,7 +555,7 @@ Repository-independent projects, isolated coding workspaces, non-code and sandbo
 - [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
 - [x] **P08** · P31 · Store the integration policy per project with an installation default _(needs P01, A07f, U10, H11b, A06)_
 - [x] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
-- [ ] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
+- [x] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [x] **P08c** · P33 · Guide project creation in chat and list integration defaults _(needs P08b)_
 - [x] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
 - [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
