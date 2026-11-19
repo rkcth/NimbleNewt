@@ -161,3 +161,19 @@ test("access-list findings as the real run writes them pass the last gate whole,
   for (const kept of ["NT AUTHORITY\\SYSTEM", "BUILTIN\\Users", "NT SERVICE\\TrustedInstaller", "NT SERVICE\\WaaSMedicSvc", "APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES", "NT VIRTUAL MACHINE\\Virtual Machines", "Everyone", "CREATOR OWNER"]) assert.equal(redactAccountName(kept), kept);
   for (const gone of ["PC\\erin", "DESKTOP-4F2K9\\JimBob", "erin", "MYDOMAIN\\Erin Lee", "NT SERVICE\\a\\b", "NT SERVICE\\x:(F)", "", "NT SERVICE\\line\nbreak", "MicrosoftAccount\\me@example.com"]) assert.equal(redactAccountName(gone), "<user>", JSON.stringify(gone));
 });
+
+test("a SID is redacted whatever follows it and however long it is; only the redacted heads before a placeholder are left, and the gate judges the same way", () => {
+  // A raw machine SID directly followed by "-<" (as when a name after it was already a placeholder) is still redacted, and the gate withholds it if it ever got through.
+  assert.equal(redact("S-1-5-21-1111-2222-3333-1001-<x>", names), "S-1-5-21-<domain>-<account>-<x>");
+  assert.equal(scrub("S-1-5-21-1111-2222-3333-1001-<x>", names), "S-1-5-21-<domain>-<account>-<x>");
+  // A SID with the most sub-authorities Windows allows (15), and a longer run of numbers, are redacted too.
+  const fifteen = "S-1-5-21-1-2-3-4-5-6-7-8-9-10-11-12-13-14";
+  assert.equal(redactSid(fifteen), "S-1-5-21-<domain>-<account>");
+  assert.equal(redact(`x ${fifteen} y`, names), "x S-1-5-21-<domain>-<account> y");
+  assert.ok(!/1111|2222/.test(redact("S-1-5-21-1111-2222-3-4-5-6-7-8-9-10-11-12-13-14-15-16-17", names)));
+  // Only the heads redactSid writes are exempt, and only before "-<": a raw head elsewhere, or another SID before "-<", is judged as a SID.
+  assert.equal(scrub("S-1-5-21-<domain>-500 S-1-12-1-<account> S-1-5-5-<session>", names), "S-1-5-21-<domain>-500 S-1-12-1-<account> S-1-5-5-<session>");
+  assert.equal(redact("S-1-5-21-77-<x>", names), "S-1-5-21-<domain>-<account>-<x>");
+  // An access-list account that only starts like a SID is not kept as one.
+  assert.equal(redact("C:\\x S-1-robert:(F)", names), "C:\\x <user>:(F)");
+});

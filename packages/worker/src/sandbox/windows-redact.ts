@@ -16,7 +16,8 @@ export interface RedactionNames {
 
 export const WITHHELD = "<withheld: possible personal data>";
 
-const SID_SHAPE = /^S-1-\d+(?:-\d+){1,14}$/;
+/** A SID: revision 1, an authority and one to fifteen sub-authorities (Windows allows at most 15). */
+const SID_SHAPE = /^S-1-\d+(?:-\d+){1,15}$/;
 /** SIDs that are the same on every Windows machine and name a kind of account, never a person. */
 const FIXED_SIDS = new Set(["S-1-0-0", "S-1-1-0", "S-1-2-0", "S-1-2-1", "S-1-3-0", "S-1-3-1", "S-1-3-2", "S-1-3-3", "S-1-3-4", "S-1-5-1", "S-1-5-2", "S-1-5-3", "S-1-5-4", "S-1-5-6", "S-1-5-7", "S-1-5-8", "S-1-5-9", "S-1-5-10", "S-1-5-11", "S-1-5-12", "S-1-5-13", "S-1-5-14", "S-1-5-15", "S-1-5-17", "S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-33", "S-1-5-113", "S-1-5-114"]);
 /**
@@ -81,8 +82,11 @@ export function redactAccountName(account: string): string {
   if (parts.length === 2 && NAMED_AUTHORITIES.test(parts[0]!.trim()) && /^[A-Za-z0-9 ._$&'-]{1,80}$/.test(parts[1]!)) return a;
   return "<user>";
 }
-/** A SID in text: not followed by more digits or by a further `-<digits>`; a redacted form (`S-1-5-21-<domain>-...`) is not matched again. */
-const SID_IN_TEXT = /(\*?)(S-1-\d+(?:-\d+){1,14})(?!\d|-\d|-<)/gi;
+/** A SID in text, as long as it goes (up to 15 sub-authorities); a longer run of numbers is matched in parts, each judged on its own. */
+const SID_IN_TEXT = /(\*?)(S-1-\d+(?:-\d+){1,15})(?!\d)/gi;
+/** The heads `redactSid` writes in front of a placeholder (`S-1-5-21-<domain>-...`, `S-1-12-1-<account>`, `S-1-5-5-<session>`): only these, followed by `-<`, are left as they are. */
+const REDACTED_HEADS = new Set(["S-1-5-21", "S-1-12-1", "S-1-5-5"]);
+const isRedactedHead = (sid: string, after: string): boolean => after.startsWith("-<") && REDACTED_HEADS.has(sid.toUpperCase());
 const WELL_KNOWN = /^(?:nt authority|builtin|nt service|nt virtual machine|window manager|font driver host|everyone|users|administrators|guests|system|creator owner|authenticated users|all application packages|trustedinstaller|<host>|<user>)$/i;
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const SEP = String.raw`(?:\\\\|\\|/)+`;
@@ -113,7 +117,7 @@ export function redact(text: string, names: RedactionNames = {}): string {
   const fromEmail: string[] = [];
   out = out.replace(/(?:MicrosoftAccount|AzureAD)\\{1,2}[^\s:"'\\]+/gi, "<user>");
   out = out.replace(EMAIL, (m) => { const local = m.split("@")[0]!; fromEmail.push(local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)); return "<email>"; });
-  out = out.replace(SID_IN_TEXT, (_m, star: string, sid: string) => `${star}${redactSid(sid)}`);
+  out = out.replace(SID_IN_TEXT, (m: string, star: string, sid: string, at: number, all: string) => (isRedactedHead(sid, all.slice(at + m.length)) ? m : `${star}${redactSid(sid)}`));
   // Addresses (loopback and 0.x, which are version numbers, stay).
   out = out.replace(/\b(?!127\.|0\.)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, "<ip>");
   out = out.replace(/(?<![\w:])(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}(?![\w:])|(?<![\w:])(?:[0-9a-f]{1,4}:)+:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?(?![\w:])/gi, "<ip>");
@@ -144,7 +148,7 @@ export function redact(text: string, names: RedactionNames = {}): string {
     if (m === null) return line;
     const account = m[2]!.trim();
     // A SID here was already redacted by class above, so it stays (a well-known one, or its placeholder form).
-    const kept = account.split("\\").every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-[0-9A-Za-z<>-]+$/.test(account) ? account : "<user>";
+    const kept = account.split("\\").every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-\d+(?:-(?:\d+|<(?:domain|account|session|other)>))+$/.test(account) ? account : "<user>";
     return `${m[1]!}${kept}:${m[3]!}${cr}`;
   }).join("\n");
   return out;
@@ -162,7 +166,7 @@ export function scrub(text: string, names: RedactionNames = {}, limit = 2048): s
   const bare = out.replace(/<(?:user|host|home|sid|ip|email)>/g, "");
   const local = localNames();
   const watched = [...[...local.users, ...(names.users ?? [])].flatMap(withPieces), ...[...local.hosts, ...(names.hosts ?? [])].flatMap((n) => [n, n.split("\\")[0]!])].filter((n) => n.length >= 2);
-  const sidLeft = [...bare.matchAll(SID_IN_TEXT)].some((m) => redactSid(m[2]!) !== m[2]!.toUpperCase() || m[2]! !== m[2]!.toUpperCase());
+  const sidLeft = [...bare.matchAll(SID_IN_TEXT)].some((m) => !isRedactedHead(m[2]!, bare.slice(m.index + m[0].length)) && (redactSid(m[2]!) !== m[2]!.toUpperCase() || m[2]! !== m[2]!.toUpperCase()));
   if (watched.some((n) => wholeWord(n).test(bare)) || new RegExp(EMAIL.source).test(bare) || sidLeft || bare.includes("\0")) return WITHHELD;
   return out;
 }

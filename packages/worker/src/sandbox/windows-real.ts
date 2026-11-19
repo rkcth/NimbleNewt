@@ -57,7 +57,10 @@ $o = $a.GetOwner([System.Security.Principal.SecurityIdentifier])
 `;
 // The access list by SID (the same in every language), explicit and inherited entries, for the findings. The count is sent next to the list so that a list PowerShell turned
 // into a single object, or cut short, is noticed. Rights are the raw access mask (generic rights included), flags their numeric values; nothing is translated here.
+// 'Stop' makes a path that cannot be read end the script with an error (exit 1): without it Get-Acl only reports the error, the rest runs on nothing and prints an empty list
+// with a count of 0, which would read as "nobody else can change it".
 const ACCESS_SCRIPT = `
+$ErrorActionPreference = 'Stop'
 $a = Get-Acl -LiteralPath $env:NN_PATH
 $rules = @($a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
 $out = @(foreach ($r in $rules) { @{ sid = $r.IdentityReference.Value; rights = [int64]$r.FileSystemRights.value__; type = "$($r.AccessControlType)"; inherited = [bool]$r.IsInherited; inheritance = [int]$r.InheritanceFlags.value__; propagation = [int]$r.PropagationFlags.value__ } })
