@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { WITHHELD, redact, redactAccountName, redactAndCut, redactSid, scrub, scrubDeep, sidClass } from "./windows-redact.js";
+import { WITHHELD, cutWhole, redact, redactAccountName, redactAndCut, redactSid, scrub, scrubDeep, sidClass } from "./windows-redact.js";
 
 const names = { users: ["JimBob", "NimbleNewtRunner"], hosts: ["DESKTOP-4F2K9"] };
 
@@ -366,4 +366,57 @@ test("re-check: no search is retried in exponentially or quadratically many ways
   assert.equal(redact("user@ex.com JimBob", names), redact("user@ex.com JimBob", { ...names, users: [...names.users, "user"] }));
   // A local part found only as the end of a longer run of name characters (the one-pass search must follow its fallback links).
   assert.equal(redact("x-ann.leeroy@ex.com ann.lee@ex.com; see x-ann.lee", names), "<email> <email>; see x-<user>");
+});
+
+test("an access-denied start's read-back and the real-sandbox detail's arguments: every account, home folder, SID and address goes, the folders and rights stay", () => {
+  // The read-back windows-job.ts writes after an access-denied wsb start (own-hardware run 44501483353), with what a real machine can list: the console user, the machine's
+  // own accounts, accounts of a domain the redaction does not know, Microsoft and Azure AD accounts, SIDs, and a job folder under the user's profile.
+  const n = { users: ["DESKTOP-4F2K9\\robert", "Robert Hostetter"], hosts: ["DESKTOP-4F2K9"] };
+  const readback = [
+    "failed: Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit 2147942405): this process (in the active console session: no; the console user: no): start the runner interactively",
+    "shared C:\\nn\\work <- C:\\Users\\Robert Hostetter\\AppData\\Local\\Temp\\nn\\jobs\\j1\\guest\\work (writable, work):",
+    "    NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+    "    BUILTIN\\Administrators:(OI)(CI)(F)",
+    "    DESKTOP-4F2K9\\robert:(OI)(CI)M",
+    "    CORP\\alice.smith:(OI)(CI)(RX)",
+    "    FAMILY\\kidaccount:(I)(F)",
+    "    S-1-5-21-1111111111-2222222222-3333333333-1001:(OI)(CI)(W)",
+    "    AzureAD\\RobertH:(F)",
+    "    MicrosoftAccount\\rob.hostetter@outlook.com:(F)",
+    "shared C:\\nn\\work\\.git <- D:\\nn\\jobs\\j1\\guest\\work\\.git (read-only, protected):",
+    "    DESKTOP-4F2K9\\robert:(DENY)(OI)(CI)(W,DC)",
+    "    … 3 more entries",
+  ].join("\r\n");
+  const leaks = /robert|hostetter|alice|kidaccount|DESKTOP-4F2K9|1111111111|3333333333|outlook/i;
+  for (const [what, out] of [["redact", redact(readback, n)], ["scrub", scrub(readback, n, 4000)], ["scrub 400", scrub(readback, n, 400)]] as const) {
+    assert.ok(!leaks.test(out), `${what}: ${out}`);
+    assert.notEqual(out, WITHHELD, what);
+  }
+  const out = redact(readback, n);
+  // The folders, guest paths, kinds and rights stay readable.
+  assert.match(out, /shared C:\\nn\\work <- <home>\\AppData\\Local\\Temp\\nn\\jobs\\j1\\guest\\work \(writable, work\):/);
+  assert.match(out, /shared C:\\nn\\work\\.git <- D:\\nn\\jobs\\j1\\guest\\work\\.git \(read-only, protected\):/);
+  for (const kept of ["    NT AUTHORITY\\SYSTEM:(OI)(CI)(F)", "    BUILTIN\\Administrators:(OI)(CI)(F)", "    <user>:(OI)(CI)(RX)", "    S-1-5-21-<domain>-<account>:(OI)(CI)(W)", "    <host>\\<user>:(DENY)(OI)(CI)(W,DC)"]) assert.ok(out.includes(kept), `${kept} in ${out}`);
+  // The same entries joined on one line (as a summary may flatten them) or written as icacls arguments: every account after an unknown domain still goes.
+  const inline = "x (writable, work): NT AUTHORITY\\SYSTEM:(OI)(CI)(F); CORP\\alice.smith:(OI)(CI)(RX); FAMILY\\kid account:(I)(F) | /deny | OTHERDOM\\carol:(OI)(CI)(W,DC) NT SERVICE\\TrustedInstaller:(F)";
+  const flat = redact(inline, n);
+  assert.ok(!/alice|kid|carol/i.test(flat), flat);
+  // (The line rule takes the head and first account of such a line as one account.)
+  assert.match(flat, /^x <user>:\(OI\)\(CI\)\(F\); CORP\\<user>:\(OI\)\(CI\)\(RX\); FAMILY\\<user>:\(I\)\(F\) \| \/deny \| OTHERDOM\\<user>:\(OI\)\(CI\)\(W,DC\) NT SERVICE\\TrustedInstaller:\(F\)$/);
+  // The real-sandbox detail's arguments, one indented line each: a .wsb configuration under the profile and an icacls grant to the share account.
+  const args = ["    start", "    --config", "    <Configuration><MappedFolders><MappedFolder><HostFolder>C:\\Users\\robert\\AppData\\Local\\Temp\\nn\\work</HostFolder><SandboxFolder>C:\\nn\\work</SandboxFolder></MappedFolder></MappedFolders></Configuration>", "    C:\\nn\\jobs\\j1\\work", "    /grant", "    CORP\\bob:(OI)(CI)M"].join("\n");
+  const a = scrub(args, n, 1800);
+  assert.ok(!/robert|bob/i.test(a), a);
+  assert.ok(a.includes("<HostFolder><home>\\AppData") && a.includes("    /grant") && a.includes("    C:\\nn\\jobs\\j1\\work") && a.includes("    <user>:(OI)(CI)M"), a);
+  // Redaction lengthens text (a short name becomes <host>\<user>); the cut comes after it and stays within the limit with its note.
+  const longer = Array.from({ length: 200 }, () => "    DESKTOP-4F2K9\\robert:(OI)(CI)M").join("\n");
+  for (const limit of [400, 1800, 2048]) { const c = scrub(longer, n, limit); assert.ok(c.length <= limit && !leaks.test(c) && c.endsWith("more characters]"), c); }
+});
+
+test("cutWhole: text not yet redacted is cut between words, so no half name, SID or address is left behind", () => {
+  assert.equal(cutWhole("short", 10), "short");
+  assert.equal(cutWhole("granted PC\\robert:(F) to", 15), "granted PC\\…");
+  assert.equal(cutWhole("sid S-1-5-21-1111111111-2222", 20), "sid …");
+  assert.equal(cutWhole("mail robert@example.com", 15), "mail …");
+  assert.ok(!/robe|S-1-5-21-1/.test(redact(cutWhole("granted PC\\robert:(F) sid S-1-5-21-1111111111-2222", 15), { users: ["robert"], hosts: ["PC"] })));
 });

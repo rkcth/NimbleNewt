@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { NormalizedRecipe } from "./recipe.js";
 import { GUEST_PATHS, aclSteps, describeWsbAccessDenied, isWsbAccessDenied, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
 import type { WindowsHost } from "./windows-host.js";
+import { cutWhole } from "./windows-redact.js";
 
 /** The job file the backend writes (in the supervisor's control directory) and the runner process reads. */
 export interface WindowsJob {
@@ -45,20 +46,32 @@ function icacls(host: WindowsHost): string {
 
 /**
  * After an access-denied `wsb start`: each folder the configuration maps (guest path, host path, read-only or writable) with its access list as icacls reads it back at that
- * moment (the job's grants are still in place; they are given back only when the job is released). One line per folder, each list cut to 600 characters, so the next run shows
- * whether the share account's grant was there, which deny entries applied, and who else is listed, without anyone having to reproduce the failure. Never throws.
+ * moment (the job's grants are still in place; they are given back only when the job is released), so the next run shows whether the share account's grant was there, which
+ * deny entries applied, and who else is listed, without anyone having to reproduce the failure. One line per folder (starting "shared "), then one indented line per access
+ * entry: a public record redacts an access list line by line (windows-redact.ts names the account of every indented `account:(rights)` line), and entries joined on one line
+ * would leave every account after the first in place when its domain is not one the redaction knows. The entries are cut whole at 600 characters per folder (never inside a
+ * name, which the redaction could then no longer recognise). Never throws; a failing or hanging icacls only ends that folder's read-back.
  */
 export async function sharedFolderReadback(host: WindowsHost, shares: readonly Share[]): Promise<string[]> {
   const lines: string[] = [];
   for (const s of shares) {
     const head = `shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why})`;
-    const r = await host.run(icacls(host), [s.host], { timeoutMs: 30_000 }).catch((error: unknown) => ({ code: null, stdout: "", stderr: (error as Error).message, timedOut: false }));
-    if (r.code !== 0) { lines.push(`${head}: access list not readable (icacls exit ${String(r.code)})`); continue; }
-    // icacls prints the path, then the entries one per line until the first blank line, then a summary in the system's language.
-    const block = r.stdout.replace(/\r/g, "").split("\n\n")[0] ?? "";
-    const first = block.toLowerCase().startsWith(s.host.toLowerCase()) ? block.slice(s.host.length) : block;
-    const entries = first.split("\n").map((l) => l.trim()).filter((l) => l !== "").join("; ");
-    lines.push(`${head}: ${entries.length > 600 ? `${entries.slice(0, 600)}…` : entries || "no entry read"}`);
+    try {
+      const r = await host.run(icacls(host), [s.host], { timeoutMs: 30_000 });
+      if (r.code !== 0) { lines.push(`${head}: access list not readable (icacls exit ${String(r.code)}${r.timedOut ? ", timed out" : ""})`); continue; }
+      // icacls prints the path, then the entries one per line until the first blank line, then a summary in the system's language.
+      const block = (r.stdout ?? "").replace(/\r/g, "").split("\n\n")[0] ?? "";
+      const first = block.toLowerCase().startsWith(s.host.toLowerCase()) ? block.slice(s.host.length) : block;
+      const entries = first.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+      const kept: string[] = [];
+      let size = 0;
+      for (const e of entries) { if (size + e.length > 600) break; kept.push(e); size += e.length; }
+      lines.push(`${head}:${entries.length === 0 ? " no entry read" : ""}`);
+      for (const e of kept) lines.push(`    ${e}`);
+      if (kept.length < entries.length) lines.push(`    … ${String(entries.length - kept.length)} more entries`);
+    } catch {
+      lines.push(`${head}: access list not readable (icacls could not be run)`);
+    }
   }
   return lines;
 }
@@ -207,9 +220,10 @@ async function execute(host: WindowsHost, job: WindowsJob, supervisorPaths: read
       const session = denied ? await host.session().catch(() => undefined) : undefined;
       const why = /0x8000401A/i.test(text) ? "Windows Sandbox could not start because no user session is available (0x8000401A, the server's configured identity)"
         : denied ? `Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(started.code)}): ${describeWsbAccessDenied(session)}`
-        : `wsb start failed (exit ${String(started.code)}): ${text.trim().slice(0, 300)}`;
-      // The reason stays on the first line (callers that summarise read only that); the folders and their access lists follow, one per line.
-      const readback = denied ? await sharedFolderReadback(host, shares) : [];
+        : `wsb start failed (exit ${String(started.code)}): ${cutWhole(text.trim(), 300)}`;
+      // The reason stays on the first line (callers that summarise read only that); the folders and their access entries follow, one per line. A read-back that fails
+      // anyway leaves the reason as it is.
+      const readback = denied ? await sharedFolderReadback(host, shares).catch(() => ["shared folders: access lists not read"]) : [];
       return { exitCode: EXIT_FAILED, stdout: "", stderr: `failed: ${why}\n${readback.map((l) => `${l}\n`).join("")}` };
     }
     // The session conditions are checked again between start and exec: the start takes long enough for a lock to be undone.

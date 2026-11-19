@@ -1015,10 +1015,15 @@ describe("Windows launcher: running a job", () => {
       assert.equal(first, `failed: Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(failure.code)}): ${describeWsbAccessDenied(d.sess)}`);
       // Then every mapped folder, with its access list read back while the job's grants are still in place (the share account's grant and the .git deny are visible).
       const shares = sharesFor(pd.job.recipe, `${pd.jobDir}\\guest`);
-      assert.equal(rest.length, shares.length, od.stderr);
-      for (const [i, s] of shares.entries()) assert.ok(rest[i]!.startsWith(`shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why}): NT AUTHORITY\\SYSTEM:(OI)(CI)(F); `), rest[i]);
-      assert.match(rest.find((l) => l.includes(", work)"))!, /robert:\(OI\)\(CI\)M$/i);
-      assert.match(rest.find((l) => l.includes(", protected)"))!, /robert:\(DENY\)\(OI\)\(CI\)\(W,DC\)$/i);
+      const heads = rest.filter((l) => l.startsWith("shared "));
+      assert.equal(heads.length, shares.length, od.stderr);
+      for (const [i, s] of shares.entries()) assert.equal(heads[i], `shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why}):`);
+      // Each entry on its own indented line (a public record redacts access lists line by line), the folder's head line first.
+      const entriesOf = (why: string): string[] => { const at = rest.findIndex((l) => l.includes(`, ${why}):`)); const next = rest.findIndex((l, i) => i > at && l.startsWith("shared ")); return rest.slice(at + 1, next === -1 ? undefined : next); };
+      assert.ok(rest.every((l) => l.startsWith("shared ") || l.startsWith("    ")), od.stderr);
+      assert.equal(entriesOf("work")[0], "    NT AUTHORITY\\SYSTEM:(OI)(CI)(F)");
+      assert.ok(entriesOf("work").some((l) => /^ {4}\S*robert:\(OI\)\(CI\)M$/i.test(l)), od.stderr);
+      assert.ok(entriesOf("protected").some((l) => /^ {4}\S*robert:\(DENY\)\(OI\)\(CI\)\(W,DC\)$/i.test(l)), od.stderr);
       assert.equal(d.runs.filter((r) => r.file.toLowerCase().endsWith("icacls.exe") && r.args.length === 1).length, shares.length, "one read-back per mapped folder");
       // The health probe's reason is the first line only, whole; the read-back stays out of it.
       const dh = new SimHost(); dh.startFailure = failure;
@@ -1026,6 +1031,31 @@ describe("Windows launcher: running a job", () => {
       assert.match(hr, /refused the start \(access denied.*check that Windows Sandbox may use the shared folders \(the research of 2026-10-16 saw this error from an output folder it could not use\)$/);
       assert.doesNotMatch(hr, /shared C:\\nn/);
       assert.match(od.stderr, /in the active console session: no; the console user: no\): start the runner interactively with run\.cmd as the console user \(not as a service\); otherwise check that Windows Sandbox may use the shared folders/);
+    }
+    {
+      // A read-back that fails, throws or times out leaves the start's reason in place and only marks that folder; a long list is cut between entries, never inside a name.
+      const f = new SimHost(); f.startFailure = { code: 2147942405, stdout: "", stderr: "", timedOut: false };
+      const pf = prepared(f);
+      const shares = sharesFor(pf.job.recipe, `${pf.jobDir}\\guest`);
+      const long = Array.from({ length: 40 }, (_, i) => `CORP\\someone.withalongname${String(i)}:(OI)(CI)(RX)`);
+      let n = 0;
+      const plain = f.run.bind(f);
+      f.run = async (file, args, options) => {
+        if (!(file.toLowerCase().endsWith("icacls.exe") && args.length === 1 && f.startFailure !== undefined && f.runs.some((r) => r.args[0] === "start"))) return plain(file, args, options);
+        n++;
+        if (n === 1) throw new Error("spawn EPERM");
+        if (n === 2) return { code: null, stdout: "", stderr: "", timedOut: true };
+        return ok(`${args[0]!} ${long.join("\r\n       ")}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`);
+      };
+      const of = await runWindowsJob(f, pf.job, [], pf.jobDir);
+      const lines = of.stderr.trimEnd().split("\n");
+      assert.match(lines[0]!, /^failed: Windows Sandbox refused the start \(access denied/);
+      assert.equal(lines[1], `shared ${shares[0]!.guest} <- ${shares[0]!.host} (${shares[0]!.readOnly ? "read-only" : "writable"}, ${shares[0]!.why}): access list not readable (icacls could not be run)`);
+      assert.match(lines[2]!, /: access list not readable \(icacls exit null, timed out\)$/);
+      const kept = lines.filter((l) => /^ {4}CORP\\someone/.test(l));
+      assert.ok(kept.length > 0 && kept.every((l) => long.includes(l.trim())), of.stderr);
+      assert.ok(kept.join("").replace(/ {4}/g, "").length <= 600 * (shares.length - 2));
+      assert.ok(lines.some((l) => /^ {4}… \d+ more entries$/.test(l)), of.stderr);
     }
     // In the console session as the console user, the shared folders are named instead; a session that cannot be read leaves both facts undetermined.
     assert.equal(describeWsbAccessDenied({ consoleUser: "PC\\robert", ...ME }), "this process (in the active console session: yes; the console user: yes) is where Windows Sandbox expects it; check that Windows Sandbox may use the shared folders (the research of 2026-10-16 saw this error from an output folder it could not use)");
