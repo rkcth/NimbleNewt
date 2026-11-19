@@ -40,7 +40,8 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import type { StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
-import { docReasonText, type DocObligationService } from "../submissions/doc-obligations.js";
+import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
+import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
@@ -278,7 +279,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
-  docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned" },
+  docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
@@ -725,6 +726,8 @@ export interface StatusDeps {
   readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list">;
+  /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
+  readonly docSubmissions?: Pick<SubmissionService, "documents">;
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -744,6 +747,8 @@ export interface StatusOptions extends RunnerOptions {
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
 /** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
 const REPLAY_LINE_ITEMS = 12;
+/** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
+const DOC_CANDIDATES = 3;
 /** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
 const STANDUP_ROSTER_LISTED = 10;
 /** The ID of the one coordinator record (`COORDINATOR_ID` in chat/coordinator.ts), cited when there is none or it cannot be read. */
@@ -2072,6 +2077,8 @@ export class StatusService {
     const lines: Line[] = [];
     const flagged = items.filter((i) => i.state !== "verified").length;
     lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
+    const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
     for (const d of items.slice(0, 30)) {
       const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
@@ -2080,10 +2087,33 @@ export class StatusService {
       const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
       const open: string[] = [];
       for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
-      lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
+      const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
+      lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
     }
     if (list.items.length > 30) lines.push(line(`${list.items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
     return { observedAt: at, lines };
+  }
+
+  /**
+   * What would verify a flagged document (card Q03b), for the owner's chat to pass to `doc.obligation.verify`: the newest document changes of the project made since the flag (at most 3, read with the
+   * submissions' own rule, so only those the viewer may read), and per task it describes the code to verify against (the newest flagged code, else the code it was last verified with). Never throws for
+   * a missing service: the line then says the document changes are not listed here.
+   */
+  async #docCandidates(by: Principal, projectId: string, d: Awaited<ReturnType<DocObligationService["list"]>>["items"][number], changesSince: Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>): Promise<string> {
+    const code = docVerifyCode(d);
+    const against = d.implementationRefs.map((t) => (code[t] === undefined ? `${t}: no tested code named yet (see the qa view)` : `${code[t]} (${t})`)).join(", ");
+    const version = d.releaseVersion === undefined ? "" : `, for version ${quoted(d.releaseVersion, 40)}`;
+    if (this.#deps.docSubmissions === undefined) return ` To verify: document changes are not listed here; code ${against}${version}.`;
+    let found: Awaited<ReturnType<SubmissionService["documents"]>>;
+    const key = d.flaggedAt ?? "";
+    let read = changesSince.get(key);
+    if (read === undefined) { const service = this.#deps.docSubmissions; read = service.documents(by, projectId, { limit: DOC_CANDIDATES + 1, ...(d.flaggedAt === undefined ? {} : { since: d.flaggedAt }) }); changesSince.set(key, read); }
+    try { found = await read; } catch (error) { if (error instanceof DomainError && error.code === "not_found") return ""; throw error; }
+    const since = d.flaggedAt === undefined ? "" : ` since it was flagged at ${d.flaggedAt}`;
+    const shownDocs = found.items.slice(0, DOC_CANDIDATES).map((x) => `${x.id} (task ${x.taskId}, by ${shown(x.submittedBy, 80)}, at ${x.createdAt}, ${String(x.artifactDigest).slice(0, 19)})`);
+    const docs = shownDocs.length === 0 ? `no document change of this project${since} that you may read: the agent keeping it submits the updated document (kind document) first`
+      : `${found.items.length === 1 ? "one document change" : `${found.items.length > DOC_CANDIDATES ? `more than ${DOC_CANDIDATES}` : found.items.length} document changes`} of this project${since}, newest first: ${shownDocs.join("; ")}`;
+    return ` To verify: ${docs}; code ${against}${version}.`;
   }
 
   /**

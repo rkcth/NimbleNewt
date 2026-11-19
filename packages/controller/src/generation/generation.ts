@@ -714,7 +714,11 @@ export class GenerationService {
    * anything through the bridge either: the intent is recorded in the same commit that checks the hold and the generation (`admitEffect`). `callId` is the ID the bridge presents (`checkCall` finds it); `kind` is "bridge" and `target` the bridge
    * operation. The same call asked again (its effect already admitted) answers with its effect. Dispatcher or owner only; the effect needs no `effect.perform` of the agent, since the bridge judges the operation itself.
    */
-  async admitCall(viewer: Principal, command: { commandId: string; taskId: string; callId: string; target: string }): Promise<{ effectId: string; runId: string; toolCallId: string; replayed: boolean }> {
+  /**
+   * `otherCall` (G04 follow-up review): the call was admitted before under another command ID, so the bridge asking now numbers it differently from the request that started it (a worker that resumed in a new process may number a
+   * repeated provider ID differently when Pi itself answered an earlier use of it without running the tool). The operation's own keys come from the bridge call ID, so the caller must not run a started effect again under this one.
+   */
+  async admitCall(viewer: Principal, command: { commandId: string; taskId: string; callId: string; target: string }): Promise<{ effectId: string; runId: string; toolCallId: string; replayed: boolean; otherCall?: true }> {
     onlyKnown(command, ["commandId", "taskId", "callId", "target"]);
     const taskId = checkTaskId(command.taskId);
     if (typeof command.callId !== "string" || !BRIDGE_CALL_ID.test(command.callId)) invalid("callId", "is not a tool call ID");
@@ -722,7 +726,10 @@ export class GenerationService {
     const gate = (await this.#runner.get("generation-gate", gateIdOf(taskId)))?.body as unknown as GateBody | undefined;
     const found = gate?.current === undefined ? undefined : await this.#locateCall(taskId, gate.current, command.callId);
     if (found === undefined) throw new GenerationRefused("incomplete", `call ${command.callId.slice(0, 60)} belongs to no recorded generation of task ${taskId}`);
-    if (found.call.state === "admitted" && found.call.effectId !== undefined) return { effectId: found.call.effectId, runId: found.row.id, toolCallId: found.call.id, replayed: true };
+    if (found.call.state === "admitted" && found.call.effectId !== undefined) {
+      const same = found.call.effectId === derivedId("eff", scopedCommandId(viewer.id, command.commandId));
+      return { effectId: found.call.effectId, runId: found.row.id, toolCallId: found.call.id, replayed: true, ...(same ? {} : { otherCall: true as const }) };
+    }
     const done = await this.#admitEffect(viewer, { commandId: command.commandId, runId: found.row.id, toolCallId: found.call.id, kind: "bridge", target: command.target }, true);
     return { effectId: done.effectId, runId: found.row.id, toolCallId: found.call.id, replayed: done.replayed };
   }

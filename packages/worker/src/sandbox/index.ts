@@ -8,12 +8,15 @@ export { SandboxLauncher, type Capacity, type LaunchRecord, type LaunchRequest, 
 export { listQuarantined, quarantine, readQuarantined, type QuarantineHooks, type QuarantineRecord } from "./quarantine.js";
 export { DEFAULT_HEADROOM, LIMIT_BOUNDS, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, type Headroom, type LimitCapabilities, type LimitEnforcement, type LimitName, type LimitedPlan, type ResourceLimits } from "./limits.js";
 export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, type AutologonOptIn, type WindowsSandboxOptions } from "./windows.js";
-export type { WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+export type { WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 export { windowsRealHost } from "./windows-real.js";
+export { evidenceControlDirs, releaseLeftovers, sandboxRunning, type LeftoverResult } from "./windows-cleanup.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";
 export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type JobRun } from "./job.js";
 export { linuxProcessTree, linuxStillRunning, splitRunTree, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";
 export { hostScriptRunner, hostScriptBase, ownNodeInstall, type HostInterpreter, type HostScriptFacts, type HostScriptRunner, type HostScriptRunnerOptions } from "./host-runner.js";
 export { CONTAINMENT_SCHEMA, MAX_REPORT_AGE_MS, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, REQUIRED_PLATFORMS, assessRelease, parseReport, produceReport, reportDigest, runContainmentSuite, runOutcome, type CaseResult, type ContainmentReport, type GateOptions, type GateResult, type PlatformName, type SuiteOptions, type TrustedHostException, type Verdict, type WindowsEvidence } from "./containment.js";
-export { unavailableBackend, windowsEvidenceBackend } from "./containment-windows.js";
+export { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, type IdentitySource } from "./containment-windows.js";
+export { MAX_WSB_SUMMARY_BYTES, WSB_CONTROLS, WSB_SUMMARY_SCHEMA, WSB_TESTS, attachWindowsEvidence, controlsFromEscapeOutput, parseWorkdirCheck, parseWsbSummary, redactReport, sessionFromEnvironment, windowsEvidenceFromSummary, type WindowsEvidenceContext, type WsbControl, type WsbSummary } from "./containment-windows-evidence.js";
+export { redact, redactAndCut, scrub, scrubDeep, WITHHELD, type RedactionNames } from "./windows-redact.js";
 export { CPU_BURST_SECONDS, ResourceWatch, judge, measureDirs, parseCpuTime, parsePsUsage, psSampler, type LimitExceeded, type UsageSample, type UsageSampler, type WatchLimits } from "./resource-watch.js";

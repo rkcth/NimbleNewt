@@ -113,3 +113,49 @@ jobs:
           path: ${{ runner.temp }}/g05/containment-*.json
           if-no-files-found: warn
           retention-days: 90
+
+  # Card Y02: the checkpoint's scenario set (scripts/y02-scenarios.json: escape and path tricks, resource limits, startup checks, the pre-commit gate, pause and stop, checked resume,
+  # remote reconnect with epochs, idle subscriptions) through `y02-checkpoint.mjs run`, on the hosted Linux and macOS runners, on the same commit as the rest of this workflow, with the
+  # sandbox required. It uploads y02-scenarios-<platform>.json, which `y02-checkpoint.mjs gate` reads beside the containment reports above, the QA records (qa.yml) and the CI run ids.
+  # Windows is not here: its scenario set needs the real Windows Sandbox, which a hosted runner cannot run; own-hardware.yml runs it on the owner's machine.
+  y02-scenarios:
+    name: Y02 scenarios / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19.0"
+      - name: Install bubblewrap and allow user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative.
+      - run: npm ci
+      # The runner sets NIMBLENEWT_REQUIRE_SANDBOX=1 for every scenario file itself, so a host that cannot confine fails instead of skipping.
+      - name: Run the Y02 scenario set
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/y02"
+          node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02" 2>&1 | tee "$RUNNER_TEMP/y02.log"
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          { echo "## Y02 scenarios, ${{ matrix.os }}"; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02.log" 2>/dev/null | tail -n 20 || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: y02-scenarios-${{ runner.os }}
+          path: ${{ runner.temp }}/y02/y02-scenarios-*.json
+          if-no-files-found: warn
+          retention-days: 90

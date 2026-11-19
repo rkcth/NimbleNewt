@@ -72,11 +72,19 @@ jobs:
   # Card A03b: the real Windows Sandbox tests (packages/worker/src/sandbox/windows-real.test.ts). Same guards as the probe; only the Windows runner, and only when it is
   # started by hand from main. The artifact holds only a summary (pass/fail, counts, OS build, mode names); detailed output stays on the machine. The tests start real sandboxes and change per-job ACLs under a temporary folder, and remove them afterwards. They never enable auto-login
   # (the auto-login and lock test runs only if the owner sets NIMBLENEWT_REAL_WINDOWS_AUTOLOGON on the runner's own environment, which this file does not do).
+  # On the same commit the job then produces, for cards G05, G06 and Y02: the filesystem facts of this machine (G06), the controller working-directory check, the G05 containment report with
+  # its `windows` block filled from the summary (REDACTED: account, machine and home names, SIDs and addresses replaced; the unredacted copy stays on the machine), the G06 long-path test,
+  # and the Y02 scenario report with the real Windows Sandbox. Every step after the build runs even if an earlier one failed (continue-on-error), so one run gathers everything; the last
+  # step lists each outcome in the job summary and fails the job if any of them failed. Nothing here is a sign-off: the evidence is judged by `containment-evidence.mjs gate` and
+  # `y02-checkpoint.mjs gate`, which still block on what no automation can show (logout and reboot under the service identity, the strict supervisor ACL, a packaged controller).
   sandbox-windows:
     name: Windows Sandbox (real)
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, nimblenewt-windows]
-    timeout-minutes: 60
+    # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
+    # The job's limit is above the sum of every step's own limit (365 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
+    # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
+    timeout-minutes: 420
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -103,7 +111,51 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - run: npm ci
       - run: npm run build
+      # G06: what this machine's filesystem is (type, cluster size, long-path and 8.3 settings, case sensitivity of the checkout). No volume label, serial number or user name is recorded.
+      - name: Record the filesystem (G06)
+        id: fs
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'g06-host'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          function Try-Get([scriptblock]$b) { try { & $b } catch { 'unknown' } }
+          $drive = (Split-Path -Qualifier $env:GITHUB_WORKSPACE).TrimEnd(':')
+          $tempDrive = (Split-Path -Qualifier $env:RUNNER_TEMP).TrimEnd(':')
+          $vol = Try-Get { Get-Volume -DriveLetter $drive }
+          $tempVol = Try-Get { Get-Volume -DriveLetter $tempDrive }
+          $os = Try-Get { Get-CimInstance Win32_OperatingSystem }
+          $longPaths = Try-Get { (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled).LongPathsEnabled }
+          # Only the words enabled or disabled are kept from fsutil's output (its full text can name the checkout's path, which holds the account name).
+          # fsutil 8dot3name prints the volume's and the registry's state and then the result ("Based on the above ... settings, 8dot3 name creation is disabled on C:"): when that
+          # result line is there it alone is read, since the first two can disagree with it.
+          function State([string]$t) { $r = ($t -split "`r?`n") | Where-Object { $_ -match 'Based on the above' } | Select-Object -First 1; if ($r) { $t = $r }; if ($t -match 'is disabled|: disabled') { 'disabled' } elseif ($t -match 'is enabled|: enabled') { 'enabled' } else { 'unknown' } }
+          $short = Try-Get { State (fsutil 8dot3name query "$($drive):" | Out-String) }
+          $case = Try-Get { State (fsutil file queryCaseSensitiveInfo "$env:GITHUB_WORKSPACE" | Out-String) }
+          $facts = [ordered]@{
+            schema = 'nimblenewt.g06-host/1'
+            commit = "$env:GITHUB_SHA"
+            os = [ordered]@{ caption = Try-Get { $os.Caption }; version = Try-Get { $os.Version }; build = Try-Get { $os.BuildNumber }; architecture = Try-Get { $os.OSArchitecture } }
+            node = (node -p 'process.version')
+            checkoutVolume = [ordered]@{ fileSystem = Try-Get { $vol.FileSystemType }; driveType = Try-Get { "$($vol.DriveType)" }; allocationUnitSize = Try-Get { $vol.AllocationUnitSize } }
+            tempVolume = [ordered]@{ fileSystem = Try-Get { $tempVol.FileSystemType }; driveType = Try-Get { "$($tempVol.DriveType)" }; sameAsCheckout = ($drive -eq $tempDrive) }
+            longPathsEnabled = $longPaths
+            shortNames8dot3 = $short
+            checkoutCaseSensitivity = $case
+          }
+          $json = $facts | ConvertTo-Json -Depth 4
+          [System.IO.File]::WriteAllText((Join-Path $out 'g06-host.json'), $json, (New-Object System.Text.UTF8Encoding $false))
+          # UTF-8 without a byte-order mark (Add-Content -Encoding utf8 in Windows PowerShell 5.1 writes one).
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## G06: this machine's filesystem`n``````json`n$json`n```````n", (New-Object System.Text.UTF8Encoding $false))
+          # The step's exit status is not left to whichever native program (fsutil) ran last.
+          exit 0
       - name: Run the real Windows Sandbox tests
+        id: wsb
+        continue-on-error: true
+        # Step timeouts: a stuck step ends with a failure and the later steps (the cleanup, the outcome, the uploads) still run inside the job's limit.
+        timeout-minutes: 90
         shell: bash
         env:
           NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"
@@ -118,11 +170,134 @@ jobs:
           set -o pipefail
           mkdir -p "$NIMBLENEWT_WSB_OUT" "$NIMBLENEWT_WSB_LOCAL" "$NIMBLENEWT_WSB_DETAIL"
           node --import ./scripts/offline-guard.mjs --test --test-timeout=1500000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$NIMBLENEWT_WSB_LOCAL/junit.xml" packages/worker/dist/sandbox/windows-real.test.js > "$NIMBLENEWT_WSB_LOCAL/output.txt" 2>&1 || { echo "the real Windows Sandbox tests failed; see the redacted detail artifact"; exit 1; }
+      # G05: the working directory the controller of an installed release gets when the scheduled task (the Windows service unit) starts the launcher. The release's entry is a stand-in, so the
+      # result says packaged: false (scripts/g05-workdir-check.mjs). Its output holds booleans and fixed texts only.
+      - name: Controller working-directory check (G05)
+        id: wd
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g05-local"
+          node scripts/g05-workdir-check.mjs --out "$RUNNER_TEMP/g05-local/workdir.json" 2>&1 | tee "$RUNNER_TEMP/g05-local/workdir.log" | node scripts/redact-log.mjs
+      # G05: the containment suite through the production launcher with the Windows Sandbox backend, with the `windows` block filled from the Sandbox tests' summary and the check above.
+      # Only the REDACTED report is uploaded (the repository is public); the unredacted one stays in the local folder on the machine. The supervisor-ACL rule is report-only for the same
+      # reason as the tests above (the checkout is writable by the runner's account), so the report says report-only and the gate keeps blocking on the strict check.
+      - name: G05 containment, redacted
+        id: g05
+        continue-on-error: true
+        timeout-minutes: 60
+        shell: bash
+        env:
+          NIMBLENEWT_WSB_SUPERVISOR_ACL: report-only
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g05-windows" "$RUNNER_TEMP/g05-local"
+          EXTRA=()
+          if [ -f "$RUNNER_TEMP/sandbox-windows/summary.json" ]; then EXTRA+=(--windows-summary "$RUNNER_TEMP/sandbox-windows/summary.json"); if [ -f "$RUNNER_TEMP/g05-local/workdir.json" ]; then EXTRA+=(--workdir-check "$RUNNER_TEMP/g05-local/workdir.json"); fi; else echo "no Sandbox summary: the report has no windows block"; fi
+          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/g05-windows" "${EXTRA[@]}" --redact --local "$RUNNER_TEMP/g05-local" 2>&1 | tee "$RUNNER_TEMP/g05-local/g05.log" | node scripts/redact-log.mjs
+      # G06: paths over 260 characters on this machine's real filesystem (packages/worker/src/workspace/long-paths.test.ts; the Windows-only test runs here).
+      - name: G06 long paths on this machine
+        id: g06
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g06-host"
+          node --import ./scripts/offline-guard.mjs --test --test-timeout=600000 packages/worker/dist/workspace/long-paths.test.js 2>&1 | tee "$RUNNER_TEMP/g06-local.log" | node scripts/redact-log.mjs
+          grep -E "^# (tests|pass|fail|cancelled|skipped|todo) " "$RUNNER_TEMP/g06-local.log" > "$RUNNER_TEMP/g06-host/long-paths-counts.txt" || true
+      # Y02: the scenario set with the real Windows Sandbox (scripts/y02-checkpoint.mjs run). Its report holds counts, the commit and the OS type only. The Sandbox tests it runs write their
+      # summary and findings to folders of their own here, so they do not replace the summary uploaded above.
+      - name: Y02 scenarios with the real Windows Sandbox
+        id: y02
+        continue-on-error: true
+        timeout-minutes: 150
+        shell: bash
+        env:
+          NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"
+          NIMBLENEWT_WSB_SUPERVISOR_ACL: report-only
+          NIMBLENEWT_WSB_OUT: ${{ runner.temp }}/y02-wsb-local/summary
+          NIMBLENEWT_WSB_LOCAL: ${{ runner.temp }}/y02-wsb-local/findings
+          NIMBLENEWT_WSB_DETAIL: ${{ runner.temp }}/y02-wsb-local/detail
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/y02-windows" "$RUNNER_TEMP/y02-wsb-local"
+          node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02-windows" 2>&1 | tee "$RUNNER_TEMP/y02-wsb-local/y02.log" | node scripts/redact-log.mjs
+      # What a step stopped by its timeout (or a cancelled run) left behind: each leftover job's sandbox is stopped and its access lists restored through the backend's own release
+      # (scripts/wsb-cleanup.mjs); a Windows Sandbox still running afterwards is reported, not stopped. Counts only in the log; the reasons stay in the local folder.
+      - name: Release leftovers of the Sandbox runs
+        id: cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g05-local"
+          node scripts/wsb-cleanup.mjs --local "$RUNNER_TEMP/g05-local" 2>&1 | tee "$RUNNER_TEMP/g05-local/cleanup.log" | node scripts/redact-log.mjs
+      - name: Job summary and outcome
+        if: always()
+        shell: bash
+        env:
+          FS: ${{ steps.fs.outcome }}
+          WSB: ${{ steps.wsb.outcome }}
+          WD: ${{ steps.wd.outcome }}
+          G05: ${{ steps.g05.outcome }}
+          G06: ${{ steps.g06.outcome }}
+          Y02: ${{ steps.y02.outcome }}
+          CLEAN: ${{ steps.cleanup.outcome }}
+        run: |
+          {
+            echo "## Windows evidence run (A03b, G05, G06, Y02)"
+            echo "Evidence for the gates, not a sign-off. Judge it with containment-evidence.mjs gate and y02-checkpoint.mjs gate."
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| G06 filesystem facts | $FS |"
+            echo "| A03b real Windows Sandbox tests | $WSB |"
+            echo "| G05 working-directory check (stand-in entry, packaged: false) | $WD |"
+            echo "| G05 containment, redacted | $G05 |"
+            echo "| G06 long paths | $G06 |"
+            echo "| Y02 scenarios | $Y02 |"
+            echo "| Leftovers of the Sandbox runs released | $CLEAN |"
+            echo
+            if [ -f "$RUNNER_TEMP/sandbox-windows/summary.json" ]; then echo "Sandbox tests: $(node -p "JSON.stringify(require(process.argv[1]).counts)" "$RUNNER_TEMP/sandbox-windows/summary.json" 2>/dev/null || echo unreadable)"; fi
+            # The copied lines go through the same redaction as the step logs (scripts/redact-log.mjs).
+            for f in "$RUNNER_TEMP/g05-local/workdir.log" "$RUNNER_TEMP/g05-local/g05.log" "$RUNNER_TEMP/g06-host/long-paths-counts.txt" "$RUNNER_TEMP/g05-local/cleanup.log"; do
+              if [ -f "$f" ]; then echo; echo '```'; tail -n 15 "$f" | node scripts/redact-log.mjs; echo '```'; fi
+            done
+            # `|| true`: bash steps run with -e and pipefail, and a log with no scenario line (the run stopped early) must not end this step before the outcome check below.
+            if [ -f "$RUNNER_TEMP/y02-wsb-local/y02.log" ]; then echo; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02-wsb-local/y02.log" | tail -n 12 | node scripts/redact-log.mjs || true; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          for o in "$FS" "$WSB" "$WD" "$G05" "$G06" "$Y02" "$CLEAN"; do if [ "$o" != "success" ]; then echo "at least one step did not succeed (see the table in the job summary)"; exit 1; fi; done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: sandbox-windows
           path: ${{ runner.temp }}/sandbox-windows
+          if-no-files-found: warn
+          retention-days: 90
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: containment-windows-own-hardware
+          path: ${{ runner.temp }}/g05-windows/containment-*.json
+          if-no-files-found: warn
+          retention-days: 90
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: g06-host-windows
+          path: ${{ runner.temp }}/g06-host
+          if-no-files-found: warn
+          retention-days: 90
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: y02-scenarios-windows-own-hardware
+          path: ${{ runner.temp }}/y02-windows/y02-scenarios-*.json
           if-no-files-found: warn
           retention-days: 90
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

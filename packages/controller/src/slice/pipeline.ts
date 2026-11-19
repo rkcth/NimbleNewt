@@ -27,6 +27,8 @@ export interface SliceWorld {
   readonly clock: () => string;
   /** The conversation the worker's model step talks to. Default: a durable stand-in that records each distinct request once. A real runtime can be supplied. */
   readonly conversation?: (world: SliceWorld) => ConversationSubmitter;
+  /** The effect claim lease in ms. Default 1 (a claim a dead process left is expired at once). A long lease leaves only the primary epoch to free a dead process's claim (G04 follow-up, second review). */
+  readonly effectLeaseMs?: number;
 }
 
 export const ANSWER = "20 packets of seed";
@@ -92,7 +94,7 @@ export async function startProcess(world: SliceWorld, holder: string): Promise<S
   const epoch = projects.epoch;
   const assign = AssignmentService.withEpoch(storage, epoch, projects, options);
   const inbox = InboxService.withEpoch(storage, epoch, assign, options);
-  const effects = EffectService.withEpoch(storage, epoch, assign, { ...options, holder, leaseMs: 1 });
+  const effects = EffectService.withEpoch(storage, epoch, assign, { ...options, holder, leaseMs: world.effectLeaseMs ?? 1 });
   const blockers = BlockerService.withEpoch(storage, epoch, options);
   const blobs = await FileBlobStore.open({ directory: join(world.directory, "blobs"), testHooks: { afterTempWrite: () => world.chaos.hit("blob: written to a temporary file"), afterRename: () => world.chaos.hit("blob: named") } });
   // The blob folder is part of the outside world: a dead process cannot write to it.

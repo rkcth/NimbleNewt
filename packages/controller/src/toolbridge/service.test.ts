@@ -6,6 +6,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";
 import type { Grant } from "../security/index.js";
+import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
@@ -504,6 +505,87 @@ for (const backend of backends) {
     assert.equal(bad(out["slow"]!).code, "generation_refused");
     assert.match(bad(out["slow"]!).message, /still streaming/);
     assert.equal(seen.some((r) => (r as { args: { title?: string } }).args.title === "G" || (r as { args: { title?: string } }).args.title === "S"), false);
+  });
+
+  suite("G04 follow-up review: a tool.invoke presented under another call ID than the one its effect was admitted under is never run again by the ledger (its dispatcher record is keyed by the call ID); under its own ID it may be", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const args = { tool: "a_aaaaaaaaaaaaaaaa.x", input: {} };
+    const verdict = { recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name: "nimblenewt__tool-invoke", args: JSON.stringify(args), state: "complete" };
+    const given: Record<string, boolean> = {};
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async () => ({ v: 1, op: "x", ok: true, result: {} }) as never },
+      isLocalHost: () => true,
+      generations: {
+        checkCall: async () => verdict as never,
+        // `own` is the call ID the effect was admitted under; any other number of the same recorded call is reported as `otherCall`.
+        admitCall: async (_p: unknown, cmd: { callId: string }) => ({ effectId: "eff-x", runId: "grun-x", toolCallId: "call_0", replayed: cmd.callId !== "own", ...(cmd.callId === "own" ? {} : { otherCall: true as const }) }),
+        // The ledger's view of the started effect: what matters is whether it may run the bridge again with the same key.
+        executeCall: async (_p: unknown, _cmd: unknown, bridge: { idempotent: boolean }) => { given[Object.keys(given).length === 0 ? "own" : "other"] = bridge.idempotent; return { effectId: "eff-x", status: "uncertain" } as never; },
+      },
+      callCheck: async () => ({ check: true, require: false }),
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      out["own"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "own", args });
+      out["other"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "d:0123456789abcdef0123456789abcdef01234567", args });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    assert.deepEqual(given, { own: true, other: false });
+    for (const k of ["own", "other"]) assert.match(bad(out[k]!).message, /may or may not have happened/);
+  });
+
+  suite("G04 follow-up, second review: a call presented again while its first request is still being run (the effect is busy) waits for it and is answered from the ledger, never told busy and never run; another refusal is not waited on", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const args = { tool: "a_aaaaaaaaaaaaaaaa.x", input: {} };
+    const verdict = { recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name: "nimblenewt__tool-invoke", args: JSON.stringify(args), state: "complete" };
+    const asked: Record<string, number> = {};
+    let executed = 0;
+    const make = (busyWait: { stepMs: number; totalMs: number }): ToolExecutionService => new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async () => { executed++; return ({ v: 1, op: "x", ok: true, result: {} }) as never; } },
+      isLocalHost: () => true,
+      generations: {
+        checkCall: async () => verdict as never,
+        admitCall: async (_p: unknown, cmd: { callId: string }) => ({ effectId: `eff-${cmd.callId}`, runId: "grun-x", toolCallId: cmd.callId, replayed: true }),
+        // `busy`: the first request still holds the effect for two asks, then it has settled and the ledger answers. `fenced`: a refusal that waiting cannot change.
+        executeCall: async (_p: unknown, cmd: { toolCallId: string }) => {
+          const n = (asked[cmd.toolCallId] = (asked[cmd.toolCallId] ?? 0) + 1);
+          if (cmd.toolCallId === "fenced") throw new DomainError("fenced", "the attempt has been replaced");
+          if (n <= 2 || cmd.toolCallId.startsWith("stuck")) throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
+          return { effectId: "eff-busy", status: "confirmed", evidence: { ok: true, result: { from: "ledger" } } } as never;
+        },
+      },
+      callCheck: async () => ({ check: true, require: false }),
+      busyWait,
+    });
+    // Short steps so the end of the wait is reached here (the default is 200 ms steps for at most 30 s).
+    const svc = make({ stepMs: 5, totalMs: 50 });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      out["busy"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "busy", args });
+      out["fenced"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "fenced", args });
+      out["stuck"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck", args });
+      // Settings that would make the wait unbounded (a limit that is not finite, a step under the 1 ms a timer waits at least, a step over the timer's limit) end it at once.
+      out["stuck-endless"] = await make({ stepMs: 5, totalMs: Infinity }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-endless", args });
+      out["stuck-tiny"] = await make({ stepMs: 0.001, totalMs: 50 }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-tiny", args });
+      out["stuck-huge"] = await make({ stepMs: Infinity, totalMs: 50 }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-huge", args });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    assert.deepEqual(good(out["busy"]!), { from: "ledger" });
+    assert.deepEqual([asked["busy"], asked["fenced"], executed], [3, 1, 0]);
+    assert.equal(bad(out["fenced"]!).code, "fenced");
+    // A first request that never ends within the wait: the call is refused as busy (11 asks: at 0, 5, ..., 50 ms), nothing was run, and the model is told not to make the call again under a new call ID.
+    assert.equal(asked["stuck"], 11);
+    assert.equal(bad(out["stuck"]!).code, "effect_busy");
+    assert.match(bad(out["stuck"]!).message, /Do not make the call again under a new call ID/);
+    assert.deepEqual([asked["stuck-endless"], asked["stuck-tiny"], asked["stuck-huge"]], [1, 1, 1]);
+    for (const k of ["stuck-endless", "stuck-tiny", "stuck-huge"]) assert.equal(bad(out[k]!).code, "effect_busy");
+    assert.equal(executed, 0);
   });
 
   suite("card L05d: a recorded call is bound to the operation it is presented for (name and arguments); the owner can turn that off", async (c) => {

@@ -71,6 +71,13 @@ test("a recorded call is bound to the operation it asks for by its name and argu
     const again = await x.bridge("call_w", "desk.write", WRITE);
     assert.ok(again.ok && (again.result as { replayed: boolean }).replayed === false, JSON.stringify(again));
     assert.deepEqual(again, first);
+    // G04 follow-up review: the admission says when the same recorded call is asked under another bridge call ID than the one it was admitted under (the bridge then never lets the ledger run it again).
+    const { createHash } = await import("node:crypto");
+    const own = `ba-${createHash("sha256").update(`${x.t.attemptId}\0call_w`).digest("hex").slice(0, 40)}`;
+    const owner = x.w.c.dispatch!.principal;
+    assert.equal((await x.gen.admitCall(owner, { commandId: own, taskId: x.t.taskId, callId: "call_w", target: "desk.write" })).otherCall, undefined);
+    const other = await x.gen.admitCall(owner, { commandId: "ba-other", taskId: x.t.taskId, callId: "call_w", target: "desk.write" });
+    assert.deepEqual([other.effectId, other.replayed, other.otherCall], [call.effectId, true, true]);
     // With the binding turned off by the owner's chat setting the same call goes through under other arguments (the owner's choice).
     const off = await x.api("generation.stream.change", { disable: ["bindCall"] });
     assert.ok(off.ok, JSON.stringify(off));

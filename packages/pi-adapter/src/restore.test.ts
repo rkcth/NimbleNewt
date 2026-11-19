@@ -11,6 +11,9 @@ import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/n
 import { requestId } from "@nimblenewt/contracts";
 import { PiAdapter } from "./index.js";
 import { EFFECT_OUTPUT, attemptsIn, effectTool } from "./testing/crash-fixture.js";
+import { BRIDGE_CRASH_REPLIES } from "./testing/bridge-crash-fixture.js";
+import { createBridge, seedFromConversation, type BridgeReply } from "./bridge.js";
+import { appendFileSync, readFileSync } from "node:fs";
 import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -82,6 +85,44 @@ test("a real process kill mid-tool is recovered in a fresh process; a replay-saf
   const result = await (await adapter.root().submit(input("kill-1", "do the effect"))).result();
   assert.equal(attemptsIn(log), 2);
   assert.deepEqual([result.status, result.toolCalls[0]?.status, result.toolCalls[0] && "output" in result.toolCalls[0] ? result.toolCalls[0].output : ""], ["completed", "ok", EFFECT_OUTPUT]);
+});
+
+test("G04 follow-up: after a real kill mid-tool the interrupted call is the conversation's open tool call (read before the hold is released), and once it ran again there is none", async () => {
+  const dir = scratch();
+  const log = join(dir, "attempts.log");
+  killChild(dir, log, "safe");
+  const adapter = await reopen(dir, [effectTool(log, { killFirstAttempt: false, replay: "safe" })], [fauxAssistantMessage("recovered")]);
+  assert.deepEqual(await adapter.root().openToolCalls(), ["effect-call"]);
+  assert.equal(attemptsIn(log), 1, "reading the open calls starts nothing");
+  await adapter.releaseHold();
+  const result = await (await adapter.root().submit(input("kill-1", "do the effect"))).result();
+  assert.equal(result.toolCalls[0]?.status, "ok");
+  assert.deepEqual(await adapter.root().openToolCalls(), []);
+});
+
+test("G04 follow-up, end to end: a bridge call a real SIGKILL interrupted is presented again by Pi after the restart under the very call ID the controller saw before the crash, and a later call is numbered on", async () => {
+  const dir = scratch();
+  const log = join(dir, "bridge.log");
+  const script = fileURLToPath(new URL("./testing/bridge-crash-child.js", import.meta.url));
+  const child = spawnSync(process.execPath, [script, dir, log], { encoding: "utf8", timeout: 30000 });
+  if (process.platform !== "win32") assert.equal(child.signal, "SIGKILL", child.stderr);
+  const seen = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { op: string; callId: string }).filter((r) => r.op === "desk.write").map((r) => r.callId);
+  const before = seen();
+  assert.equal(before.length, 2, "two writes reached the controller before the kill");
+  assert.equal(before[0], "call_0");
+  assert.match(before[1]!, /^d:[0-9a-f]{40}$/, "the provider's second call_0 is another call to the controller");
+  // The restarted worker, as worker/process.ts does it: the same bridge, seeded from the stored conversation before the hold is released.
+  const bridge = createBridge({ send: async (request): Promise<BridgeReply> => { appendFileSync(log, `${JSON.stringify({ op: request.op, callId: request.callId })}\n`); return { ok: true, result: { recordId: "dsk-x" } }; } });
+  const adapter = await reopen(dir, bridge.tools, BRIDGE_CRASH_REPLIES.slice(2));
+  await seedFromConversation(bridge, adapter.root());
+  await adapter.releaseHold();
+  const result = await (await adapter.root().submit(input("bridge-kill-1", "write two notes"))).result();
+  assert.equal(result.status, "completed");
+  const after = seen().slice(2);
+  assert.equal(after[0], before[1], "the interrupted write is presented again under the ID the controller already knows, so its ledger answers it");
+  assert.equal(after.length, 2);
+  assert.ok(![...before, after[0]].includes(after[1]!), "the model's next call_0 is a new call to the controller");
+  assert.deepEqual(await adapter.root().openToolCalls(), []);
 });
 
 test("the root conversation is the same after reopen and can be re-acquired by ID", async () => {

@@ -14,6 +14,7 @@ import { LIMITS as STORAGE_LIMITS, type AggregateRef, type Change, type Controll
 import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
+import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
 import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
@@ -1075,6 +1076,43 @@ export class ChatService {
       const open = ((wl.result["windows"] ?? []) as { windowId: string; status: string }[]).filter((w) => w.status === "scheduled" || w.status === "prepared" || w.status === "activated");
       if (open.length !== 1) return refuse(open.length === 0 ? "not_found" : "invalid_command", open.length === 0 ? "No maintenance window is open, so there is nothing to cancel." : `${open.length} maintenance windows are open (${open.slice(0, 5).map((w) => w.windowId).join(", ")}): which one should be cancelled?`);
       args["windowId"] = open[0]!.windowId;
+    }
+    // Verifying a document by chat (card Q03b): "verify the user guide". The document change, the code and a release's version are records, so what the owner did not name is filled from the records the
+    // `docs` view shows: the one document change of the project made since the flag (several: the owner is asked which; none: they are told the keeper must submit it first), per task the code the document
+    // was flagged for (else the code it was last verified with), and the release's version. A document change the interpreter names must be one the view lists or one the owner wrote out.
+    if (intent.op === "doc.obligation.verify" && typeof args["obligationId"] === "string") {
+      const item = await this.#get(token, "doc.obligation.get", { id: args["obligationId"] });
+      if (item === undefined) return refuse("not_found", "no such documentation obligation");
+      const title = `${quotedText(String(item["title"]), 80)} (${args["obligationId"]})`;
+      const flaggedAt = typeof item["flaggedAt"] === "string" ? item["flaggedAt"] : undefined;
+      const since = flaggedAt === undefined ? "" : ` made since it was flagged at ${flaggedAt}`;
+      if (item["state"] === "verified" && args["documentSubmissionId"] === undefined) return refuse("invalid_command", `${title} is already verified against tested code and nothing has flagged it since, so there is nothing to verify. To check it again, name the document change to verify it with.`);
+      const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "submission.documents", args: { projectId: String(item["projectId"]), limit: DOC_CHOICES + 1, ...(flaggedAt === undefined ? {} : { since: flaggedAt }) } });
+      if (!listed.ok) return refuse(listed.error.code, listed.error.message);
+      const docs = (listed.result["items"] ?? []) as { id: string; taskId: string; submittedBy: string; createdAt: string; artifactDigest?: string }[];
+      const shownDocs = docs.slice(0, DOC_CHOICES);
+      const label = (x: (typeof docs)[number]): string => `${x.id}: task ${x.taskId}, by ${x.submittedBy}, at ${x.createdAt}, ${String(x.artifactDigest).slice(0, 19)}`;
+      const given = args["documentSubmissionId"];
+      if (given === undefined) {
+        if (docs.length === 0) return refuse("not_found", `No document change of this project${since} can verify ${title}, so nothing was proposed. ${String(item["owner"])}, who keeps it, submits the updated document first (a document submission in the docs role); then ask again.`);
+        if (docs.length > 1) return { ok: false, kind: "ask", question: `${docs.length > DOC_CHOICES ? `More than ${DOC_CHOICES}` : String(docs.length)} document changes of this project${since} could verify ${title}${docs.length > DOC_CHOICES ? " (the newest are shown)" : ""}. Which one is the updated document?`, options: shownDocs.map(label), field: "documentSubmissionId", choices: shownDocs.map((x) => x.id) };
+        args["documentSubmissionId"] = docs[0]!.id;
+        fillNotes.push(`Document change ${label(docs[0]!)}: the one document change of this project${since}.`);
+      } else if (typeof given !== "string" || (!shownDocs.some((x) => x.id === given) && !wholeWord(words, given))) {
+        return refuse("unsupported_value", `${typeof given === "string" ? quotedText(given, 40) : "That"} is not a document change the docs view lists for ${title}${shownDocs.length === 0 ? ` (it lists none${since})` : ` (it lists ${shownDocs.map((x) => x.id).join(", ")})`}, and your message does not name it, so nothing was proposed.`);
+      }
+      if (args["evidence"] === undefined) {
+        const code = docVerifyCode(item as unknown as Parameters<typeof docVerifyCode>[0]);
+        const refs = (Array.isArray(item["implementationRefs"]) ? item["implementationRefs"] : []) as string[];
+        const missing = refs.filter((t) => code[t] === undefined);
+        if (missing.length > 0) return refuse("invalid_command", `Which tested code should ${title} be verified against for ${missing.join(", ")}? Nothing in its record names code for ${missing.length === 1 ? "that task" : "those tasks"}; the qa view of a task lists its code submissions and whether their QA gate passes.`);
+        args["evidence"] = refs.map((t) => code[t]!);
+        fillNotes.push(`Checked against ${refs.map((t) => `code ${code[t]!} of ${t}`).join(", ")}: ${(item["reasons"] as unknown[] | undefined)?.length ? "the newest code it was flagged for, or the code it was last verified with" : "the code it was last verified with"}, from its record; the QA gate of each must pass when this is applied.`);
+      }
+      if (args["applicableVersion"] === undefined && typeof item["releaseVersion"] === "string") {
+        args["applicableVersion"] = item["releaseVersion"];
+        fillNotes.push(`For version ${quotedText(item["releaseVersion"], 40)}: the release that flagged it.`);
+      }
     }
     if (intent.op === "release.activate") {
       delete args["digest"];
@@ -2887,6 +2925,8 @@ function shownOf(result: JsonObject): string[] | undefined {
   return Array.isArray(lines) && lines.length > 0 && lines.every((l) => typeof l === "string") ? (lines as string[]).slice(0, 12).map((l) => l.slice(0, 600)) : undefined;
 }
 
+/** How many document changes the chat offers when it asks which one verifies a document (card Q03b): the `docs` view lists as many. */
+const DOC_CHOICES = 3;
 const refuse = (code: string, message: string): { ok: false; kind: "refuse"; code: string; message: string } => ({ ok: false, kind: "refuse", code, message });
 
 /**

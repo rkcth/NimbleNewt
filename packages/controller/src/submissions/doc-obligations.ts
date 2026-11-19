@@ -542,3 +542,16 @@ export function docReasonText(r: DocReason): string {
     case "release_changed": return `release ${r.to} replaces version ${r.from}`;
   }
 }
+
+/**
+ * The code a flagged document would be verified against (card Q03b), per task it describes: the newest code it was flagged for (a behaviour change), else the code it was last verified with unless that
+ * code lost its QA gate since. A task with neither is left out: the code comes from the qa view. Only a suggestion for the views and the chat; `verify` checks the QA gate itself.
+ */
+export function docVerifyCode(b: Pick<DocObligationBody, "implementationRefs" | "reasons" | "verification">): Record<string, string> {
+  const out: Record<string, string> = {};
+  const lost = new Set<string>();
+  for (const r of b.reasons ?? []) { if (r.kind === "behavior_changed") out[r.taskId] = r.submissionId; else if (r.kind === "evidence_lost") lost.add(r.submissionId); }
+  for (const e of b.verification?.evidence ?? []) if (out[e.taskId] === undefined && !lost.has(e.submissionId)) out[e.taskId] = e.submissionId;
+  for (const t of Object.keys(out)) if (!b.implementationRefs.includes(t)) delete out[t];
+  return out;
+}
