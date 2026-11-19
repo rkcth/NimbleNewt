@@ -153,12 +153,14 @@ export class QaEvidenceService {
     return { taskId, task: task! };
   }
 
-  async #submission(id: unknown, field = "submissionId"): Promise<SubmissionBody & { tree: string }> {
+  /** The code submission and its task, read with the task's read right first: a submission of a task the caller may not read is not found, whatever its kind. */
+  async #submission(by: Principal, id: unknown, field = "submissionId"): Promise<{ sub: SubmissionBody & { tree: string }; taskId: string; task: TaskBody }> {
     if (typeof id !== "string" || !SBM.test(id)) bad(field, "is not a submission ID");
     const s = (await this.#runner.get("submission", id as string))?.body as unknown as SubmissionBody | undefined;
     if (s === undefined) return hidden("submission");
+    const { taskId, task } = await this.#readable(by, s!.taskId);
     if (s!.kind !== "code" || s!.tree === undefined || !TREE.test(s!.tree)) bad(field, "QA evidence is recorded on a code submission, which names the tree checked");
-    return s as SubmissionBody & { tree: string };
+    return { sub: s as SubmissionBody & { tree: string }, taskId, task };
   }
 
   async #contract(taskId: string): Promise<{ version: number; body: Record<string, unknown> | undefined; revision?: number }> {
@@ -246,8 +248,7 @@ export class QaEvidenceService {
     const result = await this.#runner.command("qa.evidence.record", { commandId: scoped, actor: by.id }, async () => ({
       payload: { submissionId: command.submissionId, criteriaRevision: command.criteriaRevision, decisions: [...decisions as string[]], environment, observedAt, checks: json(checks) as unknown as JsonObject },
       build: async () => {
-        const sub = await this.#submission(command.submissionId);
-        const { taskId, task } = await this.#readable(by, sub.taskId);
+        const { sub, taskId, task } = await this.#submission(by, command.submissionId);
         if (task.state === "cancelled") throw new DomainError("invalid_command", "the task is cancelled");
         if (ms > Date.parse(this.#runner.now()) + QA_LIMITS.skewMs) bad("observedAt", "is in the future");
         const self = by.id === sub.submittedBy;
@@ -408,8 +409,7 @@ export class QaEvidenceService {
    * no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> {
-    const sub = await this.#submission(submissionIdValue);
-    const { taskId } = await this.#readable(by, sub.taskId);
+    const { sub, taskId } = await this.#submission(by, submissionIdValue);
     const submissionId = submissionIdValue;
     const contract = await this.#contract(taskId);
     const reliance = await this.#reliance(taskId);

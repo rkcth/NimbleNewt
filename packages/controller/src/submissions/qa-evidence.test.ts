@@ -123,6 +123,35 @@ for (const backend of backends) {
       assert.equal(reQa.settled.length, 3, "independent evidence settles the rest");
       const l2 = await svc.list(owner, task2);
       assert.deepEqual([l2.rechecks.length, l2.rechecks.every((r) => r.state === "done")], [4, true], "done re-checks stay listed");
+
+      // A decision the task comes to rely on after the evidence was recorded: the evidence no longer holds, and the check invalidates it naming the decision.
+      assert.equal((await svc.gate(owner, sub2)).verdict, "passed");
+      const dec2 = derivedId("dec", cid("dec"));
+      await plant("decision", dec2, { ...decision("active"), topic: "ui" });
+      await plant("decision-reliance", relianceIdOf(task2), { taskId: task2, projectId: project, links: [{ id: "l2", subject: { kind: "task", id: task2 }, decisionId: dec2, version: 1, topic: "ui", state: "current", linkedBy: owner.id, linkedAt: "2026-11-18T09:45:00.000Z" }], revalidations: 0, followUps: [] });
+      const g3 = await svc.gate(owner, sub2);
+      assert.deepEqual([g3.verdict, g3.reasons, g3.stale.find((s) => s.id === reQa.id)?.reasons], ["failed", ["stale_evidence"], [{ kind: "decision_not_cited", decisionId: dec2 }]], "evidence that did not cite a decision the task now relies on does not count");
+      const k4 = await svc.check(owner, { commandId: cid("k"), taskId: task2 });
+      assert.deepEqual(k4.invalidated, [reSelf.id, reQa.id], "the self-check too");
+      assert.deepEqual((await svc.get(owner, derivedId("qrc", reQa.id)))?.["reasons"], [{ kind: "decision_not_cited", decisionId: dec2 }]);
+      await refuses("invalid_command", () => svc.record(qa, { commandId: cid("r"), ...ev2, criteriaRevision: 1, checks: [{ name: "smoke", result: "passed" }] }), /relies on decision/);
+      // Only decisions of the task or its project are cited.
+      const elsewhere = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "Q" })).id;
+      const decFar = derivedId("dec", cid("dec"));
+      await plant("decision", decFar, { ...decision("active"), projectId: elsewhere });
+      await refuses("invalid_command", () => svc.record(qa, { commandId: cid("r"), ...ev2, criteriaRevision: 1, decisions: [dec2, decFar], checks: [{ name: "smoke", result: "passed" }] }), /not a decision of this task or its project/);
+      const decOtherTask = derivedId("dec", cid("dec"));
+      await plant("decision", decOtherTask, { ...decision("active"), taskId: task });
+      await refuses("invalid_command", () => svc.record(qa, { commandId: cid("r"), ...ev2, criteriaRevision: 1, decisions: [dec2, decOtherTask], checks: [{ name: "smoke", result: "passed" }] }), /not a decision of this task or its project/);
+      assert.equal((await svc.record(qa, { commandId: cid("r"), ...ev2, criteriaRevision: 1, decisions: [dec2], checks: [{ name: "smoke", result: "passed" }] })).source, "independent");
+      assert.equal((await svc.gate(owner, sub2)).verdict, "passed");
+
+      // A submission of a task the caller may not read is not found, whatever its kind; a reader learns it is not a code submission.
+      const review = derivedId("sbm", cid("sub"));
+      await plant("submission", review, { taskId: task2, projectId: project, kind: "review", role: "reviewer", submittedBy: qa.id, submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: false, subject: sub2, verdict: "approve", evidence: [] });
+      await refuses("not_found", () => svc.gate(eve, review));
+      await refuses("not_found", () => svc.record(eve, { commandId: cid("r"), ...ev2, submissionId: review, checks: [{ name: "smoke", result: "passed" }] }));
+      await refuses("invalid_command", () => svc.gate(owner, review), /code submission/);
     } finally { await world.close(); }
   });
 }
