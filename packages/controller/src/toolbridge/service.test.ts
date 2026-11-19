@@ -506,6 +506,36 @@ for (const backend of backends) {
     assert.equal(seen.some((r) => (r as { args: { title?: string } }).args.title === "G" || (r as { args: { title?: string } }).args.title === "S"), false);
   });
 
+  suite("G04 follow-up review: a tool.invoke presented under another call ID than the one its effect was admitted under is never run again by the ledger (its dispatcher record is keyed by the call ID); under its own ID it may be", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const args = { tool: "a_aaaaaaaaaaaaaaaa.x", input: {} };
+    const verdict = { recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name: "nimblenewt__tool-invoke", args: JSON.stringify(args), state: "complete" };
+    const given: Record<string, boolean> = {};
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async () => ({ v: 1, op: "x", ok: true, result: {} }) as never },
+      isLocalHost: () => true,
+      generations: {
+        checkCall: async () => verdict as never,
+        // `own` is the call ID the effect was admitted under; any other number of the same recorded call is reported as `otherCall`.
+        admitCall: async (_p: unknown, cmd: { callId: string }) => ({ effectId: "eff-x", runId: "grun-x", toolCallId: "call_0", replayed: cmd.callId !== "own", ...(cmd.callId === "own" ? {} : { otherCall: true as const }) }),
+        // The ledger's view of the started effect: what matters is whether it may run the bridge again with the same key.
+        executeCall: async (_p: unknown, _cmd: unknown, bridge: { idempotent: boolean }) => { given[Object.keys(given).length === 0 ? "own" : "other"] = bridge.idempotent; return { effectId: "eff-x", status: "uncertain" } as never; },
+      },
+      callCheck: async () => ({ check: true, require: false }),
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      out["own"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "own", args });
+      out["other"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "d:0123456789abcdef0123456789abcdef01234567", args });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    assert.deepEqual(given, { own: true, other: false });
+    for (const k of ["own", "other"]) assert.match(bad(out[k]!).message, /may or may not have happened/);
+  });
+
   suite("card L05d: a recorded call is bound to the operation it is presented for (name and arguments); the owner can turn that off", async (c) => {
     const ann = await c.agentFor("ann");
     await c.task("t", ann);

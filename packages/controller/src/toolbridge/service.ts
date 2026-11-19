@@ -605,22 +605,19 @@ export class ToolExecutionService {
     let ran = false;
     let performed: BridgeResponse | undefined;
     const again = ASKED_AGAIN.has(request.op as BridgeOperation);
-    const bridge: EffectBridge = {
-      idempotent: again,
-      execute: async () => {
-        ran = true;
-        let response: BridgeResponse;
-        try { response = await perform(); } catch (error) {
-          // A typed refusal of the operation's own service (a bad argument, a right it does not hold, a stale revision) did not happen: a failed effect, answered as the refusal it is. Anything else leaves the outcome unknown.
-          if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code, message: error.message.slice(0, 500) });
-          thrown = error; throw error;
-        }
-        performed = response;
-        if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
-        if (again && NOT_FINAL.has(response.result["state"])) throw new NotFinal();
-        const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
-        return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
-      },
+    const execute = async (): Promise<JsonObject> => {
+      ran = true;
+      let response: BridgeResponse;
+      try { response = await perform(); } catch (error) {
+        // A typed refusal of the operation's own service (a bad argument, a right it does not hold, a stale revision) did not happen: a failed effect, answered as the refusal it is. Anything else leaves the outcome unknown.
+        if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code, message: error.message.slice(0, 500) });
+        thrown = error; throw error;
+      }
+      performed = response;
+      if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
+      if (again && NOT_FINAL.has(response.result["state"])) throw new NotFinal();
+      const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
+      return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
     };
     try {
       const commandId = `ba-${createHash("sha256").update(`${c.attemptId}\0${request.callId}`).digest("hex").slice(0, 40)}`;
@@ -632,6 +629,9 @@ export class ToolExecutionService {
           await new Promise((r) => setTimeout(r, STREAMING_WAIT_MS));
         }
       }
+      // Whether the ledger may run a started effect again with the same key. The key of `tool.invoke` and `job.start` is this request's call ID (their dispatcher record and job), so a call admitted before under another call ID
+      // (`otherCall`, G04 follow-up review) is never run again under this one: a started effect is only reconciled, and with nothing to ask it becomes uncertain.
+      const bridge: EffectBridge = { idempotent: again && admitted.otherCall !== true, execute };
       const outcome = await generations.executeCall!(this.#deps.principal, { runId: admitted.runId, toolCallId: admitted.toolCallId }, bridge);
       if (thrown !== undefined) throw thrown;
       const evidence = (outcome.evidence ?? {}) as JsonObject;
