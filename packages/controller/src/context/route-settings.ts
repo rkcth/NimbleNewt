@@ -1,4 +1,5 @@
 import { ANCHOR_DEFAULT_CHARS, ANCHOR_MAX_CHARS, ANCHOR_MIN_CHARS } from "./anchor.js";
+import { WORKER_FIXED_PART_BUDGET } from "./fixed-part.js";
 import { DomainError } from "../domain/errors.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -7,8 +8,12 @@ import type { ControllerStorage, JsonObject } from "../storage/types.js";
 
 const REF = { kind: "ctx-route-settings", id: "main" } as const;
 
-/** The system prompt a host assumes when a harness does not report one (the host's `UNKNOWN_SYSTEM_PROMPT_CHARS`), and an estimate of the bridge tools' schemas; together the floor of the fixed part of a route nobody has measured yet. */
-export const ROUTE_FLOOR_DEFAULTS = { systemPromptChars: 8000, toolSchemaChars: 6000 } as const;
+/**
+ * The floor of the fixed part of a route nobody has measured yet: the real worker's system text and bridge tool schemas, at their budget (`WORKER_FIXED_PART_BUDGET`, 3,000 + 16,000 characters, a little over the measured
+ * 2,537 + 15,024). Before card "Fixed-part sizing after T08" it was 8,000 + 6,000, which T08's toolbox tools outgrew: a route move admitted on it was refused at the first call. The integration test
+ * `fixed-part-budget.test.ts` fails when the real figures exceed it.
+ */
+export const ROUTE_FLOOR_DEFAULTS = WORKER_FIXED_PART_BUDGET;
 export const DEFAULT_ROUTE_FLOOR_CHARS = ROUTE_FLOOR_DEFAULTS.systemPromptChars + ROUTE_FLOOR_DEFAULTS.toolSchemaChars;
 export const ROUTE_FLOOR_BOUNDS = { min: 1, max: 4_000_000 } as const;
 
@@ -75,7 +80,7 @@ export class ContextRouteSettingsService {
     if (unknown.length > 0) invalid(unknown[0]!, "is not a field of this command");
     let setFloor: number | undefined, setAnchor: number | undefined, setRecall: number | undefined;
     if (command.set !== undefined) {
-      if (command.set === null || typeof command.set !== "object" || Array.isArray(command.set)) invalid("set", "must be an object such as { \"floorChars\": 14000 } or { \"anchorChars\": 2400 } or { \"recallCalls\": 20 }");
+      if (command.set === null || typeof command.set !== "object" || Array.isArray(command.set)) invalid("set", "must be an object such as { \"floorChars\": 20000 } or { \"anchorChars\": 2400 } or { \"recallCalls\": 20 }");
       for (const [k, v] of Object.entries(command.set as object)) {
         if (k === "floorChars") setFloor = figure(v, "set");
         else if (k === "anchorChars") setAnchor = anchorFigure(v, "set");
