@@ -2,12 +2,16 @@
 //   node scripts/containment-evidence.mjs run  --out DIR [--allow-unavailable]   run the suite here, write DIR/containment-<platform>.json
 //        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner that cannot run
 //        Windows Sandbox). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
+//        --windows-summary FILE [--workdir-check FILE]: Windows only. Fill the report's `windows` block from the real Windows Sandbox tests' summary.json (windows-real.test.ts) and the
+//        working-directory check (scripts/g05-workdir-check.mjs); what they cannot show stays false (packages/worker/src/sandbox/containment-windows-evidence.ts). Without it there is no block.
+//        --redact [--local DIR]: the written report has account, machine and home names, SIDs and addresses replaced (windows-redact.ts), for a public artifact; with --local the
+//        unredacted report is also written to DIR (keep that folder on the machine). A redacted report that no longer reads as a report is not written.
 //   node scripts/containment-evidence.mjs gate --dir DIR --commit SHA   read every containment-*.json in DIR and list what blocks a release
 // `run` builds the tree first (tsc --build; the compiled code is not tracked by git, so a stale build would otherwise be reported under HEAD's commit) and needs a committed checkout; the report names the commit and says if the tree was dirty.
 // `gate` exits 1 while anything blocks, so a release step can call it. Reports are read as data: size-bounded and shape-checked.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,15 +26,52 @@ const flag = (name) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? re
 
 if (command === "run") {
   const out = flag("out");
-  if (out === undefined) { console.error("usage: run --out DIR [--allow-unavailable]"); process.exit(2); }
-  const report = await worker.produceReport(root);
+  const usage = "usage: run --out DIR [--allow-unavailable] [--windows-summary FILE [--workdir-check FILE]] [--redact [--local DIR]]";
+  const valued = ["--out", "--windows-summary", "--workdir-check", "--local"];
+  for (let i = 0; i < rest.length; i++) {
+    if (valued.includes(rest[i]) && rest[i + 1] !== undefined && !rest[i + 1].startsWith("--")) { i++; continue; }
+    if (rest[i] === "--allow-unavailable" || rest[i] === "--redact") continue;
+    console.error(usage); process.exit(2);
+  }
+  if (out === undefined || (flag("workdir-check") !== undefined && flag("windows-summary") === undefined) || (flag("local") !== undefined && !rest.includes("--redact"))) { console.error(usage); process.exit(2); }
+  // Windows: the owner and share account default to the console user, as in windows-real.test.ts; which default was taken is printed (source words only, never the name).
+  const consoleUser = await worker.windowsConsoleUser();
+  if (process.platform === "win32") { const id = worker.evidenceIdentity(process.env, consoleUser); console.log(`  Windows Sandbox owner: ${id.ownerSource}; share account: ${id.shareSource} (configured = NIMBLENEWT_WSB_OWNER / NIMBLENEWT_WSB_SHARE_IDENTITY, console = the account signed in at the console, runner = this process's account)`); }
+  let report = await worker.produceReport(root);
+  const summaryFile = flag("windows-summary");
+  if (summaryFile !== undefined) {
+    const read = (f) => { try { return readFileSync(resolve(f), "utf8"); } catch { return undefined; } };
+    const summaryRaw = read(summaryFile);
+    const workdirRaw = flag("workdir-check") === undefined ? undefined : read(flag("workdir-check"));
+    if (summaryRaw === undefined) console.log("  the Windows Sandbox summary could not be read: no windows block (the gate blocks on it)");
+    else if (flag("workdir-check") !== undefined && workdirRaw === undefined) console.log("  the working-directory check output could not be read: no windows block (the gate blocks on it)");
+    else {
+      const made = worker.attachWindowsEvidence(report, { summaryRaw, ...(workdirRaw === undefined ? {} : { workdirRaw }), session: worker.sessionFromEnvironment(process.env) });
+      if ("error" in made) console.log(`  no windows block: ${made.error}`);
+      else { report = made.report; for (const n of made.notProven) console.log(`  windows block: not proven: ${n}`); }
+    }
+  }
   mkdirSync(resolve(out), { recursive: true });
   const file = join(resolve(out), `containment-${report.platform}.json`);
-  writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
-  const bad = report.cases.filter((c) => c.verdict !== "pass");
-  console.log(`${report.platform} (${report.backend}${report.backendVersion ? ` ${report.backendVersion}` : ""}) commit ${report.implementationCommit.slice(0, 12)}${report.dirty ? " DIRTY" : ""}: ${report.cases.length - bad.length}/${report.cases.length} cases hold -> ${file}`);
+  const redact = rest.includes("--redact");
+  // With --redact, what is printed is the redacted report too: a job log or summary is as public as the artifact.
+  // On Windows the account at the console (and a configured owner or share account) is often not the account this runs as, so it is not among the names redaction knows by
+  // itself: look it up and hide it too. A failed lookup leaves the general rules (any `<machine>\account`, home folders, SIDs).
+  const names = { users: [process.env["NIMBLENEWT_WSB_OWNER"], process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"]].filter((n) => typeof n === "string" && n.length >= 2) };
+  if (redact && consoleUser !== undefined) names.users.push(consoleUser);
+  const shown = redact ? worker.redactReport(report, names) : report;
+  if (redact) {
+    const local = flag("local");
+    if (local !== undefined) { mkdirSync(resolve(local), { recursive: true }); writeFileSync(join(resolve(local), `containment-${report.platform}.json`), `${JSON.stringify(report, null, 2)}\n`); }
+    const redacted = `${JSON.stringify(shown, null, 2)}\n`;
+    const check = worker.parseReport(redacted);
+    if ("error" in check) { console.error(`the redacted report does not read as a report (${check.error}); nothing is written`); process.exit(1); }
+    writeFileSync(file, redacted);
+  } else writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
+  const bad = shown.cases.filter((c) => c.verdict !== "pass");
+  console.log(`${shown.platform} (${shown.backend}${shown.backendVersion ? ` ${shown.backendVersion}` : ""}) commit ${shown.implementationCommit.slice(0, 12)}${shown.dirty ? " DIRTY" : ""}: ${shown.cases.length - bad.length}/${shown.cases.length} cases hold -> ${redact ? basename(file) : file}`);
   const outcome = worker.runOutcome(report, { allowUnavailable: rest.includes("--allow-unavailable") });
-  if (outcome.skipped) console.log(`  SKIPPED: no sandbox capacity on this host (${report.capacityReason ?? "unavailable"}); every case is not_run and the release gate blocks on this platform`);
+  if (outcome.skipped) console.log(`  SKIPPED: no sandbox capacity on this host (${shown.capacityReason ?? "unavailable"}); every case is not_run and the release gate blocks on this platform`);
   else for (const c of bad) console.log(`  ${c.verdict} ${c.id}: ${c.detail}`);
   const exception = report.trustedHost !== undefined && report.trustedHost.refusedWithoutAuthority && report.trustedHost.reachesHostFiles;
   if (!exception && !outcome.skipped) console.log("  the trusted-host exception could not be shown");

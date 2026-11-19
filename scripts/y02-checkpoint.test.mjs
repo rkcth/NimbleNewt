@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CI_SCHEMA, MAX_SCENARIO_ATTEMPTS, PLATFORMS, notApplicableHere, SCENARIO_SCHEMA, SIGNOFF_SCHEMA, assessCheckpoint, evidenceDigest, evidenceNames, expectedScenarios, filesFor, isoMillis, judgeTotals, main,
-  parseCiRuns, parseQaEvidence, parseScenarioMap, parseScenarioReport, parseSignoff, parseStrictJson, parseTapSummary, readBounded, readEvidenceDir, renderVerdict, runScenarios, show, staleness, writeFileAtomic,
+  OWNER_LOAD_FILE, ownerLoadLine, parseCiRuns, parseQaEvidence, parseScenarioMap, parseScenarioReport, parseSignoff, parseStrictJson, parseTapSummary, readBounded, readEvidenceDir, renderVerdict, runScenarios, show, staleness, writeFileAtomic,
 } from "./y02-checkpoint.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -600,4 +600,38 @@ test("the command line: usage errors exit 2, an incomplete directory exits 1 and
     assert.equal((() => { try { return readFileSync(join(empty, name), "utf8"); } catch { return undefined; } })(), before, name);
   }
   rmSync(empty, { recursive: true, force: true });
+});
+
+test("owner-load: owner decisions per day and stalls from an exported audit log; usage and bad input are refused", async () => {
+  const io = () => { const out = []; const err = []; return { out: (s) => out.push(s), err: (s) => err.push(s), lines: out, errors: err }; };
+  const d = dir();
+  try {
+    const lines = [
+      { seq: 1, operationId: "o1", actor: "owner:rob", at: "2026-11-10T08:00:00.000Z", type: "task.create", subject: { kind: "task", id: "t1" }, detail: { projectId: "p1" } },
+      { seq: 2, operationId: "o2", actor: "owner:rob", at: "2026-11-11T08:00:00.000Z", type: "task.create", subject: { kind: "task", id: "t2" }, detail: { projectId: "p2" } },
+      { seq: 3, operationId: "o3", actor: "controller", at: "2026-11-11T09:00:00.000Z", type: "stall.concern", subject: { kind: "stall-concern", id: "c1" }, detail: { taskId: "t1", state: "suspected", kind: "silent" } },
+      { seq: 4, operationId: "o4", actor: "controller", at: "2026-11-11T09:10:00.000Z", type: "stall.concern", subject: { kind: "stall-concern", id: "c2" }, detail: { taskId: "t2", state: "suspected", kind: "loop" } },
+    ];
+    writeFileSync(join(d, "audit.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    const out = join(d, "load.json");
+    const i = io();
+    assert.equal(await main(["owner-load", "--audit", join(d, "audit.jsonl"), "--out", out, "--now", NOW.toISOString(), "--days", "2"], i), 0, i.errors.join());
+    const r = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual(r.perDay, [{ day: "2026-11-10", ownerDecisions: 1 }, { day: "2026-11-11", ownerDecisions: 1 }]);
+    assert.deepEqual([r.stallCount, r.stallsReachingUnrelatedWork, r.stalls[0].reached[0].sameProject], [2, 1, false]);
+    assert.equal(i.lines.at(-1), ownerLoadLine(r));
+    assert.match(i.lines.at(-1), /owner decisions 2026-11-10\.\.2026-11-11: 2 in 2 days .* stalls 2, of which 1 reached unrelated work/);
+    for (const argv of [["owner-load"], ["owner-load", "--audit", "x"], ["owner-load", "--out", "x"], ["owner-load", "--audit", "x", "--out", out, "--days", "0"], ["owner-load", "--audit", "x", "--out", out, "--now", "soon"], ["owner-load", "--audit", "x", "--out", join(d, "y02-signoff.json")], ["run", "--out", d, "--audit"]]) {
+      const u = io();
+      assert.equal(await main(argv, u), 2, JSON.stringify(argv));
+    }
+    const missing = io();
+    assert.equal(await main(["owner-load", "--audit", join(d, "none.jsonl"), "--out", out], missing), 1);
+    assert.match(missing.errors.join(), /the audit log is missing/);
+    writeFileSync(join(d, "bad.jsonl"), "{\"seq\":1}\n");
+    const bad = io();
+    assert.equal(await main(["owner-load", "--audit", join(d, "bad.jsonl"), "--out", out], bad), 1);
+    assert.match(bad.errors.join(), /line 1: an audit record needs/);
+    assert.equal(OWNER_LOAD_FILE, "y02-owner-load.json");
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

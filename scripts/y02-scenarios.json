@@ -42,7 +42,8 @@
           "symbolic links need privileges on Windows",
           "POSIX permissions",
           "POSIX paths",
-          "this machine has a Windows Sandbox client; the no-client case does not apply (windows-real.test.ts covers a machine with one)"
+          "this machine has a Windows Sandbox client; the no-client case does not apply (windows-real.test.ts covers a machine with one)",
+          "set NIMBLENEWT_REAL_WINDOWS_AUTOLOGON=1 on a machine the owner set up for auto-login and lock"
         ]
       },
       "minTests": 45
