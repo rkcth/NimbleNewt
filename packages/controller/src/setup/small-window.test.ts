@@ -192,6 +192,8 @@ test("setup readiness names a stored route whose window cannot start a task, wit
       r = await route();
       assert.equal(r.state, "missing", r.detail);
       assert.ok(r.detail.includes("no task can start on any of them") && r.detail.includes(`big/m (65,536 tokens with a reply limit of 40,000; needs ${grouped(startableWindow(WORKER_FIXED_PART_CHARS, 40_000))})`), r.detail);
+      // Each route's window needed is worked out with its own reply limit (the other route keeps the usual room).
+      assert.ok(r.detail.includes(`tiny/m (16,384 tokens; needs ${grouped(MIN_STARTABLE_WINDOW)})`), r.detail);
       // The detail stays within what the setup view shows of it.
       assert.ok(r.detail.length <= 240, String(r.detail.length));
       assert.ok((await call("routing.budget.set", { route: "big/m", maxTokens: 8_000 }, "rd3")).ok);
@@ -209,4 +211,34 @@ test("the interpreter is told where the small-window warning appears, that a lar
   assert.ok(system.includes("accepted with a warning, shown in the proposal before the owner agrees and in the setup list"), "the warning before yes");
   assert.ok(system.includes("a large reply limit set with routing.budget.set raises the window a task needs, and its proposal says so"), "the reply limit");
   assert.ok(system.includes(`${DEFAULT_CONTEXT_TOKENS} is only the launcher's placeholder`), "the placeholder named is the launcher's own window");
+});
+
+// First review of the follow-up: route names may be long (a provider name of 64 characters, a model name of 128) and many routes may be too small; the detail still fits what the setup view shows,
+// names at most three routes (fewer when they do not fit), cuts a long name, and counts the rest.
+test("setup readiness keeps the too-small routes within what the setup view shows: long names cut, at most three named, the rest counted", async () => {
+  const long = "m".repeat(120);
+  for (const scenario of ["short", "long"] as const) {
+    const w = await openWorld(backends[0]!, {}, undefined, routed);
+    try {
+      const call = async (op: string, args: Record<string, unknown>, commandId?: string): Promise<R & { result?: Record<string, unknown> }> => (await w.api.handle(w.ownerToken, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as never;
+      const route = async (): Promise<{ state: string; detail: string }> => { const r = await call("setup.readiness", {}); assert.ok(r.ok, JSON.stringify(r)); return ((r.result!["item"] as { items: { id: string; state: string; detail: string }[] }).items.find((i) => i.id === "model-route"))!; };
+      if (scenario === "short") {
+        // Short names: three named, the other two counted.
+        assert.ok((await call("routing.provider.add", { providers: [1, 2, 3, 4, 5].map((n) => provider(`p${n}`, 8100 + n, 16_384)) }, "ln1")).ok);
+        const r = await route();
+        assert.equal(r.state, "missing", r.detail);
+        assert.ok(r.detail.includes("no task can start on any of them: p1/m (16,384 tokens; needs") && r.detail.includes("p3/m") && !r.detail.includes("p4/m") && r.detail.endsWith(" and 2 more"), r.detail);
+        assert.ok(r.detail.length <= 240, `${r.detail.length}: ${r.detail}`);
+      } else {
+        // Long names with reply limits: fewer named, each cut, still within 240 characters, and the count says how many are left out.
+        const name = (n: number) => `${"q".repeat(60)}${n}`;
+        assert.ok((await call("routing.provider.add", { providers: [1, 2, 3, 4, 5].map((n) => ({ ...provider(name(n), 8200 + n, 65_536), models: [long] })) }, "ln2")).ok);
+        for (const n of [1, 2, 3, 4, 5]) assert.ok((await call("routing.budget.set", { route: `${name(n)}/${long}`, maxTokens: 40_000 }, `ln-b${n}`)).ok);
+        const r = await route();
+        assert.equal(r.state, "missing", r.detail);
+        assert.ok(r.detail.length <= 240, `${r.detail.length}: ${r.detail}`);
+        assert.ok(r.detail.includes(`no task can start on any of them: ${name(1).slice(0, 57)}... (65,536 tokens with a reply limit of 40,000; needs ${grouped(startableWindow(WORKER_FIXED_PART_CHARS, 40_000))})`) && / and [234] more$/.test(r.detail), r.detail);
+      }
+    } finally { await w.close(); }
+  }
 });

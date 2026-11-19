@@ -1,4 +1,4 @@
-import { DEFAULT_REPLY_TOKENS, FIXED_PART_WORDS, grouped, windowNeeded } from "../context/fixed-part.js";
+import { DEFAULT_REPLY_TOKENS, FIXED_PART_WORDS, WORKER_FIXED_PART_CHARS, grouped, windowCanStartTask, windowNeeded } from "../context/fixed-part.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -46,6 +46,9 @@ export interface Readiness {
 }
 
 const PAGE = 200;
+/** What the setup view (the status kind setup) shows of an item's detail, and of one route's name in it. */
+const DETAIL_SHOWN = 240;
+const ROUTE_SHOWN = 60;
 const MAX_PAGES = 5;
 
 /**
@@ -92,14 +95,25 @@ export class SetupReadinessService {
     const routes = Object.keys(table?.routes ?? {}).filter((r) => enabled.includes(r.split("/")[0]!));
     // A stored route whose window cannot start a task (card "Fixed-part sizing after T08", follow-up), by the same rule as the first-call admission with the route's own reply limit: named with the window it needs.
     // With no route that can start one, the step is not done: the team cannot run a task.
+    // The window needed is worked out once per reply limit (routes usually share one; a large limit takes many steps to work out).
+    const needs = new Map<number, number | undefined>();
     const tooSmall = routes.flatMap((r) => {
       const e = table?.routes?.[r];
       const window = e?.contextTokens, reply = typeof e?.maxTokens === "number" && Number.isSafeInteger(e.maxTokens) && e.maxTokens >= 0 ? e.maxTokens : DEFAULT_REPLY_TOKENS;
-      const need = typeof window === "number" ? windowNeeded(window, reply) : undefined;
-      return need === undefined ? [] : [`${r} (${grouped(window as number)} tokens${reply === DEFAULT_REPLY_TOKENS ? "" : ` with a reply limit of ${grouped(reply)}`}; needs ${grouped(need)})`];
+      if (typeof window !== "number" || !Number.isSafeInteger(window) || windowCanStartTask(window, WORKER_FIXED_PART_CHARS, reply)) return [];
+      if (!needs.has(reply)) needs.set(reply, windowNeeded(window, reply));
+      const need = needs.get(reply);
+      if (need === undefined) return [];
+      const name = r.length > ROUTE_SHOWN ? `${r.slice(0, ROUTE_SHOWN - 3)}...` : r;
+      return [`${name} (${grouped(window)} tokens${reply === DEFAULT_REPLY_TOKENS ? "" : ` with a reply limit of ${grouped(reply)}`}; needs ${grouped(need)})`];
     });
-    const small = tooSmall.length === 0 ? "" : `; no task can start on ${tooSmall.length === routes.length ? (routes.length === 1 ? "it" : "any of them") : `${tooSmall.length} of them`}: ${tooSmall.slice(0, 3).join(", ")}${tooSmall.length > 3 ? ` and ${tooSmall.length - 3} more` : ""}`;
-    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > tooSmall.length ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)${small}` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher. A route named as too small: add its provider again with the model's real window, or lower the route's reply limit with routing.budget.set" });
+    const found = `${enabled.length} enabled provider(s), ${routes.length} usable route(s)`;
+    // Up to three routes are named, as many as fit in what the setup view shows of a detail (`DETAIL_SHOWN`); the rest are counted.
+    const smallWords = (named: number): string => `; no task can start on ${tooSmall.length === routes.length ? (routes.length === 1 ? "it" : "any of them") : `${tooSmall.length} of them`}: ${tooSmall.slice(0, named).join(", ")}${tooSmall.length > named ? ` and ${tooSmall.length - named} more` : ""}`;
+    let named = Math.min(3, tooSmall.length);
+    while (named > 1 && found.length + smallWords(named).length > DETAIL_SHOWN) named--;
+    const small = tooSmall.length === 0 ? "" : smallWords(named);
+    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > tooSmall.length ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${found}${small}` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher. A route named as too small: add its provider again with the model's real window, or lower the route's reply limit with routing.budget.set" });
 
     let hosts = 0; let announced = 0;
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });
