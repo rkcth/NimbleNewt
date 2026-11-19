@@ -145,7 +145,7 @@ export interface StateApiDeps {
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
-  readonly submissions?: Pick<SubmissionService, "record" | "get" | "list">;
+  readonly submissions?: Pick<SubmissionService, "record" | "get" | "list" | "documents">;
   /** Versioned deliverables and their acceptance (card Q01). */
   readonly taskArtifacts?: Pick<TaskArtifactPublisher, "publish">;
   readonly serviceOps?: Pick<ServiceOperations, "operate" | "observe">;

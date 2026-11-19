@@ -544,7 +544,7 @@ for (const backend of backends) {
     const verdict = { recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name: "nimblenewt__tool-invoke", args: JSON.stringify(args), state: "complete" };
     const asked: Record<string, number> = {};
     let executed = 0;
-    const svc = new ToolExecutionService({
+    const make = (busyWait: { stepMs: number; totalMs: number }): ToolExecutionService => new ToolExecutionService({
       principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
       state: { handle: async () => { executed++; return ({ v: 1, op: "x", ok: true, result: {} }) as never; } },
       isLocalHost: () => true,
@@ -555,19 +555,24 @@ for (const backend of backends) {
         executeCall: async (_p: unknown, cmd: { toolCallId: string }) => {
           const n = (asked[cmd.toolCallId] = (asked[cmd.toolCallId] ?? 0) + 1);
           if (cmd.toolCallId === "fenced") throw new DomainError("fenced", "the attempt has been replaced");
-          if (n <= 2 || cmd.toolCallId === "stuck") throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
+          if (n <= 2 || cmd.toolCallId.startsWith("stuck")) throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
           return { effectId: "eff-busy", status: "confirmed", evidence: { ok: true, result: { from: "ledger" } } } as never;
         },
       },
       callCheck: async () => ({ check: true, require: false }),
-      // Short steps so the end of the wait is reached here (the default is 200 ms steps for at most 30 s).
-      busyWait: { stepMs: 5, totalMs: 50 },
+      busyWait,
     });
+    // Short steps so the end of the wait is reached here (the default is 200 ms steps for at most 30 s).
+    const svc = make({ stepMs: 5, totalMs: 50 });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = async ({ order, gateway }) => {
       out["busy"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "busy", args });
       out["fenced"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "fenced", args });
       out["stuck"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck", args });
+      // Settings that would make the wait unbounded (a limit that is not finite, a step under the 1 ms a timer waits at least, a step over the timer's limit) end it at once.
+      out["stuck-endless"] = await make({ stepMs: 5, totalMs: Infinity }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-endless", args });
+      out["stuck-tiny"] = await make({ stepMs: 0.001, totalMs: 50 }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-tiny", args });
+      out["stuck-huge"] = await make({ stepMs: Infinity, totalMs: 50 }).handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck-huge", args });
       return { status: "completed", text: "x" };
     };
     await c.tick();
@@ -578,6 +583,8 @@ for (const backend of backends) {
     assert.equal(asked["stuck"], 11);
     assert.equal(bad(out["stuck"]!).code, "effect_busy");
     assert.match(bad(out["stuck"]!).message, /Do not make the call again under a new call ID/);
+    assert.deepEqual([asked["stuck-endless"], asked["stuck-tiny"], asked["stuck-huge"]], [1, 1, 1]);
+    for (const k of ["stuck-endless", "stuck-tiny", "stuck-huge"]) assert.equal(bad(out[k]!).code, "effect_busy");
     assert.equal(executed, 0);
   });
 
