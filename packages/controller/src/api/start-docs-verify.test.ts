@@ -146,6 +146,16 @@ test("the owner's chat verifies a document (card Q03b): the docs view lists the 
     const after2 = (await call(boot.token, "doc.obligation.get", { id: guide })).result.item;
     assert.deepEqual([after2.state, after2.applicableVersion, after2.verification.documentSubmissionId], ["verified", "2.0", final]);
 
+    // Verified again, the owner may still name a document change to check it with: one the view does not list (the fourth newest) only when the owner wrote it out.
+    const plain = "check the user guide again with the first change";
+    const unlisted = (await turn("m16", plain, [{ kind: "command", op: "doc.obligation.verify", args: { obligationId: guide, documentSubmissionId: old }, evidence: plain, basis: "owner" }])).outcomes;
+    assert.equal(unlisted[0].status, "refused", JSON.stringify(unlisted));
+    assert.match(unlisted[0].message, new RegExp(`it lists ${final}, ${draft}, ${fresh}\\)`));
+    const written = `check the user guide again with ${old}`;
+    const named = (await turn("m17", written, [{ kind: "command", op: "doc.obligation.verify", args: { obligationId: guide, documentSubmissionId: old }, evidence: written, basis: "owner" }])).outcomes;
+    assert.equal(named[0].status, "proposed", JSON.stringify(named));
+    assert.match((named[0].preview as string[]).join("\n"), new RegExp(`code ${sub2} of ${task}`));
+
     // The same list through the state API: newest first, this project only, and an agent sees only its own.
     const listed = await call(boot.token, "submission.documents", { projectId: project });
     assert.equal(listed.ok, true, JSON.stringify(listed));

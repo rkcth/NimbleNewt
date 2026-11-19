@@ -2077,6 +2077,8 @@ export class StatusService {
     const lines: Line[] = [];
     const flagged = items.filter((i) => i.state !== "verified").length;
     lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
+    const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
     for (const d of items.slice(0, 30)) {
       const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
@@ -2085,7 +2087,7 @@ export class StatusService {
       const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
       const open: string[] = [];
       for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
-      const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d);
+      const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
       lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
     }
     if (list.items.length > 30) lines.push(line(`${list.items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
@@ -2097,13 +2099,16 @@ export class StatusService {
    * submissions' own rule, so only those the viewer may read), and per task it describes the code to verify against (the newest flagged code, else the code it was last verified with). Never throws for
    * a missing service: the line then says the document changes are not listed here.
    */
-  async #docCandidates(by: Principal, projectId: string, d: Awaited<ReturnType<DocObligationService["list"]>>["items"][number]): Promise<string> {
+  async #docCandidates(by: Principal, projectId: string, d: Awaited<ReturnType<DocObligationService["list"]>>["items"][number], changesSince: Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>): Promise<string> {
     const code = docVerifyCode(d);
     const against = d.implementationRefs.map((t) => (code[t] === undefined ? `${t}: no tested code named yet (see the qa view)` : `${code[t]} (${t})`)).join(", ");
     const version = d.releaseVersion === undefined ? "" : `, for version ${quoted(d.releaseVersion, 40)}`;
     if (this.#deps.docSubmissions === undefined) return ` To verify: document changes are not listed here; code ${against}${version}.`;
     let found: Awaited<ReturnType<SubmissionService["documents"]>>;
-    try { found = await this.#deps.docSubmissions.documents(by, projectId, { limit: DOC_CANDIDATES + 1, ...(d.flaggedAt === undefined ? {} : { since: d.flaggedAt }) }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return ""; throw error; }
+    const key = d.flaggedAt ?? "";
+    let read = changesSince.get(key);
+    if (read === undefined) { const service = this.#deps.docSubmissions; read = service.documents(by, projectId, { limit: DOC_CANDIDATES + 1, ...(d.flaggedAt === undefined ? {} : { since: d.flaggedAt }) }); changesSince.set(key, read); }
+    try { found = await read; } catch (error) { if (error instanceof DomainError && error.code === "not_found") return ""; throw error; }
     const since = d.flaggedAt === undefined ? "" : ` since it was flagged at ${d.flaggedAt}`;
     const shownDocs = found.items.slice(0, DOC_CANDIDATES).map((x) => `${x.id} (task ${x.taskId}, by ${shown(x.submittedBy, 80)}, at ${x.createdAt}, ${String(x.artifactDigest).slice(0, 19)})`);
     const docs = shownDocs.length === 0 ? `no document change of this project${since} that you may read: the agent keeping it submits the updated document (kind document) first`

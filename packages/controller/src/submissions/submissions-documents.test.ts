@@ -107,10 +107,10 @@ for (const backend of backends) {
       assert.deepEqual((await svc.documents(owner, project, { limit: 10 })).items.map((x) => x.id), [d5, d4, d3, d2]);
       assert.ok(await svc.get(owner, d1), "the record itself stays");
       // Two document changes of one project at the same moment are both indexed (the one that lost the index write is built again).
-      const [d6, d7] = await Promise.all([doc(dora, login, "7"), doc(dan, search, "8")]);
+      const [d6, d7, d8] = await Promise.all([doc(dora, login, "7"), doc(dan, search, "8"), doc(dora, search, "9")]);
       const newest = (await svc.documents(owner, project, { limit: 10 })).items.map((x) => x.id);
-      assert.deepEqual(new Set(newest.slice(0, 2)), new Set([d6, d7]));
-      assert.equal(newest.length, 4);
+      assert.deepEqual(new Set(newest.slice(0, 3)), new Set([d6, d7, d8]));
+      assert.deepEqual(newest.slice(3), [d5], "the index keeps the newest 4, in the order they were written");
     } finally { await world.close(); }
   });
 }
