@@ -37,8 +37,8 @@ export const realProbe: LibraryProbe = {
   opensslDir: (p) => { try { return statSync(p).size > MAX_SCAN_BYTES ? undefined : opensslDirIn(readFileSync(p)); } catch { return undefined; } },
 };
 
-/** A libcrypto larger than this is not scanned for its OpenSSL directory. */
-const MAX_SCAN_BYTES = 256 * 1024 * 1024;
+/** A libcrypto larger than this is not scanned for its OpenSSL directory (Homebrew's is about 5 MB, a universal one about 10 MB); the scan reads the whole file into memory once per cache miss. */
+export const MAX_SCAN_BYTES = 64 * 1024 * 1024;
 const OPENSSLDIR_MARK = Buffer.from('OPENSSLDIR: "', "latin1");
 
 /**

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { SandboxError } from "./errors.js";
-import { cachedLibraryReads, dependentLibraryReads, opensslDirIn, parseDependents, parseRpaths, realProbe as hostProbe, symlinkChain, type LibraryProbe } from "./libraries.js";
+import { cachedLibraryReads, dependentLibraryReads, MAX_SCAN_BYTES, opensslDirIn, parseDependents, parseRpaths, realProbe as hostProbe, symlinkChain, type LibraryProbe } from "./libraries.js";
 import { normalizeRecipe } from "./recipe.js";
 import { profileFor, seatbeltBackend } from "./seatbelt.js";
 
@@ -325,15 +325,50 @@ describe("Homebrew OpenSSL's configuration file (macOS probe on Rob's Mac, run 4
     assert.ok(reads.includes(CNF) && reads.includes(real));
   });
 
+  test("the remembered answer carries the configuration's stamp: a removed or replaced configuration is looked at again", () => {
+    const base = brewWithOpenssl();
+    let cnf: "file" | "gone" | "dir" = "file";
+    let edits = 0;
+    const probe: LibraryProbe = {
+      ...base,
+      exists: (p) => p === CNF ? cnf !== "gone" : base.exists(p),
+      isFile: (p) => p === CNF ? cnf === "file" : base.isFile(p),
+      stamp: (p) => { if (p !== CNF) return base.stamp(p); if (cnf === "gone") throw Object.assign(new Error("gone"), { code: "ENOENT" }); return `${cnf}:${edits}`; },
+    };
+    const reads = cachedLibraryReads(probe);
+    assert.ok(reads(NODE, []).includes(CNF));
+    const scans = (): number => base.calls.filter((c) => c.startsWith("ssldir")).length;
+    const before = scans();
+    assert.ok(reads(NODE, []).includes(CNF));
+    assert.equal(scans(), before, "an unchanged answer is reused");
+    edits++;
+    assert.ok(reads(NODE, []).includes(CNF));
+    assert.equal(scans(), before + 1, "an edited configuration is looked at again");
+    cnf = "dir"; edits++;
+    assert.ok(!reads(NODE, []).includes(CNF), "a configuration replaced by a directory is dropped");
+    cnf = "gone";
+    assert.ok(!reads(NODE, []).includes(CNF), "a removed configuration is dropped");
+  });
+
   test("the OpenSSL directory is read from the library's own text, only as a plain absolute path", () => {
     const b = (s: string): Buffer => Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(s, "latin1"), Buffer.from([0])]);
     assert.equal(opensslDirIn(b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"')), "/opt/homebrew/etc/openssl@3");
     assert.equal(opensslDirIn(b('OPENSSLDIR: "/usr/lib/ssl/"')), "/usr/lib/ssl");
-    for (const bad of ["no mark here", 'OPENSSLDIR: "relative/dir"', 'OPENSSLDIR: "/opt/../etc"', 'OPENSSLDIR: "/opt//etc"', 'OPENSSLDIR: "/opt/homebrew/etc', 'OPENSSLDIR: "/opt/\x01x"', `OPENSSLDIR: "/${"a".repeat(2000)}"`]) assert.equal(opensslDirIn(b(bad)), undefined, bad);
+    for (const bad of ["no mark here", 'OPENSSLDIR: "relative/dir"', 'OPENSSLDIR: "/opt/../etc"', 'OPENSSLDIR: "/opt//etc"', 'OPENSSLDIR: "/opt/homebrew/etc', 'OPENSSLDIR: "/opt/\x01x"', `OPENSSLDIR: "/${"a".repeat(2000)}"`, 'OPENSSLDIR: "/opt/x\n"', 'OPENSSLDIR: "/opt/x\ny"', 'OPENSSLDIR: "/opt/./x"', 'OPENSSLDIR: "/opt/\xe9"']) assert.equal(opensslDirIn(b(bad)), undefined, JSON.stringify(bad));
+    // Profile and regular-expression characters are kept as they are: the path only ever travels as a -D parameter value, never as profile text.
+    assert.equal(opensslDirIn(b('OPENSSLDIR: "/opt/a (b) \\c;d"')), "/opt/a (b) \\c;d");
+    // Only the first mark counts.
+    assert.equal(opensslDirIn(b('OPENSSLDIR: "/opt/first"\0OPENSSLDIR: "/opt/second"')), "/opt/first");
     const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-ssl-scan-")));
     try {
       writeFileSync(join(root, "libcrypto.3.dylib"), b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"'));
       assert.equal(hostProbe.opensslDir(join(root, "libcrypto.3.dylib")), "/opt/homebrew/etc/openssl@3");
+      // A file over the size limit is not read at all (sparse, so nothing large is written).
+      writeFileSync(join(root, "big.dylib"), b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"'));
+      truncateSync(join(root, "big.dylib"), MAX_SCAN_BYTES + 1);
+      assert.equal(hostProbe.opensslDir(join(root, "big.dylib")), undefined);
+      truncateSync(join(root, "big.dylib"), MAX_SCAN_BYTES);
+      assert.equal(hostProbe.opensslDir(join(root, "big.dylib")), "/opt/homebrew/etc/openssl@3");
       assert.equal(hostProbe.opensslDir(join(root, "gone.dylib")), undefined);
       assert.equal(hostProbe.isFile(join(root, "libcrypto.3.dylib")), true);
       assert.equal(hostProbe.isFile(root), false);
