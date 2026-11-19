@@ -7,6 +7,7 @@ import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
@@ -33,6 +34,8 @@ export type DocReason =
 export interface DocUpdate {
   /** The assigned update task (created by the controller, owned by the document's owner). */
   readonly taskId: string;
+  /** The document's running count of update tasks: the task's ID is derived from the document and this number, so a repeat finds it and a later update of the same kind is a new task. */
+  readonly seq: number;
   readonly reason: DocReason;
   readonly requestedBy: string;
   readonly requestedAt: string;
@@ -67,11 +70,13 @@ export interface DocObligationBody {
     readonly verifiedBy: string;
     readonly verifiedAt: string;
   };
-  /** Why it is stale, when it is. */
+  /** Why it is flagged since it was last verified or recorded (newest last). An unverified document keeps them too: a verification must then be against the newest tested code named here. */
   readonly reasons?: readonly DocReason[];
   /** A release flagged it: a verification must name this version. */
   readonly releaseVersion?: string;
   readonly updates: readonly DocUpdate[];
+  /** How many update tasks the document was ever given (the settled ones beyond the limit are dropped from `updates`). */
+  readonly updateCount?: number;
 }
 
 interface IndexBody { readonly ids: readonly string[] }
@@ -103,8 +108,12 @@ const only = (command: object, fields: readonly string[]): void => {
 };
 const bare = (agent: string): string => (agent.startsWith("agent:") ? agent.slice("agent:".length) : agent);
 const reasonKey = (r: DocReason): string => (r.kind === "release_changed" ? `release:${r.to}` : `${r.kind}:${r.taskId}:${r.submissionId}`);
-/** The command that creates a document's update task for one reason; the task's ID is derived from it by the project service, so it is known before the task exists and a repeat finds it. */
-const createCommandOf = (obligationId: string, r: DocReason): string => `doc-update:${obligationId}:${derivedId("dob", reasonKey(r)).slice(4)}`;
+/** What an update task is about: one implementing task, or the release. A document gets one open update task per subject; a further reason on the same subject is noted on the record, not given another task. */
+const subjectOf = (r: DocReason): string => (r.kind === "release_changed" ? "release" : `task:${r.taskId}`);
+/** The command that creates a document's update task number `seq`; the task's ID is derived from it by the project service, so it is known before the task exists and a repeat finds it. */
+const createCommandOf = (obligationId: string, seq: number): string => `doc-update:${obligationId}:${seq}`;
+/** A planned flag of one document: the reasons to note (new since it was last verified or recorded) and those that get an update task. */
+interface Planned { readonly id: string; readonly revision: number; readonly body: DocObligationBody; readonly reasons: readonly DocReason[]; readonly tasks: readonly DocReason[] }
 
 /**
  * Documentation obligations and their impact (card Q03, first slice). An obligation names a document (user, developer, support or promotional), its owner (an agent), the version it applies to,
@@ -208,6 +217,10 @@ export class DocObligationService {
       build: async () => {
         const owner = (await this.#runner.get("principal", command.owner))?.body as unknown as PrincipalBody | undefined;
         if (owner === undefined || owner.kind !== "agent" || owner.state !== "active") bad("owner", `${command.owner} is not an active agent`);
+        // The keeper gets this project's update tasks: it must be an agent that may read the project's tasks, not one of another project.
+        const asOf = this.#runner.now();
+        const keeper = await effectiveOf(this.#runner, { id: command.owner, kind: "agent", name: owner!.name, grants: owner!.grants, asOf } as Principal, asOf);
+        if (!allows(keeper, "task.read", projectId, { now: asOf })) bad("owner", `${command.owner} may not read this project's tasks, so it cannot keep this document`);
         for (const r of refs) { const t = await this.#task(r); if (t === undefined || t.projectId !== projectId) bad("implementationRefs", `${r} is not a task of this project`); }
         const now = this.#runner.now();
         const changes: Change[] = [];
@@ -221,7 +234,7 @@ export class DocObligationService {
           const same = JSON.stringify(b.implementationRefs) === JSON.stringify(refs) && claimKey(b.claims) === claimKey(claims) && b.applicableVersion === applicableVersion;
           state = same ? b.state : "unverified";
           const next: DocObligationBody = same ? { ...b, title, location, audience, owner: command.owner, changedAt: now }
-            : { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates };
+            : { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates, ...(b.updateCount === undefined ? {} : { updateCount: b.updateCount }) };
           changes.push({ type: "update", ref: { kind: "doc-obligation", id }, expectedRevision: current.revision, body: json(next) });
           return { ref: { kind: "doc-obligation", id }, creates: false, changes, detail: { projectId, state } };
         }
@@ -279,6 +292,13 @@ export class DocObligationService {
         }
         const missing = b.implementationRefs.filter((t) => !evidence.some((e) => e.taskId === t));
         if (missing.length > 0) bad("evidence", `names no tested code of ${missing.join(", ")}: a document is verified against every task it describes`);
+        // Flagged for a task's new tested code: the verification is against that code's tree (the newest flag of the task), not the older code the document was checked against before.
+        const newest = new Map<string, Extract<DocReason, { kind: "behavior_changed" }>>();
+        for (const r of b.reasons ?? []) if (r.kind === "behavior_changed") newest.set(r.taskId, r);
+        for (const e of evidence) {
+          const want = newest.get(e.taskId);
+          if (want !== undefined && want.tree !== e.tree) bad("evidence", `${e.submissionId} is tree ${e.tree.slice(0, 12)} of task ${e.taskId}, but the document was flagged for its new tested code (submission ${want.submissionId}, tree ${want.tree.slice(0, 12)}): verify it against that tree`);
+        }
         if (unsupported.length > 0) {
           const claims = b.claims.filter((c) => unsupported.includes(c.taskId)).map((c) => JSON.stringify(c.text));
           throw new DomainError("invalid_command", `the QA gate of ${unsupported.join(", ")} does not pass${claims.length === 0 ? "" : `, so these claims would be unsupported: ${claims.join(", ")}`}`, { field: "evidence" });
@@ -299,11 +319,12 @@ export class DocObligationService {
   // ---- impact and release ---------------------------------------------------------------------------------------------------
 
   /**
-   * The documents a task's tested code affects. `submissionId` names the code (a code submission of the task); without it, the newest independently checked one is used. Every document of the project
-   * describing the task becomes stale when it was verified against another tree of it, or its evidence for the task no longer passes; each such document and each unverified one gets one update task,
-   * assigned to its owner and linked to that code. The owner or a docs or director agent asks.
+   * The documents a task's tested code affects. `submissionId` names the code (a code submission of the task); without it, the newest independently checked one is used. When that code's QA gate passes,
+   * every document of the project describing the task that was verified against another tree of it, and every unverified one, is flagged for it; whatever the code, a document whose own evidence for the
+   * task no longer passes is flagged as well. A flagged document gets an update task assigned to its owner and linked to that code, one open task per task described (a further change of the same task is
+   * noted on the record, and the verification must then be against the newest tested code). Asked again, nothing is repeated. The owner or a docs or director agent asks.
    */
-  async impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }): Promise<{ taskId: string; submissionId: string; tree: string; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
+  async impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     only(command, ["commandId", "taskId", "submissionId"]);
     const commandId = checkCommandId(command.commandId);
     const taskId = checkTaskId(command.taskId);
@@ -316,25 +337,26 @@ export class DocObligationService {
     if (typeof submissionId !== "string" || !SBM.test(submissionId)) bad("submissionId", "is not a submission ID");
     const gate = await this.#ports.gate(by, submissionId!);
     if (gate.taskId !== taskId) bad("submissionId", `is code of task ${gate.taskId}, not ${taskId}`);
-    const plan = async (): Promise<{ id: string; revision: number; body: DocObligationBody; reasons: DocReason[] }[]> => {
-      const out: { id: string; revision: number; body: DocObligationBody; reasons: DocReason[] }[] = [];
+    // Code whose QA gate does not pass is not tested behaviour: it flags nothing as changed (the update task would name untested code), but a document's own evidence is still checked.
+    const tested = gate.verdict === "passed";
+    const plan = async (): Promise<Planned[]> => {
+      const out: Planned[] = [];
       for (const id of (await this.#index(task!.projectId)).body.ids) {
         const found = await this.#runner.get("doc-obligation", id);
         const b = found?.body as unknown as DocObligationBody | undefined;
         if (found === undefined || b === undefined || !b.implementationRefs.includes(taskId)) continue;
         const reasons: DocReason[] = [];
-        const was = b.verification?.evidence.find((e) => e.taskId === taskId);
-        if (b.state === "unverified" || was === undefined) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree });
-        else if (was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
-        else if ((await this.#ports.gate(by, was.submissionId)).verdict !== "passed") reasons.push({ kind: "evidence_lost", taskId, submissionId: was.submissionId });
-        // Asked again for the same code: nothing is repeated.
-        const fresh = reasons.filter((r) => !b.updates.some((u) => reasonKey(u.reason) === reasonKey(r)));
-        if (fresh.length > 0) out.push({ id, revision: found.revision, body: b, reasons: fresh });
+        const was = b.state === "unverified" ? undefined : b.verification?.evidence.find((e) => e.taskId === taskId);
+        if (was === undefined) { if (tested) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree }); }
+        else if (tested && was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
+        else if ((was.submissionId === submissionId ? gate : await this.#ports.gate(by, was.submissionId)).verdict !== "passed") reasons.push({ kind: "evidence_lost", taskId, submissionId: was.submissionId });
+        const p = this.#planned(id, found.revision, b, reasons);
+        if (p !== undefined) out.push(p);
       }
       return out;
     };
     const flagged = await this.#flag(by, commandId, "doc.impact.check", { taskId, submissionId: submissionId! }, plan);
-    return { taskId, submissionId: submissionId!, tree: gate.tree, ...flagged };
+    return { taskId, submissionId: submissionId!, tree: gate.tree, verdict: gate.verdict, ...flagged };
   }
 
   /** A release of `version`: every document of the project that applies to another version (user, developer, support and promotional alike) is flagged stale with an update task for its owner. */
@@ -344,15 +366,14 @@ export class DocObligationService {
     const version = text(command.version, "version", { min: 1, max: DOC_LIMITS.version });
     const projectId = await this.#project(by, command.projectId);
     await this.#keeps(by, projectId);
-    const plan = async (): Promise<{ id: string; revision: number; body: DocObligationBody; reasons: DocReason[] }[]> => {
-      const out: { id: string; revision: number; body: DocObligationBody; reasons: DocReason[] }[] = [];
+    const plan = async (): Promise<Planned[]> => {
+      const out: Planned[] = [];
       for (const id of (await this.#index(projectId)).body.ids) {
         const found = await this.#runner.get("doc-obligation", id);
         const b = found?.body as unknown as DocObligationBody | undefined;
         if (found === undefined || b === undefined || b.applicableVersion === version) continue;
-        const r: DocReason = { kind: "release_changed", from: b.applicableVersion, to: version };
-        if (b.updates.some((u) => reasonKey(u.reason) === reasonKey(r))) continue;
-        out.push({ id, revision: found.revision, body: b, reasons: [r] });
+        const p = this.#planned(id, found.revision, b, [{ kind: "release_changed", from: b.applicableVersion, to: version }]);
+        if (p !== undefined) out.push(p);
       }
       return out;
     };
@@ -363,12 +384,29 @@ export class DocObligationService {
   }
 
   /**
+   * Which of a document's reasons are new, and which of those get an update task. A reason already noted since the document was last verified or recorded, or already behind an open update task, is not
+   * new (asked again, nothing repeats; a reason seen in an earlier, settled cycle is new again, so going back to older code flags the document). A new reason gets a task unless an update task on the
+   * same subject (the same implementing task, or the release) is still open, or the document already has the limit of open update tasks: then it is only noted.
+   */
+  #planned(id: string, revision: number, b: DocObligationBody, candidates: readonly DocReason[]): Planned | undefined {
+    const open = b.updates.filter((u) => u.state === "open");
+    const known = new Set([...open.map((u) => reasonKey(u.reason)), ...(b.reasons ?? []).map(reasonKey)]);
+    const reasons = candidates.filter((r) => !known.has(reasonKey(r)));
+    if (reasons.length === 0) return undefined;
+    const subjects = new Set(open.map((u) => subjectOf(u.reason)));
+    const tasks: DocReason[] = [];
+    for (const r of reasons) if (!subjects.has(subjectOf(r)) && open.length + tasks.length < DOC_LIMITS.updates) { tasks.push(r); subjects.add(subjectOf(r)); }
+    return { id, revision, body: b, reasons, tasks };
+  }
+
+  /**
    * Writes the flags (one command: every flagged document with its update task's ID planned), then opens each planned update task that does not exist yet: created, made ready and assigned to the
    * document's owner, each step skipped when already done, so a repeat finishes what a failure left. An assignment that cannot be made leaves the task open and unassigned (reported, and shown).
    */
-  async #flag(by: Principal, commandId: string, type: string, payload: JsonObject, plan: () => Promise<{ id: string; revision: number; body: DocObligationBody; reasons: DocReason[] }[]>): Promise<{ flagged: string[]; tasks: { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
+  async #flag(by: Principal, commandId: string, type: string, payload: JsonObject, plan: () => Promise<Planned[]>): Promise<{ flagged: string[]; tasks: { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     const scoped = scopedCommandId(by.id, commandId);
     let made: { obligationId: string; taskId: string; create: string; projectId: string; title: string; description: string; owner: string }[] = [];
+    let flagged: string[] = [];
     let replayed = false;
     let wrote = false;
     if ((await plan()).length > 0) {
@@ -381,37 +419,44 @@ export class DocObligationService {
           const changes: Change[] = [];
           made = [];
           for (const f of found) {
-            if (f.body.updates.length + f.reasons.length > DOC_LIMITS.updates) throw new DomainError("unavailable", `document ${f.id} already holds ${DOC_LIMITS.updates} update requests`);
-            const updates: DocUpdate[] = [...f.body.updates];
-            for (const r of f.reasons) {
-              const updateTask = derivedId("task", createCommandOf(f.id, r));
-              updates.push({ taskId: updateTask, reason: r, requestedBy: by.id, requestedAt: now, state: "open" });
-              made.push({ obligationId: f.id, taskId: updateTask, create: createCommandOf(f.id, r), projectId: f.body.projectId, owner: f.body.owner, ...this.#describe(f.id, f.body, r) });
+            let count = f.body.updateCount ?? f.body.updates.length;
+            const added: DocUpdate[] = [];
+            for (const r of f.tasks) {
+              const create = createCommandOf(f.id, count);
+              const updateTask = derivedId("task", create);
+              added.push({ taskId: updateTask, seq: count, reason: r, requestedBy: by.id, requestedAt: now, state: "open" });
+              made.push({ obligationId: f.id, taskId: updateTask, create, projectId: f.body.projectId, owner: f.body.owner, ...this.#describe(f.id, f.body, r) });
+              count++;
             }
-            const releaseTo = f.reasons.find((r): r is Extract<DocReason, { kind: "release_changed" }> => r.kind === "release_changed")?.to;
+            // Settled updates beyond the limit are dropped, oldest first (their tasks stay ordinary tasks); open ones are kept, and #planned never opens more than the limit.
+            const kept = [...f.body.updates];
+            for (let i = 0; kept.length + added.length > DOC_LIMITS.updates && i < kept.length;) { if (kept[i]!.state === "settled") kept.splice(i, 1); else i++; }
+            const releaseTo = [...f.reasons].reverse().find((r): r is Extract<DocReason, { kind: "release_changed" }> => r.kind === "release_changed")?.to;
             const state: DocState = f.body.state === "unverified" ? "unverified" : "stale";
-            const next: DocObligationBody = { ...f.body, state, ...(state === "stale" ? { reasons: [...(f.body.reasons ?? []), ...f.reasons].slice(-DOC_LIMITS.updates) } : {}), ...(releaseTo === undefined ? {} : { releaseVersion: releaseTo }), updates };
+            const next: DocObligationBody = { ...f.body, state, reasons: [...(f.body.reasons ?? []), ...f.reasons].slice(-DOC_LIMITS.updates), ...(releaseTo === undefined ? {} : { releaseVersion: releaseTo }), updates: [...kept, ...added], updateCount: count };
             changes.push({ type: "update", ref: { kind: "doc-obligation", id: f.id }, expectedRevision: f.revision, body: json(next) });
           }
-          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged: found.map((f) => f.id) } };
+          flagged = found.map((f) => f.id);
+          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged } };
         },
       }));
       replayed = result.replayed;
       wrote = !result.replayed;
     }
     if (!wrote) {
-      // A replay, or nothing new: finish the update tasks the command's documents still have open and unopened.
+      // A replay, or nothing new: finish the update tasks the project's documents still have open and unopened.
       made = [];
+      flagged = [];
       const ids = new Set<string>();
       const projectId = (payload["projectId"] as string | undefined) ?? (await this.#task(payload["taskId"] as string))?.projectId;
       for (const id of projectId === undefined ? [] : (await this.#index(projectId)).body.ids) {
         const b = (await this.#runner.get("doc-obligation", id))?.body as unknown as DocObligationBody | undefined;
-        for (const u of b?.updates ?? []) if (u.state === "open" && !ids.has(u.taskId) && (await this.#task(u.taskId)) === undefined) { ids.add(u.taskId); made.push({ obligationId: id, taskId: u.taskId, create: createCommandOf(id, u.reason), projectId: b!.projectId, owner: b!.owner, ...this.#describe(id, b!, u.reason) }); }
+        for (const u of b?.updates ?? []) if (u.state === "open" && !ids.has(u.taskId) && (await this.#task(u.taskId)) === undefined) { ids.add(u.taskId); made.push({ obligationId: id, taskId: u.taskId, create: createCommandOf(id, u.seq), projectId: b!.projectId, owner: b!.owner, ...this.#describe(id, b!, u.reason) }); }
       }
     }
     const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
-    return { flagged: wrote ? [...new Set(made.map((m) => m.obligationId))] : [], tasks, replayed };
+    return { flagged, tasks, replayed };
   }
 
   #describe(id: string, b: DocObligationBody, r: DocReason): { title: string; description: string } {

@@ -21,6 +21,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 };
 const treeA = "a".repeat(40);
 const treeB = "b".repeat(40);
+const treeC = "f".repeat(40);
 
 for (const backend of backends) {
   test(`${backend.name}: documentation obligations are verified only against tested code; a behaviour change or a release flags them and opens assigned update tasks (card Q03)`, async () => {
@@ -74,6 +75,7 @@ for (const backend of backends) {
       const promo = { projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login }] };
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, claims: [{ text: "Instant search", taskId: search }] }), /unsupported claim/);
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, owner: "agent:nobody" }), /not an active agent/);
+      await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, owner: far.id }), /may not read this project's tasks/);
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, implementationRefs: [login, elsewhere], claims: [] }), /not a task of this project/);
       await refuses("forbidden", () => docs.record(pat, { commandId: cid("r"), ...promo }));
       await refuses("not_found", () => docs.record(far, { commandId: cid("r"), ...promo }));
@@ -91,6 +93,9 @@ for (const backend of backends) {
       await tested(sub1);
       await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, documentSubmissionId: sub1 }), /kind document/);
       await refuses("forbidden", () => docs.verify(pat, { commandId: cid("v"), ...verify }));
+      const foreignDoc = derivedId("sbm", cid("doc"));
+      await plant("submission", foreignDoc, { taskId: elsewhere, projectId: other, kind: "document", role: "docs", submittedBy: far.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, documentSubmissionId: foreignDoc }), /not a submission of this project/);
       const searchCode = await code(search, treeA);
       await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, evidence: [searchCode] }), /does not describe/);
       const v1 = await docs.verify(dora, { commandId: cid("v"), ...verify });
@@ -121,15 +126,31 @@ for (const backend of backends) {
       const again = await docs.impact(owner, { commandId: "impact-1", taskId: login });
       assert.deepEqual([again.flagged, again.tasks.length], [[], 0], "a repeat flags nothing and opens nothing new");
       assert.deepEqual((await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: sub2 })).flagged, [], "asked again for the same code: nothing is repeated");
+      const revOf = async (id: string): Promise<number> => (await docs.get(owner, id))!["revision"] as number;
+      const rev0 = await revOf(p1.id);
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev0, documentSubmissionId: document, evidence: [sub1] }), /flagged for its new tested code/);
 
-      // Verifying against the new tested code settles the update.
-      const v2 = await docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: (await docs.get(owner, p1.id))!["revision"] as number, documentSubmissionId: document, evidence: [sub2] });
+      // Code whose QA gate does not pass is not tested behaviour: it flags nothing.
+      const sub3 = await code(login, treeC);
+      const untested = await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: sub3 });
+      assert.deepEqual([untested.verdict, untested.flagged, untested.tasks.length, await revOf(p1.id)], ["failed", [], 0, rev0], "untested code flags nothing");
+      // A further tested change of the same task while its update task is open: noted on the record, no second task; the verification must be against the newest tree.
+      await tested(sub3);
+      const further = await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: sub3 });
+      assert.deepEqual([[...further.flagged].sort(), further.tasks.length], [[p1.id, guide.id].sort(), 0], "one open update task per described task");
+      const noted = (await docs.get(owner, p1.id)) as unknown as { updates: unknown[]; reasons: { tree: string }[] };
+      assert.deepEqual([noted.updates.length, noted.reasons.map((r) => r.tree)], [1, [treeB, treeC]]);
+      const rev1 = await revOf(p1.id);
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev1, documentSubmissionId: document, evidence: [sub2] }), /verify it against that tree/);
+
+      // Verifying against the newest tested code settles the update.
+      const v2 = await docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: await revOf(p1.id), documentSubmissionId: document, evidence: [sub3] });
       assert.equal(v2.settled.length, 1);
       void v1;
 
       // The tested code it was checked against fails QA later: the document goes stale again.
-      await tested(sub2, "failed");
-      const lost = await docs.impact(dora, { commandId: cid("i"), taskId: login, submissionId: sub2 });
+      await tested(sub3, "failed");
+      const lost = await docs.impact(dora, { commandId: cid("i"), taskId: login, submissionId: sub3 });
       assert.deepEqual(lost.flagged, [p1.id]);
       assert.deepEqual(((await docs.get(owner, p1.id)) as unknown as { reasons: { kind: string }[] }).reasons.map((r) => r.kind), ["evidence_lost"], "a verification cleared the earlier reasons");
 
@@ -138,14 +159,23 @@ for (const backend of backends) {
       assert.deepEqual(rel.byAudience, { user: 1, developer: 0, support: 0, promotional: 1 });
       assert.equal(rel.tasks.length, 2);
       assert.deepEqual((await docs.release(owner, { commandId: cid("rel"), projectId: project, version: "2.0" })).flagged, [], "the same release flags nothing twice");
-      await tested(sub2);
+      await tested(sub3);
       const rev = (await docs.get(owner, p1.id))!["revision"] as number;
-      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev, documentSubmissionId: document, evidence: [sub2] }), /version 2\.0/);
-      await refuses("stale_revision", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev - 1, documentSubmissionId: document, evidence: [sub2], applicableVersion: "2.0" }));
-      const v3 = await docs.verify(owner, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev, documentSubmissionId: document, evidence: [sub2], applicableVersion: "2.0" });
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev, documentSubmissionId: document, evidence: [sub3] }), /version 2\.0/);
+      await refuses("stale_revision", () => docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev - 1, documentSubmissionId: document, evidence: [sub3], applicableVersion: "2.0" }));
+      const v3 = await docs.verify(owner, { commandId: cid("v"), obligationId: p1.id, expectedRevision: rev, documentSubmissionId: document, evidence: [sub3], applicableVersion: "2.0" });
       assert.equal(v3.settled.length, 2, "the evidence-lost and release updates are settled");
       const now = (await docs.get(owner, p1.id)) as unknown as { state: string; applicableVersion: string; releaseVersion?: string };
       assert.deepEqual([now.state, now.applicableVersion, now.releaseVersion], ["verified", "2.0", undefined]);
+
+      // Going back to code the document was flagged for in an earlier, settled round flags it again, with a new update task.
+      const back = await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: sub2 });
+      assert.deepEqual(back.flagged, [p1.id], "the guide still has its update task open for the login task, so only the page is new");
+      const firstTask = impact.tasks.find((t) => t.obligationId === p1.id)!.taskId;
+      assert.equal(back.tasks.length, 1);
+      assert.notEqual(back.tasks[0]!.taskId, firstTask, "a new update task, not the settled one again");
+      assert.equal(((await runner.get("task", back.tasks[0]!.taskId))?.body as unknown as { state: string }).state, "ready");
+      await docs.verify(dora, { commandId: cid("v"), obligationId: p1.id, expectedRevision: await revOf(p1.id), documentSubmissionId: document, evidence: [sub2] });
 
       // Replacing the obligation with new claims makes it unverified again; a new owner alone keeps its state.
       const r1 = (await docs.get(owner, p1.id))!["revision"] as number;
@@ -153,6 +183,18 @@ for (const backend of backends) {
       assert.equal(kept.state, "verified");
       const changed = await docs.record(owner, { commandId: cid("r"), ...promo, obligationId: p1.id, expectedRevision: kept.revision, applicableVersion: "2.0", claims: [{ text: "Sign in with a passkey or a code", taskId: login }] });
       assert.equal(changed.state, "unverified");
+
+      // Two release checks at once (different command IDs): one update task per document, none twice. The guide's release update for 2.0 is still open, so 3.0 is only noted on it.
+      const both = await Promise.allSettled([1, 2].map((k) => docs.release(owner, { commandId: cid(`race${k}`), projectId: project, version: "3.0" })));
+      for (const r of both) if (r.status === "rejected") assert.equal((r.reason as DomainError).code, "stale_revision", String(r.reason));
+      const opened = both.flatMap((r) => (r.status === "fulfilled" ? r.value.tasks : []));
+      // Both callers may finish opening the same task (a crash between the flag and the task is finished by whoever asks next): it is one task, made once.
+      assert.deepEqual([...new Set(opened.map((t) => `${t.obligationId}/${t.taskId}`))], [`${p1.id}/${opened[0]!.taskId}`], "one new update task, for the page only");
+      assert.ok(opened.every((t) => t.assigned));
+      const page = (await docs.get(owner, p1.id)) as unknown as { updates: { reason: { kind: string; to?: string } }[] };
+      assert.equal(page.updates.filter((u) => u.reason.kind === "release_changed" && u.reason.to === "3.0").length, 1);
+      const guideNow = (await docs.get(owner, guide.id)) as unknown as { releaseVersion: string; updates: { state: string }[] };
+      assert.deepEqual([guideNow.releaseVersion, guideNow.updates.filter((u) => u.state === "open").length], ["3.0", 2], "noted on the guide; its open login and release tasks stay the only ones");
     } finally {
       await world.close();
     }

@@ -7762,7 +7762,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.record`
 
-Records a documentation obligation (card Q03): a document (`audience` `user`, `developer`, `support` or `promotional`), where it lives, its owner (the agent that keeps it current and gets its update tasks), the product version it applies to, the tasks whose behaviour it describes (`implementationRefs`) and any capability it claims, each claim naming one of those tasks (a claim with no implementing task is an unsupported claim and refused). It starts `unverified`. With `obligationId` and `expectedRevision` it replaces one: a change of the tasks, claims or version makes it `unverified` again. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID records once.
+Records a documentation obligation (card Q03): a document (`audience` `user`, `developer`, `support` or `promotional`), where it lives, its owner (the agent that keeps it current and gets its update tasks), the product version it applies to, the tasks whose behaviour it describes (`implementationRefs`) and any capability it claims, each claim naming one of those tasks (a claim with no implementing task is an unsupported claim and refused). The owner must be an active agent that may read the project's tasks. It starts `unverified`. With `obligationId` and `expectedRevision` it replaces one: a change of the tasks, claims or version makes it `unverified` again. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID records once.
 
 Arguments:
 
@@ -7784,7 +7784,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.verify`
 
-Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
 
 Arguments:
 
@@ -7801,7 +7801,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.impact.check`
 
-Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. Every document of the project describing the task becomes `stale` when it was verified against another tree of the task or its evidence no longer passes QA; each such document and each unverified one gets an update task, created ready and assigned to the document's owner, whose text links the tested code. Asked again for the same code, nothing is repeated (unopened update tasks are opened). The owner, or a docs or director agent of the project.
+Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. When that code's QA gate passes, every document of the project describing the task that was verified against another tree of it becomes `stale`, and every unverified one is flagged; a document whose own evidence for the task no longer passes QA becomes `stale` whatever the code (`verdict` says whether the named code passes). A flagged document gets an update task, created ready and assigned to the document's owner, whose text links the tested code: one open update task per task described (a further change of the same task is noted on the record, and the document must then be verified against the newest flagged tree). Asked again for the same code, nothing is repeated (unopened update tasks are opened); code the document was flagged for in an earlier, settled round flags it again. The owner, or a docs or director agent of the project.
 
 Arguments:
 
@@ -7809,7 +7809,7 @@ Arguments:
 - `taskId`: the task whose behaviour changed
 - `submissionId` (optional): its tested code submission
 
-Result: `{ taskId, submissionId, tree, flagged (obligation IDs), tasks: [{ obligationId, taskId, assigned }], replayed }`.
+Result: `{ taskId, submissionId, tree, verdict, flagged (obligation IDs), tasks: [{ obligationId, taskId, assigned }], replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -2053,7 +2053,7 @@ export class StatusService {
       const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
       const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
-      const state = d.state === "verified" ? "Verified." : d.state === "unverified" ? "FLAGGED: unverified (never checked against tested code)." : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
+      const state = d.state === "verified" ? "Verified." : d.state === "unverified" ? `FLAGGED: unverified (not checked against tested code since it was recorded)${(d.reasons ?? []).length === 0 ? "" : `; since then ${(d.reasons ?? []).map(docReasonText).join("; ")}`}.` : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
       const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
       const open: string[] = [];
       for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
