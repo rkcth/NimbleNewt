@@ -11,9 +11,16 @@ import { BUDGET_DEFAULTS } from "./budget.js";
  * 1. Set `WORKER_FIXED_PART` to the measured figures the budget test prints, and `WORKER_FIXED_PART_BUDGET` a little above them (it is also the unmeasured-route floor, which `api/start-route-change.test.ts` pins).
  * 2. Update the figures the tests pin on purpose to the new `WORKER_FIXED_PART_ABOUT_TOKENS` / `MIN_STARTABLE_WINDOW` / `PRACTICAL_STARTABLE_WINDOW` (the budget test prints them): `fixed-part-budget.test.ts`
  *    (integration) and `setup/small-window.test.ts` ("about N tokens", "N or more is needed in practice").
- * 3. If the real fixed part no longer starts a task on 32,768 tokens, the windows that assume it does must be raised too: the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider from the configuration
- *    document), the real-process tests w12-anchor and w13-recall (integration, 32,768) and `context/enforcement.test.ts`'s view suite; the owner is then told the larger window.
+ *    The C07g real-process test (`integration/c07g-route-view.test.ts`, `FLOOR_CHARS`) sets a floor that must stay above the real fixed part: raise it with the budget.
+ * 3. If the real fixed part no longer starts a task on 32,768 tokens, the windows that assume it does must be raised to `PRACTICAL_STARTABLE_WINDOW` (or more): the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider
+ *    from the configuration document) and the launcher note `u14-launcher.test.ts` pins ("context window assumed 32768 tokens ... under about 32,768"), the placeholder the interpreter prompt names
+ *    (`chat/model-interpreter.ts`, "32768 is only the launcher's placeholder"), and the integration tests that run the real worker process on 32,768 tokens: w12-anchor and w13-recall (`WINDOW`), g09-remote-updates
+ *    (`WINDOW`), h12bf-composed (`window`) and `w03-rig-support.ts` (its `window` and `contextWindow`, used by W03, W04, L04e and L04g); then the budget test's list of those windows and the windows
+ *    `setup/small-window.test.ts` expects to start a task. h12bf's compaction case (65,536 tokens, a stored conversation sized against the fixed part) must be sized again by hand. Check that
+ *    `context/enforcement.test.ts`'s view suite (40,960) still cuts. The owner is then told the larger window.
  * 4. Regenerate the API reference (`node scripts/api-docs.mjs --write`; the summaries quote these figures) and say so in the implementation notes.
+ * Tried on a merge with card P03b's first slice (2,537 + 18,242 characters, about 6,900 tokens, 35,840 startable, 36,864 in practice): budget 3,000 + 19,500, C07g floor 23,500, the windows above at 36,864;
+ * the tests that failed were the ones named above (the whole integration suite was run), and all passed after these steps except h12bf's compaction case.
  */
 export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 15_024 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */
