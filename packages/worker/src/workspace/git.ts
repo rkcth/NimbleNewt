@@ -359,6 +359,12 @@ export class GitBridge {
   /** The commit the checkout is based on (what a refresh moves and what the agent's work is measured from). */
   async baseOf(gitDir: string): Promise<string> { return this.#base(gitDir); }
 
+  /** The tree of a commit of the checkout's own repository (card P10: a landing of a queued submission compares the committed work with the approved tree). */
+  async treeOf(options: { gitDir: string; commit: string }): Promise<string> {
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(options.commit)) throw new WorkspaceError("invalid_path", "a commit is named by its full ID");
+    return (await this.#run(["rev-parse", "--verify", `${options.commit}^{tree}`], { gitDir: options.gitDir })).stdout.trim();
+  }
+
   async #base(gitDir: string): Promise<string> {
     return (await this.#run(["rev-parse", "--verify", "refs/nn/base"], { gitDir })).stdout.trim();
   }

@@ -12,6 +12,7 @@ import { GitBridge, LocalWorkspaces, SandboxLauncher } from "@nimblenewt/worker"
 // Card P09, end to end through startController with the local worker over a real git repository and the real sandbox: an agent submits its work (work.end), a second agent approves it, the release commits it, and the
 // integrator's landing is gated on the project's required checks (the strict profile's tests and review). The contract's test command runs in bubblewrap on a copy of the integrated tree; while it fails nothing is landed, the
 // results are on the request bound to that tree and the author gets them in its inbox. Once it passes (the owner's contract change), the landing lands exactly that tree and the review is the one given for that patch.
+// The approval queues the submission in the landing queue (card P10): the refused landing leaves it there and the landing that lands takes it out.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -102,14 +103,17 @@ test("a landing is made only when the project's required checks pass on the inte
     await until(async () => { await c.dispatch!.dispatcher.tick(); return (await s.workEnd.get(attempt))?.state === "done"; }, "the ending was not completed");
     const submissionId = (await s.workEnd.get(attempt))!.submissionId!;
     const sub = (await api(c, boot.token, "submission.get", { submissionId })).result.item;
+    // The landing branch is named before the review, so the controller queues the approved submission in the landing queue by itself (card P10): a landing lands only the queue's head, and the gate judges that submission.
+    assert.equal((await api(c, boot.token, "project.branches.change", { project, landing: "main" }, "branch-main")).ok, true);
     assert.equal((await api(c, rev, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: submissionId, verdict: "approve" }, "rv-1")).ok, true);
+    const queuedNow = async () => ((await api(c, boot.token, "landing.queue.list", { projectId: project })).result?.items ?? []).map((e: { submissionId: string }) => e.submissionId);
+    assert.deepEqual(await queuedNow(), [submissionId], "the approval queued the submission");
     const released = await api(c, boot.token, "workspace.request", { operation: "release", taskId: task, reason: "commit the reviewed work", submissionId }, "rel-1");
     assert.equal(released.result?.state, "done", JSON.stringify(released));
 
     // The contract's test command, set by the owner: it fails while src/a.ts holds the agent's change.
     const check = (want: string) => [{ name: "unit", run: ["/opt/node/bin/node", "-e", `const s = require('node:fs').readFileSync('src/a.ts', 'utf8'); console.log('checked ' + s.trim()); process.exit(s.includes(${JSON.stringify(want)}) ? 0 : 1);`], timeoutSeconds: 60 }];
     assert.equal((await api(c, boot.token, "contract.set", { taskId: task, expectedVersion: 0, checks: check("a = 1") }, "ct-1")).ok, true);
-    assert.equal((await api(c, boot.token, "project.branches.change", { project, landing: "main" }, "branch-main")).ok, true);
     await s.principals.enroll(owner, { commandId: "enroll-integrator", kind: "agent", name: "integrator", grants: [] });
     const taken = await api(c, boot.token, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 3_600_000, holder: "integrator" }, "lease-main");
     assert.equal(taken.ok, true, JSON.stringify(taken));
@@ -136,6 +140,7 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.match(notes[0]!.text!, /was not landed: the required checks did not all pass/);
     assert.match(notes[0]!.text!, /- unit: exit 1: checked export const a = 2;/);
     assert.deepEqual(await readdir(copies), [], "the check's copy of the tree is gone");
+    assert.deepEqual(await queuedNow(), [submissionId], "a landing the checks refused leaves the submission in the queue");
 
     // The owner's contract now expects the change: the same tree passes, and exactly it is landed.
     assert.equal((await api(c, boot.token, "contract.set", { taskId: task, expectedVersion: 1, checks: check("a = 2") }, "ct-2")).ok, true);
@@ -146,6 +151,7 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.match(landed.result.checks.results[1].summary, /approved by agent:.* for this tree/);
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
     assert.equal(landingCheckCalls, 2, "the checks ran again for the second landing: an earlier result is never reused");
+    assert.deepEqual([landed.result.queued?.submissionId, await queuedNow()], [submissionId, []], "the landing took exactly its submission out of the queue");
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();
   } finally { for (const f of finishes) f(); await c.close(); await launcher.stop().catch(() => undefined); try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing to open */ } rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
