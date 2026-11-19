@@ -168,8 +168,13 @@ function localNames(): { users: string[]; hosts: string[] } {
   return { users, hosts };
 }
 
+/**
+ * What may end just before a name without making it part of a longer word: anything but a letter or digit, and also the letter of an escaped control character (`\n`, `\t`, ...
+ * in JSON or inspected text, where a name often starts the next line) or the `m` of a terminal colour code (written raw or escaped).
+ */
+const NAME_START = String.raw`(?<![A-Za-z0-9](?<!\\[nrtbfv]|(?:\x1b|\\x1[bB]|\\u001[bB])\[[0-9;]*m))`;
 /** A name as a whole word; a space in it matches any run of blanks, line breaks included (console output wraps). */
-const wholeWord = (name: string): RegExp => new RegExp(String.raw`(?<![A-Za-z0-9])${escapeRe(name).replace(/ +/g, String.raw`\s+`)}(?![A-Za-z0-9])`, "gi");
+const wholeWord = (name: string): RegExp => new RegExp(String.raw`${NAME_START}${escapeRe(name).replace(/ +/g, String.raw`\s+`)}(?![A-Za-z0-9])`, "gi");
 /** The name and its parts of four or more characters (a surname alone, "Robert.Hostetter", "robert_hostetter"). */
 const withPieces = (name: string): string[] => { const tail = name.split("\\").pop()!; return [name, tail, tail.replace(/[\s._-]+/g, ""), ...tail.split(/[\s._-]+/).filter((p) => p.length >= 4)]; };
 /** The 8.3 short-name prefix of a name: its first six letters and digits (ROBERT~1, ROBERT~1.DES). */
@@ -210,14 +215,29 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/<host>(?:\.[A-Za-z0-9-]+)+/g, "<host>");
   // An account on this machine that is not among the known names (another account at the console, such as the owner when the runner has its own account): what follows
   // `<host>\` is an account name. Not after a backslash (a UNC path, whose next part is a share).
-  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>)[^\s\\/:"',;()<>]+/g, "<host>$1<user>");
+  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>)[^\s\\/:"',;()<>\x1b]+/g, "<host>$1<user>");
   // Home directories: any drive's Users (or Documents and Settings) root, whatever the name; the name runs to the next separator or quote, spaces included.
   out = out.replace(new RegExp(String.raw`[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP}[^\\/"'*?|\r\n:]*[^\\/"'*?|\r\n:\s]`, "gi"), "<home>");
   // UNC server names (`\\server\share`, or `\\\\server` escaped), the whole run of backslashes kept. Not where the run continues a path (after a drive `C:`, a name
-  // character, a dot, a closing bracket or brace, or a placeholder such as `<home>`): in JSON-escaped text every separator is written `\\`, and
+  // character, a dot, `$`, `?`, a dash, a closing bracket or brace, or a placeholder such as `<home>`): in JSON-escaped text every separator is written `\\`, and
   // `"C:\\Program Files\\WindowsApps"` would otherwise lose each folder name to `<host>` (and `<host>\\<user>` its `<user>`). A name in such a path is treated as it is in
-  // the unescaped path, where a single backslash was never read as a server.
-  out = out.replace(/(?<![\w.$)\]}\\-]|<[a-z]+>)(?<!\b[A-Za-z]:)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string) => (server === "?" || server === "." ? m : `${run}<host>`));
+  // the unescaped path, where a single backslash was never read as a server. A letter that ends an escaped control character (`\n`, `\r`, `\t`, ... in JSON or inspected
+  // text, where a UNC path often starts the next line) or a terminal colour code does not end a name: there the run starts a UNC path, as it does after a blank. After an
+  // escape written with k backslashes the text is escaped that many times over, so only a run of at least 2k is a UNC start (`\\r\\n\\\\\\\\server` twice escaped: the
+  // `\\` of `\\n` is the escape itself, the eight are the UNC prefix). The look back is at most 24 characters, so the rule stays linear on long lines.
+  // A long UNC path (`\\?\UNC\server\share`, escaped or not) names its server after `UNC`.
+  out = out.replace(/(?<!\\)(\\{2,}\?\\+UNC\\+)([^\\/"'\s]+)/gi, "$1<host>");
+  const continuesPath = (run: string, before: string): boolean => {
+    const escape = /(\\+)[nrtbfv]$/.exec(before);
+    if (escape !== null) return run.length < 2 * escape[1]!.length;
+    if (/(?:\x1b|\\x1[bB]|\\u001[bB])\[[0-9;]*m$/.test(before)) return false;
+    return /(?:[\w.$?)\]}-]|<[a-z]+>|\b[A-Za-z]:)$/.test(before);
+  };
+  out = out.replace(/(?<!\\)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string, at: number, all: string) => (server === "?" || server === "." || continuesPath(run, all.slice(Math.max(0, at - 24), at)) ? m : `${run}<host>`));
+  // Accounts in an escaped access list (`CORP\\bob:(F)` inside JSON or inspected text, where the lines below are one line and the line rule does not see them): the account
+  // after `DOMAIN\\` goes unless it is well known. The domain stays, as it does for a UNC share. The look ahead to the run comes first, so the look back over the domain is
+  // tried only where a run starts.
+  out = out.replace(/(?<!\\)(?=\\\\)(?<=(?:^|[\s"'(]|\\[nrtbfv])[^\\/"'\s:()<>]+)(\\{2,})([^\\/"'\r\n\t:()<>]+?)(?=:\((?:[A-Z]{1,5})[,)(])/g, (m, run: string, name: string) => (WELL_KNOWN.test(name.trim()) ? m : `${run}<user>`));
   // Accounts in an access list, line by line: everything before the colon of `account:(RIGHTS)` is the account (spaces included); only well-known ones and placeholders stay.
   out = out.split("\n").map((line) => {
     const cr = line.endsWith("\r") ? "\r" : "";
@@ -232,7 +252,7 @@ export function redact(text: string, names: RedactionNames = {}): string {
     if (m === null) return line;
     const account = m[2]!.trim();
     // A SID here was already redacted by class above, so it stays (a well-known one, or its placeholder form).
-    const kept = account.split("\\").every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-\d+(?:-(?:\d+|<(?:domain|account|session|vm|other)>))+$/.test(account) ? account : "<user>";
+    const kept = account.split(/\\+/).every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-\d+(?:-(?:\d+|<(?:domain|account|session|vm|other)>))+$/.test(account) ? account : "<user>";
     return `${m[1]!}${kept}:${m[3]!}${cr}`;
   }).join("\n");
   return out;
@@ -241,7 +261,11 @@ export function redact(text: string, names: RedactionNames = {}): string {
 /** Redacts, then cuts to `limit` characters, saying so. */
 export function redactAndCut(text: string, names: RedactionNames = {}, limit = 2048): string {
   const clean = redact(text, names);
-  return clean.length <= limit ? clean : `${clean.slice(0, limit)}...[cut, ${clean.length - limit} more characters]`;
+  if (clean.length <= limit) return clean;
+  // The note counts toward the limit: a field checked against a maximum length (a containment case's detail is at most 400 characters, and redactReport cuts it to 400)
+  // must still fit when redaction made it longer (a short name becomes `<host>\<user>`). The note is sized for the longest count it can carry.
+  const keep = Math.max(0, limit - `...[cut, ${clean.length} more characters]`.length);
+  return `${clean.slice(0, keep)}...[cut, ${clean.length - keep} more characters]`;
 }
 
 /** The last gate: redact, cut, and if the result still holds anything that looks personal, withhold the whole field. */

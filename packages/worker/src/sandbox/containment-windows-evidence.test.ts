@@ -135,3 +135,12 @@ test("redacting a report hides names in its free text only; the gate judges the 
   assert.ok("report" in parseReport(text));
   assert.deepEqual(blockers(red), blockers(original));
 });
+
+test("a case detail that redaction makes longer than 400 characters is cut to fit, so the redacted report still reads as a report", () => {
+  const detail = "PC\\ab ".repeat(50);
+  assert.ok(detail.length <= 400);
+  const original: ContainmentReport = { ...winReport(), cases: winReport().cases.map((c) => ({ ...c, detail })), windows: windowsEvidenceFromSummary(summary(), { session: "service" }).evidence };
+  const red = redactReport(original, { users: ["ab"], hosts: ["PC"] });
+  assert.ok(red.cases.every((c) => c.detail.length <= 400 && !/\bab\b/.test(c.detail)), red.cases[0]!.detail);
+  assert.ok("report" in parseReport(raw(red)), JSON.stringify(parseReport(raw(red))));
+});

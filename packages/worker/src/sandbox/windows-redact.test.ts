@@ -107,6 +107,31 @@ test("a JSON-escaped local path keeps its folder names: two backslashes after a 
   assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
 });
 
+test("escaped multi-line text: a server, a known name or an account at the start of a line (after \\n, \\t or a colour code) still goes", () => {
+  // A UNC path on the next line of JSON or inspected output: the n of the escaped line break does not end a name, at one level of escaping and at two.
+  assert.equal(redact(JSON.stringify("first line\n\\\\fileserver01\\share"), names), JSON.stringify("first line\n\\\\<host>\\share"));
+  assert.equal(redact(JSON.stringify("a\t\\\\fs2\\s"), names), JSON.stringify("a\t\\\\<host>\\s"));
+  const twice = JSON.stringify(JSON.stringify("x\r\n\\\\fs3\\s\r\nnext"));
+  assert.equal(redact(twice, names), JSON.stringify(JSON.stringify("x\r\n\\\\<host>\\s\r\nnext")));
+  assert.equal(redact("\x1b[31m\\\\fs4\\s", names), "\x1b[31m\\\\<host>\\s");
+  // A long UNC path names its server after UNC; a long local path keeps its drive.
+  assert.equal(redact("\\\\?\\UNC\\fs5\\share", names), "\\\\?\\UNC\\<host>\\share");
+  assert.equal(redact(JSON.stringify("\\\\?\\UNC\\fs5\\share \\\\?\\C:\\x"), names), JSON.stringify("\\\\?\\UNC\\<host>\\share \\\\?\\C:\\x"));
+  // Known names right after an escaped line break or a colour code, and in the last gate.
+  assert.equal(redact(JSON.stringify("ran as\nJimBob"), names), JSON.stringify("ran as\n<user>"));
+  assert.equal(redact("\x1b[32mJimBob\x1b[0m on \\x1b[1mDESKTOP-4F2K9", names), "\x1b[32m<user>\x1b[0m on \\x1b[1m<host>");
+  assert.equal(scrub(JSON.stringify("x\tDESKTOP-4F2K9\\someone"), names), JSON.stringify("x\t<host>\\<user>"));
+  assert.equal(redact("DESKTOP-4F2K9\\someone\x1b[31m\\\\fs6\\s", names), "<host>\\<user>\x1b[31m\\\\<host>\\s");
+  // An access list printed escaped is one line: an account after an escaped DOMAIN\\ goes unless it is well known; the rights, the domain and the path stay.
+  const acl = ["C:\\x NT AUTHORITY\\SYSTEM:(I)(F)", "      CORP\\bob:(OI)(CI)(M)", "      CORP\\John Smith:(F)", "      APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(RX)", "      BUILTIN\\Users:(RX)"].join("\r\n");
+  assert.equal(redact(JSON.stringify(acl), names), JSON.stringify(acl.replace("CORP\\bob", "CORP\\<user>").replace("CORP\\John Smith", "CORP\\<user>")));
+  assert.equal(redact(JSON.stringify("C:\\x\\App Everyone:(R)"), names), JSON.stringify("C:\\x\\App Everyone:(R)"));
+  // Linear on long lines of escapes, colour codes and domains.
+  const started = Date.now();
+  for (const long of ["a\\n".repeat(70_000), "\x1b[31m".repeat(40_000), " CORP\\\\bob".repeat(30_000), ` CORP${"\\".repeat(100_000)}b:(F)`]) redact(long, names);
+  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+});
+
 test("accounts in an access list go unless they are well known; rights stay", () => {
   const acl = [
     "C:\\Jobs\\work NT AUTHORITY\\SYSTEM:(OI)(CI)(F)", "      BUILTIN\\Administrators:(OI)(CI)(F)", "      OTHERBOX\\Dana:(OI)(CI)(M)", "      Dana2:(I)(OI)(CI)(RX)",
@@ -179,6 +204,10 @@ test("redaction is applied before the cut, so a cut cannot leave half a name; th
   const out = redactAndCut(long, names);
   assert.ok(!out.includes("Ali"), out.slice(-60));
   assert.match(out, /\[cut, \d+ more characters\]$/);
+  assert.ok(out.length <= 2048, String(out.length));
+  // The note counts toward the limit, also when redaction made the text longer than the limit.
+  const grows = "PC\\ab ".repeat(60);
+  for (const limit of [400, 401, 4000]) { const cut = scrub(grows, { users: ["ab"], hosts: ["PC"] }, limit); assert.ok(cut.length <= limit && /\[cut, \d+ more characters\]$/.test(cut) === (redact(grows, { users: ["ab"], hosts: ["PC"] }).length > limit), `${limit}: ${cut.length}`); }
   assert.equal(redactAndCut("short", names), "short");
   const once = redact("C:\\Users\\Alice S-1-5-21-7-8-9-1001 and S-1-5-19", names);
   assert.ok(!/Alice|7-8-9/.test(once), once);
