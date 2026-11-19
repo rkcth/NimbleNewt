@@ -1,6 +1,6 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
-import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
+import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import type { NormalizedRecipe } from "./recipe.js";
 
 /** Microsoft's publisher id for packages that ship with Windows itself (publisher `CN=Microsoft Windows, O=Microsoft Corporation, ...`). */
@@ -37,6 +37,30 @@ export const AUTOLOGON_ACKNOWLEDGEMENT = "I accept that this computer signs in a
 /** Card A03b: whether a virtual machine fallback is qualified. It is not, and this is the recorded reason (shown in the capacity notes and in every launch record). */
 export const VM_FALLBACK_DECISION =
   "VM fallback not qualified and not implemented: Windows Sandbox meets the service lifecycle in its session-dependent forms (owner session present, or the owner's explicit auto-login and lock mode), and a separate Windows VM would need its own licence and deployment review; the owner declined evaluation media on 2026-10-16. With nobody signed in and no opt-in, capacity stays unavailable.";
+
+/**
+ * What the owner is told when `wsb start` answers E_ACCESSDENIED (0x80070005, exit 2147942405) and this process is not known to run in the active console session as the console
+ * user, as for the own-hardware runner of run 44501483353 (whose cause was not established).
+ */
+export const INTERACTIVE_RUNNER_HINT = "start the runner interactively with run.cmd as the console user (not as a service)";
+
+/**
+ * The explanation of an access-denied `wsb start`, from the session facts about this process at that moment (undefined when they could not be read). These facts are not a
+ * condition of admission: the research of 2026-10-16 started Windows Sandbox from SYSTEM in session 0 while the owner was signed in, and saw this same error from a mapped output
+ * folder the sandbox could not use. So both causes are named, the session one first when a fact is not "yes".
+ */
+export function describeWsbAccessDenied(session: WindowsSession | undefined): string {
+  const fact = (v: boolean | undefined): string => (v === undefined ? "not determined" : v ? "yes" : "no");
+  const facts = `in the active console session: ${fact(session?.processInConsoleSession)}; the console user: ${fact(session?.processIsConsoleUser)}`;
+  const folders = "check that Windows Sandbox may use the shared folders (the research of 2026-10-16 saw this error from an output folder it could not use)";
+  if (session?.processInConsoleSession === true && session.processIsConsoleUser === true) return `this process (${facts}) is where Windows Sandbox expects it; ${folders}`;
+  return `this process (${facts}): ${INTERACTIVE_RUNNER_HINT}; otherwise ${folders}`;
+}
+
+/** Whether a `wsb start` result is Windows' access-denied answer: exit 2147942405 (0x80070005 read unsigned), its signed form, or the code in the text. */
+export function isWsbAccessDenied(code: number | null, text: string): boolean {
+  return code === 0x80070005 || code === 0x80070005 - 0x1_0000_0000 || /0x80070005|E_ACCESSDENIED/i.test(text);
+}
 
 export type WindowsMode = "owner-session" | "autologon-lock";
 

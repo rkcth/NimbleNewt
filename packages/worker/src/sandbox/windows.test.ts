@@ -10,8 +10,8 @@ import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend,
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning } from "./windows-cleanup.js";
-import { accessFromProbe, ownerFromProbe, packageFromProbe, signatureFromProbe } from "./windows-real.js";
-import { ACCEPTED_SIGNATURE_KINDS, MICROSOFT_STORE_PUBLISHER_ID, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
+import { accessFromProbe, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
+import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
 // Windows Sandbox itself confines anything. That is windows-real.test.ts, which runs only on a Windows machine with NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
@@ -22,6 +22,8 @@ const STAGING = "C:\\ProgramData\\NimbleNewt\\staging";
 const RUNNER = "C:\\Program Files\\NimbleNewt\\worker\\dist\\sandbox\\windows-runner.js";
 const MS = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
 const key = (p: string): string => p.toLowerCase();
+/** The runner started interactively by the console user: it runs in the active console session, as that user. */
+const ME = { processInConsoleSession: true, processIsConsoleUser: true } as const;
 
 type Guest = (config: string, args: readonly string[]) => ProcessResult;
 const ok = (stdout = "", code = 0): ProcessResult => ({ code, stdout, stderr: "", timedOut: false });
@@ -38,7 +40,7 @@ class SimHost implements WindowsHost {
   /** As found on the owner's Windows 11 machine (build 10.0.26200): the Windows-provided package. */
   pkg: WindowsPackageInfo | undefined = { name: "MicrosoftWindows.WindowsSandbox", publisherId: WINDOWS_PUBLISHER_ID, familyName: `MicrosoftWindows.WindowsSandbox_${WINDOWS_PUBLISHER_ID}`, version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" };
   sigs = new Map<string, WindowsSignature>();
-  sess: WindowsSession = { consoleUser: "PC\\robert", locked: false };
+  sess: WindowsSession = { ...ME, consoleUser: "PC\\robert", locked: false };
   auto: WindowsAutologon = { enabled: true, user: "PC\\robert", plaintextPasswordStored: false };
   task: WindowsLockTask = { present: true, enabled: true, executable: "C:\\Program Files\\NimbleNewt\\lock.exe" };
   writable = new Map<string, string[]>();
@@ -457,11 +459,36 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     const a = await health(nobody);
     assert.equal(a.healthy, false);
     assert.match(a.reason!, /nobody is signed in.*0x8000401A.*auto-login and lock mode/);
-    const other = new SimHost(); other.sess = { consoleUser: "PC\\guest" };
+    const other = new SimHost(); other.sess = { ...ME, consoleUser: "PC\\guest" };
     assert.match((await health(other)).reason!, /not the configured owner/);
     const broken = new SimHost(); broken.session = async () => { throw new Error("wtsapi32 failed"); };
     assert.match((await health(broken)).reason!, /could not be examined: wtsapi32 failed/);
     for (const h of [nobody, other, broken]) assert.deepEqual(h.wsbCommands, []);
+  });
+
+  test("whether this process is in the console session as the console user is not a condition: the research started Windows Sandbox from SYSTEM in session 0 with the owner signed in", async () => {
+    const cases: WindowsSession[] = [
+      { ...ME, consoleUser: "PC\\robert", processInConsoleSession: false },
+      { ...ME, consoleUser: "PC\\robert", processIsConsoleUser: false },
+      { consoleUser: "PC\\robert" },
+    ];
+    for (const sess of cases) {
+      const host = new SimHost(); host.sess = sess;
+      const h = await health(host);
+      assert.equal(h.healthy, true, `${JSON.stringify(sess)}: ${h.reason}`);
+      assert.ok(host.wsbCommands.includes("start"));
+      const j = new SimHost(); const { job, jobDir } = prepared(j); j.sess = sess;
+      assert.equal((await runWindowsJob(j, job, [], jobDir)).exitCode, 0);
+      const auto = new SimHost(); auto.sess = { ...sess, locked: true };
+      const ah = await health(auto, { autologonLock: OPT_IN });
+      assert.equal(ah.healthy, true, ah.reason);
+    }
+    // The existing session conditions are unchanged by the facts: someone else at the console, or an unlocked desktop in auto-login mode, still refuse.
+    const other = new SimHost(); other.sess = { ...ME, consoleUser: "PC\\guest" };
+    assert.match((await health(other)).reason!, /not the configured owner/);
+    const unlocked = new SimHost(); unlocked.sess = { ...ME, consoleUser: "PC\\robert", locked: false };
+    assert.match((await health(unlocked, { autologonLock: OPT_IN })).reason!, /not locked/);
+    assert.equal(INTERACTIVE_RUNNER_HINT, "start the runner interactively with run.cmd as the console user (not as a service)");
   });
 
   test("the probe must show confinement: each way the guest could get out makes the host unhealthy", async () => {
@@ -655,6 +682,18 @@ describe("Windows launcher: the client package and its signatures (exact allowli
   });
 
   test("the real probes' answers are read exactly: package fields, signature status, Windows' message without the file's path", () => {
+    // The session probe: nobody signed in, the two facts about this process only when determined, the account by SID first and otherwise only by the exact full name.
+    assert.deepEqual(sessionFromProbe({ sessionId: null, user: null, domain: null, flags: null }), {});
+    assert.deepEqual(sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", flags: 1, processSessionId: 1, processUser: "PC\\robert", sameSid: true }),
+      { consoleUser: "PC\\robert", locked: false, processInConsoleSession: true, processIsConsoleUser: true });
+    assert.deepEqual(sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", flags: 0, processSessionId: 0, processUser: "NT AUTHORITY\\SYSTEM", sameSid: false }),
+      { consoleUser: "PC\\robert", locked: true, processInConsoleSession: false, processIsConsoleUser: false }, "a service: session 0, another account");
+    assert.equal(sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", processSessionId: 1, processUser: "pc\\ROBERT", sameSid: null }).processIsConsoleUser, true, "by name when no SID could be compared");
+    assert.equal(sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", processSessionId: 1, processUser: "OTHER\\robert", sameSid: null }).processIsConsoleUser, false, "the name must match whole");
+    assert.equal(sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", processSessionId: 1, processUser: "PC\\robert", sameSid: false }).processIsConsoleUser, false, "the SID decides");
+    const unknown = sessionFromProbe({ sessionId: 1, user: "robert", domain: "PC", processSessionId: "1", processUser: "", sameSid: "yes" });
+    assert.deepEqual(unknown, { consoleUser: "PC\\robert" }, "nothing undetermined is reported as a fact");
+    assert.equal(sessionFromProbe({ sessionId: -1, user: "robert", processSessionId: -1 }).processInConsoleSession, undefined);
     assert.equal(packageFromProbe(null), undefined);
     assert.deepEqual(packageFromProbe({ name: "MicrosoftWindows.WindowsSandbox", publisherId: "cw5n1h2txyewy", familyName: "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" }),
       { name: "MicrosoftWindows.WindowsSandbox", publisherId: "cw5n1h2txyewy", familyName: "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" });
@@ -689,7 +728,7 @@ describe("Windows launcher: the client package and its signatures (exact allowli
 });
 
 describe("Windows launcher: explicit auto-login and lock mode", () => {
-  const on = (host: SimHost, behave?: Parameters<typeof probeGuest>[1]) => { host.guest = probeGuest(host, behave); host.sess = { consoleUser: "PC\\robert", locked: true }; return windowsSandboxBackend(options(host, { autologonLock: OPT_IN })); };
+  const on = (host: SimHost, behave?: Parameters<typeof probeGuest>[1]) => { host.guest = probeGuest(host, behave); host.sess = { ...ME, consoleUser: "PC\\robert", locked: true }; return windowsSandboxBackend(options(host, { autologonLock: OPT_IN })); };
 
   test("healthy only with a locked console, local auto-login for the owner, a protected lock task; the notes say what the exposure is", async () => {
     const host = new SimHost();
@@ -700,9 +739,9 @@ describe("Windows launcher: explicit auto-login and lock mode", () => {
 
   test("an unlocked or unknown lock state admits nothing", async () => {
     const host = new SimHost(); const b = on(host);
-    host.sess = { consoleUser: "PC\\robert", locked: false };
+    host.sess = { ...ME, consoleUser: "PC\\robert", locked: false };
     assert.match((await b.health()).reason!, /not locked/);
-    host.sess = { consoleUser: "PC\\robert" };
+    host.sess = { ...ME, consoleUser: "PC\\robert" };
     assert.match((await b.health()).reason!, /cannot be determined|could not be determined/);
     assert.deepEqual(host.wsbCommands, []);
   });
@@ -732,8 +771,8 @@ describe("Windows launcher: explicit auto-login and lock mode", () => {
   test("the lock is verified again after the sandbox starts and before the command: a desktop unlocked in between stops the job", async () => {
     const host = new SimHost(); const backend = on(host);
     const { job, jobDir } = prepared(host, { autologonLock: OPT_IN }, recipe());
-    host.sess = { consoleUser: "PC\\robert", locked: true };
-    host.afterStart = () => { host.sess = { consoleUser: "PC\\robert", locked: false }; };
+    host.sess = { ...ME, consoleUser: "PC\\robert", locked: true };
+    host.afterStart = () => { host.sess = { ...ME, consoleUser: "PC\\robert", locked: false }; };
     const out = await runWindowsJob(host, { ...job, settings: { ...job.settings, mode: "autologon-lock", lockHelper: OPT_IN.lockHelper } }, [], jobDir);
     assert.equal(out.exitCode, EXIT_REFUSED);
     assert.match(out.stderr, /not locked/);
@@ -858,7 +897,7 @@ describe("Windows launcher: running a job", () => {
     host.sess = {};
     const a = await runWindowsJob(host, job, [], jobDir);
     assert.equal(a.exitCode, EXIT_REFUSED); assert.match(a.stderr, /nobody is signed in/);
-    host.sess = { consoleUser: "PC\\robert" }; host.pkg = undefined;
+    host.sess = { ...ME, consoleUser: "PC\\robert" }; host.pkg = undefined;
     const b = await runWindowsJob(host, job, [], jobDir);
     assert.equal(b.exitCode, EXIT_REFUSED); assert.match(b.stderr, /not installed/);
     assert.deepEqual(host.wsbCommands, []);
@@ -967,6 +1006,66 @@ describe("Windows launcher: running a job", () => {
     const pa = prepared(a);
     const oa = await runWindowsJob(a, pa.job, [], pa.jobDir);
     assert.match(oa.stderr, /no user session is available \(0x8000401A/);
+    // Access denied from wsb start is explained with the session facts of this process at that moment, whether the code or only the text says so.
+    for (const failure of [{ code: 2147942405, stdout: "", stderr: "Access is denied.", timedOut: false }, { code: -2147024891, stdout: "", stderr: "", timedOut: false }, { code: 1, stdout: "", stderr: "Access is denied. (0x80070005 (E_ACCESSDENIED))", timedOut: false }]) {
+      const d = new SimHost(); d.startFailure = failure;
+      const pd = prepared(d); d.sess = { consoleUser: "PC\\robert", locked: false, processInConsoleSession: false, processIsConsoleUser: false };
+      const od = await runWindowsJob(d, pd.job, [], pd.jobDir);
+      const [first, ...rest] = od.stderr.trimEnd().split("\n");
+      assert.equal(first, `failed: Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(failure.code)}): ${describeWsbAccessDenied(d.sess)}`);
+      // Then every mapped folder, with its access list read back while the job's grants are still in place (the share account's grant and the .git deny are visible).
+      const shares = sharesFor(pd.job.recipe, `${pd.jobDir}\\guest`);
+      const heads = rest.filter((l) => l.startsWith("shared "));
+      assert.equal(heads.length, shares.length, od.stderr);
+      for (const [i, s] of shares.entries()) assert.equal(heads[i], `shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why}):`);
+      // Each entry on its own indented line (a public record redacts access lists line by line), the folder's head line first.
+      const entriesOf = (why: string): string[] => { const at = rest.findIndex((l) => l.includes(`, ${why}):`)); const next = rest.findIndex((l, i) => i > at && l.startsWith("shared ")); return rest.slice(at + 1, next === -1 ? undefined : next); };
+      assert.ok(rest.every((l) => l.startsWith("shared ") || l.startsWith("    ")), od.stderr);
+      assert.equal(entriesOf("work")[0], "    NT AUTHORITY\\SYSTEM:(OI)(CI)(F)");
+      assert.ok(entriesOf("work").some((l) => /^ {4}\S*robert:\(OI\)\(CI\)M$/i.test(l)), od.stderr);
+      assert.ok(entriesOf("protected").some((l) => /^ {4}\S*robert:\(DENY\)\(OI\)\(CI\)\(W,DC\)$/i.test(l)), od.stderr);
+      assert.equal(d.runs.filter((r) => r.file.toLowerCase().endsWith("icacls.exe") && r.args.length === 1).length, shares.length, "one read-back per mapped folder");
+      // The health probe's reason is the first line only, whole; the read-back stays out of it.
+      const dh = new SimHost(); dh.startFailure = failure;
+      const hr = (await windowsSandboxBackend(options(dh)).health()).reason!;
+      assert.match(hr, /refused the start \(access denied.*check that Windows Sandbox may use the shared folders \(the research of 2026-10-16 saw this error from an output folder it could not use\)$/);
+      assert.doesNotMatch(hr, /shared C:\\nn/);
+      assert.match(od.stderr, /in the active console session: no; the console user: no\): start the runner interactively with run\.cmd as the console user \(not as a service\); otherwise check that Windows Sandbox may use the shared folders/);
+    }
+    {
+      // A read-back that fails, throws or times out leaves the start's reason in place and only marks that folder; a long list is cut between entries, never inside a name.
+      const f = new SimHost(); f.startFailure = { code: 2147942405, stdout: "", stderr: "", timedOut: false };
+      const pf = prepared(f);
+      const shares = sharesFor(pf.job.recipe, `${pf.jobDir}\\guest`);
+      const long = Array.from({ length: 40 }, (_, i) => `CORP\\someone.withalongname${String(i)}:(OI)(CI)(RX)`);
+      let n = 0;
+      const plain = f.run.bind(f);
+      f.run = async (file, args, options) => {
+        if (!(file.toLowerCase().endsWith("icacls.exe") && args.length === 1 && f.startFailure !== undefined && f.runs.some((r) => r.args[0] === "start"))) return plain(file, args, options);
+        n++;
+        if (n === 1) throw new Error("spawn EPERM");
+        if (n === 2) return { code: null, stdout: "", stderr: "", timedOut: true };
+        return ok(`${args[0]!} ${long.join("\r\n       ")}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`);
+      };
+      const of = await runWindowsJob(f, pf.job, [], pf.jobDir);
+      const lines = of.stderr.trimEnd().split("\n");
+      assert.match(lines[0]!, /^failed: Windows Sandbox refused the start \(access denied/);
+      assert.equal(lines[1], `shared ${shares[0]!.guest} <- ${shares[0]!.host} (${shares[0]!.readOnly ? "read-only" : "writable"}, ${shares[0]!.why}): access list not readable (icacls could not be run)`);
+      assert.match(lines[2]!, /: access list not readable \(icacls exit null, timed out\)$/);
+      const kept = lines.filter((l) => /^ {4}CORP\\someone/.test(l));
+      assert.ok(kept.length > 0 && kept.every((l) => long.includes(l.trim())), of.stderr);
+      assert.ok(kept.join("").replace(/ {4}/g, "").length <= 600 * (shares.length - 2));
+      assert.ok(lines.some((l) => /^ {4}… \d+ more entries$/.test(l)), of.stderr);
+    }
+    // In the console session as the console user, the shared folders are named instead; a session that cannot be read leaves both facts undetermined.
+    assert.equal(describeWsbAccessDenied({ consoleUser: "PC\\robert", ...ME }), "this process (in the active console session: yes; the console user: yes) is where Windows Sandbox expects it; check that Windows Sandbox may use the shared folders (the research of 2026-10-16 saw this error from an output folder it could not use)");
+    assert.match(describeWsbAccessDenied(undefined), /^this process \(in the active console session: not determined; the console user: not determined\): start the runner interactively/);
+    assert.match(describeWsbAccessDenied({ consoleUser: "PC\\robert", processInConsoleSession: true }), /session: yes; the console user: not determined\): start the runner/);
+    const t = new SimHost(); t.startFailure = { code: 2147942405, stdout: "", stderr: "", timedOut: false };
+    const pt = prepared(t); const plain = t.session.bind(t); let reads = 0;
+    t.session = async () => { if (++reads > 1) throw new Error("wtsapi32 failed"); return plain(); };
+    assert.match((await runWindowsJob(t, pt.job, [], pt.jobDir)).stderr, /refused the start .*session: not determined/);
+    assert.equal(isWsbAccessDenied(1, "Error 0x8000401A"), false); assert.equal(isWsbAccessDenied(5, ""), false); assert.equal(isWsbAccessDenied(null, ""), false);
     const b = new SimHost(); b.guest = () => ({ code: null, stdout: "partial", stderr: "", timedOut: true });
     const pb = prepared(b);
     const ob = await runWindowsJob(b, pb.job, [], pb.jobDir);

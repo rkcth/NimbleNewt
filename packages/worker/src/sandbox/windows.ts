@@ -6,6 +6,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { randomUUID } from "node:crypto";
 import { EXIT_BUSY, jobDirFor, jobFile, lockFile, releaseJob, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import type { WindowsHost } from "./windows-host.js";
+import { cutWhole } from "./windows-redact.js";
 import {
   AUTOLOGON_ACKNOWLEDGEMENT, DEFAULT_MIN_VERSION, GUEST_PATHS, LOCK_TASK_NAME, VM_FALLBACK_DECISION,
   capabilityNotes, checkIdentity, packageFamilyName, checkWindowsHostPath, checkWindowsProgramPath, compareVersions, guestCommand, guestPathFor, launchScript, overlapsWin, sameAccount, sharesFor, verifyClient, verifySession,
@@ -170,7 +171,9 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
       if (out.exitCode === EXIT_BUSY) return Date.now() - lastHealthy < PROBE_MS_CACHE ? { healthy: true, backend: "windows-sandbox", version: clientVersion, notes: [...notes, "a job is running; the last confinement probe still stands"] } : no("a job is running, so the confinement probe could not be repeated");
       if (out.exitCode !== 0 || !out.stdout.includes("confined")) {
         const why: Record<number, string> = { 11: "the guest could not write its own checkout", 12: "the guest could write to a read-only input", 13: "the guest could write inside the protected .git", 14: "the guest reached the network" };
-        return no(`the confinement probe failed: ${why[out.exitCode] ?? (out.stderr.trim().slice(0, 300) || `exit ${out.exitCode}`)}`);
+        // The job's reason comes first; after an access-denied start the shared folders' read-back access lists follow on lines starting "shared " (kept out of this summary).
+        const reason = cutWhole(out.stderr.split(/\nshared /)[0]!.trim(), 600);
+        return no(`the confinement probe failed: ${why[out.exitCode] ?? (reason || `exit ${out.exitCode}`)}`);
       }
       if (!host.exists(`${probeDir}\\work\\ok.txt`) || host.exists(`${tools}\\denied.txt`) || host.exists(`${probeDir}\\work\\.git\\denied.txt`)) return no("the confinement probe passed in the guest but the host does not show the expected files");
       lastHealthy = Date.now();

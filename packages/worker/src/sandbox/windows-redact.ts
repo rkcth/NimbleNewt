@@ -258,6 +258,11 @@ export function redact(text: string, names: RedactionNames = {}): string {
   // tried only where a run starts. A domain the UNC rule above already made `<host>` (`?\\tCORP\\\\bob:(F)` escaped twice, whose `\\t` reads as a UNC start) still has its
   // account removed.
   out = out.replace(/(?<!\\)(?=\\\\)(?<=(?:^|[\s"'(]|\\[nrtbfv])[^\\/"'\s:()<>]+|<host>)(\\{2,})([^\\/"'\r\n\t:()<>]+?)(?=:\((?:[A-Z]{1,5})[,)(])/g, (m, run: string, name: string) => (WELL_KNOWN.test(name.trim()) ? m : `${run}<user>`));
+  // Accounts of access entries written inline (`...; CORP\bob:(OI)(CI)M`, an icacls argument `CORP\bob:(OI)(CI)M`, or access entries a summary joined onto one line), which
+  // the line rule below sees only once per line: the account after a single `DOMAIN\` goes unless it is well known; the domain stays, as above. Both runs are
+  // bounded (a domain of at most 64 characters, an account of at most 104, the longest a user principal name has), and the look ahead to the single `\` comes first, so
+  // the look back is tried only there: an unbounded look back tried at every character took time growing with the square of a line's length.
+  out = out.replace(/(?=\\(?!\\))(?<=(?:^|[\s;|"'(,])[^\\/"'\s:;|()<>,]{1,64})\\([^\\/"'\r\n\t:;|()<>]{1,104}?)(?=:\((?:[A-Z]{1,5})[,)(])/g, (m, name: string) => (WELL_KNOWN.test(name.trim()) ? m : "\\<user>"));
   // Accounts in an access list, line by line: everything before the colon of `account:(RIGHTS)` is the account (spaces included); only well-known ones and placeholders stay.
   out = out.split("\n").map((line) => {
     const cr = line.endsWith("\r") ? "\r" : "";
@@ -276,6 +281,15 @@ export function redact(text: string, names: RedactionNames = {}): string {
     return `${m[1]!}${kept}:${m[3]!}${cr}`;
   }).join("\n");
   return out;
+}
+
+/**
+ * Cuts text that has NOT been redacted yet (a job's own message, which a public record later redacts) to at most `limit` characters plus `…`, never inside a word: the
+ * partial word at the cut is dropped too, so a name, SID or address cut in half ("PC\robe", "S-1-5-21-12") is never left where the redaction could no longer recognise it.
+ */
+export function cutWhole(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit).replace(/[^\s\\/:;,|()<>"'=]*$/, "")}…`;
 }
 
 /** Redacts, then cuts to `limit` characters, saying so. */

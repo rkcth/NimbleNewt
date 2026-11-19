@@ -61,6 +61,13 @@ export interface WindowsSession {
   readonly consoleUser?: string;
   /** True when Windows reports that console session as locked. Absent when it could not be determined. */
   readonly locked?: boolean;
+  /**
+   * True when this process runs in that active console session; false when it runs in another one (a service runs in session 0). Reported to explain an access-denied
+   * Windows Sandbox start (0x80070005, own-hardware run 44501483353), not a condition of admission. Absent when it could not be determined.
+   */
+  readonly processInConsoleSession?: boolean;
+  /** True when this process's account is the console user (compared by SID where Windows can resolve the name, otherwise by name); absent when it could not be determined. */
+  readonly processIsConsoleUser?: boolean;
 }
 
 export interface WindowsAutologon {

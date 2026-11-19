@@ -42,11 +42,11 @@ const factsSummary: Record<string, boolean | string> = {};
 let controls: Partial<Record<WsbControl, boolean>> = {};
 const supervisorAclMode = process.env["NIMBLENEWT_WSB_SUPERVISOR_ACL"] === "report-only" ? "report-only" : "strict";
 
-// A failing test also leaves a REDACTED detail (NIMBLENEWT_WSB_DETAIL, uploaded as its own artifact with a short retention): the error message, the failing step, and the last host calls
+// A failing test also leaves a REDACTED detail (NIMBLENEWT_WSB_DETAIL, uploaded as its own artifact with a short retention): the error message, the failing step, and the last 40 host calls (with their arguments)
 // with their output cut to 2 KiB each, with account, domain, machine and home names and SIDs replaced by placeholders (windows-redact.ts). Auto-login and lock-task results are never copied.
 const detailDir = process.env["NIMBLENEWT_WSB_DETAIL"] ?? join(tmpdir(), "nn-wsb-detail");
 const redactNames: { users: string[]; hosts: string[] } = { users: [], hosts: [] };
-const calls: { step: string; ok: boolean; detail?: string }[] = [];
+const calls: { step: string; ok: boolean; args?: string; detail?: string }[] = [];
 const details: Record<string, unknown> = {};
 const clean = (text: string): string => scrub(text, redactNames as RedactionNames);
 function recording(inner: WindowsHost): WindowsHost {
@@ -61,7 +61,11 @@ function recording(inner: WindowsHost): WindowsHost {
   }
   wrapped["run"] = async (file: string, args: readonly string[], options: { cwd?: string; timeoutMs: number }) => {
     const r = await inner.run(file, args, options);
-    calls.push({ step: `run ${basename(file)} ${args.slice(0, 2).map((a) => (a.length > 40 ? "<long>" : a)).join(" ")}`, ok: r.code === 0, detail: `exit ${String(r.code)}${r.timedOut ? " (timed out)" : ""}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}` });
+    // The arguments are kept whole (the account an icacls grant names, the exact .wsb configuration a start was given), so an access-denied start can be judged from the
+    // folders and grants really used (own-hardware run 44501483353 showed only "<long> /grant"). One indented line per argument, as icacls indents an access list: the
+    // redaction names the account of each such `account:(rights)` line. They are redacted and cut on their own (1,800 characters, cut after redaction) in recordFailure, so
+    // a long configuration neither crowds out the call's output nor is cut before redaction.
+    calls.push({ step: `run ${basename(file)} ${args.slice(0, 2).map((a) => (a.length > 40 ? "<long>" : a)).join(" ")}`, ok: r.code === 0, args: args.map((a) => `    ${a}`).join("\n"), detail: `exit ${String(r.code)}${r.timedOut ? " (timed out)" : ""}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}` });
     return r;
   };
   return wrapped as unknown as WindowsHost;
@@ -69,7 +73,7 @@ function recording(inner: WindowsHost): WindowsHost {
 function recordFailure(name: string, error: unknown, since: number): void {
   const mine = calls.slice(since);
   const failing = [...mine].reverse().find((c) => !c.ok);
-  details[name] = { error: clean(error instanceof Error ? error.message : String(error)), failingStep: failing === undefined ? "(an assertion, no host call failed)" : clean(failing.step), calls: mine.slice(-12).map((c) => ({ step: clean(c.step), ok: c.ok, ...(c.detail === undefined ? {} : { detail: clean(c.detail) }) })) };
+  details[name] = { error: clean(error instanceof Error ? error.message : String(error)), failingStep: failing === undefined ? "(an assertion, no host call failed)" : clean(failing.step), calls: mine.slice(-40).map((c) => ({ step: clean(c.step), ok: c.ok, ...(c.args === undefined ? {} : { args: scrub(c.args, redactNames as RedactionNames, 1800) }), ...(c.detail === undefined ? {} : { detail: clean(c.detail) }) })) };
   writeDetail();
 }
 function writeDetail(): void {
@@ -207,6 +211,9 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     sub["owner was explicitly configured"] = process.env["NIMBLENEWT_WSB_OWNER"] !== undefined;
     sub["console user is the configured owner"] = session?.consoleUser !== undefined && session.consoleUser.toLowerCase() === owner.toLowerCase();
     sub["lock state known"] = session?.locked !== undefined;
+    // Recorded to explain an access-denied start (0x80070005, own-hardware run 44501483353, cause not established): run.cmd started by the console user gives yes, yes.
+    sub["runner in the active console session"] = session?.processInConsoleSession ?? "not determined";
+    sub["runner is the console user"] = session?.processIsConsoleUser ?? "not determined";
     await attempt("auto-login flags readable", () => host.autologon());
     await attempt("lock task readable", () => host.lockTask("NimbleNewt-LockOnLogon"));
     await attempt("supervisor folder ACL readable", () => host.writableBy(join(runnerScript, "..")));
