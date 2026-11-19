@@ -127,8 +127,11 @@ export class LandingQueueService {
     return { entry: q.entries[at]!, position: at + 1, ...outcome };
   }
 
-  /** Takes a task's entry out of the queue (the owner or the integrator decided it does not land now). `not_found` when the task has no entry. */
-  async remove(command: { commandId: string; actor: string; projectId: string; branch: string; taskId: string; reason: string }): Promise<{ readonly taskId: string; readonly removed?: LandingQueueEntry; readonly replayed: boolean }> {
+  /**
+   * Takes a task's entry out of the queue (the owner or the integrator decided it does not land now). `not_found` when the task has no entry, or when `allowed` (the door's rule for a caller who may take out only
+   * its own entry) refuses the entry found: it is judged on the entry inside the same write, so an entry put there by someone else at the same moment is never taken out on the strength of an earlier read.
+   */
+  async remove(command: { commandId: string; actor: string; projectId: string; branch: string; taskId: string; reason: string; allowed?: (entry: LandingQueueEntry) => boolean }): Promise<{ readonly taskId: string; readonly removed?: LandingQueueEntry; readonly replayed: boolean }> {
     const taskId = checkTaskId(command.taskId);
     const reason = text(command.reason, "reason", { min: 1, max: LANDING_QUEUE_LIMITS.reason });
     const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
@@ -139,7 +142,7 @@ export class LandingQueueService {
         const current = await this.#runner.get(KIND, queueId);
         const q = current?.body as unknown as LandingQueueBody | undefined;
         const at = q?.entries.findIndex((e) => e.taskId === taskId) ?? -1;
-        if (current === undefined || q === undefined || at < 0) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
+        if (current === undefined || q === undefined || at < 0 || (command.allowed !== undefined && !command.allowed(q.entries[at]!))) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
         removed = q.entries[at];
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {

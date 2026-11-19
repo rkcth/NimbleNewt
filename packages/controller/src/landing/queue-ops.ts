@@ -90,7 +90,8 @@ export class LandingQueueOps {
       if (branch === undefined) return false;
       const q = await this.#queue.get(a.projectId, branch);
       if (!q.entries.some((e) => e.submissionId === submissionId)) return false;
-      await this.#queue.remove({ commandId: `lq-withdraw:${cause}`, actor: "service:landing-queue", projectId: a.projectId, branch, taskId: a.taskId, reason: `submission ${submissionId} is no longer approved` });
+      // Judged inside the write: only this very submission leaves. A newer approved submission of the task that took its place at the same moment stays (a take-out by task alone would remove it).
+      await this.#queue.remove({ commandId: `lq-withdraw:${cause}`, actor: "service:landing-queue", projectId: a.projectId, branch, taskId: a.taskId, reason: `submission ${submissionId} is no longer approved`, allowed: (e) => e.submissionId === submissionId });
       return true;
     } catch { return false; }
   }
@@ -104,13 +105,11 @@ export class LandingQueueOps {
     if (projectId === undefined) throw refused(`task ${taskId}`);
     const branch = await this.#branch(taskId, projectId);
     const integrator = this.#integrator(by, projectId);
-    if (!integrator) {
-      // The author of the entry may take its own work out. With no entry there, the caller's own earlier command may have taken it (a repeat is answered by the service); anything else is told nothing exists.
-      const mine = (await this.#queue.get(projectId, branch)).entries.find((e) => e.taskId === taskId);
-      if (mine !== undefined && (mine.author !== by.id || (by.taskScope !== undefined && by.taskScope.taskId !== taskId))) throw refused(`task ${taskId}`);
-    }
+    // The author of the entry may take its own work out, judged on the entry inside the queue's own write (not on an earlier read, which an entry added at the same moment could make stale). A repeat of the caller's
+    // own recorded command is answered by the service; anything else is told nothing exists.
+    const allowed = integrator ? undefined : (e: LandingQueueEntry): boolean => e.author === by.id && (by.taskScope === undefined || by.taskScope.taskId === taskId);
     try {
-      return { ...(await this.#queue.remove({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId, branch, taskId, reason })), branch };
+      return { ...(await this.#queue.remove({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId, branch, taskId, reason, ...(allowed === undefined ? {} : { allowed }) })), branch };
     } catch (error) {
       if (!integrator && error instanceof DomainError && error.code === "not_found") throw refused(`task ${taskId}`);
       throw error;

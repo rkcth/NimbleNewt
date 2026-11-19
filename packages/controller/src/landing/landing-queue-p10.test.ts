@@ -237,4 +237,39 @@ for (const backend of backends) {
       assert.deepEqual(await r.queued(), []);
     } finally { await r.close(); }
   });
+
+  test(`${backend.name}: review: a landing's outcome is recorded with its queue entry taken out even when the queue changes at the same moment, and an author's take-out is judged on the entry inside the write (card P10, queue)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2, t3] = [await r.task("one"), await r.task("two"), await r.task("three")];
+      const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      await r.ops.add(ivy, { commandId: "q1", submissionId: r.approve(1, t1) });
+      await r.ops.add(ivy, { commandId: "q2", submissionId: r.approve(2, t2) });
+      // Approvals keep arriving while the landing's outcome is written: each of the first six reads of the queue for the outcome is followed by another change, so the outcome's write loses its race six times
+      // (more than the five attempts the outcome's write once had).
+      const s3 = r.approve(3, t3);
+      let raced = 0;
+      const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
+        quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => ({ ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }) }),
+        landingLease: (by, call) => r.leaseOps.checkLanding(by, { ...call, branch: "main" }),
+        landingQueue: { check: (by, call) => r.ops.checkLanding(by, call), landedChanges: async (p, b, s) => { const changes = await r.ops.landedChanges(p, b, s); if (raced < 6) { raced++; if (raced === 1) await r.ops.add(r.w.owner, { commandId: "q3", submissionId: s3 }); else { await r.ops.remove(r.w.owner, { commandId: `out-${raced}`, taskId: t3, reason: "x" }); await r.ops.add(r.w.owner, { commandId: `q3-${raced}`, submissionId: s3 }); } } return changes; } },
+      }, { clock: r.w.clock.now, pause: async () => undefined });
+      const landed = await svc.request(ivy, { commandId: "w1", operation: "landing", taskId: t1, reason: "land it", leaseId: lease.leaseId, fence: lease.fence });
+      assert.equal(landed.state, "done", landed.summary);
+      assert.equal(raced, 6);
+      assert.deepEqual((await r.queued()).map((e) => e[2]), [t2, t3], "the landed entry left, and the entries written meanwhile were all kept");
+      // An author may take out only an entry that is its own, decided on what the queue holds when it is written.
+      await refuses("not_found", () => LandingQueueService.withEpoch(r.w.storage, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined }).remove({ commandId: "svc-out", actor: "agent:eve", projectId: r.w.project, branch: "main", taskId: t2, reason: "x", allowed: (e) => e.author === "agent:eve" }));
+      assert.deepEqual((await r.queued()).map((e) => e[2]), [t2, t3], "nothing was taken out");
+      // The controller's withdrawal of a submission whose approval was taken back, while a newer approved submission of the same task takes its place at the same moment: only the old one may leave.
+      const s4 = r.approve(4, t2);
+      const real = LandingQueueService.withEpoch(r.w.storage, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined });
+      const racing = { get: async (p: string, b: string) => { const q = await real.get(p, b); await real.enqueue({ commandId: "replace-t2", actor: r.w.owner.id, projectId: p, branch: b, submissionId: s4, taskId: t2, base: BASE, tree: tree(4), author: "agent:ann" }); return q; }, remove: (c: Parameters<LandingQueueService["remove"]>[0]) => real.remove(c) } as unknown as LandingQueueService;
+      r.approve(2, t2, "agent:ann", false);
+      assert.equal(await r.queueOps(racing).withdrawUnapproved(sbm(2), "review-changes"), false, "the old submission had already been replaced");
+      assert.deepEqual((await r.queued()).map((e) => [e[1], e[2]]), [[s4, t2], [sbm(3), t3]], "the newer approved submission keeps the task's place");
+    } finally { await r.close(); }
+  });
 }

@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
@@ -523,7 +524,10 @@ export class WorkspaceOpService {
 
   /** Writes the outcome. A repeat that arrived while the host worked marked the record `uncertain`; the real outcome replaces that. */
   async #settle(actor: string, scoped: string, id: string, outcome: WorkspaceRecordBody): Promise<WorkspaceAnswer> {
-    for (let attempt = 0; attempt < 5; attempt++) {
+    // The outcome is written with other records (the refresh-round count, a submission's commit, and for a landing the landing queue, which approvals and other writers change at any moment, card P10), so a lost race
+    // is built again from what is stored now, after a short jittered wait, rather than leaving a confirmed landing unrecorded.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (attempt > 0) await sleep(Math.round(Math.random() * Math.min(50, 5 * attempt)));
       const current = (await this.#get(id))!;
       // A refresh that moved the checkout onto a newer head is one round of the task; the count and the record are written together, so one is never without the other.
       const counts = outcome.operation === "reapply" && outcome.state === "done" && (outcome.detail as { changed?: unknown } | undefined)?.changed === true;
