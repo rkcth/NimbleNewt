@@ -1,3 +1,4 @@
 export { KIND_ROLES, SUBMISSION_KINDS, REVIEW_DISABLED_SINGLE_AGENT, SubmissionService, type CheckResult, type Evidence, type RecordSubmission, attemptOfAssignments, type AttemptOf, type RolesOf, type SubmissionOptions, type SubmissionBody, type SubmissionKind, type SubmissionApproval } from "./submissions.js";
 
 export { AcceptanceService, CONTRACT_WORK_FIELDS, ACCESS_SCOPES, AUDIENCES, DELIVERABLE_STATES, DELIVERABLE_TYPES, type AcceptancePorts, type DeliverableBody, type DeliverableState, type DeliverableType, type EventBody, type StaleDeliverable, type VersionBody } from "./acceptance.js";
+export { QA_LIMITS, QA_RESULTS, QaEvidenceService, reasonText as qaReasonText, type QaCheck, type QaDecisionRef, type QaEvidenceBody, type QaEvidencePorts, type QaGate, type QaGateCheck, type QaRecheckBody, type QaResult, type QaStaleReason } from "./qa-evidence.js";
