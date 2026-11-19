@@ -2813,6 +2813,26 @@ Arguments:
 
 Result: `{ probation, policy, external, current, lastKnownGood }` (null where there is none).
 
+#### `release.window.get`
+
+Owner, or an agent granted exactly `release.manage` (card K07): one maintenance window: the release and digest, when it opens and closes (local and UTC), scope, channel, preparation limits, health deadline, who authorized it, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled), what it waits for, its history and, once it changed the release, whether the earlier release could still be rolled back to.
+
+Arguments:
+
+- `windowId`: the window
+
+Result: The window.
+
+#### `release.window.list`
+
+Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, newest opening first (up to 50), and the releases quarantined after a failed window.
+
+Arguments:
+
+- none
+
+Result: `{ windows, quarantined, truncated }`.
+
 #### `agenda.get`
 
 One agenda item with its state, owner, deferral and outcome link.
@@ -7963,6 +7983,43 @@ Arguments:
 - `commandId`: required
 
 Result: `{ stopped, releaseId }` (stopped false when no watch was open).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.window.set`
+
+Owner only (card K07): a maintenance window for one exact staged release: a local date and time in a named time zone and how long it lasts. From `prepareLeadMinutes` before it opens the controller prepares (verifies the staged files against the digest, checks the release is not quarantined and that `minFreeBytes` are free); while it is open and no agent attempt is running it activates the release through the same checks as release.activate (approval, signature, platform, targets, migration plan). Running work is never stopped: if it never goes quiet the window ends deferred. A window that closes before the update started ends missed and never deploys later. A release that fails its checks or fails to start after the window is quarantined (no later window can bring it back). One open window at a time.
+
+Arguments:
+
+- `candidateId`: the staged release
+- `digest`: the digest `release.stage` returned (release.verify shows it)
+- `date`: YYYY-MM-DD, local to timeZone
+- `time`: HH:MM (24-hour), local to timeZone
+- `timeZone`: a time zone name such as Europe/London
+- `durationMinutes`: 15 to 1440
+- `channel` (optional): a short name for the trusted source the release came from (a label)
+- `scope` (optional): installation (the only scope for now)
+- `prepareLeadMinutes` (optional): how long before the opening preparation may start (default 60)
+- `minFreeBytes` (optional): the free space the release root must have (default 1 GiB)
+- `healthDeadlineSeconds` (optional): 30 to 3600 (default 300); recorded, the launcher's startup window is what is enforced
+- `commandId`: required
+
+Result: `{ windowId, opensAt, closesAt, replayed }` (UTC instants).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.window.cancel`
+
+Owner only (card K07): ends a maintenance window that has not activated its release yet. Nothing else changes. A window that already activated is rolled back with release.rollback instead.
+
+Arguments:
+
+- `windowId`: the window
+- `reason` (optional): a short reason (up to 200 characters)
+- `commandId`: required
+
+Result: `{ windowId, status }`.
 
 Completion: finished when accepted (`completed: true`).
 

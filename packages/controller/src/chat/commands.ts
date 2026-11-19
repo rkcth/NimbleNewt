@@ -180,6 +180,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },
   "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  // A maintenance window (card K07) is a standing word to activate one exact release at a stated time: always shown first. Cancelling one only stops it: the safe direction, applied at once.
+  "release.window.set": { verb: "Set a maintenance window that activates a staged release at a stated time", mode: "propose" },
+  "release.window.cancel": { verb: "Cancel a maintenance window", mode: "apply" },
   "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
   "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
@@ -591,7 +594,7 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
  */
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
-export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
+export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId", "windowId"]);
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 

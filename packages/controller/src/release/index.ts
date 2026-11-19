@@ -9,3 +9,4 @@ export * from "./updater.js";
 export * from "./trust.js";
 export * from "./trust-mirror.js";
 export * from "./diagnosis.js";
+export * from "./windows.js";

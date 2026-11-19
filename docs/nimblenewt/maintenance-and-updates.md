@@ -79,6 +79,19 @@ Not built: service-manager units (launchd, systemd, Windows service), running it
 - **Database schema.** `compat.json` may add `schema: { min, max }`, the database schema versions (the number of the last applied migration) the release can run on. The controller records the highest version it has opened in the launcher's file as soon as the database is open. The launcher refuses to fall back to a last known good whose range ends below that version (it blocks and tells the owner a snapshot taken before the upgrade must be restored), and activation or rollback to such a release is refused. A release that states no range is not checked.
 - **Not part of this card:** the maintenance window, its scope and the Prepare-to-Commit sequence are K07; the Pi runtime upgrade path is G11.
 
+### Maintenance windows (card K07, first slice)
+
+The owner sets a window for one exact staged release (`release.window.set`, or in chat, where it is always shown first with the staged digest filled in from the record and the time it understood): a local date and time in a named time zone, how long it lasts, an optional channel label, the preparation lead (default 60 minutes) and the free space the release root must have (default 1 GiB). One window is open at a time. The controller's dispatcher then:
+
+1. **Prepares** from the lead time before the opening: verifies the staged files against the digest the owner named, checks the release is not quarantined and that there is room.
+2. **Waits** while any agent attempt is running; nothing is stopped.
+3. **Activates** while the window is open, through the same journalled `release.activate` and all its checks (approval, signature, platform, targets, migration plan, compatibility).
+4. Marks the window **committed** once the release confirmed its start, or **reverted** (and quarantines the release) when the launcher recorded a failed start and fell back.
+
+A window that closes before the update started ends **missed** (or **deferred** when work never went quiet) and never deploys later. A release whose files or digest changed is quarantined, so no later window can bring it back. The owner is told each outcome once. `release.window.cancel` ends a window that has not activated yet; `release.window.list` and the chat status "how are the maintenance windows" show them, with whether the earlier release could still come back.
+
+Not built yet: suspending workers without release, the checkpoint, the migration test on an isolated copy, the quarantined start with dispatch and effects disabled, the verification run and its health deadline (recorded only; the launcher's startup window decides today), state commit-or-revert, a restart after activation, bounded recovery mode, recurring windows, narrower scopes, the UI and the fault matrix on macOS, Linux and Windows.
+
 ## Maintenance sequence
 
 1. **Prepare:** acquire and verify the exact authorized release before the window. Candidate building, if used by a development deployment, has already happened in a separate pipeline. Test migrations and recovery using isolated copies and fake services without production credentials. Check space for release artifacts and consistent state backups.
