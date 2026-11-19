@@ -5,12 +5,20 @@ import { DONE_TEXT, cleanToolRun, killToolAndRestart, toolBoundaries, type ToolK
 
 /** The outcome of a kill at each boundary of the tool route when Pi does not run an interrupted call again (the production bridge tools' setting), by the boundary's label. */
 export function expectedWithoutReplay(label: string): string {
-  if (/after generation\.admit|before effect\.claim/.test(label)) return "admitted, never started: nothing pushed, the intent stays open, model told it did not finish";
+  if (/after generation\.admit|before effect\.claim/.test(label)) return "admitted, never started: nothing pushed, the intent stays open, no blocker, model told it did not finish";
   if (/after effect\.claim|outside: before applying/.test(label)) return "started, never settled (not pushed): no blocker, model told it did not finish";
   if (/outside: after applying|before effect\.settle/.test(label)) return "started, never settled (pushed): no blocker, model told it did not finish";
-  if (/after effect\.settle|tool: outcome known/.test(label)) return "pushed once and confirmed, but the model was told it did not finish";
-  return "cut before the call was admitted: nothing pushed, model told it did not finish";
+  if (/after effect\.settle|tool: outcome known/.test(label)) return "pushed once and confirmed, no blocker, but the model told it did not finish";
+  return "cut before the call was admitted: nothing pushed, no blocker, model told it did not finish";
 }
+
+/** The boundaries the route must have, in this order, between the model's call and the tool's answer: without them a sweep could pass while skipping a step. */
+export const ROUTE_STEPS = [
+  "tool: called by the model", "before generation.begin", "after generation.begin", "before generation.record", "after generation.record",
+  "before generation.complete", "after generation.complete", "before generation.admit", "after generation.admit", "before effect.claim", "after effect.claim",
+  "outside: before applying the effect", "outside: after applying the effect, before answering", "before effect.settle", "after effect.settle",
+  "tool: outcome known, not yet returned to the model",
+] as const;
 
 /**
  * Card G04, a kill inside a protected tool the model calls: the controller services and the real Pi adapter in one child process, the model's `push`
@@ -27,6 +35,8 @@ export function defineToolKillTests(engineName: string, heavy = false): void {
     const clean = await withEngine(engine, (spec, dir) => cleanToolRun(spec, dir, replay));
     assert.equal(clean.state.text, DONE_TEXT);
     const points = toolBoundaries(clean);
+    // Every step of the route is a boundary, each once and in order (a step that disappeared or moved out of the tool would otherwise go unkilled silently).
+    assert.deepEqual(points.map((p) => describe(clean, p).replace(/^\d+ /, "")), [...ROUTE_STEPS]);
     const runs: ToolKilled[] = [];
     for (const point of points) runs.push(await withEngine(engine, (spec, dir) => killToolAndRestart(spec, dir, clean, point, replay)));
     for (const r of runs) console.log(`# g04 tool${replay === undefined ? "" : " replayed"}[${engine.name}] ${r.label}: ${r.outcome} (model asked ${r.modelCalls} time(s) after the restart)`);
@@ -36,7 +46,7 @@ export function defineToolKillTests(engineName: string, heavy = false): void {
 
   test(`${engine.name}: a real SIGKILL at every boundary of a protected tool call the Pi model makes (admission, the effect ledger, the target) never pushes twice, never reports a push that did not happen and loses no acknowledged operation; an interrupted call is not run again, so a started effect stays unsettled and a finished one is reported to the model as not finished`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
     const { runs, points, first, last } = await sweep(undefined);
-    assert.ok(points.length >= 14, `${points.length} boundaries`);
+    assert.equal(points.length, ROUTE_STEPS.length);
     assert.deepEqual(runs.map((r) => `${r.label}: ${r.outcome}`), runs.map((r) => `${r.label}: ${expectedWithoutReplay(r.label)}`));
     console.log(`# g04 tool[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, database read before restart, restarted and checked`);
   });
