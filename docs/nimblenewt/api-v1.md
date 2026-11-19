@@ -2627,6 +2627,28 @@ Arguments:
 
 Result: `{ systemVersion, state, observedAt }`.
 
+#### `simulation.observe`
+
+Owner only (card P07): what a simulation scope's stand-in holds for one resource, labelled simulated. Read only.
+
+Arguments:
+
+- `scopeId`: the scope
+- `service`: the service name
+- `resource`: the resource name
+
+Result: `{ systemVersion, state, observedAt, simulated: true, label }`.
+
+#### `simulation.get`
+
+Owner only (card P07): a simulation scope, its stand-in world and the status of each of its effects as the ledger records them, all labelled simulated. Read only.
+
+Arguments:
+
+- `scopeId`: the scope
+
+Result: `{ id, scope, effects: [{ effectId, status, target?, simulated: true }] }`.
+
 #### `deliverable.record.get`
 
 One deliverable with its newest (or the named) version: state, content, review, and the state of every version. Hidden as not found where the caller may not read it (the task's read right, narrowed or widened by the access scope).
@@ -7441,6 +7463,51 @@ Arguments:
 - `action`: { type, params? }, for example { type: "restart" } or { type: "set", params: { fields: { ... } } }
 
 Result: `{ effectId, status, outcome?, evidence?, note? }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `simulation.open`
+
+Owner only (card P07): opens a simulation scope for a task, an isolated place to try service operations before any real access is used. The scope has its own stand-in of the services, built from `layout`, and reaches no real service, tool, model, message or grant. Every operation in it is an effect of the effect ledger marked with the scope: the ledger runs it only through the scope's simulated stand-in and refuses (records `failed`, does nothing) any real write, send or spend. Every result is labelled simulated and can never be named as a real outcome; real access is granted separately (grant.create). Repeating the command opens it once.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+- `layout`: the stand-in: `{ <service>: { <resource>: { state?: { ... }, dependents?: [{ service, resource }] } } }`, 1 to 20 services of 1 to 20 resources
+- `purpose` (optional): a few words on what is being tried (up to 200 characters)
+
+Result: `{ id, replayed, scope: { taskId, projectId, state, label, isolation, world, effects } }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `simulation.operate`
+
+Owner only (card P07): does one action on one resource of a simulation scope's stand-in, through the effect ledger as an effect of the scope, with the same read-back and collateral checks as service.operate. Nothing real is written, sent or spent; the result says `simulated: true` and carries the label. `inject` makes the stand-in misbehave once, as a real service might: `refuse`, `lose-answer` (the ledger asks instead of repeating), `corrupt` (the read-back catches it) or `leak` (a neighbour changes too: the collateral check catches it). Repeating the command does it once. A closed scope refuses.
+
+Arguments:
+
+- `commandId`: required
+- `scopeId`: the scope
+- `service`: the service name
+- `resource`: the resource name
+- `action`: { type, params? }: `set` with params.fields, or `restart`
+- `inject` (optional): refuse, lose-answer, corrupt or leak
+
+Result: `{ scopeId, effectId, status, evidence?, note?, simulated: true, label }`; the evidence also says `simulated: true` and names the scope.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `simulation.close`
+
+Owner only (card P07): closes a simulation scope. No further operation runs in it; what it recorded stays readable. Repeating it is harmless.
+
+Arguments:
+
+- `commandId`: required
+- `scopeId`: the scope
+
+Result: `{ id, scope }`.
 
 Completion: finished when accepted (`completed: true`).
 
