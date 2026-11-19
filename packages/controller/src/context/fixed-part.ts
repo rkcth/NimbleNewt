@@ -8,25 +8,26 @@ import { BUDGET_DEFAULTS } from "./budget.js";
  * true) and when they grow past `WORKER_FIXED_PART_BUDGET` (so the next tool or rule that is added is a deliberate step that raises the budget, the floor and the smallest startable window with it).
  *
  * RAISING THE FIXED PART (a new bridge tool, a longer description, a new system rule), all in one change:
- * 1. Set `WORKER_FIXED_PART` to the measured figures the budget test prints, and `WORKER_FIXED_PART_BUDGET` a little above them (it is also the unmeasured-route floor, which `api/start-route-change.test.ts` pins).
+ * 1. Set `WORKER_FIXED_PART` to the measured figures the budget test prints, and `WORKER_FIXED_PART_BUDGET` a little above them (it is also the unmeasured-route floor, which `api/start-route-change.test.ts` pins;
+ *    the floor itself must still start a task on `PRACTICAL_STARTABLE_WINDOW`, which the budget test checks).
  * 2. Update the figures the tests pin on purpose to the new `WORKER_FIXED_PART_ABOUT_TOKENS` / `MIN_STARTABLE_WINDOW` / `PRACTICAL_STARTABLE_WINDOW` (the budget test prints them): `fixed-part-budget.test.ts`
  *    (integration) and `setup/small-window.test.ts` ("about N tokens", "N or more is needed in practice").
  *    The C07g real-process test (`integration/c07g-route-view.test.ts`, `FLOOR_CHARS`) sets a floor that must stay above the real fixed part: raise it with the budget.
- * 3. If the real fixed part no longer starts a task on 32,768 tokens, the windows that assume it does must be raised to `PRACTICAL_STARTABLE_WINDOW` (or more): the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider
- *    from the configuration document) and the launcher note `u14-launcher.test.ts` pins ("context window assumed 32768 tokens ... under about 32,768"), the placeholder the interpreter prompt names
- *    (`chat/model-interpreter.ts`, "32768 is only the launcher's placeholder"), and the integration tests that run the real worker process on 32,768 tokens: w12-anchor and w13-recall (`WINDOW`), g09-remote-updates
+ * 3. If the real fixed part no longer starts a task on the window these assume (36,864 tokens since card P03b's first slice, 32,768 before), they must be raised to the new `PRACTICAL_STARTABLE_WINDOW` (or more):
+ *    the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider from the configuration document) and the launcher note `u14-launcher.test.ts` pins ("context window assumed 36864 tokens ... under about 36,864"),
+ *    the placeholder the interpreter prompt names (`chat/model-interpreter.ts`, "36864 is only the launcher's placeholder"), and the integration tests that run the real worker process on that window: w12-anchor and w13-recall (`WINDOW`), g09-remote-updates
  *    (`WINDOW`), h12bf-composed (`window`) and `w03-rig-support.ts` (its `window` and `contextWindow`, used by W03, W04, L04e and L04g); then the budget test's list of those windows and the windows
- *    `setup/small-window.test.ts` expects to start a task. h12bf's compaction case (65,536 tokens, a stored conversation sized against the fixed part) must be sized again by hand. Check that
+ *    `setup/small-window.test.ts` expects to start a task. h12bf's compaction case (98,304 tokens, a stored conversation sized against the fixed part; its comment explains the sizing) must be sized again by hand. Check that
  *    `context/enforcement.test.ts`'s view suite (40,960) still cuts. The owner is then told the larger window.
  * 4. Regenerate the API reference (`node scripts/api-docs.mjs --write`; the summaries quote these figures) and say so in the implementation notes.
- * Tried on a merge with card P03b's first slice (2,537 + 18,242 characters, about 6,900 tokens, 35,840 startable, 36,864 in practice): budget 3,000 + 19,500, C07g floor 23,500, the windows above at 36,864;
- * the tests that failed were the ones named above (the whole integration suite was run), and all passed after these steps except h12bf's compaction case.
+ * Done once, at the merge of card P03b's first slice (2,537 + 17,714 characters, about 6,800 tokens, 34,816 startable, 36,864 in practice): budget 3,000 + 18,750 (about 1,000 characters of room, as before;
+ *    3,000 + 19,500 would put the floor at 37,888 startable, over the window told), C07g floor 22,750, the windows above at 36,864, h12bf's compaction case from 65,536 to 98,304.
  */
-export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 15_024 } as const;
+export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 17_714 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */
-export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 3_000, toolSchemaChars: 16_000 } as const;
+export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 3_000, toolSchemaChars: 18_750 } as const;
 export const WORKER_FIXED_PART_CHARS = WORKER_FIXED_PART.systemPromptChars + WORKER_FIXED_PART.toolSchemaChars;
-/** The measured fixed part in tokens at the budgets' estimate (three characters to a token), and the figure the owner is told, rounded to hundreds ("about 5,900 tokens"). */
+/** The measured fixed part in tokens at the budgets' estimate (three characters to a token), and the figure the owner is told, rounded to hundreds ("about 6,800 tokens"). */
 export const WORKER_FIXED_PART_TOKENS = Math.ceil(WORKER_FIXED_PART_CHARS / BUDGET_DEFAULTS.charsPerToken);
 export const WORKER_FIXED_PART_ABOUT_TOKENS = Math.round(WORKER_FIXED_PART_TOKENS / 100) * 100;
 /** The smallest task the first call can carry besides the fixed part and the anchor: the task's own words, the rules note and the view's frame. An estimate (about 1,000 tokens). */
@@ -42,7 +43,7 @@ export function windowCanStartTask(window: number, fixedChars: number = WORKER_F
   return Math.floor(window * BUDGET_DEFAULTS.startupShare) >= need;
 }
 
-/** The smallest window (a multiple of 1,024 tokens) whose first call holds the fixed part, the anchor and the smallest task; at the measured figures 30,720 tokens, so 32,768 in practice. */
+/** The smallest window (a multiple of 1,024 tokens) whose first call holds the fixed part, the anchor and the smallest task; at the measured figures 34,816 tokens, so 36,864 in practice. */
 export function startableWindow(fixedChars: number = WORKER_FIXED_PART_CHARS): number {
   for (let w = WINDOW_STEP; w <= 100_000_000; w += WINDOW_STEP) if (windowCanStartTask(w, fixedChars)) return w;
   return 100_000_000;
@@ -55,7 +56,7 @@ const PRACTICAL_STEP = 4_096;
  * (35,840 tokens with card P03b's four tools) would then be told "65,536 or more" although 36,864 works.
  */
 export function practicalWindow(min: number): number { return Math.ceil(min / PRACTICAL_STEP) * PRACTICAL_STEP; }
-/** What the owner is told is needed in practice: `MIN_STARTABLE_WINDOW` rounded up to a multiple of 4,096 tokens (32,768 at the measured figures). */
+/** What the owner is told is needed in practice: `MIN_STARTABLE_WINDOW` rounded up to a multiple of 4,096 tokens (36,864 at the measured figures). */
 export const PRACTICAL_STARTABLE_WINDOW = practicalWindow(MIN_STARTABLE_WINDOW);
 
 /** A whole number with thousands separated by commas (no locale data needed). */

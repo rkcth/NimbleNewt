@@ -57,8 +57,8 @@ test("a first start makes the owner once with the credential in the secret store
     assert.equal(a.ownerToken, token);
     assert.match(a.notes.join("\n"), /secret store, not in a file/);
     assert.match(a.notes.join("\n"), /primary\/local-x, backup\/free-y/);
-    // The assumed window (32,768) starts a task, so the note names the figures from the constants and carries no small-window warning (card "Fixed-part sizing after T08").
-    assert.match(a.notes.join("\n"), /context window assumed 32768 tokens, .*under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused/);
+    // The assumed window (36,864 since card P03b's bridge tools) starts a task, so the note names the figures from the constants and carries no small-window warning (card "Fixed-part sizing after T08").
+    assert.match(a.notes.join("\n"), /context window assumed 36864 tokens, .*under about 36,864 tokens tasks may stop with a context blocker, and under 8,192 the route is refused/);
     assert.doesNotMatch(a.notes.join("\n"), /no task can start on it/);
     // Nothing on disk holds the credential: not the database, not the configuration, not a log.
     for (const f of filesUnder(dir)) assert.ok(!readFileSync(f).includes(Buffer.from(token!)), `${f} must not hold the owner's credential`);

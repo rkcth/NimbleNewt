@@ -14,7 +14,7 @@ const real = (): { systemPromptChars: number; toolSchemaChars: number } => {
 const RAISE = "see RAISING THE FIXED PART in packages/controller/src/context/fixed-part.ts";
 const derived = (r: { systemPromptChars: number; toolSchemaChars: number }): string => {
   const chars = r.systemPromptChars + r.toolSchemaChars, tokens = Math.ceil(chars / 3), min = startableWindow(chars);
-  return `measured: system text ${r.systemPromptChars}, bridge tool schemas ${r.toolSchemaChars} characters (${chars}, about ${Math.round(tokens / 100) * 100} tokens); smallest startable window ${min}, ${practicalWindow(min)} in practice, 32,768 ${windowCanStartTask(32_768, chars) ? "still starts" : "NO LONGER starts"} a task; ${RAISE}`;
+  return `measured: system text ${r.systemPromptChars}, bridge tool schemas ${r.toolSchemaChars} characters (${chars}, about ${Math.round(tokens / 100) * 100} tokens); smallest startable window ${min}, ${practicalWindow(min)} in practice, ${PRACTICAL_STARTABLE_WINDOW} (the window the tests and the launcher assume) ${windowCanStartTask(PRACTICAL_STARTABLE_WINDOW, chars) ? "still starts" : "NO LONGER starts"} a task; ${RAISE}`;
 };
 
 test("the real worker's fixed part stays within its budget, so a new tool or rule is a deliberate step", () => {
@@ -29,7 +29,7 @@ test("the figures the owner is told match the measured fixed part (within 5%)", 
   near(WORKER_FIXED_PART.systemPromptChars, r.systemPromptChars, "system text");
   near(WORKER_FIXED_PART.toolSchemaChars, r.toolSchemaChars, "bridge tool schemas");
   assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, Math.round(WORKER_FIXED_PART_TOKENS / 100) * 100);
-  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 5_900, `the words say about 5,900 tokens, pinned here on purpose; ${RAISE}`);
+  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 6_800, `the words say about 6,800 tokens, pinned here on purpose; ${RAISE}`);
 });
 
 test("a route nobody has measured counts at least the real fixed part", () => {
@@ -38,6 +38,8 @@ test("a route nobody has measured counts at least the real fixed part", () => {
   assert.ok(ROUTE_FLOOR_DEFAULTS.systemPromptChars >= r.systemPromptChars);
   assert.ok(ROUTE_FLOOR_DEFAULTS.toolSchemaChars >= r.toolSchemaChars, `the floor's tools (${ROUTE_FLOOR_DEFAULTS.toolSchemaChars}) are below the real bridge tools (${r.toolSchemaChars})`);
   assert.ok(DEFAULT_ROUTE_FLOOR_CHARS >= r.systemPromptChars + r.toolSchemaChars);
+  // The room over the real part is small enough that a route counted at the floor still starts a task on the window the owner is told.
+  assert.equal(windowCanStartTask(PRACTICAL_STARTABLE_WINDOW, DEFAULT_ROUTE_FLOOR_CHARS), true, `the floor (${DEFAULT_ROUTE_FLOOR_CHARS}) needs a window of ${startableWindow(DEFAULT_ROUTE_FLOOR_CHARS)}; ${RAISE}`);
 });
 
 test("the smallest window that can start a task, and the warning for an accepted window under it", () => {
@@ -45,11 +47,11 @@ test("the smallest window that can start a task, and the warning for an accepted
   // The window the owner is told is needed in practice holds the real fixed part beside the anchor and the smallest task; the recorded figure gives the startable window, the step below it cannot start one.
   assert.ok(startableWindow(r.systemPromptChars + r.toolSchemaChars) <= PRACTICAL_STARTABLE_WINDOW, `the real fixed part starts a task on the window the owner is told; ${derived(r)}`);
   assert.ok(windowCanStartTask(MIN_STARTABLE_WINDOW) && !windowCanStartTask(MIN_STARTABLE_WINDOW - 1024));
-  assert.equal(PRACTICAL_STARTABLE_WINDOW, 32_768, `pinned here on purpose; ${RAISE}`);
-  assert.equal(MIN_STARTABLE_WINDOW, 30_720, `the warning names it ("at least 30,720 tokens"), pinned here on purpose; ${RAISE}`);
-  // The window the tests that run the real process use (w12, w13 since the CI fix) and the one the launcher assumes for a provider of the configuration document can start a task on the REAL fixed part;
-  // 24,576, which the tests used before, cannot.
-  for (const [w, who] of [[32_768, "the real-process tests w12-anchor and w13-recall"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
+  assert.equal(PRACTICAL_STARTABLE_WINDOW, 36_864, `pinned here on purpose; ${RAISE}`);
+  assert.equal(MIN_STARTABLE_WINDOW, 34_816, `the warning names it ("at least 34,816 tokens"), pinned here on purpose; ${RAISE}`);
+  // The window the tests that run the real process use (36,864 since card P03b's first slice; 32,768 before it, 24,576 before the CI fix) and the one the launcher assumes for a provider of the configuration document
+  // can start a task on the REAL fixed part; 24,576 cannot.
+  for (const [w, who] of [[36_864, "the real-process tests w12-anchor, w13-recall, g09-remote-updates, h12bf-composed and w03-rig-support (W03, W04, L04e, L04g)"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
     assert.equal(windowCanStartTask(w, r.systemPromptChars + r.toolSchemaChars), true, `${who} assume ${w} tokens start a task; ${derived(r)}`);
   }
   assert.equal(windowCanStartTask(24_576), false);
@@ -57,7 +59,7 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.equal(MIN_WORKABLE_CONTEXT_TOKENS, MIN_WORKABLE_WINDOW);
   assert.ok(MIN_STARTABLE_WINDOW > MIN_WORKABLE_CONTEXT_TOKENS);
   const w = smallWindowWarning(16_384);
-  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 5,900 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
+  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 6,800 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
   assert.equal(smallWindowWarning(MIN_STARTABLE_WINDOW), undefined);
   assert.equal(smallWindowWarning(65_536), undefined);
 });

@@ -33,7 +33,7 @@ test("routing.provider.add accepts a window too small to start a task, warns wit
     assert.equal(small.result!.warnings!.length, 1, "only the small window is warned about");
     const w = small.result!.warnings![0]!;
     assert.ok(w.startsWith("Provider tiny: a context window of 16,384 tokens is accepted, but no task can start on it"), w);
-    assert.ok(w.includes("about 5,900 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toLocaleString("en-US")} tokens`), w);
+    assert.ok(w.includes("about 6,800 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toLocaleString("en-US")} tokens`), w);
     assert.deepEqual(small.result!.shown, small.result!.warnings, "the chat shows the warning");
     // The chat's reply of an applied command shows the lines.
     assert.ok(replyOf([{ i: 0, status: "applied", op: "routing.provider.add", shown: small.result!.shown } as never]).includes(w));
@@ -60,9 +60,9 @@ test("the figures: the floor covers the measured fixed part, every accepted wind
   for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w < MIN_STARTABLE_WINDOW; w += 1_024) assert.equal(windowCanStartTask(w), false, String(w));
   const exact = Array.from({ length: 1_024 }, (_, i) => MIN_STARTABLE_WINDOW - 1_023 + i).find((w) => windowCanStartTask(w))!;
   assert.ok(exact > MIN_STARTABLE_WINDOW - 1_024 && smallWindowWarning(exact) === undefined && smallWindowWarning(exact - 1) !== undefined, String(exact));
-  for (const w of [MIN_STARTABLE_WINDOW, 32_768, 40_960, 131_072]) { assert.equal(windowCanStartTask(w), true, String(w)); assert.equal(smallWindowWarning(w), undefined, String(w)); }
+  for (const w of [MIN_STARTABLE_WINDOW, 36_864, 40_960, 131_072]) { assert.equal(windowCanStartTask(w), true, String(w)); assert.equal(smallWindowWarning(w), undefined, String(w)); }
   const q = SETUP_GUIDE["model-route"].question;
-  assert.ok(q.includes("about 5,900 tokens") && q.includes("32,768 or more is needed in practice") && !q.includes("4,200"), q);
+  assert.ok(q.includes("about 6,800 tokens") && q.includes("36,864 or more is needed in practice") && !q.includes("4,200"), q);
 });
 
 test("in the chat, the owner gives a window too small to start a task: the proposal is shown first, and once applied the reply carries the warning with the window that is needed", async () => {

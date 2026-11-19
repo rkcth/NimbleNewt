@@ -78,7 +78,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
     dispatch: {
       manual: true,
       local: {
-        window: () => 32768,
+        window: () => 36864,
         build: (services) => {
           const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }), ...(options.kind === undefined ? {} : { kind: options.kind }) } : undefined) });
           const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
@@ -90,7 +90,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
               mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
               return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
             },
-            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 36864, maxTokens: 1024, reasoning: false, input: ["text"] }),
             namespaceId: (order) => services.namespaceId(order as never),
             bridge: async (order, call, token, request) => services.bridge!(order as never, call, token, request) as never,
             relay: (order, request) => services.attemptRelay(order as never, relay, { model: "local" }).relay(request),

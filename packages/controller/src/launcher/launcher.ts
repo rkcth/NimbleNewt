@@ -59,7 +59,7 @@ export const OWNER_SECRET = OWNER_SECRET_PREFIX;
  */
 export const ownerSecretName = (dataDir: string): string => `${OWNER_SECRET}-${createHash("sha256").update(resolve(dataDir)).digest("hex").slice(0, 16)}`;
 /** The context window assumed for a provider the configuration document names, which carries none; the owner changes it by chat (routing.provider.add replaces the provider). */
-export const DEFAULT_CONTEXT_TOKENS = 32_768;
+export const DEFAULT_CONTEXT_TOKENS = 36_864;
 
 /**
  * What the launcher gives the builder of a worker host on this machine (card U14b). The builder lives outside the controller package (it needs the worker package, which the controller does not import), so the host that starts

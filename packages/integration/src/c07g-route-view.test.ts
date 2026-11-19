@@ -18,11 +18,11 @@ const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
 // The route's window and the figure assumed for a route nobody has measured. The real process's fixed part (its system text and every bridge tool's schema, about 17,600 characters since card T08's toolbox
-// tools) is just under the default floor (19,000 characters since card "Fixed-part sizing after T08"), so the owner sets a clearly larger one here: the dispatcher's view is built on more than the process really
+// tools, about 20,250 since card P03b's service and deliverable tools) is just under the default floor (21,750 characters since card P03b; 19,000 from card "Fixed-part sizing after T08"), so the owner sets a clearly larger one here: the dispatcher's view is built on more than the process really
 // sends, and the measured view fits more.
 // The window's startup share (a quarter) holds the measured fixed part beside what must stay whole, with room for some of the questions but not all.
 const WINDOW = 40_960;
-const FLOOR_CHARS = 20_000;
+const FLOOR_CHARS = 22_750;
 const HEADER = `[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route localp/small (a ${WINDOW}-token window).]`;
 type Reply = { ok: boolean; result?: any; error?: { code: string; message: string } };
 

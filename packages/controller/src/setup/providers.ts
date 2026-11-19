@@ -26,7 +26,7 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 
 /**
  * The smallest window a route can work in (the worker refuses a smaller one; kept equal to `MIN_WORKABLE_WINDOW` in pi-adapter, which an integration test checks, card CMP). A window from here up to
- * `MIN_STARTABLE_WINDOW` (context/fixed-part.ts) is accepted, but no task can start on it since card T08 (the fixed part alone is about 5,900 tokens): `add` says so in its `warnings`.
+ * `MIN_STARTABLE_WINDOW` (context/fixed-part.ts) is accepted, but no task can start on it since card T08 (the fixed part alone is about 6,800 tokens since card P03b): `add` says so in its `warnings`.
  */
 export const MIN_WORKABLE_CONTEXT_TOKENS = 8192;
 
