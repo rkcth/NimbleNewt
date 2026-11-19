@@ -10,6 +10,7 @@ import { HostService } from "../hosts/index.js";
 import { ContractService } from "../planning/contracts.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { Difficulty } from "../planning/contracts.js";
+import { ownerLoadReport, readAuditLog } from "./owner-load.js";
 import { EscalationLadderService, RECOVERY_ACTIONS, RecoveryLadderService, StallService, type RecoveryAction, type RecoveryEffects, assessStall, DEFAULT_THRESHOLDS, type StallEvent, type StallOptions } from "./index.js";
 
 after(stopServer);
@@ -1628,5 +1629,40 @@ for (const backend of backends) {
       assert.equal(new Set(calls.filter((x) => x.action === action).map((x) => x.key)).size, action === "hand-to-owner" ? 0 : 1, "any repeat of the effect carries the same key");
     }
     assert.equal((await concern()).recoveryPending, undefined);
+  });
+
+  suite("Y02 owner-load report over the audit this controller wrote: owner decisions per day, and a stall that reached unrelated work", async (c) => {
+    const h = await c.host("h1");
+    // Day 1: a task in project P stalls (silent) and stays stalled.
+    now = Date.parse("2026-10-22T22:00:00.000Z");
+    const first = await c.work();
+    await c.send(h, first, step("start"));
+    now += 30 * MIN;
+    assert.equal((await c.stall.scan(c.owner)).opened, 1);
+    // Day 2: a task in the OTHER project stalls while the first is still open, then is released, which clears its concern.
+    now = Date.parse("2026-10-23T00:10:00.000Z");
+    const second = await c.work({ project: c.other });
+    await c.send(await c.host("h2", c.other), second, step("start"));
+    now += 30 * MIN;
+    const opened = await c.stall.scan(c.owner);
+    assert.equal(opened.opened, 1, "only the second task's stall is new; the first is still open");
+    const a = (await c.assignments.getAssignment(second))!;
+    await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId: second, expectedRevision: a.revision });
+    await c.stall.scan(c.owner);
+    const { records, truncated } = await readAuditLog(c.storage);
+    assert.equal(truncated, false);
+    // The expected owner figures, counted independently: distinct operations with the owner as actor, per day.
+    const expected = new Map<string, Set<string>>();
+    for (const r of records) if (r.actor === c.owner.id) { const d = r.at.slice(0, 10); expected.set(d, (expected.get(d) ?? new Set()).add(r.operationId)); }
+    const report = ownerLoadReport(records, { now: at(), days: 3 });
+    assert.deepEqual(report.perDay.map((d) => d.day), ["2026-10-21", "2026-10-22", "2026-10-23"]);
+    for (const d of report.perDay) assert.equal(d.ownerDecisions, expected.get(d.day)?.size ?? 0, d.day);
+    assert.ok(report.ownerDecisions > 0 && report.perDay[0]!.ownerDecisions === 0, "the setup on day 1 and the release on day 2 are owner commands; day 0 has none");
+    assert.equal(report.stallCount, 2);
+    const [s1, s2] = report.stalls;
+    assert.deepEqual([s1!.taskId, s1!.projectId, s1!.endedAt, s1!.kind], [first, c.project, undefined, "silent"], "the first stall is still open");
+    assert.deepEqual(s1!.reached.map((x) => [x.taskId, x.projectId, x.sameProject]), [[second, c.other, false]], "the second stall, in another project, opened while the first was open");
+    assert.deepEqual([s2!.taskId, s2!.endState, s2!.reached.length], [second, "cleared", 0]);
+    assert.equal(report.stallsReachingUnrelatedWork, 1);
   });
 }
