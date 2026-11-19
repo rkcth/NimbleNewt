@@ -201,6 +201,9 @@ export async function acknowledgedSurvive(storage: ControllerStorage, clean: Cle
   return problems;
 }
 
+/** What a child writes to stderr, followed by the JSON of its boundary label, just before it kills itself. */
+export const KILLED_AT = "g04 killed at ";
+
 /** A child process that runs the whole path (controller and adapter in one process) and kills itself with SIGKILL at a boundary. */
 export function runChild(spec: StoreSpec, directory: string, crashAt: number, scenario: "path" | "wait" | "tool" | "tool-replay" = "path"): Promise<{ killed: boolean; out: string; err: string }> {
   const script = fileURLToPath(new URL("./g04-child.js", import.meta.url));
