@@ -175,6 +175,7 @@ export function toolInvariants(s: ToolState): string[] {
   expect(s.applied <= 1, `the outside world holds ${s.applied} pushes`);
   expect(s.effects.length <= 1, `${s.effects.length} effects in the ledger`);
   expect(s.text !== DONE_TEXT || s.applied === 1, "the model was told the push happened but the outside world does not hold it");
+  expect(s.effects.length > 0 || s.executed === 0, "the target was reached with no effect in the ledger");
   for (const e of s.effects) {
     if (e.status === "confirmed") expect(s.applied === 1, `effect ${e.id} is confirmed but nothing was applied`);
     if (e.status === "failed") expect(s.applied === 0, `effect ${e.id} failed but the push was applied`);
@@ -192,13 +193,18 @@ export function toolInvariants(s: ToolState): string[] {
  * model told it did not finish); pushed but the model told it did not finish; or an effect that started and that nothing settles afterwards.
  */
 export function outcomeOf(s: ToolState): string {
+  // Every part of the sentence is read from the state (nothing is assumed from the branch), so a change in what is pushed, what the model is told
+  // or which blockers are open changes the outcome and the per-boundary comparison notices it.
   const e = s.effects[0];
-  if (s.text === DONE_TEXT && e?.status === "confirmed") return "pushed once, model told";
-  if (e === undefined) return "cut before the call was admitted: nothing pushed, model told it did not finish";
-  if (e.status === "intended" && !e.started) return "admitted, never started: nothing pushed, the intent stays open, model told it did not finish";
-  if (e.status === "intended" && e.started) return `started, never settled (${s.applied === 1 ? "pushed" : "not pushed"}): no blocker, model told it did not finish`;
-  if (e.status === "confirmed") return "pushed once and confirmed, but the model was told it did not finish";
-  return `effect ${e.status}, ${s.applied} pushed`;
+  const pushed = s.applied === 0 ? "nothing pushed" : `${s.applied} pushed`;
+  const told = s.text === DONE_TEXT ? "model told it was pushed" : s.text === NOT_DONE_TEXT ? "model told it did not finish" : `model said ${JSON.stringify(s.text)}`;
+  const blocked = s.blockers.length === 0 ? "no blocker" : `blockers ${[...s.blockers].sort().join(", ")}`;
+  if (s.text === DONE_TEXT && e?.status === "confirmed" && s.applied === 1 && s.blockers.length === 0) return "pushed once, model told";
+  if (e === undefined) return `cut before the call was admitted: ${pushed}, ${blocked}, ${told}`;
+  if (e.status === "intended" && !e.started) return `admitted, never started: ${pushed}, the intent stays open, ${blocked}, ${told}`;
+  if (e.status === "intended" && e.started) return `started, never settled (${s.applied === 1 ? "pushed" : "not pushed"}): ${blocked}, ${told}`;
+  if (e.status === "confirmed" && s.applied === 1) return `pushed once and confirmed, ${blocked}, but the ${told}`;
+  return `effect ${e.status}${e.started ? " (started)" : ""}, ${pushed}, ${blocked}, ${told}`;
 }
 
 /** The uncrashed run: its boundaries with the operation behind each, and its finished state. The holder is "child", as in the killed process. */
