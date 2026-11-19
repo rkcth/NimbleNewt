@@ -88,6 +88,7 @@ import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
 import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import type { IntegratorLeaseOps } from "../landing/lease-ops.js";
+import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
@@ -153,6 +154,8 @@ export interface StateApiDeps {
   readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get" | "reapply">;
   /** The authorised door to the integrator leases of landing (card P10). */
   readonly integratorLeases?: Pick<IntegratorLeaseOps, "acquire" | "renew" | "release" | "list">;
+  /** The door to the landing queues of the projects' landing branches (card P10). Absent when the controller runs without it. */
+  readonly landingQueue?: Pick<LandingQueueOps, "add" | "remove" | "list">;
   /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
   readonly status?: Pick<StatusService, "ask" | "attention" | "toolActivity">;
   readonly invitations?: InvitationInbox;
@@ -400,6 +403,7 @@ export class StateApi {
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
         ...(this.#deps.integratorLeases === undefined ? {} : { integratorLeases: this.#deps.integratorLeases }),
+        ...(this.#deps.landingQueue === undefined ? {} : { landingQueue: this.#deps.landingQueue }),
         ...(this.#deps.status === undefined ? {} : { status: this.#deps.status }),
         ...(this.#deps.invitations === undefined ? {} : { invitations: this.#deps.invitations }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),

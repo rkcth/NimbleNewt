@@ -45,7 +45,8 @@ export interface HostWorkspaceCall {
   readonly landing?: LandingPolicy;
   /**
    * A `release` only (card H12o): the approved submission to commit. The commit is then exactly its tree on its base (anything else in the checkout refuses the release: a new submission and approval are needed), carries the
-   * `NimbleNewt-Submission:` trailer, and is made once: a commit this checkout already made for it is answered again (`detail.recovered`) instead of a second one.
+   * `NimbleNewt-Submission:` trailer, and is made once: a commit this checkout already made for it is answered again (`detail.recovered`) instead of a second one. A `landing` (card P10): the oldest queued submission;
+   * it lands only when the shared head is its base and the checkout's committed work is exactly its tree (nothing beyond it), and the answer names it (`detail.submission`, `base`, `tree`).
    */
   readonly submission?: ApprovedSubmission;
 }
@@ -143,7 +144,7 @@ export class WorkspaceHost {
     if (typeof requestId !== "string" || !REQUEST.test(requestId)) return no("the request ID is not one this host accepts");
     if (typeof operation !== "string" || !OPERATIONS.includes(operation)) return no(`the operation ${JSON.stringify(String(operation).slice(0, 30))} is not one this host knows`);
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
-    if (call.submission !== undefined && (operation !== "release" || !isApprovedSubmission(call.submission))) return no(operation !== "release" ? "only a release commits a submission" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
+    if (call.submission !== undefined && ((operation !== "release" && operation !== "landing") || !isApprovedSubmission(call.submission))) return no(operation !== "release" && operation !== "landing" ? "only a release commits a submission, and a landing lands one" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
     if (call.assignee !== undefined && (typeof call.assignee !== "string" || !IDENT.test(call.assignee))) return no("the assignee name is malformed");
     if (operation === "release" && this.#options.release !== true) return no("this host does not commit reviewed work through this request: the commit needs the commit permit of the review gate (A06, H12o), which a workspace request does not carry");
@@ -253,6 +254,9 @@ export class WorkspaceHost {
     if ("problem" in first) return no(`${first.problem}; nothing was landed`);
     const base = await git.baseOf(where.gitDir);
     if (base !== first.head) return no(`the checkout is based on ${base.slice(0, 12)} but the landing branch is at ${first.head.slice(0, 12)}; nothing was landed (the author refreshes onto the head first)`);
+    // A queued submission (card P10): it was approved on a base, and it lands only on that base (base == head), so the landing branch has not moved since the review.
+    const sub = call.operation === "landing" ? call.submission : undefined;
+    if (sub !== undefined && sub.base !== first.head) return no(`submission ${sub.id} was approved on ${sub.base.slice(0, 12)} but the landing branch is at ${first.head.slice(0, 12)}; nothing was landed (the author refreshes and the work is approved again)`);
     // The checkout must be at rest: only committed work lands (a file written after the review is not part of what was reviewed).
     const state = await git.status({ gitDir: where.gitDir, checkout: where.checkout });
     if (state.dirty) return no(`the checkout holds ${state.entries.length} changed, new or ignored file(s) that are not committed; nothing was landed (only committed work lands)`);
@@ -262,6 +266,12 @@ export class WorkspaceHost {
       this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
+    }
+    // The integrator writes no content (card P10): the committed work that would land must be exactly the approved tree on the approved base. A commit added after the approval (by anyone) is a diff beyond the
+    // submission and refuses the whole landing.
+    if (sub !== undefined) {
+      const tree = await git.treeOf({ gitDir: where.gitDir, commit: plan.head });
+      if (plan.base !== sub.base || tree !== sub.tree) return no(`the checkout's committed work (tree ${tree.slice(0, 12)} on ${plan.base.slice(0, 12)}) is not submission ${sub.id}'s approved tree ${sub.tree.slice(0, 12)} on ${sub.base.slice(0, 12)}: a landing carries exactly the approved submission and nothing beyond it; nothing was landed`);
     }
     const files = plan.files.filter((f) => !f.modeOnly);
     if (files.length === 0) return nothing(false);
@@ -309,7 +319,7 @@ export class WorkspaceHost {
     }
     let marked = false;
     try { marked = await git.markLanded({ gitDir: where.gitDir, commit: plan.head }); } catch { marked = false; }
-    return { ok: true, summary: `${result.count} file(s) landed in the shared workspace, uncommitted: landed changes are waiting to be committed by the integrator or owner${marked ? "" : "; the checkout could not be marked as landed"}`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, markedIntegrated: marked, changed: true, landed: marked, waitingToCommit: true } };
+    return { ok: true, summary: `${result.count} file(s) landed in the shared workspace, uncommitted: landed changes are waiting to be committed by the integrator or owner${marked ? "" : "; the checkout could not be marked as landed"}`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, markedIntegrated: marked, changed: true, landed: marked, waitingToCommit: true, ...(sub === undefined ? {} : { submission: sub.id, base: sub.base, tree: sub.tree }) } };
   }
 
   /**

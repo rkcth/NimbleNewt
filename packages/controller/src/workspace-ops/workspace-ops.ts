@@ -52,7 +52,10 @@ export interface WorkspaceCall {
    * host that cannot read the controller's settings. A local host reads the policy itself and ignores this.
    */
   readonly landing?: CarriedLanding;
-  /** A `release` of an approved submission only (card H12o): the submission and the base and tree that were approved. The host commits exactly that, once. */
+  /**
+   * A `release` of an approved submission (card H12o): the submission and the base and tree that were approved; the host commits exactly that, once. A `landing` of the oldest queued submission (card P10): the host lands
+   * only when the shared head is that base and the checkout's committed work is exactly that tree (any diff beyond the submission is refused).
+   */
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string };
 }
 /** The owner's landing figures that travel to a remote host: the owner-set values only (branch, whether the commit permit is required, extra protected paths, whether the built-in protected list applies). */
@@ -94,6 +97,8 @@ export interface WorkspaceRecordBody {
   readonly lease?: { readonly leaseId: string; readonly fence: number };
   /** A `release` of an approved submission (card H12o): which submission, the base and tree that were approved, and who approved it (a reviewer, or `review_disabled_single_agent`). */
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string; readonly approvedBy: string };
+  /** A `landing` of the oldest submission of the landing branch's queue (card P10): which submission, its approved base and tree, and the branch whose queue it was taken from. */
+  readonly queued?: { readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string };
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
 export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
@@ -123,7 +128,18 @@ export interface WorkspaceDeps {
    * right before the host is asked (a review may say `changes` while the task is made quiet).
    */
   readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string } | undefined>;
+  /**
+   * The landing queue (card P10, `LandingQueueOps`). When given, a `landing` lands only the oldest approved submission of the landing branch's queue (`check` answers it, or `undefined` for the owner's landing of a task
+   * with nothing queued while the queue is empty), asked when the request is made and again right before the host is asked; the host is told the submission's base and tree, and a landing the host confirms as exactly
+   * that submission takes it out of the queue in the same write that records the landing (`landedChanges`). When absent, landings are not queued.
+   */
+  readonly landingQueue?: {
+    check(by: Principal, call: { taskId: string; projectId: string; submissionId: unknown }): Promise<{ readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string } | undefined>;
+    landedChanges(projectId: string, branch: string, submissionId: string): Promise<Change[]>;
+  };
 }
+/** The landing queue moved under a landing between its two showings (card P10): told apart from a lease that no longer holds. */
+class QueueMoved extends DomainError {}
 
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const json = (value: object): JsonObject => value as unknown as JsonObject;
@@ -180,10 +196,11 @@ export class WorkspaceOpService {
     else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing is made under an integrator lease");
     // A release may name an approved submission of the task (card H12o): checked before anything is recorded or frozen, and again right before the host is asked.
     let submission: WorkspaceRecordBody["submission"];
-    if (command.submissionId !== undefined) {
-      if (operation !== "release") invalid("submissionId", "only a release commits a submission");
-      submission = await this.#approved(command.submissionId, taskId);
-    }
+    const queue = operation === "landing" ? this.#deps.landingQueue : undefined;
+    if (command.submissionId !== undefined && operation !== "release" && queue === undefined) invalid("submissionId", operation === "landing" ? "only a release commits a submission (no landing queue is kept here)" : "only a release commits a submission, and a landing lands one");
+    if (command.submissionId !== undefined && operation === "release") submission = await this.#approved(command.submissionId, taskId);
+    // A landing lands only the oldest approved submission of the landing branch's queue (card P10), exactly its base and tree: checked after the lease, before anything is recorded or frozen, and again right before the host is asked.
+    const queued: WorkspaceRecordBody["queued"] = queue === undefined ? undefined : await queue.check(by, { taskId, projectId, submissionId: command.submissionId });
     // One operation per task: two would race on the same checkout and one's release would lift the other's freeze.
     if (this.#busy.has(taskId)) throw new DomainError("unavailable", `task ${taskId} already has a workspace operation running; ask again when it ends`);
     this.#busy.set(taskId, id);
@@ -193,12 +210,23 @@ export class WorkspaceOpService {
       const intended = (await this.#deps.attempts?.live(taskId)) ?? [];
       let assignee: string | undefined;
       try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
-      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }) };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }) }, body: () => make, also: () => this.#openChange(taskId, id) });
+      const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }), ...(queued === undefined ? {} : { queued: { submissionId: queued.submissionId, base: queued.base, tree: queued.tree, branch: queued.branch } }) };
+      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }), ...(queued === undefined ? {} : { submissionId: queued.submissionId }) }, body: () => make, also: () => this.#openChange(taskId, id) });
       const started = (await this.#get(id))!;
       const pinned = leased;
       const approvedNow = submission;
-      const outcome = await this.#run(id, started.body, pinned === undefined ? approvedNow === undefined ? undefined : async () => { await this.#stillApproved(approvedNow, taskId); } : async () => { await this.#deps.landingLease!(by, { taskId, projectId, ...pinned }); });
+      const queuedNow = queued;
+      // The second showing: the same lease, the same approval, and the same place in the queue (the oldest, the same submission; or, for the owner's landing of nothing queued, a queue that is still empty).
+      const again = pinned === undefined && approvedNow === undefined && queue === undefined ? undefined : async () => {
+        if (pinned !== undefined) await this.#deps.landingLease!(by, { taskId, projectId, ...pinned });
+        if (approvedNow !== undefined) await this.#stillApproved(approvedNow, taskId);
+        if (queue !== undefined) {
+          let now: Awaited<ReturnType<typeof queue.check>>;
+          try { now = await queue.check(by, { taskId, projectId, submissionId: queuedNow?.submissionId }); } catch (error) { throw new QueueMoved("invalid_transition", error instanceof Error ? error.message : String(error)); }
+          if ((now === undefined) !== (queuedNow === undefined) || (now !== undefined && (now.submissionId !== queuedNow!.submissionId || now.base !== queuedNow!.base || now.tree !== queuedNow!.tree || now.branch !== queuedNow!.branch))) throw new QueueMoved("invalid_transition", "the landing queue changed while the task was made quiet");
+        }
+      };
+      const outcome = await this.#run(id, started.body, again);
       return await this.#settle(by.id, scoped, id, outcome);
     } finally { this.#busy.delete(taskId); }
   }
@@ -440,9 +468,9 @@ export class WorkspaceOpService {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
         // The quiesce may have taken a while: the lease is shown once more right before the host writes anything, and a lease that is no longer the caller's live hold means nothing is asked of the host.
         if (stillLeased !== undefined) {
-          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
+          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : error instanceof QueueMoved ? `the submission is no longer the oldest approved one in the landing queue, so nothing was landed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
         }
-        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }) });
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(body.queued === undefined ? {} : { submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
           const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
           changed = found.changed !== false;
@@ -480,7 +508,10 @@ export class WorkspaceOpService {
       const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
-        return done("done", { summary: safe(outcome.summary, WORKSPACE_LIMITS.summary), ...(detail === undefined ? {} : { detail }), ...more });
+        // A queued submission leaves the queue only when the host confirms it landed exactly that submission (card P10); a landing it does not confirm is said so, and the entry stays.
+        const unconfirmed = body.operation === "landing" && body.queued !== undefined && detail?.["landed"] === true && !this.#landedExactly(body.queued, detail);
+        const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 160 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue` : ""}`;
+        return done("done", { summary, ...(detail === undefined ? {} : { detail }), ...more });
       }
       return done("refused", { summary: `the host did not do it: ${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts });
     } catch (error) {
@@ -500,7 +531,7 @@ export class WorkspaceOpService {
       const round = counts ? ((counter?.body as unknown as { rounds?: number } | undefined)?.rounds ?? 0) + 1 : undefined;
       const final: WorkspaceRecordBody = round === undefined ? outcome : { ...outcome, round };
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(await this.#dequeueChange(final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
         return { ...final, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
@@ -521,6 +552,18 @@ export class WorkspaceOpService {
     if ((await this.#runner.get(SUBMISSION_COMMIT, s.id)) !== undefined) return [];
     const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true };
     return [{ type: "create", ref: { kind: SUBMISSION_COMMIT, id: s.id }, body: json(body) }];
+  }
+
+  /** Whether the host's detail confirms that exactly the queued submission landed: the same submission, base and tree. */
+  #landedExactly(q: NonNullable<WorkspaceRecordBody["queued"]>, detail: JsonObject | undefined): boolean {
+    return detail !== undefined && detail["landed"] === true && detail["submission"] === q.submissionId && detail["base"] === q.base && detail["tree"] === q.tree;
+  }
+
+  /** The change that takes a landed submission out of the landing queue (card P10), in the same write as the landing's outcome; only when the host confirmed exactly that submission landed. */
+  async #dequeueChange(final: WorkspaceRecordBody): Promise<Change[]> {
+    const q = final.queued;
+    if (final.operation !== "landing" || q === undefined || final.state !== "done" || this.#deps.landingQueue === undefined || !this.#landedExactly(q, final.detail)) return [];
+    return this.#deps.landingQueue.landedChanges(final.projectId, q.branch, q.submissionId);
   }
 
   /** The write of a task's refresh-round count: created at the first round, then updated against the revision that was read. */
