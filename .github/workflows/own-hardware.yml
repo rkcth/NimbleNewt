@@ -40,12 +40,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $candidates = @()
-          $git = Get-Command git.exe -ErrorAction SilentlyContinue
-          if ($git) { $candidates += Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin' }
+          $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+          # git.exe is usually in Git\cmd or Git\bin (bash in Git\bin); with Git\mingw64\bin on the PATH, Git\bin is one level higher.
+          if ($git) { $root = Split-Path (Split-Path $git.Source -Parent) -Parent; foreach ($r in @($root, (Split-Path $root -Parent))) { if ($r) { $candidates += Join-Path $r 'bin' } } }
           $candidates += Join-Path $env:ProgramFiles 'Git\bin'
           $dir = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bash.exe') } | Select-Object -First 1
           if (-not $dir) { Write-Output "::error::Git Bash (Git for Windows bin\bash.exe) was not found; install Git for Windows (docs/nimblenewt/own-hardware-runners.md)"; exit 1 }
-          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo "bash for this job: $BASH ($BASH_VERSION)"'
+          # No double quotes inside the -c text: Windows PowerShell 5.1 passes them to native programs unescaped.
+          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo bash for this job: $BASH $BASH_VERSION'
           if ($LASTEXITCODE -ne 0) { exit 1 }
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - name: Record the machine
@@ -89,12 +91,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $candidates = @()
-          $git = Get-Command git.exe -ErrorAction SilentlyContinue
-          if ($git) { $candidates += Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin' }
+          $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+          # git.exe is usually in Git\cmd or Git\bin (bash in Git\bin); with Git\mingw64\bin on the PATH, Git\bin is one level higher.
+          if ($git) { $root = Split-Path (Split-Path $git.Source -Parent) -Parent; foreach ($r in @($root, (Split-Path $root -Parent))) { if ($r) { $candidates += Join-Path $r 'bin' } } }
           $candidates += Join-Path $env:ProgramFiles 'Git\bin'
           $dir = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bash.exe') } | Select-Object -First 1
           if (-not $dir) { Write-Output "::error::Git Bash (Git for Windows bin\bash.exe) was not found; install Git for Windows (docs/nimblenewt/own-hardware-runners.md)"; exit 1 }
-          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo "bash for this job: $BASH ($BASH_VERSION)"'
+          # No double quotes inside the -c text: Windows PowerShell 5.1 passes them to native programs unescaped.
+          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo bash for this job: $BASH $BASH_VERSION'
           if ($LASTEXITCODE -ne 0) { exit 1 }
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - run: npm ci
