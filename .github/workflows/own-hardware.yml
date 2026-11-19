@@ -30,8 +30,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Windows: a plain `shell: bash` can resolve to C:\Windows\System32\bash.exe (the WSL launcher), which loses the backslashes of
+      # the runner's script path, so no step runs (GitHub run 44453704944). This step puts Git for Windows' bash first on the PATH for
+      # the rest of the job, so every later `shell: bash` step uses Git Bash. A `shell:` line naming "C:\Program Files\Git\bin\bash.exe"
+      # directly does not work: the runner splits that line at its first space. See docs/nimblenewt/own-hardware-runners.md.
+      - name: Use Git Bash for bash steps
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @()
+          $git = Get-Command git.exe -ErrorAction SilentlyContinue
+          if ($git) { $candidates += Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin' }
+          $candidates += Join-Path $env:ProgramFiles 'Git\bin'
+          $dir = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bash.exe') } | Select-Object -First 1
+          if (-not $dir) { Write-Output "::error::Git Bash (Git for Windows bin\bash.exe) was not found; install Git for Windows (docs/nimblenewt/own-hardware-runners.md)"; exit 1 }
+          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo "bash for this job: $BASH ($BASH_VERSION)"'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - name: Record the machine
         shell: bash
+        # On Windows this is Git Bash (the step above).
         run: |
           echo "## ${{ matrix.label }}" >> "$GITHUB_STEP_SUMMARY"
           { echo '```'; node -p "[process.platform, process.arch, process.version, require('os').release()].join(' ')"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -60,6 +79,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Windows: a plain `shell: bash` can resolve to C:\Windows\System32\bash.exe (the WSL launcher), which loses the backslashes of
+      # the runner's script path, so no step runs (GitHub run 44453704944). This step puts Git for Windows' bash first on the PATH for
+      # the rest of the job, so every later `shell: bash` step uses Git Bash. A `shell:` line naming "C:\Program Files\Git\bin\bash.exe"
+      # directly does not work: the runner splits that line at its first space. See docs/nimblenewt/own-hardware-runners.md.
+      - name: Use Git Bash for bash steps
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @()
+          $git = Get-Command git.exe -ErrorAction SilentlyContinue
+          if ($git) { $candidates += Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin' }
+          $candidates += Join-Path $env:ProgramFiles 'Git\bin'
+          $dir = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bash.exe') } | Select-Object -First 1
+          if (-not $dir) { Write-Output "::error::Git Bash (Git for Windows bin\bash.exe) was not found; install Git for Windows (docs/nimblenewt/own-hardware-runners.md)"; exit 1 }
+          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo "bash for this job: $BASH ($BASH_VERSION)"'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - run: npm ci
       - run: npm run build
       - name: Run the real Windows Sandbox tests
