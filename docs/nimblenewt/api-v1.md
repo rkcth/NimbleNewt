@@ -2607,7 +2607,7 @@ Result: `{ items }`.
 
 #### `service.observe`
 
-What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource.
+What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource. A local worker reads through its tool bridge (`nimblenewt__service-observe`, its own task only).
 
 Arguments:
 
@@ -7373,7 +7373,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `service.operate`
 
-Does ONE action on ONE resource of a service for a task and records what the service itself reports afterwards. The scope is judged first: the right `effect.perform` (granted per resource: kind `service`, id `<service>/<resource>`, or project-wide) is needed on the named resource and on every other resource the action would change, otherwise it is refused as `forbidden` and nothing is done. An agent must own the task's current attempt. The intent is written to the effect ledger first; the service applies it once (a repeat with the same command ID applies nothing again); the resource is read back and judged, and the resources next to it are checked to be unchanged. `confirmed` means applied and verified; the result then carries `outcome { reference, systemVersion, observedAt }`, the only thing a deliverable of type `operational-outcome` may name. A change that cannot be verified, or that moved something outside the scope, is `uncertain`: it is never retried blindly and a person decides. No service connected: `unavailable`.
+Does ONE action on ONE resource of a service for a task and records what the service itself reports afterwards. The scope is judged first: the right `effect.perform` (granted per resource: kind `service`, id `<service>/<resource>`, or project-wide) is needed on the named resource and on every other resource the action would change, otherwise it is refused as `forbidden` and nothing is done. An agent must own the task's current attempt. The intent is written to the effect ledger first; the service applies it once (a repeat with the same command ID applies nothing again); the resource is read back and judged, and the resources next to it are checked to be unchanged. `confirmed` means applied and verified; the result then carries `outcome { reference, systemVersion, observedAt }`, the only thing a deliverable of type `operational-outcome` may name. A change that cannot be verified, or that moved something outside the scope, is `uncertain`: it is never retried blindly and a person decides. No service connected: `unavailable`. A local worker operates through its tool bridge (`nimblenewt__service-operate`, its own task only, the call ID as the command ID).
 
 Arguments:
 
@@ -7389,7 +7389,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `deliverable.draft`
 
-Starts a deliverable of a task in `draft` (version 1): its type, title, responsible agent, audience and access scope, and optionally its content (artifacts of the task, grouped as `source` or `exported`; the code or document submissions it is; for an operational outcome the verified reference, system version and observation time). An agent holding the author, docs or qa role creates its own; the owner may name the responsible agent. Access scope `owner`: the owner and the responsible agent read it; `task` (default): also agents that may read the task; `project`: also any agent holding a role in the project. Audience `external`: only the owner can accept it. Repeating the same command ID records once.
+Starts a deliverable of a task in `draft` (version 1): its type, title, responsible agent, audience and access scope, and optionally its content (artifacts of the task, grouped as `source` or `exported`; the code or document submissions it is; for an operational outcome the verified reference, system version and observation time). An agent holding the author, docs or qa role creates its own; the owner may name the responsible agent. Access scope `owner`: the owner and the responsible agent read it; `task` (default): also agents that may read the task; `project`: also any agent holding a role in the project. Audience `external`: only the owner can accept it. Repeating the same command ID records once. A local worker drafts through its tool bridge (`nimblenewt__deliverable-draft`: its own task, itself responsible).
 
 Arguments:
 
@@ -7447,7 +7447,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `deliverable.submit`
 
-Submits the draft version for review (draft to submitted). The artifacts are checked against their bytes, the version must be complete for its type, and `contractVersion` must be the task contract version now in force (a stale one is `stale_revision` with the current version). Responsible agent or owner. Submitting is not acceptance.
+Submits the draft version for review (draft to submitted). The artifacts are checked against their bytes, the version must be complete for its type, and `contractVersion` must be the task contract version now in force (a stale one is `stale_revision` with the current version). Responsible agent or owner. Submitting is not acceptance. A local worker submits through its tool bridge (`nimblenewt__deliverable-submit`), always against the contract version its attempt began with.
 
 Arguments:
 
