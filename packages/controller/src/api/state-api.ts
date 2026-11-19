@@ -11,6 +11,7 @@ import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
 import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
+import type { SimulationService } from "../simulation/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
@@ -146,6 +147,8 @@ export interface StateApiDeps {
   /** Versioned deliverables and their acceptance (card Q01). */
   readonly taskArtifacts?: Pick<TaskArtifactPublisher, "publish">;
   readonly serviceOps?: Pick<ServiceOperations, "operate" | "observe">;
+  /** Simulation scopes (card P07). */
+  readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
@@ -393,6 +396,7 @@ export class StateApi {
         ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
+        ...(this.#deps.simulation === undefined ? {} : { simulation: this.#deps.simulation }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.activation === undefined ? {} : { activation: this.#deps.activation }),
         ...(this.#deps.migrationGuard === undefined ? {} : { migrationGuard: this.#deps.migrationGuard }),

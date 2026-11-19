@@ -66,6 +66,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
   // A rerun of a replay (card U09b) changes nothing: it is a walk through the recorded steps in an isolated scope, so it applies at once. Saying a step was wrong (replaces true) changes how every later replay shows it, so it is first shown.
   "activity.replay.simulate": { verb: "Rerun a task's replay as a simulation (nothing is run, sent or changed; failAt injects a provider failure at a step)", mode: "apply" },
+  // Simulation scopes (card P07): a stand-in of the services where the effect ledger refuses any real write, send or spend, so opening one, trying an action in it and closing it change nothing real: they apply at once. Real access is granted separately (grant.create, always shown first).
+  "simulation.open": { verb: "Open a simulation scope for a task: a stand-in of its services (layout: services, their resources, each with state and dependents) to try actions in before any real access; nothing real is written, sent or spent", mode: "apply" },
+  "simulation.operate": { verb: "Try one action (set fields or restart) on a resource in a simulation scope; the result is simulated (inject refuse, lose-answer, corrupt or leak to see how a failure is handled)", mode: "apply" },
+  "simulation.close": { verb: "Close a simulation scope (nothing more runs in it; what it recorded stays readable)", mode: "apply" },
   "activity.correct": { verb: "Correct a step of a task's activity; replaces true says the step was wrong, so the replay shows it as replaced", mode: "propose" },
   "thinking.collection.set": { verb: "Turn collecting the model's thinking off or on (enabled true or false); what was kept stays until retention removes it", mode: "apply" },
   "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
@@ -671,6 +675,11 @@ export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "d
 export const NEED_CHOICES: ReadonlySet<string> = new Set(["allow", "deny", "agree", "decline", "approve", "done"]);
 /** A recovery step's `action` is one of six fixed rungs (and the step is always shown first); its `text` must still be the owner's own words (card V02c). */
 export const RECOVERY_STEP_EXEMPT: ReadonlySet<string> = new Set(["action"]);
+/**
+ * A simulation scope's controls (card P07) change nothing real: the scope is a record reference the service checks (owner only), the service and resource are names in the scope's own stand-in (an unknown one is refused),
+ * and the action type and injected failure are fixed choices. Texts the owner gives as state (a field's value) must still be the owner's own words.
+ */
+export const SIMULATION_EXEMPT: ReadonlySet<string> = new Set(["scopeId", "service", "resource", "type", "inject"]);
 /** A workspace request's `operation` is one of five fixed choices (and the request is always shown first); its `reason` must still be the owner's own words (card H12m). */
 export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation"]);
 

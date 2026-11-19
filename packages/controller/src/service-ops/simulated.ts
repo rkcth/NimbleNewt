@@ -14,6 +14,11 @@ const refKey = (r: ServiceRef): string => `${r.service}/${r.resource}`;
 const same = (a: ServiceRef, b: ServiceRef): boolean => a.service === b.service && a.resource === b.resource;
 
 interface Cell { version: number; state: JsonObject; dependents: readonly ServiceRef[] }
+/** What a stand-in holds, as plain JSON: every resource (version, state, dependents) and every applied key with what the bridge asked to keep. */
+export interface SimulatedSnapshot {
+  readonly cells: Readonly<Record<string, { readonly version: number; readonly state: JsonObject; readonly dependents: readonly ServiceRef[] }>>;
+  readonly keys: Readonly<Record<string, true | JsonObject>>;
+}
 
 /** Faults a test can arm to show how the adapter behaves when the target misbehaves. */
 export interface SimulatedFaults {
@@ -44,6 +49,23 @@ export class SimulatedServices implements ServiceTarget {
   constructor(layout: SimulatedLayout, clock: () => string = () => new Date().toISOString()) {
     this.#clock = clock;
     for (const [service, resources] of Object.entries(layout)) for (const [resource, r] of Object.entries(resources)) this.#cells.set(refKey({ service, resource }), { version: 1, state: { ...(r.state ?? {}) }, dependents: r.dependents ?? [] });
+  }
+
+  /** Everything the stand-in holds, as plain JSON (card P07: a simulation scope keeps its world in its own record, so it outlives a restart). */
+  snapshot(): SimulatedSnapshot {
+    const cells: Record<string, { version: number; state: JsonObject; dependents: ServiceRef[] }> = {};
+    for (const [k, c] of this.#cells) cells[k] = { version: c.version, state: JSON.parse(JSON.stringify(c.state)) as JsonObject, dependents: c.dependents.map((d) => ({ service: d.service, resource: d.resource })) };
+    const keys: Record<string, true | JsonObject> = {};
+    for (const [k, v] of this.#keys) keys[k] = v === true ? true : JSON.parse(JSON.stringify(v)) as JsonObject;
+    return { cells, keys };
+  }
+
+  /** A stand-in holding exactly what `snapshot` gave. */
+  static fromSnapshot(snapshot: SimulatedSnapshot, clock?: () => string): SimulatedServices {
+    const out = new SimulatedServices({}, clock);
+    for (const [k, c] of Object.entries(snapshot.cells)) out.#cells.set(k, { version: c.version, state: { ...c.state }, dependents: c.dependents.map((d) => ({ service: d.service, resource: d.resource })) });
+    for (const [k, v] of Object.entries(snapshot.keys)) out.#keys.set(k, v);
+    return out;
   }
 
   /** The target's clock, for tests that need a fixed observation time. */
