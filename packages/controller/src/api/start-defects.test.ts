@@ -93,13 +93,17 @@ test("through the running controller a defect is linked to its version and findi
     assert.equal((await call(far.token, "status.ask", { request: { kind: "defects", taskId: task } })).error.code, "not_found");
 
     // The owner records a finding of their own by chat: the ID comes from the view, the finding must be the owner's words.
-    const noticed = "version 2 of the install guide has a typo in step 1, minor";
+    // No number in the owner's words: the interpreter takes the version from the view it showed (a version number is not searched for in the message).
+    const noticed = "the latest version of the install guide has a typo in step 1, minor";
     const invented = await turn("m1b", noticed, [{ kind: "command", op: "defect.report", args: { deliverableId: id, version: 2, finding: "the whole guide is wrong", severity: "minor" }, evidence: noticed, basis: "owner" }]);
     assert.equal(invented[0].status, "refused", JSON.stringify(invented));
     const own = await turn("m1c", noticed, [{ kind: "command", op: "defect.report", args: { deliverableId: id, version: 2, finding: "a typo in step 1", severity: "minor" }, evidence: noticed, basis: "owner" }]);
     assert.equal(own[0].status, "applied", JSON.stringify(own));
     const typo = (await call(boot.token, "defect.list", { deliverableId: id })).result.items.find((x: any) => x.id !== defect);
     assert.deepEqual([typo.version, typo.finding.text, typo.reportedBy, typo.state], [2, "a typo in step 1", rob.id, "open"]);
+    // A defect whose repair was never checked says so.
+    const typoLine = ((await call(boot.token, "status.ask", { request: { kind: "defects", taskId: task } })).result.item.lines as { text: string }[]).map((l) => l.text).find((t) => t.startsWith(`Defect ${typo.id} `));
+    assert.match(typoLine ?? "", new RegExp(`^Defect ${typo.id} \\(minor, found in version 2\\): open, waiting for a repair; 0 of 1 repair and review cycles used\\. Finding: "a typo in step 1"\\. No repair of it has been checked yet\\.$`));
 
     // The owner decides in their own words: shown first, applied on their word; the failed check stays failed.
     const decide = "accept that guide defect as it is: ship it now and fix the backup step next release";
@@ -113,6 +117,24 @@ test("through the running controller a defect is linked to its version and findi
     assert.deepEqual(item.checks.map((x: any) => [x.verdict, x.cycles, x.limit, x.escalated]), [["not-fixed", 1, 1, true]], "the failed check is kept as it was");
     assert.deepEqual(item.overrideRecords.map((o: any) => [o.outcome, o.reason, o.remaining.map((r: any) => [r.defectId, r.state, r.lastVerdict])]), [["accept-as-is", "ship it now and fix the backup step next release", [[defect, "escalated", "not-fixed"], [typo.id, "open", undefined]]]], "the decision names every finding still unresolved");
     assert.equal((await call(rev.token, "defect.override", { id: defect, outcome: "repair-again", reason: "no" }, "o9")).error.code, "forbidden", "only the owner overrides");
+
+    // A judgement shown to the owner applies only to the defect as it was shown: a repair checked and repaired again in between (now in another version) makes the proposal stale.
+    await s.configuration.change(rob, { commandId: "cfg2", layer: "project", scopeId: project, expectedRevision: 1, set: { "review.repairCycles": 3 } } as never);
+    const nextVersion = async (n: number) => {
+      const v = await call(ann.token, "deliverable.version.new", { id, expectedRevision: (await call(ann.token, "deliverable.record.get", { id })).result.item.revision, artifacts: [{ artifactId: art }] }, `n${n}`);
+      assert.ok((await call(ann.token, "deliverable.submit", { id, expectedRevision: v.result.revision, contractVersion: 0 }, `s${n}`)).ok);
+      assert.ok((await call(ann.token, "defect.repair", { id: typo.id, version: n }, `rp${n}`)).ok);
+    };
+    await nextVersion(3);
+    const judge = "the typo fix in the guide works";
+    const shownCheck = await turn("m4", judge, [{ kind: "command", op: "defect.review", args: { id: typo.id, verdict: "fixed" }, evidence: judge, basis: "owner" }]);
+    assert.equal(shownCheck[0].status, "proposed", JSON.stringify(shownCheck));
+    assert.equal((await call(rev.token, "defect.review", { id: typo.id, verdict: "not-fixed", reason: "the typo is still there" }, "rv2")).result.state, "open");
+    await nextVersion(4);
+    const staleCheck = await turn("m5", "yes, do that", [{ kind: "apply_proposal", proposalId: shownCheck[0].proposalId, evidence: "do that", basis: "owner" }]);
+    assert.notEqual(staleCheck[0].status, "applied", JSON.stringify(staleCheck));
+    const typoNow = (await call(boot.token, "defect.get", { id: typo.id })).result.item;
+    assert.deepEqual([typoNow.state, typoNow.repairVersion, typoNow.checks.map((x: any) => x.verdict)], ["repair-submitted", 4, ["not-fixed"]], "version 4 was never judged by the owner");
 
     // Every owner control of the card is a chat command.
     for (const op of ["defect.report", "defect.repair", "defect.review", "defect.override"]) assert.ok(CHAT_OPS[op], op);

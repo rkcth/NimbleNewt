@@ -2029,6 +2029,11 @@ export class ChatService {
         const item = typeof args["concernId"] === "string" ? await this.#get(token, "stall.concern.get", { concernId: args["concernId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such concern") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "defect": {
+        // A defect's revision when the judgement or decision is shown (card Q04): a check, a repair or a decision in between makes the proposal stale, so the owner never judges a version they were not shown.
+        const item = typeof args["id"] === "string" ? await this.#get(token, "defect.get", { id: args["id"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such defect") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`defect:${args["id"] as string}`) };
+      }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such task") : { ok: true, name: "expectedVersion", value: (item["version"] as number) + ahead(`contract:${args["taskId"] as string}`) };
@@ -2689,6 +2694,8 @@ function recordOf(step: ChatStep): string | undefined {
     case "difficulty.set-profiles": return "difficulty-profiles";
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
+    // A repair named in the same message comes before the owner's judgement of it, which then expects the defect's next revision.
+    case "defect.repair": return `defect:${a["id"] as string}`;
     case "standup.update": return `standup:${a["scheduleId"] as string}`;
     case "notifications.configure": return "notifications";
     case "retention.settings.set": return "retention";
