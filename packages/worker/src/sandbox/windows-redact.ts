@@ -215,25 +215,38 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/<host>(?:\.[A-Za-z0-9-]+)+/g, "<host>");
   // An account on this machine that is not among the known names (another account at the console, such as the owner when the runner has its own account): what follows
   // `<host>\` is an account name. Not after a backslash (a UNC path, whose next part is a share).
-  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>)[^\s\\/:"',;()<>\x1b]+/g, "<host>$1<user>");
+  // An escaped colour code right after the separator (`<host>\u001b[0m`) is not an account.
+  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>|(?:x1[bB]|u001[bB])\[)[^\s\\/:"',;()<>\x1b]+/g, "<host>$1<user>");
   // Home directories: any drive's Users (or Documents and Settings) root, whatever the name; the name runs to the next separator or quote, spaces included.
   out = out.replace(new RegExp(String.raw`[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP}[^\\/"'*?|\r\n:]*[^\\/"'*?|\r\n:\s]`, "gi"), "<home>");
   // UNC server names (`\\server\share`, or `\\\\server` escaped), the whole run of backslashes kept. Not where the run continues a path (after a drive `C:`, a name
-  // character, a dot, `$`, `?`, a dash, a closing bracket or brace, or a placeholder such as `<home>`): in JSON-escaped text every separator is written `\\`, and
+  // character, a dot, `$`, the `?` of a `\\?\` prefix, a dash, a closing bracket or brace, or a placeholder such as `<home>`): in JSON-escaped text every separator is written `\\`, and
   // `"C:\\Program Files\\WindowsApps"` would otherwise lose each folder name to `<host>` (and `<host>\\<user>` its `<user>`). A name in such a path is treated as it is in
   // the unescaped path, where a single backslash was never read as a server. A letter that ends an escaped control character (`\n`, `\r`, `\t`, ... in JSON or inspected
   // text, where a UNC path often starts the next line) or a terminal colour code does not end a name: there the run starts a UNC path, as it does after a blank. After an
   // escape written with k backslashes the text is escaped that many times over, so only a run of at least 2k is a UNC start (`\\r\\n\\\\\\\\server` twice escaped: the
-  // `\\` of `\\n` is the escape itself, the eight are the UNC prefix). The look back is at most 24 characters, so the rule stays linear on long lines.
+  // `\\` of `\\n` is the escape itself, the eight are the UNC prefix). A drive after such an escape or colour code (`\nC:\\Program Files`) is a drive as it is after a
+  // blank. A `?` continues the path only as part of a `\\?\` prefix; after any other `?` the run starts a UNC path. The look back is at most 48 characters, so the rule
+  // stays linear on long lines.
   // A long UNC path (`\\?\UNC\server\share`, escaped or not) names its server after `UNC`.
   out = out.replace(/(?<!\\)(\\{2,}\?\\+UNC\\+)([^\\/"'\s]+)/gi, "$1<host>");
+  const COLOUR = String.raw`(?:\x1b|\\+x1[bB]|\\+u001[bB])\[[0-9;]*m`;
+  const afterColour = new RegExp(`${COLOUR}$`);
+  const atDrive = new RegExp(String.raw`(?:^|[^\w]|\\[nrtbfv]|${COLOUR})[A-Za-z]:$`);
   const continuesPath = (run: string, before: string): boolean => {
     const escape = /(\\+)[nrtbfv]$/.exec(before);
     if (escape !== null) return run.length < 2 * escape[1]!.length;
-    if (/(?:\x1b|\\x1[bB]|\\u001[bB])\[[0-9;]*m$/.test(before)) return false;
-    return /(?:[\w.$?)\]}-]|<[a-z]+>|\b[A-Za-z]:)$/.test(before);
+    if (afterColour.test(before)) return false;
+    return /(?:[\w.$)\]}-]|\\\?|<[a-z]+>)$/.test(before) || atDrive.test(before);
   };
-  out = out.replace(/(?<!\\)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string, at: number, all: string) => (server === "?" || server === "." || continuesPath(run, all.slice(Math.max(0, at - 24), at)) ? m : `${run}<host>`));
+  // A colour code escaped twice (`\\u001b[32m`) is not a server either: it stays, and only what follows it in the same part (if anything but a drive or a placeholder) goes.
+  const notServer = (run: string, server: string): string | undefined => {
+    const code = /^(?:x1[bB]|u001[bB])\[[0-9;]*m/.exec(server);
+    if (code === null) return undefined;
+    const rest = server.slice(code[0].length);
+    return `${run}${code[0]}${/^(?:[A-Za-z]:|<[a-z]+>)?$/.test(rest) ? rest : "<host>"}`;
+  };
+  out = out.replace(/(?<!\\)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string, at: number, all: string) => (server === "?" || server === "." || continuesPath(run, all.slice(Math.max(0, at - 48), at)) ? m : notServer(run, server) ?? `${run}<host>`));
   // Accounts in an escaped access list (`CORP\\bob:(F)` inside JSON or inspected text, where the lines below are one line and the line rule does not see them): the account
   // after `DOMAIN\\` goes unless it is well known. The domain stays, as it does for a UNC share. The look ahead to the run comes first, so the look back over the domain is
   // tried only where a run starts.

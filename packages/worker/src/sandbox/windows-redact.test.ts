@@ -126,6 +126,16 @@ test("escaped multi-line text: a server, a known name or an account at the start
   const acl = ["C:\\x NT AUTHORITY\\SYSTEM:(I)(F)", "      CORP\\bob:(OI)(CI)(M)", "      CORP\\John Smith:(F)", "      APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(RX)", "      BUILTIN\\Users:(RX)"].join("\r\n");
   assert.equal(redact(JSON.stringify(acl), names), JSON.stringify(acl.replace("CORP\\bob", "CORP\\<user>").replace("CORP\\John Smith", "CORP\\<user>")));
   assert.equal(redact(JSON.stringify("C:\\x\\App Everyone:(R)"), names), JSON.stringify("C:\\x\\App Everyone:(R)"));
+  // A drive at the start of an escaped line or after a colour code is a drive, at one level of escaping and at two; a colour code escaped twice is not a server; an
+  // escaped colour code after a machine name is not an account.
+  for (const local of ["ran\nC:\\Program Files\\WindowsApps\\x", "a\tD:\\Tools\\{AB-12}\\y", "\x1b[32mC:\\Program Files\\x\x1b[0m", "\x1b[32m\\\\?\\C:\\Program Files\\x"]) {
+    assert.equal(redact(JSON.stringify(local), names), JSON.stringify(local));
+    assert.equal(redact(JSON.stringify(JSON.stringify(local)), names), JSON.stringify(JSON.stringify(local)));
+  }
+  assert.equal(redact(JSON.stringify(JSON.stringify("\x1b[32m\\\\fs8\\s")), names), JSON.stringify(JSON.stringify("\x1b[32m\\\\<host>\\s")));
+  assert.equal(redact(JSON.stringify("DESKTOP-4F2K9\x1b[0m"), names), JSON.stringify("<host>\x1b[0m"));
+  // A `?` that is not part of a `\\?\` prefix does not make the next run a separator.
+  assert.equal(redact("where?\\\\fs7\\s", names), "where?\\\\<host>\\s");
   // Linear on long lines of escapes, colour codes and domains.
   const started = Date.now();
   for (const long of ["a\\n".repeat(70_000), "\x1b[31m".repeat(40_000), " CORP\\\\bob".repeat(30_000), ` CORP${"\\".repeat(100_000)}b:(F)`]) redact(long, names);
