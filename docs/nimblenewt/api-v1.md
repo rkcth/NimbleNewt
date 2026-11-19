@@ -120,7 +120,7 @@ Result: `{ items, more }`: each `{ grantId, grantee, action, project, state, inF
 
 #### `setup.readiness`
 
-Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up. The model route item names each usable route whose context window cannot start a task (by the first-call admission rule, with the route's reply limit) and the window it needs, and is missing when no usable route can start one.
+Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up. The model route item names up to three usable routes whose context window cannot start a task (by the first-call admission rule, with the route's reply limit) with the window each needs, counts the rest, and is missing when no usable route can start one.
 
 Arguments:
 

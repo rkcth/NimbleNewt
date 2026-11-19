@@ -46,7 +46,7 @@ export interface Readiness {
 }
 
 const PAGE = 200;
-/** What the setup view (the status kind setup) shows of an item's detail, and of one route's name in it. */
+/** What the setup views (the status kind setup and the web page's setup table, `clip(i.detail, 240)` in packages/ui) show of an item's detail, and of one route's name in it. */
 const DETAIL_SHOWN = 240;
 const ROUTE_SHOWN = 60;
 const MAX_PAGES = 5;

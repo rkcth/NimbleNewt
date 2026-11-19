@@ -821,7 +821,7 @@ export const APP_JS = String.raw`(function (root) {
     if (!failed(box, 'What is set up', parts.readiness) && ready) {
       var sec = region(box, ready.ready === true ? 'Ready: every required step is done' : 'What is set up');
       var items = list(ready.items, 20).map(obj).filter(Boolean);
-      table(sec, 'Setup steps', ['Step', 'State', 'Needed', 'What was found'], items.map(function (i) { return [clip(i.label, 80), clip(i.state, 20), i.required === true ? 'yes' : 'optional', clip(i.detail, 200)]; }));
+      table(sec, 'Setup steps', ['Step', 'State', 'Needed', 'What was found'], items.map(function (i) { return [clip(i.label, 80), clip(i.state, 20), i.required === true ? 'yes' : 'optional', clip(i.detail, 240)]; }));
       var next = obj(ready.next);
       if (next) { sec.appendChild(el('div', 'card-line', 'Next: ' + clip(next.label, 80) + '. ' + clip(next.how, 300))); }
       items.filter(function (i) { return i.id === 'model-route' && i.state !== 'done'; }).forEach(function () {
