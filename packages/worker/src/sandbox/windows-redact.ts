@@ -214,9 +214,10 @@ export function redact(text: string, names: RedactionNames = {}): string {
   // Home directories: any drive's Users (or Documents and Settings) root, whatever the name; the name runs to the next separator or quote, spaces included.
   out = out.replace(new RegExp(String.raw`[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP}[^\\/"'*?|\r\n:]*[^\\/"'*?|\r\n:\s]`, "gi"), "<home>");
   // UNC server names (`\\server\share`, or `\\\\server` escaped), the whole run of backslashes kept. Not where the run continues a path (after a drive `C:`, a name
-  // character, a dot or a closing bracket): in JSON-escaped text every separator is written `\\`, and `"C:\\Program Files\\WindowsApps"` would otherwise lose each folder
-  // name to `<host>`.
-  out = out.replace(/(?<![\w.$)\]\\-])(?<!\b[A-Za-z]:)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string) => (server === "?" || server === "." ? m : `${run}<host>`));
+  // character, a dot, a closing bracket or brace, or a placeholder such as `<home>`): in JSON-escaped text every separator is written `\\`, and
+  // `"C:\\Program Files\\WindowsApps"` would otherwise lose each folder name to `<host>` (and `<host>\\<user>` its `<user>`). A name in such a path is treated as it is in
+  // the unescaped path, where a single backslash was never read as a server.
+  out = out.replace(/(?<![\w.$)\]}\\-]|<[a-z]+>)(?<!\b[A-Za-z]:)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string) => (server === "?" || server === "." ? m : `${run}<host>`));
   // Accounts in an access list, line by line: everything before the colon of `account:(RIGHTS)` is the account (spaces included); only well-known ones and placeholders stay.
   out = out.split("\n").map((line) => {
     const cr = line.endsWith("\r") ? "\r" : "";

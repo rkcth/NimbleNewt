@@ -95,6 +95,16 @@ test("a JSON-escaped local path keeps its folder names: two backslashes after a 
   assert.equal(redact("D:\\\\Program Files (x86)\\\\Tools\\\\a.b\\\\c", names), "D:\\\\Program Files (x86)\\\\Tools\\\\a.b\\\\c");
   // A home folder in the escaped form is still replaced.
   assert.ok(!/Alice/.test(redact(JSON.stringify("C:\\Users\\Alice\\x"), names)));
+  // After a placeholder or a closing brace the run is a separator too: the folder after a home, the account after a machine and a folder after a GUID folder keep their
+  // placeholder or name, as they do unescaped.
+  assert.equal(redact(JSON.stringify("C:\\Users\\Alice\\Documents\\x"), names), JSON.stringify("<home>\\Documents\\x"));
+  assert.equal(redact(JSON.stringify("C:\\ProgramData\\Package Cache\\{AB-12}\\setup.exe"), names), JSON.stringify("C:\\ProgramData\\Package Cache\\{AB-12}\\setup.exe"));
+  assert.equal(redact(JSON.stringify("DESKTOP-4F2K9\\someone ran it"), names), JSON.stringify("<host>\\<user> ran it"));
+  assert.equal(redact(JSON.stringify("\\\\10.1.2.3\\share"), names), JSON.stringify("\\\\<host>\\share"));
+  // Linear on long runs of backslashes.
+  const started = Date.now();
+  redact(`${"\\".repeat(100_000)} ${"a\\\\".repeat(100_000)}`, names);
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
 });
 
 test("accounts in an access list go unless they are well known; rights stay", () => {
