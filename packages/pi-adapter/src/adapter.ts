@@ -585,6 +585,25 @@ export class AdapterConversation implements ConversationPort, ThinkingReader {
   }
 
   /**
+   * The tool calls the conversation's assistant messages make that no tool result answers yet, in order (G04 follow-up): after a crash, the calls that were interrupted, which Pi presents again on release when their tool is
+   * replay-safe. Read-only: it does not start the scheduler.
+   */
+  async openToolCalls(): Promise<string[]> {
+    // Matched by position, not by ID alone: a provider may use one call ID in several replies (a local server counting from zero), and a result answers the newest call with its ID before it.
+    const open: string[] = [];
+    for (const entry of await this.scan(0, undefined)) {
+      const m = firstMessage(entry) as { role?: string; toolCallId?: unknown; content?: unknown };
+      if (m.role === "assistant") open.push(...callIdsOf(m.content));
+      else if (m.role === "toolResult" && typeof m.toolCallId === "string") {
+        const at = open.lastIndexOf(m.toolCallId);
+        if (at >= 0) open.splice(at, 1);
+      }
+    }
+    return open;
+  }
+
+
+  /**
    * The thinking the model produced in this conversation, in order, as readable text (card C06b). Pi keeps the provider's thinking and reasoning items in the stored conversation and replays them to the model that made them;
    * this is the owner's view of them. It is not part of `transcript()` (which carries words said only) and not part of `ConversationPort`: the controller gates it (owner only, inspection policy, redaction).
    */

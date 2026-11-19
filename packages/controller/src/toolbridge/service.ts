@@ -127,6 +127,8 @@ export interface ToolExecutionDeps {
   readonly runRecords?: RunningCallRecords;
   /** Card T02d (finish): how often (milliseconds) a starting call also sweeps the durable records of runs that can no longer be running (leftovers of a process that stopped or lost the epoch), not waited for. Default 600000 (10 minutes); `0` turns it off (the start-up sweep remains). */
   readonly runRecordSweepMs?: number;
+  /** How a call presented again waits for an earlier request of the same call that is still running (milliseconds per step, and in all). Default 200 and 30000; tests set short ones. */
+  readonly busyWait?: { readonly stepMs: number; readonly totalMs: number };
   /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   readonly hosts: Pick<HostService, "status">;
@@ -215,6 +217,9 @@ export function bridgeCommandId(prefix: string, attemptId: string, callId: strin
 }
 const STREAMING_WAIT_MS = 100;
 const STREAMING_WAIT_TOTAL_MS = 3000;
+/** How long a call presented again waits for an earlier request of the same call that is still running (G04 follow-up, second review), in steps of this many ms. */
+const BUSY_WAIT_MS = 200;
+const BUSY_WAIT_TOTAL_MS = 30_000;
 /**
  * The admitted operations that are the same operation when asked again with the same call ID (the dispatcher's operation and the job are keyed by the attempt and the call ID) and that may answer before they are done: a call parked
  * for a review (`awaiting-approval`) or still running (`in-progress`) is asked again with the same call ID to go on (review of card L05d). Their effect bridge is idempotent, and an answer that is not final leaves the effect pending,
@@ -607,22 +612,19 @@ export class ToolExecutionService {
     let ran = false;
     let performed: BridgeResponse | undefined;
     const again = ASKED_AGAIN.has(request.op as BridgeOperation);
-    const bridge: EffectBridge = {
-      idempotent: again,
-      execute: async () => {
-        ran = true;
-        let response: BridgeResponse;
-        try { response = await perform(); } catch (error) {
-          // A typed refusal of the operation's own service (a bad argument, a right it does not hold, a stale revision) did not happen: a failed effect, answered as the refusal it is. Anything else leaves the outcome unknown.
-          if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code, message: error.message.slice(0, 500) });
-          thrown = error; throw error;
-        }
-        performed = response;
-        if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
-        if (again && NOT_FINAL.has(response.result["state"])) throw new NotFinal();
-        const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
-        return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
-      },
+    const execute = async (): Promise<JsonObject> => {
+      ran = true;
+      let response: BridgeResponse;
+      try { response = await perform(); } catch (error) {
+        // A typed refusal of the operation's own service (a bad argument, a right it does not hold, a stale revision) did not happen: a failed effect, answered as the refusal it is. Anything else leaves the outcome unknown.
+        if (error instanceof DomainError) throw new EffectRejected(error.message, { code: error.code, message: error.message.slice(0, 500) });
+        thrown = error; throw error;
+      }
+      performed = response;
+      if (!response.ok) throw new EffectRejected(response.message, { code: response.code, message: response.message.slice(0, 500) });
+      if (again && NOT_FINAL.has(response.result["state"])) throw new NotFinal();
+      const kept = canonicalJson(response.result as JsonObject).length <= ADMITTED_RESULT_CHARS;
+      return { ok: true, ...(kept ? { result: response.result as JsonObject } : { truncated: true }) };
     };
     try {
       const commandId = `ba-${createHash("sha256").update(`${c.attemptId}\0${request.callId}`).digest("hex").slice(0, 40)}`;
@@ -634,7 +636,21 @@ export class ToolExecutionService {
           await new Promise((r) => setTimeout(r, STREAMING_WAIT_MS));
         }
       }
-      const outcome = await generations.executeCall!(this.#deps.principal, { runId: admitted.runId, toolCallId: admitted.toolCallId }, bridge);
+      // Whether the ledger may run a started effect again with the same key. The key of `tool.invoke` and `job.start` is this request's call ID (their dispatcher record and job), so a call admitted before under another call ID
+      // (`otherCall`, G04 follow-up review) is never run again under this one: a started effect is only reconciled, and with nothing to ask it becomes uncertain.
+      const bridge: EffectBridge = { idempotent: again && admitted.otherCall !== true, execute };
+      // G04 follow-up, second review: a call presented again while the controller is still running its first request (the worker restarted, the controller did not) finds the effect busy. It waits for that request, briefly,
+      // and is then answered from the ledger like any repeat, instead of telling the model "busy" (a model told that may make the call again under a new call ID, which would be a second write).
+      let outcome: Awaited<ReturnType<NonNullable<typeof generations.executeCall>>>;
+      const busyStep = this.#deps.busyWait?.stepMs ?? BUSY_WAIT_MS;
+      const busyTotal = this.#deps.busyWait?.totalMs ?? BUSY_WAIT_TOTAL_MS;
+      for (let waited = 0; ; waited += busyStep) {
+        try { outcome = await generations.executeCall!(this.#deps.principal, { runId: admitted.runId, toolCallId: admitted.toolCallId }, bridge); break; } catch (error) {
+          if (!isDomainError(error, "effect_busy") || ran) throw error;
+          if (!(busyStep > 0) || !(waited < busyTotal)) return refusal("effect_busy", `call ${request.callId.slice(0, 60)} is still being run by an earlier request of the same call (from before a restart); it is not run again here and its outcome is kept. Do not make the call again under a new call ID: it may already have happened`);
+          await new Promise((r) => setTimeout(r, busyStep));
+        }
+      }
       if (thrown !== undefined) throw thrown;
       const evidence = (outcome.evidence ?? {}) as JsonObject;
       if (outcome.status === "confirmed") {

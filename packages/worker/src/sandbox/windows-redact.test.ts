@@ -55,6 +55,16 @@ test("SIDs are redacted by class, with and without the icacls asterisk: machine,
   assert.equal(scrub("S-1-5-21-<domain>-500 and S-1-12-1-<account> and S-1-9-<other>", names), "S-1-5-21-<domain>-500 and S-1-12-1-<account> and S-1-9-<other>");
 });
 
+test("an account on this machine that is not a known name still goes (another account at the console); a share on this machine stays", () => {
+  assert.equal(
+    redact("the console session belongs to DESKTOP-4F2K9\\Zed.Q, not the configured owner desktop-4f2k9\\\\JimBob", names),
+    "the console session belongs to <host>\\<user>, not the configured owner <host>\\<user>",
+  );
+  assert.equal(redact("(DESKTOP-4F2K9\\other-account)", names), "(<host>\\<user>)");
+  assert.equal(redact("\\\\DESKTOP-4F2K9\\share\\dir", names), "\\\\<host>\\share\\dir");
+  assert.equal(scrub("the console session belongs to DESKTOP-4F2K9\\Zed, not the configured owner DESKTOP-4F2K9\\JimBob", names), "the console session belongs to <host>\\<user>, not the configured owner <host>\\<user>");
+});
+
 test("known user and machine names go as whole words, in quotes too, and case does not matter", () => {
   const out = redact(`user "JimBob" 'jimbob' (nimblenewtrunner) on DESKTOP-4F2K9; jimbobby stays, DESKTOP-4F2K9\\JimBob, DESKTOP-4F2K9\\\\JimBob`, names);
   assert.ok(!/JimBob\b|nimblenewtrunner|DESKTOP-4F2K9/i.test(out.replace("jimbobby", "")), out);
@@ -124,7 +134,9 @@ test("surnames, split names, lower-case SIDs, short names and DNS suffixes", () 
   assert.equal(redact("rober~1 and ROBER~1.TXT", ms), "<user> and <user>");
   // A known name that is a prefix of another account must not leave the rest visible.
   assert.ok(!/er\b/.test(redact("DESKTOP-4F2K9\\rober", { users: ["rob", "DESKTOP-4F2K9\\rober"], hosts: ["DESKTOP-4F2K9"] }).replace("<user>", "")));
-  assert.equal(redact("DESKTOP-4F2K9\\rober", { users: ["rob"], hosts: ["DESKTOP-4F2K9"] }), "<host>\\rober");
+  // "rob" does not match inside "rober"; the account after the machine name goes anyway (any `<machine>\\account` is an account).
+  assert.equal(redact("DESKTOP-4F2K9\\rober", { users: ["rob"], hosts: ["DESKTOP-4F2K9"] }), "<host>\\<user>");
+  assert.equal(redact("rober and rob", { users: ["rob"], hosts: ["DESKTOP-4F2K9"] }), "rober and <user>");
   assert.equal(redact("desktop-4f2k9.fritz.box and DESKTOP-4F2K9.local", full), "<host> and <host>");
 });
 

@@ -285,6 +285,51 @@ for (const backend of backends) {
     assert.equal((await reconciler({}, { "git-push": opaque }).runPass()).blockersOpened, 0);
   });
 
+  suite("G04 follow-up, second review: a pass closes a tool bridge call's effect (kind bridge) only once its attempt has lost the task (never started: failed; started by an executor that vanished: uncertain with one blocker), runs nothing, and leaves effects of other kinds with no bridge as they were", async (ctx) => {
+    const { projects, assign, effects, blockers, reconciler, clock } = ctx;
+    const p = await projects.createProject({ commandId: cid("p"), actor: me, name: "G" });
+    const t = await projects.createTask({ commandId: cid("t"), actor: me, projectId: p.id, title: "push" });
+    await projects.transitionTask({ commandId: cid("r"), actor: me, taskId: t.id, expectedRevision: 1, to: "ready" });
+    await assign.assignTask({ commandId: cid("a"), actor: me, taskId: t.id, owner: ann });
+    const att = await assign.admitAttempt({ commandId: cid("adm"), actor: me, taskId: t.id, expectedRevision: 1, generation: 1, owner: ann });
+    const fence = { generation: 1, attemptId: att.id };
+    let executed = 0;
+    const counting: EffectBridge = { idempotent: false, execute: async () => { executed++; throw new Error("answer lost"); } };
+    // An executor that dies once it has started the effect: its settlement and the release of its claim never reach the store.
+    const dying = new Proxy(ctx.world.storage, {
+      get(target, name, receiver) {
+        const value = Reflect.get(target, name, receiver) as unknown;
+        if (typeof value !== "function") return value;
+        if (name === "applyOperation") return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => { if (input.settleEffects.length > 0 || input.operationId.startsWith("cmd:release:")) throw Object.assign(new Error("died"), { kind: "unavailable", name: "StorageError" }); return target.applyOperation(input); };
+        return value.bind(target);
+      },
+    });
+    const doomed = EffectService.withEpoch(dying, ctx.epoch, assign, { clock: () => new Date(clock.now).toISOString(), holder: "executor-that-died" });
+    const intend = (kind: string) => effects.intend({ commandId: cid("e"), actor: me, kind, target: "desk.write", input: { path: "a" }, taskId: t.id, fence });
+    const bridgeNever = await intend("bridge");
+    const bridgeVanished = await intend("bridge");
+    const otherNever = await intend("other-kind");
+    const otherVanished = await intend("other-kind");
+    for (const id of [bridgeVanished.id, otherVanished.id]) await assert.rejects(doomed.run(id, counting));
+    assert.equal(executed, 2);
+    clock.now += 6 * 60_000;
+    const statuses = async () => Promise.all([bridgeNever, bridgeVanished, otherNever, otherVanished].map(async (e) => (await effects.get(e.id))?.status));
+    // While the attempt holds the task its calls may still be presented again: nothing is closed.
+    const holding = await reconciler().runPass();
+    assert.deepEqual([holding.effectsRun, holding.blockersOpened, await statuses()], [0, 0, ["intended", "intended", "intended", "intended"]]);
+    const rev = (await assign.getAssignment(t.id))!.revision;
+    await assign.releaseTask({ commandId: cid("rel"), actor: me, taskId: t.id, expectedRevision: rev });
+    const closed = await reconciler().runPass();
+    assert.deepEqual([closed.effectsRun, closed.blockersOpened, await statuses()], [2, 1, ["failed", "uncertain", "intended", "intended"]]);
+    assert.equal(closed.effectsUnbridged, 1, "the other kind's started effect is still only counted");
+    assert.ok(await blockers.openFor("effect_uncertain", { kind: "effect", id: bridgeVanished.id }));
+    assert.equal(await blockers.openFor("effect_uncertain", { kind: "effect", id: otherVanished.id }), undefined);
+    assert.equal(executed, 2, "closing ran nothing");
+    // A later pass opens no second blocker and changes nothing.
+    const again = await reconciler().runPass();
+    assert.deepEqual([again.effectsRun, again.blockersOpened, await statuses()], [0, 0, ["failed", "uncertain", "intended", "intended"]]);
+  });
+
   suite("scans keep a durable cursor: with a small page a restart between passes continues where the last pass stopped and covers everything", async ({ projects, assign, inbox, reconciler }) => {
     const ids: string[] = [];
     for (let i = 0; i < 5; i++) {

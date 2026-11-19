@@ -1,5 +1,9 @@
 // Card Y02 (QA checkpoint 2: isolation, stop and recovery): the automated part, and the gate that judges the whole checkpoint.
 //   node scripts/y02-checkpoint.mjs run    --out DIR                         run the scenario set here, write DIR/y02-scenarios-<platform>.json
+//        run --audit FILE also writes DIR/y02-owner-load.json from that exported audit log (see owner-load)
+//   node scripts/y02-checkpoint.mjs owner-load --audit FILE --out FILE [--now ISO] [--days N]
+//                                                                           owner decisions per day and stalls that reached unrelated work, from an exported audit log
+//                                                                           (one JSON audit record or snapshot audit row per line; packages/controller/src/health/owner-load.ts)
 //   node scripts/y02-checkpoint.mjs digest --dir DIR --platform P            print the evidence digest an owner's sign-off must quote
 //   node scripts/y02-checkpoint.mjs gate   --dir DIR --commit SHA [--now ISO] [--out FILE]
 //                                                                           judge DIR, print every blocker, write a deterministic verdict file
@@ -457,7 +461,7 @@ export const NOT_VERIFIED = [
   "evidence files are self-attested JSON (no signature): the gate proves they are consistent and bound to this commit, not that the runs happened",
   "CI run ids and conclusions are taken from ci-runs.json; the gate uses no network and does not look them up",
   "a sign-off or waiver names a person as text; the gate cannot tell who wrote it",
-  "owner decisions per day and unrelated stalls (counted from the audit log) are not read by this gate",
+  "owner decisions per day and unrelated stalls (y02-owner-load.json, from `owner-load` over an exported audit log) are reported beside the gate, not judged by it",
   "macOS and Windows runs were not made on this host; their files are judged only as data",
 ];
 
@@ -640,14 +644,29 @@ function parseArgs(argv) {
 export async function main(argv, io = { out: (s) => console.log(s), err: (s) => console.error(s) }) {
   const [command, ...rest] = argv;
   const flags = parseArgs(rest);
-  const usage = () => { io.err("usage: y02-checkpoint.mjs run --out DIR | digest --dir DIR --platform P | gate --dir DIR --commit SHA [--now ISO] [--out FILE]"); return 2; };
+  const usage = () => { io.err("usage: y02-checkpoint.mjs run --out DIR [--audit FILE] | owner-load --audit FILE --out FILE [--now ISO] [--days N] | digest --dir DIR --platform P | gate --dir DIR --commit SHA [--now ISO] [--out FILE]"); return 2; };
   if (flags === undefined) return usage();
-  const allowed = { run: ["--out"], digest: ["--dir", "--platform"], gate: ["--dir", "--commit", "--now", "--out"] }[command];
+  const allowed = { run: ["--out", "--audit"], "owner-load": ["--audit", "--out", "--now", "--days"], digest: ["--dir", "--platform"], gate: ["--dir", "--commit", "--now", "--out"] }[command];
   if (allowed === undefined || [...flags.keys()].some((k) => !allowed.includes(k))) return usage();
   const mapRaw = readBounded(join(root, "scripts", "y02-scenarios.json"), MAX_FILE_BYTES);
   if (mapRaw.raw === undefined) { io.err(`the scenario map ${mapRaw.error}`); return 2; }
   const parsedMap = parseScenarioMap(mapRaw.raw);
   if ("error" in parsedMap) { io.err(parsedMap.error); return 2; }
+
+  if (command === "owner-load") {
+    const out = flags.get("--out");
+    const audit = flags.get("--audit");
+    if (out === undefined || audit === undefined) return usage();
+    if (VERDICT_REFUSED_NAME.test(basename(resolve(out)))) { io.err("usage: --out: the owner-load report may not be written over an evidence file"); return 2; }
+    let now = new Date();
+    if (flags.has("--now")) { const t = isoMillis(flags.get("--now")); if (!Number.isFinite(t)) return usage(); now = new Date(t); }
+    const days = flags.has("--days") ? Number(flags.get("--days")) : 7;
+    const made = await ownerLoadFile(audit, now, days);
+    if ("error" in made) { io.err(made.error); return made.code; }
+    try { writeFileAtomic(out, `${JSON.stringify(made.report, null, 2)}\n`); } catch (e) { io.err(`the report could not be written: ${show(e.message, 200)}`); return 2; }
+    io.out(ownerLoadLine(made.report));
+    return 0;
+  }
 
   if (command === "run") {
     const out = flags.get("--out");
@@ -655,7 +674,15 @@ export async function main(argv, io = { out: (s) => console.log(s), err: (s) => 
     const platform = process.platform;
     if (!PLATFORMS.includes(platform)) { io.err(`${show(platform, 20)} is not a platform this checkpoint covers`); return 2; }
     try { const b = spawnSync(process.execPath, [join(root, "node_modules", "typescript", "bin", "tsc"), "--build"], { cwd: root, stdio: "inherit" }); if (b.status !== 0) throw new Error("build"); } catch { io.err("the build failed: no evidence is produced from code that does not compile"); return 1; }
+    let ownerLoad;
+    if (flags.has("--audit")) {
+      // Read before the scenarios run, so a bad audit file stops the run before the long part.
+      const made = await ownerLoadFile(flags.get("--audit"), new Date(), 7);
+      if ("error" in made) { io.err(made.error); return made.code; }
+      ownerLoad = made.report;
+    }
     const report = runScenarios({ root, map: parsedMap.map, mapDigest: parsedMap.digest, platform, now: Date.now(), log: io.out });
+    if (ownerLoad !== undefined) { writeFileAtomic(join(resolve(out), OWNER_LOAD_FILE), `${JSON.stringify(ownerLoad, null, 2)}\n`); io.out(ownerLoadLine(ownerLoad)); }
     const file = join(resolve(out), `y02-scenarios-${platform}.json`);
     writeFileAtomic(file, `${JSON.stringify(report, null, 2)}\n`);
     const bad = report.scenarios.filter((s) => s.status !== "pass");
@@ -684,6 +711,27 @@ export async function main(argv, io = { out: (s) => console.log(s), err: (s) => 
   io.out(verdict.complete ? "Y02 checkpoint evidence complete for this commit" : `Y02 checkpoint incomplete: automated part ${verdict.automatedPart}, hardware part ${verdict.hardwarePart}`);
   if (flags.has("--out")) { try { writeFileAtomic(flags.get("--out"), renderVerdict(verdict)); } catch (e) { io.err(`the verdict file could not be written: ${show(e.message, 200)}`); return 2; } }
   return verdict.complete ? 0 : 1;
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Owner decisions per day and stalls (card Y02's last clause), from an exported audit log
+
+export const OWNER_LOAD_FILE = "y02-owner-load.json";
+export const MAX_AUDIT_BYTES = 512 * 1024 * 1024;
+
+/** One plain line for the job log and summary. */
+export function ownerLoadLine(r) {
+  return `owner decisions ${r.from}..${r.to}: ${r.ownerDecisions} in ${r.days} days (most in a day ${r.maxOwnerDecisionsPerDay}, average ${r.averageOwnerDecisionsPerDay}); stalls ${r.stallCount}, of which ${r.stallsReachingUnrelatedWork} reached unrelated work`;
+}
+
+async function ownerLoadFile(path, now, days) {
+  if (!Number.isSafeInteger(days) || days < 1 || days > 90) return { error: "usage: --days is a whole number from 1 to 90", code: 2 };
+  const raw = readBounded(resolve(path), MAX_AUDIT_BYTES);
+  if (raw.raw === undefined) return { error: `the audit log ${raw.error}`, code: 1 };
+  const controller = await import(pathToFileURL(join(root, "packages", "controller", "dist", "index.js")).href);
+  const parsed = controller.parseAuditLines(raw.raw);
+  if ("error" in parsed) return { error: `the audit log: ${show(parsed.error, 200)}`, code: 1 };
+  return { report: controller.ownerLoadReport(parsed.records, { now: now.toISOString(), days }) };
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await main(process.argv.slice(2)));

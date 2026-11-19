@@ -137,6 +137,9 @@ export function redact(text: string, names: RedactionNames = {}): string {
   for (const u of [...new Set(users)].sort(byLength)) out = out.replace(wholeWord(u), "<user>");
   for (const h of [...new Set(hosts)].sort(byLength)) out = out.replace(wholeWord(h), "<host>");
   out = out.replace(/<host>(?:\.[A-Za-z0-9-]+)+/g, "<host>");
+  // An account on this machine that is not among the known names (another account at the console, such as the owner when the runner has its own account): what follows
+  // `<host>\` is an account name. Not after a backslash (a UNC path, whose next part is a share).
+  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>)[^\s\\/:"',;()<>]+/g, "<host>$1<user>");
   // Home directories: any drive's Users (or Documents and Settings) root, whatever the name; the name runs to the next separator or quote, spaces included.
   out = out.replace(new RegExp(String.raw`[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP}[^\\/"'*?|\r\n:]*[^\\/"'*?|\r\n:\s]`, "gi"), "<home>");
   out = out.replace(/\\\\(?!\\)([^\\/"'\s]+)/g, (m, server: string) => (server === "?" || server === "." ? m : "\\\\<host>"));

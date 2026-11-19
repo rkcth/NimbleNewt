@@ -40,6 +40,7 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import type { StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
+import { docReasonText, type DocObligationService } from "../submissions/doc-obligations.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
@@ -277,6 +278,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
+  docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
@@ -386,6 +388,7 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "docs"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -720,6 +723,8 @@ export interface StatusDeps {
   readonly defects?: Pick<DefectService, "forTask">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
+  /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
+  readonly docs?: Pick<DocObligationService, "list">;
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -938,6 +943,7 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
@@ -2047,6 +2053,36 @@ export class StatusService {
       }
       if (d.defects.length > 20) lines.push(line(`${d.defects.length - 20} more defects of ${d.id} are not shown; defect.list lists them all.`, cite("deliverable", d.id)));
     }
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
+   * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
+   */
+  async docLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.docs === undefined) return { observedAt: at, lines: [line("Documentation obligations are not kept on this controller.", cite("project", projectId))] };
+    let list: Awaited<ReturnType<DocObligationService["list"]>>;
+    try { list = await this.#deps.docs.list(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    if (list.items.length === 0) return { observedAt: at, lines: [line("No documentation obligations are recorded for this project: no document is tied to the behaviour it describes yet.", cite("project", projectId))] };
+    const order = { stale: 0, unverified: 1, verified: 2 } as const;
+    const items = [...list.items].sort((a, b) => order[a.state] - order[b.state]);
+    const lines: Line[] = [];
+    const flagged = items.filter((i) => i.state !== "verified").length;
+    lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    for (const d of items.slice(0, 30)) {
+      const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
+      const v = d.verification;
+      const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
+      const state = d.state === "verified" ? "Verified." : d.state === "unverified" ? `FLAGGED: unverified (not checked against tested code since it was recorded)${(d.reasons ?? []).length === 0 ? "" : `; since then ${(d.reasons ?? []).map(docReasonText).join("; ")}`}.` : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
+      const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
+      const open: string[] = [];
+      for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
+      lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
+    }
+    if (list.items.length > 30) lines.push(line(`${list.items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
     return { observedAt: at, lines };
   }
 

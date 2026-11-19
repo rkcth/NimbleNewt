@@ -4,3 +4,4 @@ export { AcceptanceService, CONTRACT_WORK_FIELDS, ACCESS_SCOPES, AUDIENCES, DELI
 
 export { DefectService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DEFECT_SEVERITIES, DEFECT_STATES, OVERRIDE_OUTCOMES, type DefectBody, type DefectCheckBody, type DefectOverrideBody, type DefectPorts, type DefectSeverity, type DefectState, type OverrideOutcome } from "./defects.js";
 export { QA_LIMITS, QA_RESULTS, QaEvidenceService, reasonText as qaReasonText, type QaCheck, type QaDecisionRef, type QaEvidenceBody, type QaEvidencePorts, type QaGate, type QaGateCheck, type QaRecheckBody, type QaResult, type QaStaleReason } from "./qa-evidence.js";
+export { DOC_AUDIENCES, DOC_LIMITS, DOC_STATES, DocObligationService, docReasonText, type DocAudience, type DocClaim, type DocEvidence, type DocObligationBody, type DocObligationPorts, type DocReason, type DocState, type DocUpdate } from "./doc-obligations.js";

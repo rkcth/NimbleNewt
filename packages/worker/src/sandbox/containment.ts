@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:net";
 import { arch as osArch, release as osRelease, tmpdir } from "node:os";
 import { join, relative, win32 } from "node:path";
 import type { SandboxBackend } from "./backend.js";
-import { windowsEvidenceBackend } from "./containment-windows.js";
+import { windowsConsoleUser, windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher } from "./launcher.js";
 import { GUEST, type SandboxRecipe } from "./recipe.js";
 import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
@@ -456,7 +456,8 @@ export async function produceReport(repo: string, options: SuiteOptions = {}): P
   const commit = git(repo, "rev-parse", "HEAD");
   const dirty = git(repo, "status", "--porcelain").length > 0;
   // Windows: the launcher has no default backend there, so the Windows Sandbox backend is built here (see containment-windows.ts for the join point with card A03b).
-  const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend() } : options);
+  // The owner and share account default to the console user there, as in windows-real.test.ts (containment-windows.ts).
+  const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend(process.env, await windowsConsoleUser()) } : options);
   const macos = macosProductVersion();
   return {
     schema: CONTAINMENT_SCHEMA, generatedAt: new Date().toISOString(), implementationCommit: commit, dirty, platform, arch: osArch(), osVersion: osRelease(),
