@@ -134,6 +134,10 @@ test("escaped multi-line text: a server, a known name or an account at the start
   }
   assert.equal(redact(JSON.stringify(JSON.stringify("\x1b[32m\\\\fs8\\s")), names), JSON.stringify(JSON.stringify("\x1b[32m\\\\<host>\\s")));
   assert.equal(redact(JSON.stringify("DESKTOP-4F2K9\x1b[0m"), names), JSON.stringify("<host>\x1b[0m"));
+  // A coloured account after the machine name and its separator is still an account; an access-list account after a domain read as a server still goes.
+  assert.equal(redact(JSON.stringify("DESKTOP-4F2K9\\\x1b[32mzed01\x1b[0m"), names), JSON.stringify("<host>\\\x1b[32m<user>\x1b[0m"));
+  assert.equal(redact(JSON.stringify(JSON.stringify("DESKTOP-4F2K9\x1b[0m")), names), JSON.stringify(JSON.stringify("<host>\x1b[0m")));
+  for (const local of ["x?\tCORP\\zed02:(F)", "DESKTOP-4F2K9\x1b[0m\nCORP\\zed03:(F)"]) assert.ok(!/zed0/.test(redact(JSON.stringify(JSON.stringify(local)), names)), local);
   // A `?` that is not part of a `\\?\` prefix does not make the next run a separator.
   assert.equal(redact("where?\\\\fs7\\s", names), "where?\\\\<host>\\s");
   // Linear on long lines of escapes, colour codes and domains.

@@ -215,8 +215,14 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/<host>(?:\.[A-Za-z0-9-]+)+/g, "<host>");
   // An account on this machine that is not among the known names (another account at the console, such as the owner when the runner has its own account): what follows
   // `<host>\` is an account name. Not after a backslash (a UNC path, whose next part is a share).
-  // An escaped colour code right after the separator (`<host>\u001b[0m`) is not an account.
-  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>|(?:x1[bB]|u001[bB])\[)[^\s\\/:"',;()<>\x1b]+/g, "<host>$1<user>");
+  // An escaped colour code right after the name (`<host>\u001b[0m`, or `<host>\\u001b[0m` escaped twice: one, two or four backslashes, all of them the code's own) is not
+  // an account. Three are an escaped separator and then the code's own backslash (`HOST\` and a coloured account, JSON-escaped): the code stays and what follows it is an account.
+  out = out.replace(/(?<!\\)<host>(\\{1,4})(?!<user>)([^\s\\/:"',;()<>\x1b]+)/g, (m, run: string, rest: string) => {
+    const code = /^(?:x1[bB]|u001[bB])\[[0-9;]*m?/.exec(rest);
+    if (code === null) return `<host>${run}<user>`;
+    if (run.length !== 3) return m;
+    return `<host>${run}${code[0]}${rest.length > code[0].length ? "<user>" : ""}`;
+  });
   // Home directories: any drive's Users (or Documents and Settings) root, whatever the name; the name runs to the next separator or quote, spaces included.
   out = out.replace(new RegExp(String.raw`[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP}[^\\/"'*?|\r\n:]*[^\\/"'*?|\r\n:\s]`, "gi"), "<home>");
   // UNC server names (`\\server\share`, or `\\\\server` escaped), the whole run of backslashes kept. Not where the run continues a path (after a drive `C:`, a name
@@ -249,8 +255,9 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/(?<!\\)(\\{2,})([^\\/"'\s]+)/g, (m, run: string, server: string, at: number, all: string) => (server === "?" || server === "." || continuesPath(run, all.slice(Math.max(0, at - 48), at)) ? m : notServer(run, server) ?? `${run}<host>`));
   // Accounts in an escaped access list (`CORP\\bob:(F)` inside JSON or inspected text, where the lines below are one line and the line rule does not see them): the account
   // after `DOMAIN\\` goes unless it is well known. The domain stays, as it does for a UNC share. The look ahead to the run comes first, so the look back over the domain is
-  // tried only where a run starts.
-  out = out.replace(/(?<!\\)(?=\\\\)(?<=(?:^|[\s"'(]|\\[nrtbfv])[^\\/"'\s:()<>]+)(\\{2,})([^\\/"'\r\n\t:()<>]+?)(?=:\((?:[A-Z]{1,5})[,)(])/g, (m, run: string, name: string) => (WELL_KNOWN.test(name.trim()) ? m : `${run}<user>`));
+  // tried only where a run starts. A domain the UNC rule above already made `<host>` (`?\\tCORP\\\\bob:(F)` escaped twice, whose `\\t` reads as a UNC start) still has its
+  // account removed.
+  out = out.replace(/(?<!\\)(?=\\\\)(?<=(?:^|[\s"'(]|\\[nrtbfv])[^\\/"'\s:()<>]+|<host>)(\\{2,})([^\\/"'\r\n\t:()<>]+?)(?=:\((?:[A-Z]{1,5})[,)(])/g, (m, run: string, name: string) => (WELL_KNOWN.test(name.trim()) ? m : `${run}<user>`));
   // Accounts in an access list, line by line: everything before the colon of `account:(RIGHTS)` is the account (spaces included); only well-known ones and placeholders stay.
   out = out.split("\n").map((line) => {
     const cr = line.endsWith("\r") ? "\r" : "";
