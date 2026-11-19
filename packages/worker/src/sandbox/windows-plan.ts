@@ -216,9 +216,15 @@ export function aclSteps(identity: string, shares: readonly Share[]): AclStep[] 
   return steps;
 }
 
-const TRUSTED = /^(?:nt authority\\system|builtin\\administrators|nt service\\trustedinstaller|creator owner|nt authority\\local service)$/i;
-const WRITE_RIGHTS = new Set(["F", "M", "W", "WD", "AD", "DC", "DE", "GA", "GW", "WDAC", "WO"]);
-/** From the text `icacls <path>` prints, the accounts other than the trusted ones that are allowed to write. Deny entries are ignored. */
+// SYSTEM, Administrators and TrustedInstaller, by their English names (on a Windows in another language the names differ and are reported as writers: a refusal, never an
+// acceptance). CREATOR OWNER only shapes the entries of files created later, which needs a right to create files that is reported on its own.
+const TRUSTED = /^(?:nt authority\\system|builtin\\administrators|nt service\\trustedinstaller|creator owner)$/i;
+// D (the simple delete right) is included like DE (the specific one): a file that can be deleted can be replaced by whoever may then create one.
+const WRITE_RIGHTS = new Set(["F", "M", "W", "D", "WD", "AD", "DC", "DE", "GA", "GW", "WDAC", "WO"]);
+/**
+ * From the text `icacls <path>` prints, the accounts other than the trusted ones that are allowed to write. Deny entries are ignored. A line that looks like an access entry
+ * (`name:(`) but is not one in the expected form is reported as `unrecognised entry "..."`, so a caller that requires an empty list refuses it rather than skipping it.
+ */
 export function parseIcaclsWritable(output: string, path: string): string[] {
   const found = new Set<string>();
   for (const raw of output.split(/\r?\n/)) {
@@ -226,7 +232,7 @@ export function parseIcaclsWritable(output: string, path: string): string[] {
     if (line === "" || /^successfully processed/i.test(line)) continue;
     if (line.toLowerCase().startsWith(path.toLowerCase())) line = line.slice(path.length).trim();
     const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
-    if (m === null) continue;
+    if (m === null) { if (line.includes(":(")) found.add(`unrecognised entry ${JSON.stringify(line.slice(0, 120))}`); continue; }
     const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
     if (tokens.includes("DENY")) continue;
     if (TRUSTED.test(m[1]!)) continue;
@@ -272,12 +278,16 @@ export function shortStatusMessage(message: string, path: string): string {
  * signed and Windows checks it. Such a file is accepted only when all of this holds, exactly:
  * - `Get-AuthenticodeSignature` says `NotSigned` (no signature at all; any other failure, such as HashMismatch or NotTrusted, is refused, never explained away);
  * - Windows says the package is signed by Windows itself (`SignatureKind` exactly `System`) and its state is exactly `Ok` (not Tampered, Modified or anything else);
+ * - neither the package folder nor the file is a link, a junction or a short name (their real paths are the paths themselves);
  * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls).
  * The package's name, publisher and family and its folder under `%ProgramFiles%\WindowsApps` were already checked before this is asked.
  */
 async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
   if (pkg.signatureKind !== "System") return { ok: false, reason: `Windows reports the package's signature kind as ${pkg.signatureKind ?? "not reported"}, not System` };
   if (pkg.status !== "Ok") return { ok: false, reason: `Windows reports the package's state as ${pkg.status ?? "not reported"}, not Ok` };
+  // The file and the folder must be the package's own, not reached through a link, a junction (here or higher up) or a short name: the access lists read below are then the
+  // ones of the file that is started. The real host fails closed (a path whose real path cannot be read counts as a link).
+  for (const p of [location, file]) if (host.isLinkOrJunction(p)) return { ok: false, reason: `${p} is a link, a junction or a short name, not the package's own path` };
   for (const p of [file, location]) {
     let writable: readonly string[];
     try { writable = await host.writableBy(p); } catch (error) { return { ok: false, reason: `the access list of ${p} could not be read: ${(error as Error).message}` }; }

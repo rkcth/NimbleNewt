@@ -238,6 +238,17 @@ describe("Windows launcher: pure rules", () => {
       "      NT SERVICE\\TrustedInstaller:(CI)(F)", "      Authenticated Users:(I)(OI)(CI)(WD,AD)", "", "Successfully processed 1 files; Failed processing 0 files",
     ].join("\r\n");
     assert.deepEqual(parseIcaclsWritable(text, "C:\\x").sort(), ["Authenticated Users", "PC\\robert"]);
+ 
+    // Only SYSTEM, Administrators and TrustedInstaller (and CREATOR OWNER, which shapes later files only) are trusted; LOCAL SERVICE is not. Delete (D) counts as a change.
+    // A name in another language is not trusted (a refusal where an empty list is required); a summary line in another language is not an entry; a line that looks like an
+    // entry but is not in the expected form is reported, never skipped.
+    const more = [
+      "C:\\x NT AUTHORITY\\LOCAL SERVICE:(M)", "      CREATOR OWNER:(OI)(CI)(IO)(F)", "      PC\\erin:(D)", "      NT-AUTORITÄT\\SYSTEM:(OI)(CI)(F)", "      BUILTIN\\Users:(OI)(CI)(RX)",
+      "      BUILTIN\\Guests:(OI)(CI)(F) (Exists WIN://SYSAPPID)", "      BUILTIN\\Administrators:(OI)(CI)(F)", "", "1 Dateien erfolgreich verarbeitet; bei 0 Dateien ist ein Verarbeitungsfehler aufgetreten.",
+    ].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(more, "C:\\x").sort(), ["NT AUTHORITY\\LOCAL SERVICE", "NT-AUTORITÄT\\SYSTEM", "PC\\erin", 'unrecognised entry "BUILTIN\\\\Guests:(OI)(CI)(F) (Exists WIN://SYSAPPID)"']);
+    const clean = ["C:\\x NT SERVICE\\TrustedInstaller:(F)", "      NT AUTHORITY\\SYSTEM:(OI)(CI)(RX)", "      BUILTIN\\Administrators:(OI)(CI)(RX)", "      BUILTIN\\Users:(OI)(CI)(RX)", "      APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES:(OI)(CI)(RX)", "Successfully processed 1 files; Failed processing 0 files"].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(clean, "C:\\x"), []);
   });
 });
 
@@ -493,6 +504,7 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     await refused(writableFile, /wsb\.exe can be changed by PC\\robert/, "file writable by the owner");
     const writableFolder = variant({}); writableFolder.writable.set(key(INSTALL), ["BUILTIN\\Users"]);
     await refused(writableFolder, /WindowsSandbox_0\.8\.107\.0_x64__cw5n1h2txyewy can be changed by BUILTIN\\Users/, "folder writable by users");
+    for (const p of [INSTALL, WSB]) { const linked = variant({}); linked.links.add(key(p)); await refused(linked, /is a link, a junction or a short name, not the package's own path/, `link at ${p}`); }
     const unreadable = variant({}); unreadable.writableBy = async () => { throw new Error("icacls: Access is denied."); };
     await refused(unreadable, /access list of .* could not be read: icacls: Access is denied\./, "access list unreadable");
     // Only the exact status NotSigned opens the package proof.
