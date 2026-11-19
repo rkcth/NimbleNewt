@@ -261,7 +261,8 @@ function scanIcacls(output: string, path: string): ({ readonly account: string; 
     if (m === null) { if (inBlock || line.includes(":(")) found.push({ problem: `unrecognised entry ${JSON.stringify(line.slice(0, 120))}` }); continue; }
     // A process trust label (`S-1-19-<type>-<level>`, e.g. `S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)` on the Store package of Windows Sandbox) is not a grant: it is a
     // SYSTEM_PROCESS_TRUST_LABEL_ACE kept in the system access list (SACL), which icacls prints among the access entries. Its rights only limit what processes below that trust
-    // level may do; it never gives an account a right, so it is not a writer. Only a SID of exactly that shape is skipped (not counted as an entry either); anything else that
+    // level may do; it never gives an account a right, so it is not a writer. icacls does not mark which list a line came from, but the skip does not depend on it: a trust
+    // SID is a token's trust level, never its user or one of its groups, so even an allow entry for one in the DACL would match no caller. Only a SID of exactly that shape is skipped (not counted as an entry either); anything else that
     // merely starts the same way (`S-1-19-1`, `S-1-19-5-6-7`, `S-1-190-1-2`) is read like any other account.
     if (/^S-1-19-\d+-\d+$/.test(m[1]!)) continue;
     entries++;
