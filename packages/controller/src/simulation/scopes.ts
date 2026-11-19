@@ -270,6 +270,7 @@ export class SimulationService {
       // The world after the change must fit the scope's record, or the change could be done on the stand-in and not kept: tried first on a copy (worst case of an injected fault).
       const trial = SimulatedServices.fromSnapshot(s.body.world, () => this.#runner.now());
       if (command.inject === "leak" && guarded[0] !== undefined) trial.faults.leakInto = guarded[0];
+      if (command.inject === "corrupt") trial.faults.corruptNext = true;
       try { await trial.apply(effectId, ref, action, { baseline: baseline as unknown as JsonObject }); } catch { /* refused on the copy: it will be refused (and change nothing) for real too */ }
       fits({ ...s.body, world: trial.snapshot(), effects: [...s.body.effects, effectId] }, "action");
       await this.#ports.effects.intend({ commandId: intentId, actor: by.id, kind: "service-op", target: `simulation:${scopeId}/service:${refKey(ref)}`, input, taskId: s.body.taskId, simulation: scopeId });

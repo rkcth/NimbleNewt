@@ -8,7 +8,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
 import { ServiceOperations, SimulatedServices, operationBridge } from "../service-ops/index.js";
-import type { JsonObject } from "../storage/types.js";
+import { canonicalJson } from "../storage/json.js";
+import { LIMITS, type JsonObject } from "../storage/types.js";
 import { SIMULATION_SCOPE_LABEL, SimulationService } from "./index.js";
 
 // Card P07 (first slice): a simulation scope where the effect ledger refuses any real write, send or spend, and every result is labelled simulated.
@@ -149,6 +150,13 @@ for (const backend of backends) {
       const corrupt = await sims.operate(owner, { commandId: cid("i"), scopeId, service: "shop", resource: "cart", action: { type: "set", params: { fields: { replicas: 4 } } }, inject: "corrupt" });
       assert.equal(corrupt.status, "uncertain");
       assert.equal(corrupt.evidence?.["simulated"], true);
+      // Resolved by hand as confirmed: the ledger still labels it simulated, whatever the person wrote, and it still cannot be named as a real outcome.
+      await effects.resolve({ commandId: cid("res"), actor: owner.id, effectId: corrupt.effectId, outcome: "confirmed", evidence: { checked: "looked at it", verified: true, simulated: false } });
+      const resolved = await effects.get(corrupt.effectId);
+      assert.equal(resolved?.status, "confirmed");
+      assert.equal(resolved?.evidence?.["simulated"], true, "labelled simulated after a hand resolution");
+      assert.equal(resolved?.evidence?.["simulation"], scopeId);
+      assert.equal(resolved?.evidence?.["label"], SIMULATED_EFFECT_LABEL);
       const leak = await sims.operate(owner, { commandId: cid("i"), scopeId, service: "billing", resource: "cache", action: { type: "set", params: { fields: { ttl: 5 } } }, inject: "leak" });
       assert.equal(leak.status, "uncertain");
       assert.ok(Array.isArray(leak.evidence?.["collateralMoved"]));
@@ -236,6 +244,20 @@ for (const backend of backends) {
       assert.ok(refused > 0, "the record's bound was reached");
       const view = await sims.get(owner, roomy);
       assert.ok(view.effects.every((e) => e.status === "confirmed"));
+
+      // The size is judged on the world the injected fault leaves: a wrong write that would grow the world past the record's bound is refused before it is done,
+      // while the same write without the fault fits (review: the trial on a copy arms the same fault as the real run).
+      const filler = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`r${i}`, { state: { a: "x".repeat(5000) } }]));
+      const tight = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: { s: filler, t: filler, u: { c: { state: {} } } } })).id;
+      const used = Buffer.byteLength(canonicalJson((await sims.get(owner, tight)).scope as unknown as JsonObject), "utf8");
+      const room = LIMITS.bodyBytes - 1024 - used;
+      assert.ok(room > 20_000, `room ${room}`);
+      // Each field `"fNNNNN":0,` is about 11 bytes when written right and about 21 when written as "corrupted".
+      const fields = Object.fromEntries(Array.from({ length: Math.floor(room / 15) }, (_, i) => [`f${String(i).padStart(5, "0")}`, 0]));
+      await refuses("invalid_command", () => sims.operate(owner, { commandId: cid("cg"), scopeId: tight, service: "u", resource: "c", action: { type: "set", params: { fields } }, inject: "corrupt" }));
+      assert.equal((await sims.get(owner, tight)).effects.length, 0, "nothing recorded");
+      assert.equal((await sims.observe(owner, { scopeId: tight, service: "u", resource: "c" })).systemVersion, "v1", "nothing done");
+      assert.equal((await sims.operate(owner, { commandId: cid("cg"), scopeId: tight, service: "u", resource: "c", action: { type: "set", params: { fields } } })).status, "confirmed", "the same write without the fault fits");
     } finally { await w.close(); }
   });
 
