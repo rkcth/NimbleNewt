@@ -102,7 +102,7 @@ async function rig(real: SandboxLauncher, answer: Model): Promise<Rig> {
     for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
     return dirs;
   };
-  const window = { value: 32768 };
+  const window = { value: 36864 };
   let local: LocalWorker | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(directory, "c.sqlite") }, argv: [], env: {}, print: () => undefined,
@@ -232,24 +232,27 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     if (real === undefined) return skipOrFail(t, "the sandbox of this OS (bubblewrap, Seatbelt) or a node install it can mount is unusable");
     const big = (n: number, repeat = 400): string => `Seed order part ${n}. `.concat("The seed order is long and detailed. ".repeat(repeat));
     // The two answers are sized for the window below: each attempt's first call fits the startup share alone, both together do not, and after the compaction (the older part only extracted) the call fits again.
-    const answer = await model([{ text: big(1, 700) }, { text: big(2, 650) }, { text: "continued" }]);
+    const answer = await model([{ text: big(1, 1050) }, { text: big(2, 1100) }, { text: "continued" }]);
     const x = await rig(real, answer);
-    // 65,536 tokens (cards W06 and W10 merged: the completion rules, work.note, work.answer and the report put the fixed part at about 4,200 tokens; on 49,152 the compacted call no longer fit). At 65,536 the worker's background
-    // compaction threshold (card CMP: window - reserve 8,192 - background 16,384) is 40,960, so the first two attempts are never compacted in the background.
-    x.window.value = 65536;
+    // 98,304 tokens (card P03b's service and deliverable tools put the fixed part at about 6,800 tokens, `WORKER_FIXED_PART_ABOUT_TOKENS` in the controller; it was 65,536 from cards W06 and W10 at about 4,200, after 49,152 no longer fit, and still fit at card T08's 5,900).
+    // Why not 65,536 any more: the real process keeps the newest tenth of the window whole when it compacts (`keepRecentTokens`, counted at four characters to a token), so the compacted call is at least the fixed part,
+    // the extract (up to 6,000 characters) and about 0.13 of the window; at 65,536 that came to 16,873 tokens, over the 16,384 startup share. A quarter less that tenth leaves room for both only from about
+    // 93,000 tokens, and 98,304 (24 x 4,096) leaves about 2,000 to spare.
+    // At 98,304 the worker's background compaction threshold (card CMP: window - reserve 12,288 - background 24,576) is 61,440, so the first two attempts are never compacted in the background.
+    x.window.value = 98304;
     try {
       // The relay checks every call against the attempt that is current for its task (L05b fence), so each run is the real admitted attempt of its own task.
       const gatewayOf = (attemptId: string): ToolGateway => ({ attemptId, call: async (): Promise<ToolResult> => { throw new Error("not used"); }, heartbeat: async () => ({ until: new Date(Date.now() + 600_000).toISOString() }), usage: async () => undefined, acknowledgeDecisions: async () => undefined } as unknown as ToolGateway);
       const order = (n: number, id: string, taskId: string, resumeFrom?: object): WorkOrder => ({ attemptId: id, taskId, projectId: x.project, agentId: `agent:${AGENT}`, generation: 1, route: "localp/small", credential: `cred-${n}`, recipe: { revision: "r1", reach: [] }, content: "go on", requestId: `req-${n}`, expiresAt: new Date(Date.now() + 300_000).toISOString(), ...(resumeFrom === undefined ? {} : { resumeFrom }) } as never);
       const sizeOf = (r: { checkpoint?: unknown }): number => (r.checkpoint as { nn?: { contextTokens?: number } }).nn?.contextTokens ?? 0;
       const run = async (n: number, from?: object): Promise<{ id: string; status: string; error?: string; checkpoint?: object }> => { const t = await x.task(n, "Order seeds"); const handle = await x.worker().start(order(n, t.attemptId, t.taskId, from)); const result = await handle.run(gatewayOf(t.attemptId)); await handle.stop(); return { id: t.attemptId, ...result }; };
-      // Two attempts each add a long answer to the conversation stored in the agent's home. Each first call fits (a quarter of the window is 16,384 tokens; the second attempt's first call is about 12,800), so neither is compacted. The window and the answers are sized (card T07b, when the bridge gained its job tools; card W02, when it gained work.end; card W06, when the system prompt gained the completion rules; card W10, when the bridge gained work.note, work.answer and the report: 65,536 tokens) so that the third attempt's first call (about 20,900) is over the startup share and, once compacted (about 14,300), fits it with about 2,000 tokens to spare.
+      // Two attempts each add a long answer to the conversation stored in the agent's home. Each first call fits (a quarter of the window is 24,576 tokens; the second attempt's first call is about 19,700), so neither is compacted. The window and the answers are sized (card T07b, when the bridge gained its job tools; card W02, when it gained work.end; card W06, when the system prompt gained the completion rules; card W10, when the bridge gained work.note, work.answer and the report: 65,536 tokens; card P03b, when the bridge gained the service and deliverable tools: 98,304 tokens, the first answer 1,050 repeats and the second 1,100, so the second alone is over the part kept whole) so that the third attempt's first call (about 33,300) is over the startup share and, once compacted (about 22,400), fits it with about 2,150 tokens to spare. The stored conversation (about 26,500) is under the resume share (60% of the window).
       const one = await run(1);
       assert.equal(one.status, "completed", one.error);
       const two = await run(2, one.checkpoint);
       assert.equal(two.status, "completed", two.error);
       const stored = sizeOf(two);
-      assert.ok(stored > 6000 && stored < 19000, `the stored conversation is over most of the startup share but under the resume share (${stored})`);
+      assert.ok(stored > 6000 && stored < Math.floor(98304 * 0.6), `the stored conversation is over most of the startup share but under the resume share (${stored})`);
       // The third resumes it: the first call (the stored conversation plus the fixed part) is over the startup share, so it is refused (a retry is announced, so no blocker yet), the real process compacts, and the call is admitted. It runs.
       const three = await run(3, two.checkpoint);
       assert.equal(three.status, "completed", three.error);

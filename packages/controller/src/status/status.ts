@@ -45,7 +45,7 @@ import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
-import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
+import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService, ReleaseWindowService } from "../release/index.js";
 import { releaseDeadline } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
@@ -304,6 +304,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
+  release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
@@ -427,6 +428,7 @@ export type StatusRequest =
   | { readonly kind: "access"; readonly agent?: string }
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
+  | { readonly kind: "release_windows" }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
@@ -578,6 +580,8 @@ export interface StatusDeps {
   /** The landing settings at the installation layer with whether the owner set each (card H12s, `ConfigurationService.installationSettings` over `LANDING_SETTING_KEYS`). Absent: the view is not offered. */
   /** The wakes of the controller's own meeting wake host (card M04h). Absent, or answering undefined (the application supplies its own host): the view is not offered. */
   readonly wakes?: () => Promise<readonly WakeView[] | undefined>;
+  /** Maintenance windows for release updates (card K07); absent without release activation. */
+  readonly releaseWindows?: (by: Principal) => Promise<Awaited<ReturnType<ReleaseWindowService["list"]>> | undefined>;
   readonly landing?: () => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>;
   /** The projects that have landing values of their own (a project layer of the configuration, or their own landing branch), each value as that project gets it and where it comes from (card H12u). Absent: the view lists the installation only. */
   readonly landingProjects?: () => Promise<{ readonly projects: readonly { readonly projectId: string; /** The branch the owner named for this project (`project.branches.set`, landing). */ readonly branch?: string; readonly values: Readonly<Record<string, { readonly value: unknown; readonly source: { readonly layer: string; readonly id: string }; readonly own?: unknown }>> }[]; readonly truncated: boolean }>;
@@ -979,6 +983,7 @@ export class StatusService {
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
+      case "release_windows": { onlyKnown(request, ["kind"]); return this.releaseWindowLines(by); }
       case "environment": { onlyKnown(request, ["kind", "agent"]); return this.environmentLines(by, request.agent); }
       case "maintenance": { onlyKnown(request, ["kind", "maintenanceId", "agent", "status", "limit"]); return this.maintenanceLines(by, request); }
       case "access": { onlyKnown(request, ["kind", "agent"]); return this.accessLines(by, request); }
@@ -1659,6 +1664,24 @@ export class StatusService {
     const sc = cite("profile-suggestion", "installation", s.revision === 0 ? undefined : s.revision);
     if (s.due) lines.push(line(`You are due to be asked about the derived profile (${s.kind === "trial-ended" ? "your trial of it has ended" : `you have approved ${s.approvalsSince} asks since the last answer`}): ${s.answers?.map((x) => shown(x, 20)).join(", ")} (the first is the default).${s.preview === undefined || s.preview.notes.length === 0 ? "" : ` Switching would change this: ${s.preview.notes.slice(0, 5).map((n) => shown(n, 300)).join("; ")}.`}`, sc));
     else lines.push(line("The derived-profile question is not due.", sc));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /** Card K07: the maintenance windows in plain lines, owner only (a holder of release.manage reads them through release.window.list). */
+  async releaseWindowLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.releaseWindows === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    let found: Awaited<ReturnType<NonNullable<StatusDeps["releaseWindows"]>>>;
+    try { found = await this.#deps.releaseWindows(by); } catch { return { observedAt: this.#runner.now(), lines: [line("The maintenance windows cannot be read right now.", cite("config-layer", "installation"))] }; }
+    if (found === undefined) return undefined;
+    const lines: Line[] = [];
+    for (const w of found.windows.slice(0, 10)) {
+      const when = `${w.date} ${w.time} ${w.timeZone} for ${w.durationMinutes} minutes (${w.opensAt} to ${w.closesAt} UTC)`;
+      const back = w.rollback === undefined ? "" : w.rollback.ok ? ` The earlier release ${w.rollback.to} can still come back (release.rollback).` : ` The earlier release ${w.rollback.to} cannot come back now: ${shown(w.rollback.reasons.join("; "), 200)}.`;
+      lines.push(line(`Window ${w.windowId} for release ${w.candidateId}, ${when}: ${w.status}${w.waiting === undefined ? "" : `, waiting: ${shown(w.waiting, 80)}`}${w.reason === undefined ? "" : ` (${shown(w.reason, 200)})`}.${back}`, cite("release-window", w.windowId, w.revision)));
+    }
+    if (found.truncated || found.windows.length > 10) lines.push(line("Older windows are not shown (release.window.list has up to 50).", cite("config-layer", "installation")));
+    for (const q of found.quarantined.slice(0, 5)) lines.push(line(`Release ${q.candidateId} is quarantined since ${q.at}: ${shown(q.reason, 160)}; no window can activate it.`, cite("release-quarantine", q.candidateId)));
+    if (lines.length === 0) lines.push(line("No maintenance window is set.", cite("config-layer", "installation")));
     return { observedAt: this.#runner.now(), lines };
   }
 

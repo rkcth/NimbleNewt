@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { PRACTICAL_STARTABLE_WINDOW, grouped } from "../context/fixed-part.js";
+import { MIN_WORKABLE_CONTEXT_TOKENS } from "../setup/providers.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { storageFollowingAuthority } from "../transfer/index.js";
@@ -57,7 +59,7 @@ export const OWNER_SECRET = OWNER_SECRET_PREFIX;
  */
 export const ownerSecretName = (dataDir: string): string => `${OWNER_SECRET}-${createHash("sha256").update(resolve(dataDir)).digest("hex").slice(0, 16)}`;
 /** The context window assumed for a provider the configuration document names, which carries none; the owner changes it by chat (routing.provider.add replaces the provider). */
-export const DEFAULT_CONTEXT_TOKENS = 32_768;
+export const DEFAULT_CONTEXT_TOKENS = 36_864;
 
 /**
  * What the launcher gives the builder of a worker host on this machine (card U14b). The builder lives outside the controller package (it needs the worker package, which the controller does not import), so the host that starts
@@ -335,7 +337,7 @@ export async function launch(options: LaunchOptions): Promise<Launched> {
     if (have === undefined && wanted.length > 0) {
       try {
         const done = await controller.services.setupProviders.add(owner, { commandId: "launcher-providers", providers: wanted.map(([name, p]) => ({ name, location: loopback(p.endpoint!) ? "local" : "cloud", paid: p.paid, endpoint: p.endpoint!, models: p.models, contextTokens: DEFAULT_CONTEXT_TOKENS, ...(p.kind === undefined ? {} : { kind: p.kind }), ...(p.credential === undefined ? {} : { credentialName: p.credential.secret }) })) });
-        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about 32,768 tokens tasks may stop with a context blocker, and under 8,192 the route is refused).`);
+        notes.push(`Model providers from the configuration were registered: ${done.routes.join(", ")} (context window assumed ${DEFAULT_CONTEXT_TOKENS} tokens, only a placeholder: tell the chat the model's real window, which matters most if it is smaller: under about ${grouped(PRACTICAL_STARTABLE_WINDOW)} tokens tasks may stop with a context blocker, and under ${grouped(MIN_WORKABLE_CONTEXT_TOKENS)} the route is refused).`, ...(done.warnings ?? []));
       } catch (error) {
         notes.push(`The model providers in the configuration were not registered yet: ${error instanceof DomainError ? error.message : "a registration problem"}`);
       }

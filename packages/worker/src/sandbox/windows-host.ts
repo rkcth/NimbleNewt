@@ -6,10 +6,30 @@
 export interface WindowsPackageInfo {
   /** The package name, for example `MicrosoftWindows.WindowsSandbox`. */
   readonly name: string;
-  /** The hash of the signing publisher, for example `8wekyb3d8bbwe` for Microsoft. */
+  /** The hash of the signing publisher, for example `cw5n1h2txyewy` (Microsoft, packages that are part of Windows) or `8wekyb3d8bbwe` (Microsoft, Store packages). */
   readonly publisherId: string;
+  /** The package family name as Windows reports it (`PackageFamilyName`): `<name>_<publisherId>`. */
+  readonly familyName: string;
   readonly version: string;
   readonly installLocation: string;
+  /** How Windows says the package itself is signed (`SignatureKind`: None, Developer, Enterprise, Store or System). Absent when not reported. */
+  readonly signatureKind?: string;
+  /** The package's state as Windows reports it (`Status`: Ok, or a problem such as Tampered or Modified). Absent when not reported. */
+  readonly status?: string;
+}
+
+/** What `Get-AuthenticodeSignature` says about one file. */
+export interface WindowsSignature {
+  /** True only when the status is exactly `Valid`. */
+  readonly valid: boolean;
+  /** The signer certificate's subject, when there is a signer certificate. */
+  readonly subject?: string;
+  /** The status name, for example Valid, NotSigned, HashMismatch, NotTrusted or UnknownError. */
+  readonly status?: string;
+  /** Windows' own explanation, shortened, with the file's path replaced by `<file>`. */
+  readonly statusMessage?: string;
+  /** Authenticode (signed inside the file), Catalog (signed through an installed catalog) or None. Absent where PowerShell does not report it. */
+  readonly signatureType?: string;
 }
 
 export interface WindowsSession {
@@ -63,13 +83,15 @@ export interface WindowsHost {
   remove(path: string): void;
 
   findPackage(): Promise<WindowsPackageInfo | undefined>;
-  /** Whether the file carries a valid Authenticode signature, and by whom. */
-  signature(path: string): Promise<{ readonly valid: boolean; readonly subject?: string }>;
+  /** Whether the file carries a valid Authenticode signature, by whom, and if not, why not. */
+  signature(path: string): Promise<WindowsSignature>;
   session(): Promise<WindowsSession>;
   autologon(): Promise<WindowsAutologon>;
   lockTask(taskName: string): Promise<WindowsLockTask>;
   /** The accounts other than SYSTEM, Administrators and TrustedInstaller that can write to the path (from its ACL). */
   writableBy(path: string): Promise<readonly string[]>;
+  /** The SID of the path's owner (for example `S-1-5-18`), read from its security descriptor. Throws when it cannot be read or is not a SID. */
+  ownerSid(path: string): Promise<string>;
   /** Starts a program (no shell) and waits for it. Used for wsb.exe and icacls.exe. */
   run(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
 }

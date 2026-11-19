@@ -9,6 +9,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { providerSecretRefusal } from "./reserved-secrets.js";
 import { BACKEND_KINDS } from "../inference-cache/profile.js";
+import { smallWindowWarning } from "../context/fixed-part.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
 const ROUTING: AggregateRef = { kind: "routing-table", id: "routing" };
@@ -23,7 +24,10 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const SECRET_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
-/** The smallest window a route can work in (the worker refuses a smaller one; kept equal to `MIN_WORKABLE_WINDOW` in pi-adapter, which an integration test checks, card CMP). */
+/**
+ * The smallest window a route can work in (the worker refuses a smaller one; kept equal to `MIN_WORKABLE_WINDOW` in pi-adapter, which an integration test checks, card CMP). A window from here up to
+ * `MIN_STARTABLE_WINDOW` (context/fixed-part.ts) is accepted, but no task can start on it since card T08 (the fixed part alone is about 6,800 tokens since card P03b): `add` says so in its `warnings`.
+ */
 export const MIN_WORKABLE_CONTEXT_TOKENS = 8192;
 
 export interface ProviderEndpointBody { readonly provider: string; readonly endpoint: string; /** The name of the secret in the secret store; the value is never kept here. */ readonly credentialName?: string; readonly kind?: string; readonly setBy: string }
@@ -106,14 +110,20 @@ export class SetupProviderService {
   /** `kept` gives the secret names the configuration keeps for something else (the database address, the transfer targets', a renamed backup signing key); read at each add. The owner's credential and the fixed names are always refused. */
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}, rules?: ListRules, kept: () => readonly string[] = () => []): SetupProviderService { return new SetupProviderService(new CommandRunner(storage, epoch, options), rules, kept); }
 
-  async add(owner: Principal, command: AddProviders): Promise<{ revision: number; replayed: boolean; providers: readonly string[]; routes: readonly string[] }> {
+  /**
+   * `warnings` (and `shown`, the lines the chat shows) is present when a provider's window is accepted but too small for any task to start on (card "Fixed-part sizing after T08"): the providers are added all the same,
+   * so the owner can correct the window or add a larger model, and the warning names the window that is needed.
+   */
+  async add(owner: Principal, command: AddProviders): Promise<{ revision: number; replayed: boolean; providers: readonly string[]; routes: readonly string[]; warnings?: readonly string[]; shown?: readonly string[] }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not edit the model providers; only the owner does`);
     let summary: { providers: string[]; routes: string[] } = { providers: [], routes: [] };
+    let warnings: string[] = [];
     const r = await this.#runner.command("setup.providers.add", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => {
       onlyKnown(command, ["commandId", "providers", "expectedRevision"]);
       if (!Array.isArray(command.providers) || command.providers.length < 1 || command.providers.length > 10) return invalid("providers", "must list 1 to 10 providers");
       const specs = command.providers.map((p, i) => checkSpec(p, i, this.#kept()));
       if (new Set(specs.map((s) => s.name.toLowerCase())).size !== specs.length) invalid("providers", "names a provider twice");
+      warnings = specs.flatMap((spec) => { const w = smallWindowWarning(spec.contextTokens); return w === undefined ? [] : [`Provider ${spec.name}: ${w}.`]; });
       return {
         payload: { providers: specs as unknown as JsonObject[] },
         build: async () => {
@@ -170,7 +180,7 @@ export class SetupProviderService {
         },
       };
     });
-    return { revision: r.revision, replayed: r.replayed, providers: summary.providers, routes: summary.routes };
+    return { revision: r.revision, replayed: r.replayed, providers: summary.providers, routes: summary.routes, ...(warnings.length === 0 ? {} : { warnings, shown: warnings }) };
   }
 
   /** Every provider's model server address and credential name, for the host that builds the model clients. */

@@ -1306,20 +1306,25 @@ for (const backend of backends) {
       out["work.refresh"] = await send("work.refresh", {}, "w13");
       // Card L04g: nor what its work relied on.
       out["dependency.record"] = await send("dependency.record", { dependencies: [{ kind: "file", key: "a.md" }] }, "w14");
+      // Card P03b: nor is a deliverable drafted or submitted, nor a service changed (reading a service goes on).
+      out["deliverable.draft"] = await send("deliverable.draft", { type: "report", title: "r" }, "w15");
+      out["deliverable.submit"] = await send("deliverable.submit", { id: "dlv-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 1 }, "w16");
+      out["service.operate"] = await send("service.operate", { service: "billing", resource: "cache", action: { type: "restart" } }, "w17");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
       out["task.get"] = await send("task.get", {}, "r2");
       out["discover"] = await send("tool.discover", {}, "r3");
+      out["service.observe"] = await send("service.observe", { service: "billing", resource: "cache" }, "r5");
       await c.pauses.resume(c.owner, { commandId: uid("rs"), scope: { kind: "task", id: taskId }, reason: "go" });
       out["after"] = await send("desk.write", { kind: "note", title: "n", body: "b3", visibility: "shared", status: "accepted" }, "w6");
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record"]) assert.equal(bad(out[op]!).code, "paused", op);
-    for (const op of ["desk.read", "task.get", "discover", "after", "continue-after"]) good(out[op]!);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "deliverable.draft", "deliverable.submit", "service.operate"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.read", "task.get", "discover", "after", "continue-after", "service.observe"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
-    assert.deepEqual(touched, ["job.get", "task.get"], "no write reached a service while paused");
+    assert.deepEqual(touched, ["job.get", "task.get", "service.observe"], "no write reached a service while paused");
   });
 
   suite("dependency.record (card L04g): the agent's note of what its work relied on goes to resume.dependencies.note with its own credential, for the attempt's own task, keyed by the call; a named task is refused; the owner sees a step", async (c) => {

@@ -8,7 +8,7 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
-import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
+import type { ReleaseActivationService, ReleaseService, ReleaseWindowService } from "../release/index.js";
 import type { AcceptanceService, DefectService, DocObligationService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
 import type { SimulationService } from "../simulation/index.js";
@@ -139,6 +139,7 @@ export interface StateApiDeps {
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
   readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
   readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify" | "confirm" | "acknowledgeStart" | "trust" | "addTrustedKey" | "removeTrustedKey" | "requireSignature" | "attachSignature" | "rolloutStatus" | "stopRollout" | "rollbackCheck">;
+  readonly releaseWindows?: Pick<ReleaseWindowService, "set" | "cancel" | "get" | "list">;
   /** Migration recovery and rollback limits (card K03). */
   readonly migrationGuard?: Pick<MigrationGuardService, "status" | "policy" | "setPolicy" | "approveContract" | "withdrawContract" | "rollbackVerdict">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
@@ -411,6 +412,7 @@ export class StateApi {
         ...(this.#deps.simulation === undefined ? {} : { simulation: this.#deps.simulation }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.activation === undefined ? {} : { activation: this.#deps.activation }),
+        ...(this.#deps.releaseWindows === undefined ? {} : { releaseWindows: this.#deps.releaseWindows }),
         ...(this.#deps.migrationGuard === undefined ? {} : { migrationGuard: this.#deps.migrationGuard }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
