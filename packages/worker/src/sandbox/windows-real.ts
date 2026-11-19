@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { win32 } from "node:path";
-import { parseIcaclsWritable } from "./windows-plan.js";
-import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession } from "./windows-host.js";
+import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
+import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 
 /**
  * The real Windows implementation of `WindowsHost` (card A03b). Only meaningful on Windows; it is exercised by the real tests (NIMBLENEWT_REAL_WINDOWS_SANDBOX=1), not by the unit tests.
@@ -35,18 +35,46 @@ $k = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\W
 $plain = ($null -ne $k.DefaultPassword) -and ("$($k.DefaultPassword)" -ne '')
 @{ enabled = ($k.AutoAdminLogon -eq '1'); user = $k.DefaultUserName; domain = $k.DefaultDomainName; plain = $plain } | ConvertTo-Json -Compress
 `;
+// Each allowed package name is looked up exactly (the names hold no wildcard characters); the newest of what is found is reported, and verifyClient checks it against SANDBOX_PACKAGES.
 const PACKAGE_SCRIPT = `
-$p = Get-AppxPackage -AllUsers -Name $env:NN_NAME | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
-if ($null -eq $p) { 'null' } else { @{ name = $p.Name; publisherId = $p.PublisherId; version = $p.Version.ToString(); installLocation = $p.InstallLocation } | ConvertTo-Json -Compress }
+$found = @(foreach ($n in ($env:NN_NAMES -split ';')) { if ($n) { Get-AppxPackage -AllUsers -Name $n } })
+$p = $found | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+if ($null -eq $p) { 'null' } else { @{ name = $p.Name; publisherId = $p.PublisherId; familyName = $p.PackageFamilyName; version = $p.Version.ToString(); installLocation = $p.InstallLocation; signatureKind = "$($p.SignatureKind)"; status = "$($p.Status)" } | ConvertTo-Json -Compress }
 `;
+// SignatureType exists from Windows PowerShell 5.1 on; where it does not, it is reported as absent.
 const SIGNATURE_SCRIPT = `
 $s = Get-AuthenticodeSignature -LiteralPath $env:NN_PATH
-@{ valid = ($s.Status -eq 'Valid'); subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null } } | ConvertTo-Json -Compress
+$type = if ($s.PSObject.Properties['SignatureType']) { "$($s.SignatureType)" } else { $null }
+@{ valid = ($s.Status -eq 'Valid'); status = "$($s.Status)"; statusMessage = "$($s.StatusMessage)"; signatureType = $type; subject = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null } } | ConvertTo-Json -Compress
 `;
 const TASK_SCRIPT = `
 $t = Get-ScheduledTask -TaskName $env:NN_TASK -ErrorAction SilentlyContinue
 if ($null -eq $t) { '{"present":false}' } else { @{ present = $true; enabled = [bool]$t.Settings.Enabled -and ($t.State -ne 'Disabled'); executable = $t.Actions[0].Execute } | ConvertTo-Json -Compress }
 `;
+
+type RawPackage = { name?: unknown; publisherId?: unknown; familyName?: unknown; version?: unknown; installLocation?: unknown; signatureKind?: unknown; status?: unknown };
+type RawSignature = { valid?: unknown; subject?: unknown; status?: unknown; statusMessage?: unknown; signatureType?: unknown };
+const text = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+
+/** The package probe's answer as the host interface reports it. A field that is missing or not text is reported empty (required ones) or absent (optional ones), so the checks refuse it. */
+export function packageFromProbe(raw: RawPackage | null): WindowsPackageInfo | undefined {
+  if (raw === null) return undefined;
+  const signatureKind = text(raw.signatureKind), status = text(raw.status);
+  return {
+    name: text(raw.name) ?? "", publisherId: text(raw.publisherId) ?? "", familyName: text(raw.familyName) ?? "", version: text(raw.version) ?? "", installLocation: text(raw.installLocation) ?? "",
+    ...(signatureKind === undefined ? {} : { signatureKind }), ...(status === undefined ? {} : { status }),
+  };
+}
+
+/** The signature probe's answer: valid only when the probe said so and the status is exactly Valid; Windows' message is shortened and the file's path in it replaced. */
+export function signatureFromProbe(raw: RawSignature, path: string): WindowsSignature {
+  const subject = text(raw.subject), status = text(raw.status), message = text(raw.statusMessage), signatureType = text(raw.signatureType);
+  return {
+    valid: raw.valid === true && status === "Valid",
+    ...(subject === undefined ? {} : { subject }), ...(status === undefined ? {} : { status }),
+    ...(message === undefined ? {} : { statusMessage: shortStatusMessage(message, path) }), ...(signatureType === undefined ? {} : { signatureType }),
+  };
+}
 
 /** One PowerShell probe's time limit. Each probe starts a fresh powershell.exe, which on a busy machine, or in the bare environment the launcher gives its runner process, can be slow. */
 export const PROBE_TIMEOUT_MS = 60_000;
@@ -125,12 +153,10 @@ export function windowsRealHost(): WindowsHost {
     createExclusive: (p, text) => { try { writeFileSync(p, text, { flag: "wx" }); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return false; throw e; } },
     remove: (p) => { rmSync(p, { recursive: true, force: true }); },
     async findPackage(): Promise<WindowsPackageInfo | undefined> {
-      const p = await powershell<WindowsPackageInfo | null>(PACKAGE_SCRIPT, { NN_NAME: "MicrosoftWindows.WindowsSandbox" });
-      return p === null ? undefined : p;
+      return packageFromProbe(await powershell<RawPackage | null>(PACKAGE_SCRIPT, { NN_NAMES: SANDBOX_PACKAGES.map((p) => p.name).join(";") }));
     },
     async signature(path) {
-      const s = await powershell<{ valid: boolean; subject: string | null }>(SIGNATURE_SCRIPT, { NN_PATH: path });
-      return { valid: s.valid, ...(s.subject === null ? {} : { subject: s.subject }) };
+      return signatureFromProbe(await powershell<RawSignature>(SIGNATURE_SCRIPT, { NN_PATH: path }), path);
     },
     async session(): Promise<WindowsSession> {
       const s = await powershell<{ sessionId: number | null; user: string | null; domain?: string; flags: number | null }>(SESSION_SCRIPT);

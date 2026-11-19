@@ -1,11 +1,33 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
-import type { WindowsHost, WindowsPackageInfo } from "./windows-host.js";
+import type { WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
 import type { NormalizedRecipe } from "./recipe.js";
 
-/** The Microsoft package that provides `wsb.exe` and the Sandbox service, and the hash of Microsoft's publisher certificate (the part after the underscore in the package family name). */
-export const SANDBOX_PACKAGE = "MicrosoftWindows.WindowsSandbox";
-export const MICROSOFT_PUBLISHER_ID = "8wekyb3d8bbwe";
+/** Microsoft's publisher id for packages that ship with Windows itself (publisher `CN=Microsoft Windows, O=Microsoft Corporation, ...`). */
+export const WINDOWS_PUBLISHER_ID = "cw5n1h2txyewy";
+/** Microsoft's publisher id for its Store and app packages (publisher `CN=Microsoft Corporation, O=Microsoft Corporation, ...`). */
+export const MICROSOFT_STORE_PUBLISHER_ID = "8wekyb3d8bbwe";
+
+export interface SandboxPackageIdentity {
+  /** The exact package name (`Name`), compared with case. */
+  readonly name: string;
+  /** The exact publisher id (`PublisherId`, the part after the underscore in the package family name), compared with case. */
+  readonly publisherId: string;
+}
+
+/**
+ * The only packages accepted as the Windows Sandbox client (the one that provides `wsb.exe` and `WindowsSandboxServer.exe`): exact pairs of package name and publisher id, so the
+ * package family name must be exactly `<name>_<publisherId>`. No wildcard, prefix, suffix or case-insensitive match, and nothing in the configuration can add to the list.
+ * - `MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy`: the Windows-provided package, the one found on the owner's Windows 11 machine (build 10.0.26200, own-hardware run 44462551218).
+ * - `Microsoft.WindowsSandbox_8wekyb3d8bbwe`: the same client if Microsoft ships it as a Store package. ASSUMPTION: this name is Microsoft's naming pattern for Store packages; it
+ *   has not been seen on a real machine.
+ */
+export const SANDBOX_PACKAGES: readonly SandboxPackageIdentity[] = Object.freeze([
+  Object.freeze({ name: "MicrosoftWindows.WindowsSandbox", publisherId: WINDOWS_PUBLISHER_ID }),
+  Object.freeze({ name: "Microsoft.WindowsSandbox", publisherId: MICROSOFT_STORE_PUBLISHER_ID }),
+]);
+/** The package family name of an identity: `<name>_<publisherId>`. */
+export const packageFamilyName = (p: SandboxPackageIdentity): string => `${p.name}_${p.publisherId}`;
 /** The client version the research of 2026-10-16 was done with (Windows 11 Pro 10.0.26200). An older client is refused; a newer one is accepted and its version is recorded in the audit. */
 export const DEFAULT_MIN_VERSION = "0.8.107.0";
 export const LOCK_TASK_NAME = "NimbleNewt-LockOnLogon";
@@ -27,8 +49,6 @@ export interface WindowsSettings {
   /** The account expected to be signed in at the console. */
   readonly owner: string;
   readonly minVersion: string;
-  readonly packageName: string;
-  readonly publisherId: string;
   readonly mode: WindowsMode;
   readonly lockTask: string;
   /** Auto-login and lock mode only: the protected helper the lock task must run. */
@@ -224,17 +244,62 @@ export interface VerifiedClient {
   /** The full path of wsb.exe; always started with `cwd` as its working directory. */
   readonly wsb: string;
   readonly cwd: string;
+  /** How each client file was proven to be Microsoft's, for the audit: `wsb.exe: authenticode; WindowsSandboxServer.exe: system-package`. */
+  readonly proof: string;
 }
 
 const MICROSOFT_SUBJECT = /(?:^|,\s*)(?:CN|O)=Microsoft Corporation(?:,|$)/;
 
-/** The Windows Sandbox client must be the Microsoft package, at or above the qualified version, in the protected packages folder, with its files signed by Microsoft; it is started from its own folder (the research found it fails from any other). */
+/** One line saying what the signature check found, for refusals and the findings: status, Windows' message, the kind of signature and the signer. */
+export function describeSignature(sig: WindowsSignature): string {
+  const parts = [`status ${sig.status ?? (sig.valid ? "Valid" : "not reported")}`];
+  if (sig.statusMessage !== undefined && sig.statusMessage !== "") parts.push(`"${sig.statusMessage}"`);
+  parts.push(`type ${sig.signatureType ?? "not reported"}`);
+  parts.push(`signer ${sig.subject ?? "none"}`);
+  return parts.join(", ");
+}
+
+/** Shortens Windows' signature message for the record: the file's own path becomes `<file>`, white space is folded, and at most 200 characters are kept. */
+export function shortStatusMessage(message: string, path: string): string {
+  let text = message;
+  if (path !== "") { const lowerPath = path.toLowerCase(); let i: number; while ((i = text.toLowerCase().indexOf(lowerPath)) >= 0) text = `${text.slice(0, i)}<file>${text.slice(i + path.length)}`; }
+  text = text.replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
+/**
+ * The second accepted proof for a client file (card A03b, publisher follow-up). Files inside a package can carry no Authenticode signature of their own: the package as a whole is
+ * signed and Windows checks it. Such a file is accepted only when all of this holds, exactly:
+ * - `Get-AuthenticodeSignature` says `NotSigned` (no signature at all; any other failure, such as HashMismatch or NotTrusted, is refused, never explained away);
+ * - Windows says the package is signed by Windows itself (`SignatureKind` exactly `System`) and its state is exactly `Ok` (not Tampered, Modified or anything else);
+ * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls).
+ * The package's name, publisher and family and its folder under `%ProgramFiles%\WindowsApps` were already checked before this is asked.
+ */
+async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
+  if (pkg.signatureKind !== "System") return { ok: false, reason: `Windows reports the package's signature kind as ${pkg.signatureKind ?? "not reported"}, not System` };
+  if (pkg.status !== "Ok") return { ok: false, reason: `Windows reports the package's state as ${pkg.status ?? "not reported"}, not Ok` };
+  for (const p of [file, location]) {
+    let writable: readonly string[];
+    try { writable = await host.writableBy(p); } catch (error) { return { ok: false, reason: `the access list of ${p} could not be read: ${(error as Error).message}` }; }
+    if (writable.length > 0) return { ok: false, reason: `${p} can be changed by ${writable.join(", ")}` };
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * The Windows Sandbox client must be one of the exact Microsoft packages in `SANDBOX_PACKAGES` (name, publisher id and family name all exact), at or above the qualified version, in
+ * the protected packages folder, with its two programs proven to be Microsoft's: a valid Authenticode signature by Microsoft, or (only for a file with no signature at all) the
+ * system-package proof above. It is started from its own folder (the research found it fails from any other). Every refusal says exactly what was found.
+ */
 export async function verifyClient(host: WindowsHost, settings: WindowsSettings): Promise<Verdict<VerifiedClient>> {
   let pkg: WindowsPackageInfo | undefined;
   try { pkg = await host.findPackage(); } catch (error) { return { ok: false, reason: `the Windows Sandbox client could not be looked up: ${(error as Error).message}` }; }
-  if (pkg === undefined) return { ok: false, reason: `Windows Sandbox is not installed (package ${settings.packageName} not found); enable the Windows Sandbox feature and its client update` };
-  if (pkg.name !== settings.packageName) return { ok: false, reason: `unexpected package ${pkg.name}` };
-  if (pkg.publisherId !== settings.publisherId) return { ok: false, reason: `the Windows Sandbox package is from publisher ${pkg.publisherId}, not ${settings.publisherId} (Microsoft); refusing it` };
+  if (pkg === undefined) return { ok: false, reason: `Windows Sandbox is not installed (none of the packages ${SANDBOX_PACKAGES.map(packageFamilyName).join(", ")} was found); enable the Windows Sandbox feature and its client update` };
+  const named = SANDBOX_PACKAGES.filter((p) => p.name === pkg.name);
+  if (named.length === 0) return { ok: false, reason: `unexpected package ${pkg.name}` };
+  const identity = named.find((p) => p.publisherId === pkg.publisherId);
+  if (identity === undefined) return { ok: false, reason: `the Windows Sandbox package ${pkg.name} is from publisher ${pkg.publisherId}; only ${named.map(packageFamilyName).join(", ")} is accepted for that name (Microsoft); refusing it` };
+  if (pkg.familyName !== packageFamilyName(identity)) return { ok: false, reason: `the Windows Sandbox package family is ${pkg.familyName}, not ${packageFamilyName(identity)}; refusing it` };
   let versionOk: boolean;
   try { versionOk = compareVersions(pkg.version, settings.minVersion) >= 0; } catch { return { ok: false, reason: `the Windows Sandbox version ${pkg.version} is not a version number` }; }
   if (!versionOk) return { ok: false, reason: `the Windows Sandbox client ${pkg.version} is older than the qualified ${settings.minVersion}; update it` };
@@ -244,12 +309,20 @@ export async function verifyClient(host: WindowsHost, settings: WindowsSettings)
   const wsb = `${location}\\wsb.exe`;
   const server = `${location}\\WindowsSandboxServer.exe`;
   for (const file of [wsb, server]) if (!host.exists(file)) return { ok: false, reason: `${file} was not found in the package folder; the client is started from there and cannot work without it` };
+  const proofs: string[] = [];
   for (const file of [wsb, server]) {
-    let sig;
+    let sig: WindowsSignature;
     try { sig = await host.signature(file); } catch (error) { return { ok: false, reason: `the signature of ${file} could not be checked: ${(error as Error).message}` }; }
-    if (!sig.valid || sig.subject === undefined || !MICROSOFT_SUBJECT.test(sig.subject)) return { ok: false, reason: `${file} does not carry a valid Microsoft signature` };
+    const name = win32.basename(file);
+    if (sig.valid && sig.subject !== undefined && MICROSOFT_SUBJECT.test(sig.subject)) { proofs.push(`${name}: authenticode`); continue; }
+    if (!sig.valid && sig.status === "NotSigned") {
+      const system = await systemPackageProof(host, pkg, location, file);
+      if (system.ok) { proofs.push(`${name}: system-package`); continue; }
+      return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)}), and the package is not proven to be part of Windows instead: ${system.reason}` };
+    }
+    return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)})` };
   }
-  return { ok: true, value: { package: pkg, wsb, cwd: location } };
+  return { ok: true, value: { package: pkg, wsb, cwd: location, proof: proofs.join("; ") } };
 }
 
 /** Whether the session conditions of the configured mode hold right now. Fails closed: anything that cannot be determined is a refusal. */

@@ -7,14 +7,15 @@ import type { BackendHealth, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxLauncher, stripTrailingSeparator, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
-import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession } from "./windows-host.js";
+import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { aclSteps, checkIdentity, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
+import { packageFromProbe, signatureFromProbe } from "./windows-real.js";
+import { MICROSOFT_STORE_PUBLISHER_ID, SANDBOX_PACKAGES, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
 // Windows Sandbox itself confines anything. That is windows-real.test.ts, which runs only on a Windows machine with NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
 
-const INSTALL = "C:\\Program Files\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__8wekyb3d8bbwe";
+const INSTALL = `C:\\Program Files\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__${WINDOWS_PUBLISHER_ID}`;
 const CONTROL = "C:\\ProgramData\\NimbleNewt\\control";
 const STAGING = "C:\\ProgramData\\NimbleNewt\\staging";
 const RUNNER = "C:\\Program Files\\NimbleNewt\\worker\\dist\\sandbox\\windows-runner.js";
@@ -33,8 +34,9 @@ class SimHost implements WindowsHost {
   dirs = new Set<string>();
   links = new Set<string>();
   runs: { file: string; args: readonly string[]; cwd?: string }[] = [];
-  pkg: WindowsPackageInfo | undefined = { name: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", version: "0.8.107.0", installLocation: INSTALL };
-  sigs = new Map<string, { valid: boolean; subject?: string }>();
+  /** As found on the owner's Windows 11 machine (build 10.0.26200): the Windows-provided package. */
+  pkg: WindowsPackageInfo | undefined = { name: "MicrosoftWindows.WindowsSandbox", publisherId: WINDOWS_PUBLISHER_ID, familyName: `MicrosoftWindows.WindowsSandbox_${WINDOWS_PUBLISHER_ID}`, version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" };
+  sigs = new Map<string, WindowsSignature>();
   sess: WindowsSession = { consoleUser: "PC\\robert", locked: false };
   auto: WindowsAutologon = { enabled: true, user: "PC\\robert", plaintextPasswordStored: false };
   task: WindowsLockTask = { present: true, enabled: true, executable: "C:\\Program Files\\NimbleNewt\\lock.exe" };
@@ -69,7 +71,7 @@ class SimHost implements WindowsHost {
   listDir(p: string): string[] { const k = key(p) + "\\"; const out = new Set<string>(); for (const x of [...this.files.keys(), ...this.dirs]) if (x.startsWith(k)) out.add(x.slice(k.length).split("\\")[0]!); return [...out]; }
   remove(p: string): void { const k = key(p); for (const f of [...this.files.keys()]) if (f === k || f.startsWith(k + "\\")) this.files.delete(f); for (const d of [...this.dirs]) if (d === k || d.startsWith(k + "\\")) this.dirs.delete(d); }
   async findPackage(): Promise<WindowsPackageInfo | undefined> { this.lookups.push("package"); return this.pkg; }
-  async signature(path: string): Promise<{ valid: boolean; subject?: string }> { return this.sigs.get(key(path)) ?? { valid: true, subject: MS }; }
+  async signature(path: string): Promise<WindowsSignature> { return this.sigs.get(key(path)) ?? { valid: true, subject: MS, status: "Valid", signatureType: "Authenticode" }; }
   async session(): Promise<WindowsSession> { return this.sess; }
   async autologon(): Promise<WindowsAutologon> { return this.auto; }
   async lockTask(): Promise<WindowsLockTask> { return this.task; }
@@ -143,7 +145,7 @@ const recipe = (extra: Partial<NormalizedRecipe> = {}): NormalizedRecipe => ({
   mode: "sandboxed", workdir: "C:\\Jobs\\a\\work", home: "C:\\Jobs\\a\\home", scratch: "C:\\Jobs\\a\\scratch", readOnly: [{ host: "C:\\Tools\\node", guest: "/inputs/node" }],
   network: "none", env: { FOO: "bar" }, protectedSubpaths: [".git"], revision: "rev1", unprotectedSubpaths: [], ...extra,
 });
-const settings = (extra: Partial<WindowsSettings> = {}): WindowsSettings => ({ controlDir: CONTROL, shareIdentity: "PC\\robert", owner: "PC\\robert", minVersion: "0.8.107.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon", ...extra });
+const settings = (extra: Partial<WindowsSettings> = {}): WindowsSettings => ({ controlDir: CONTROL, shareIdentity: "PC\\robert", owner: "PC\\robert", minVersion: "0.8.107.0", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon", ...extra });
 const COMMAND = ["/inputs/node/node.exe", "-e", "1"];
 
 function prepared(host: SimHost, extra: Partial<WindowsSandboxOptions> = {}, r: NormalizedRecipe = recipe()): { backend: SandboxBackend; plan: SpawnPlan; job: WindowsJob; jobDir: string } {
@@ -388,6 +390,148 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     const relaxed = new SimHost(); relaxed.writable.set(key(CONTROL), ["PC\\robert"]);
     assert.equal((await health(relaxed, { supervisorAcl: "report-only" })).healthy, true);
     assert.equal(windowsSandboxBackend(options(relaxed, { supervisorAcl: "report-only" })).auditDetails!()["supervisorAcl"], "report-only");
+  });
+});
+
+describe("Windows launcher: the client package and its signatures (exact allowlist, exact reasons)", () => {
+  const WSB = `${INSTALL}\\wsb.exe`;
+  const SERVER = `${INSTALL}\\WindowsSandboxServer.exe`;
+  const verify = (host: SimHost) => verifyClient(host, settings());
+  const withPkg = (extra: Partial<WindowsPackageInfo>): SimHost => { const h = new SimHost(); h.pkg = { ...h.pkg!, ...extra }; return h; };
+  const refused = async (host: SimHost, pattern: RegExp, label: string): Promise<void> => {
+    const v = await verify(host);
+    assert.equal(v.ok, false, `${label} must be refused`);
+    if (!v.ok) assert.match(v.reason, pattern, label);
+    assert.deepEqual(host.wsbCommands, [], `${label}: nothing was started`);
+  };
+
+  test("the allowlist is exactly the two Microsoft pairs and cannot be changed", () => {
+    assert.equal(WINDOWS_PUBLISHER_ID, "cw5n1h2txyewy");
+    assert.equal(MICROSOFT_STORE_PUBLISHER_ID, "8wekyb3d8bbwe");
+    assert.deepEqual(SANDBOX_PACKAGES.map(packageFamilyName), ["MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", "Microsoft.WindowsSandbox_8wekyb3d8bbwe"]);
+    assert.ok(Object.isFrozen(SANDBOX_PACKAGES) && SANDBOX_PACKAGES.every((p) => Object.isFrozen(p)));
+  });
+
+  test("each allowed pair is accepted, the Windows-provided one as found on the owner's machine", async () => {
+    for (const p of SANDBOX_PACKAGES) {
+      const v = await verify(withPkg({ name: p.name, publisherId: p.publisherId, familyName: packageFamilyName(p) }));
+      assert.equal(v.ok, true, `${packageFamilyName(p)}: ${v.ok ? "" : v.reason}`);
+      if (v.ok) assert.equal(v.value.proof, "wsb.exe: authenticode; WindowsSandboxServer.exe: authenticode");
+    }
+  });
+
+  test("the right name with another publisher is refused, including the other Microsoft id (each id belongs to one name)", async () => {
+    await refused(withPkg({ publisherId: MICROSOFT_STORE_PUBLISHER_ID, familyName: `MicrosoftWindows.WindowsSandbox_${MICROSOFT_STORE_PUBLISHER_ID}` }), /MicrosoftWindows\.WindowsSandbox is from publisher 8wekyb3d8bbwe; only MicrosoftWindows\.WindowsSandbox_cw5n1h2txyewy is accepted/, "MicrosoftWindows name, Store id");
+    await refused(withPkg({ name: "Microsoft.WindowsSandbox", publisherId: WINDOWS_PUBLISHER_ID, familyName: `Microsoft.WindowsSandbox_${WINDOWS_PUBLISHER_ID}` }), /from publisher cw5n1h2txyewy; only Microsoft\.WindowsSandbox_8wekyb3d8bbwe/, "Microsoft name, Windows id");
+    await refused(withPkg({ publisherId: "abcdefghjkmnp", familyName: "MicrosoftWindows.WindowsSandbox_abcdefghjkmnp" }), /from publisher abcdefghjkmnp/, "unknown publisher");
+  });
+
+  test("the right publisher with another name or another family is refused", async () => {
+    await refused(withPkg({ name: "MicrosoftWindows.Client.CBS", familyName: `MicrosoftWindows.Client.CBS_${WINDOWS_PUBLISHER_ID}` }), /unexpected package MicrosoftWindows\.Client\.CBS/, "another Windows package");
+    await refused(withPkg({ name: "Microsoft.WindowsCalculator", publisherId: MICROSOFT_STORE_PUBLISHER_ID, familyName: `Microsoft.WindowsCalculator_${MICROSOFT_STORE_PUBLISHER_ID}` }), /unexpected package Microsoft\.WindowsCalculator/, "another Store package");
+    for (const familyName of ["MicrosoftWindows.Client.CBS_cw5n1h2txyewy", "MicrosoftWindows.WindowsSandbox_8wekyb3d8bbwe", "Microsoft.WindowsSandbox_cw5n1h2txyewy", "", "MicrosoftWindows.WindowsSandbox"]) {
+      await refused(withPkg({ familyName }), /package family is .*, not MicrosoftWindows\.WindowsSandbox_cw5n1h2txyewy/, `family ${JSON.stringify(familyName)}`);
+    }
+  });
+
+  test("lookalikes are refused: case, prefix, suffix, white space, wildcards and truncation of the name, the publisher id and the family", async () => {
+    const names = ["microsoftwindows.windowssandbox", "MICROSOFTWINDOWS.WINDOWSSANDBOX", "MicrosoftWindows.WindowsSandbox ", " MicrosoftWindows.WindowsSandbox", "MicrosoftWindows.WindowsSandboxX", "XMicrosoftWindows.WindowsSandbox",
+      "MicrosoftWindows.WindowsSandbox.Evil", "Evil.MicrosoftWindows.WindowsSandbox", "MicrosoftWindows.WindowsSandbo", "MicrosoftWindows.WindowsSandbox*", "MicrosoftWindows.*", "*", "", "Microsoft.windowsSandbox", "MicrosoftWindows.WindowsSandbox\u0000"];
+    for (const name of names) await refused(withPkg({ name, familyName: `${name}_${WINDOWS_PUBLISHER_ID}` }), /unexpected package/, `name ${JSON.stringify(name)}`);
+    const publishers = ["CW5N1H2TXYEWY", "Cw5n1h2txyewy", "cw5n1h2txyewy ", " cw5n1h2txyewy", "cw5n1h2txyew", "cw5n1h2txyewyx", "xcw5n1h2txyewy", "cw5n1h2txyewy8wekyb3d8bbwe", "cw5n*", "*", "", "8WEKYB3D8BBWE"];
+    for (const publisherId of publishers) await refused(withPkg({ publisherId, familyName: `MicrosoftWindows.WindowsSandbox_${publisherId}` }), /from publisher/, `publisher ${JSON.stringify(publisherId)}`);
+    const families = ["microsoftwindows.windowssandbox_cw5n1h2txyewy", "MicrosoftWindows.WindowsSandbox_CW5N1H2TXYEWY", "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy ", "XMicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewyx", "MicrosoftWindows.WindowsSandbox__cw5n1h2txyewy", "MicrosoftWindows.WindowsSandbox_*"];
+    for (const familyName of families) await refused(withPkg({ familyName }), /package family is/, `family ${JSON.stringify(familyName)}`);
+  });
+
+  test("a signature that is not valid is refused with Windows' own status, message, kind of signature and signer in the reason", async () => {
+    const statuses: WindowsSignature[] = [
+      { valid: false, status: "HashMismatch", statusMessage: "The contents of file <file> might have been changed by an unauthorized user or process", signatureType: "Authenticode", subject: MS },
+      { valid: false, status: "NotTrusted", statusMessage: "A certificate chain processed, but terminated in a root certificate which is not trusted", signatureType: "Authenticode", subject: MS },
+      { valid: false, status: "UnknownError", statusMessage: "The form specified for the subject is not one supported or known by the specified trust provider", signatureType: "None" },
+      { valid: false },
+    ];
+    for (const sig of statuses) {
+      const host = new SimHost(); host.sigs.set(key(WSB), sig);
+      const v = await verify(host);
+      assert.equal(v.ok, false);
+      if (v.ok) continue;
+      assert.ok(v.reason.startsWith(`${WSB} does not carry a valid Microsoft signature (`), v.reason);
+      assert.ok(v.reason.includes(describeSignature(sig)), v.reason);
+      assert.match(v.reason, new RegExp(`status ${sig.status ?? "not reported"}`));
+      assert.match(v.reason, new RegExp(`type ${sig.signatureType ?? "not reported"}`));
+      assert.match(v.reason, sig.subject === undefined ? /signer none/ : /signer CN=Microsoft Corporation/);
+      if (sig.statusMessage !== undefined) assert.ok(v.reason.includes(sig.statusMessage));
+      // A broken or untrusted signature is never explained away by the package: the package proof is asked for only when the file has no signature at all.
+      assert.doesNotMatch(v.reason, /part of Windows/);
+    }
+    const otherSigner = new SimHost(); otherSigner.sigs.set(key(SERVER), { valid: true, status: "Valid", subject: "CN=Evil Corp, O=Evil Corp", signatureType: "Authenticode" });
+    await refused(otherSigner, /WindowsSandboxServer\.exe does not carry a valid Microsoft signature \(status Valid, type Authenticode, signer CN=Evil Corp, O=Evil Corp\)/, "valid but not Microsoft");
+    const lookalikeSigner = new SimHost(); lookalikeSigner.sigs.set(key(WSB), { valid: true, status: "Valid", subject: "CN=Microsoft Corporation Ltd, O=Evil" });
+    await refused(lookalikeSigner, /signer CN=Microsoft Corporation Ltd/, "lookalike signer");
+  });
+
+  test("a file with no signature at all is accepted only on the exact system-package proof: signature kind System, state Ok, nothing but administrators can write the file or the folder", async () => {
+    const unsigned: WindowsSignature = { valid: false, status: "NotSigned", statusMessage: "The file <file> is not digitally signed.", signatureType: "None" };
+    const host = new SimHost(); host.sigs.set(key(WSB), unsigned);
+    const v = await verify(host);
+    assert.equal(v.ok, true, v.ok ? "" : v.reason);
+    if (v.ok) assert.equal(v.value.proof, "wsb.exe: system-package; WindowsSandboxServer.exe: authenticode");
+    const both = new SimHost(); both.sigs.set(key(WSB), unsigned); both.sigs.set(key(SERVER), unsigned);
+    const b = await verify(both);
+    assert.equal(b.ok, true);
+    if (b.ok) assert.equal(b.value.proof, "wsb.exe: system-package; WindowsSandboxServer.exe: system-package");
+
+    const variant = (extra: Partial<WindowsPackageInfo>, sig: WindowsSignature = unsigned): SimHost => { const h = withPkg(extra); h.sigs.set(key(WSB), sig); return h; };
+    for (const signatureKind of ["Store", "Developer", "Enterprise", "None", "system", "SYSTEM", "System ", ""]) await refused(variant({ signatureKind }), new RegExp(`status NotSigned.*not proven to be part of Windows instead: Windows reports the package's signature kind as ${signatureKind === "" ? "" : signatureKind.trim()}`), `kind ${JSON.stringify(signatureKind)}`);
+    const noKind = new SimHost(); noKind.pkg = { name: noKind.pkg!.name, publisherId: noKind.pkg!.publisherId, familyName: noKind.pkg!.familyName, version: noKind.pkg!.version, installLocation: INSTALL, status: "Ok" }; noKind.sigs.set(key(WSB), unsigned);
+    await refused(noKind, /signature kind as not reported, not System/, "kind not reported");
+    for (const status of ["Tampered", "Modified", "LicenseIssue", "ok", "Ok "]) await refused(variant({ status }), new RegExp(`package's state as ${status.trim()}`), `state ${status}`);
+    const noStatus = new SimHost(); noStatus.pkg = { name: noStatus.pkg!.name, publisherId: noStatus.pkg!.publisherId, familyName: noStatus.pkg!.familyName, version: noStatus.pkg!.version, installLocation: INSTALL, signatureKind: "System" }; noStatus.sigs.set(key(WSB), unsigned);
+    await refused(noStatus, /state as not reported, not Ok/, "state not reported");
+    const writableFile = variant({}); writableFile.writable.set(key(WSB), ["PC\\robert"]);
+    await refused(writableFile, /wsb\.exe can be changed by PC\\robert/, "file writable by the owner");
+    const writableFolder = variant({}); writableFolder.writable.set(key(INSTALL), ["BUILTIN\\Users"]);
+    await refused(writableFolder, /WindowsSandbox_0\.8\.107\.0_x64__cw5n1h2txyewy can be changed by BUILTIN\\Users/, "folder writable by users");
+    const unreadable = variant({}); unreadable.writableBy = async () => { throw new Error("icacls: Access is denied."); };
+    await refused(unreadable, /access list of .* could not be read: icacls: Access is denied\./, "access list unreadable");
+    // Only the exact status NotSigned opens the package proof.
+    for (const status of ["notsigned", "NotSigned ", "Incompatible", "NotSupportedFileFormat"]) await refused(variant({}, { ...unsigned, status }), /does not carry a valid Microsoft signature/, `status ${status}`);
+    for (const status of ["notsigned", "Incompatible"]) { const h = variant({}, { ...unsigned, status }); const r = await verify(h); assert.ok(!r.ok && !/part of Windows/.test(r.reason)); }
+    // A contradictory answer (valid, but NotSigned and no signer) is refused, not given the package proof (the real host never reports it, see the probe parsing test).
+    await refused(variant({}, { ...unsigned, valid: true }), /does not carry a valid Microsoft signature \(status NotSigned/, "valid but NotSigned");
+  });
+
+  test("the audit names the verified package family and how each file was proven", async () => {
+    const host = new SimHost(); host.sigs.set(key(WSB), { valid: false, status: "NotSigned", signatureType: "None" }); host.guest = probeGuest(host);
+    const backend = windowsSandboxBackend(options(host));
+    assert.equal(backend.auditDetails!()["clientProof"], "unverified");
+    const h = await backend.health();
+    assert.equal(h.healthy, true, h.reason);
+    assert.equal(backend.auditDetails!()["clientProof"], "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy (wsb.exe: system-package; WindowsSandboxServer.exe: authenticode)");
+  });
+
+  test("the real probes' answers are read exactly: package fields, signature status, Windows' message without the file's path", () => {
+    assert.equal(packageFromProbe(null), undefined);
+    assert.deepEqual(packageFromProbe({ name: "MicrosoftWindows.WindowsSandbox", publisherId: "cw5n1h2txyewy", familyName: "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" }),
+      { name: "MicrosoftWindows.WindowsSandbox", publisherId: "cw5n1h2txyewy", familyName: "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" });
+    // Missing or odd fields: required ones become empty (and are refused), optional ones absent.
+    assert.deepEqual(packageFromProbe({ name: 5, publisherId: null, version: "1.0", installLocation: INSTALL, signatureKind: "", status: 0 }), { name: "", publisherId: "", familyName: "", version: "1.0", installLocation: INSTALL });
+    const path = "C:\\Program Files\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__cw5n1h2txyewy\\wsb.exe";
+    assert.deepEqual(signatureFromProbe({ valid: true, status: "Valid", statusMessage: "Signature verified.", signatureType: "Catalog", subject: "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }, path),
+      { valid: true, status: "Valid", statusMessage: "Signature verified.", signatureType: "Catalog", subject: "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" });
+    assert.deepEqual(signatureFromProbe({ valid: false, status: "NotSigned", statusMessage: `The file ${path.toUpperCase()} is not digitally signed.\r\n  You cannot run this script.`, signatureType: "None", subject: null }, path),
+      { valid: false, status: "NotSigned", statusMessage: "The file <file> is not digitally signed. You cannot run this script.", signatureType: "None" });
+    // Valid only when the status says so too; a missing kind of signature (older PowerShell) is absent.
+    assert.deepEqual(signatureFromProbe({ valid: true, status: "NotSigned", statusMessage: "" }, path), { valid: false, status: "NotSigned" });
+    assert.deepEqual(signatureFromProbe({ valid: "true", status: "Valid" }, path), { valid: false, status: "Valid" });
+    assert.deepEqual(signatureFromProbe({}, path), { valid: false });
+    const long = shortStatusMessage("x".repeat(500), path);
+    assert.equal(long.length, 200);
+    assert.ok(long.endsWith("…"));
+    assert.equal(shortStatusMessage(`${path} and ${path}`, path), "<file> and <file>");
+    assert.equal(describeSignature({ valid: false, status: "NotSigned", statusMessage: "The file <file> is not digitally signed.", signatureType: "None" }), 'status NotSigned, "The file <file> is not digitally signed.", type None, signer none');
+    assert.equal(describeSignature({ valid: false }), "status not reported, type not reported, signer none");
   });
 });
 
