@@ -13,7 +13,6 @@ import { pathToFileURL } from "node:url";
 import { safeMessage } from "./safe-error.mjs";
 
 const SYSTEM_ROOTS = new Set(["/usr", "/bin", "/lib", "/sbin", "/lib64", "/"]);
-const FALLBACK_WINDOW = 32_768;
 /** The controller's attempt IDs; an offer naming anything else (a path, `..`) is not run, since its ID becomes a folder of this host. */
 const ATTEMPT = /^att-[a-z2-7]{20}$/;
 
@@ -143,7 +142,7 @@ export async function startRemoteWorker(setup, config) {
       const route = String(order.route);
       const slash = route.indexOf("/");
       const entry = Object.hasOwn(config.routes, route) ? config.routes[route] : undefined;
-      return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? FALLBACK_WINDOW, maxTokens: entry?.maxTokens ?? 4096, reasoning: false, input: ["text"] };
+      return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? controller.DEFAULT_CONTEXT_TOKENS, maxTokens: entry?.maxTokens ?? controller.DEFAULT_REPLY_TOKENS, reasoning: false, input: ["text"] };
     },
     // The agent's own tool namespace: a stable digest of the agent, so the same agent has the same names on every host.
     namespaceId: (order) => createHash("sha256").update(String(order.agentId)).digest("hex").slice(0, 16),

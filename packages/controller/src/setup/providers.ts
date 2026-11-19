@@ -19,14 +19,16 @@ export const PROVIDER_ENDPOINT_KIND = "provider-endpoint";
 export const SETUP_PROFILE = "default";
 export const SETUP_ROLES = ["coordinator", "safety-supervisor", "author"] as const;
 
-const NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+/** What a provider's name may be (also what the chat shows of one in a proposal). */
+export const PROVIDER_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+const NAME = PROVIDER_NAME;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 const SECRET_NAME = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /**
  * The smallest window a route can work in (the worker refuses a smaller one; kept equal to `MIN_WORKABLE_WINDOW` in pi-adapter, which an integration test checks, card CMP). A window from here up to
- * `MIN_STARTABLE_WINDOW` (context/fixed-part.ts) is accepted, but no task can start on it since card T08 (the fixed part alone is about 6,800 tokens since card P03b): `add` says so in its `warnings`.
+ * `MIN_STARTABLE_WINDOW` (context/fixed-part.ts) is accepted, but no task can start on it since card T08 (the fixed part alone is `WORKER_FIXED_PART_ABOUT_TOKENS`): `add` says so in its `warnings`, and the chat says so in the proposal before it.
  */
 export const MIN_WORKABLE_CONTEXT_TOKENS = 8192;
 

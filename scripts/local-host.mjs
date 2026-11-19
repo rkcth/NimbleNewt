@@ -19,8 +19,6 @@ export const BEAT_MS = 20_000;
 const SYSTEM_ROOTS = new Set(["/usr", "/bin", "/lib", "/sbin", "/lib64", "/"]);
 /** What one agent's attempt asks the host for when it is placed (the host's capacity, declared below, says how many fit). */
 export const ATTEMPT_RESOURCES = { cpus: 1, memoryMb: 2048 };
-/** The context window assumed for a route the routing table gives none. */
-const FALLBACK_WINDOW = 32_768;
 
 /**
  * Whether the worker host may change agents' environments (the A09 runtime). OFF unless asked: a command-line switch (`--local-host-environments`) or `NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1`.
@@ -176,7 +174,7 @@ export function localHostBuilder(setup) {
                 const route = String(order.route);
                 const slash = route.indexOf("/");
                 const entry = (await ctx.controller().services.routing.get())?.routes?.[route];
-                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? FALLBACK_WINDOW, maxTokens: entry?.maxTokens ?? 4096, reasoning: false, input: ["text"] };
+                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? controller.DEFAULT_CONTEXT_TOKENS, maxTokens: entry?.maxTokens ?? controller.DEFAULT_REPLY_TOKENS, reasoning: false, input: ["text"] };
               },
               namespaceId: (order) => services.namespaceId(order),
               bridge: (order, call, token, request) => {

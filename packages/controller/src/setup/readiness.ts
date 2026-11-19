@@ -1,4 +1,4 @@
-import { FIXED_PART_WORDS } from "../context/fixed-part.js";
+import { DEFAULT_REPLY_TOKENS, FIXED_PART_WORDS, grouped, windowNeeded } from "../context/fixed-part.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -87,10 +87,19 @@ export class SetupReadinessService {
     const completeP = await this.#each("project", (_id, body) => { if (body["state"] === "archived") return; projects++; if (Array.isArray(body["repositories"]) && body["repositories"].length > 0) withRepository++; });
     items.push({ id: "project", label: "A project", required: true, state: projects > 0 ? "done" : "missing", detail: projects === 0 ? "no project yet" : `${plural(projects, "active project", "active projects", !completeP)}, ${withRepository} with a repository bound`, how: "project.create, then resource.bind for its repository" });
 
-    const table = (await s.getAggregate({ kind: "routing-table", id: "routing" }))?.body as { providers?: Record<string, { enabled?: boolean }>; routes?: Record<string, unknown> } | undefined;
+    const table = (await s.getAggregate({ kind: "routing-table", id: "routing" }))?.body as { providers?: Record<string, { enabled?: boolean }>; routes?: Record<string, { contextTokens?: unknown; maxTokens?: unknown }> } | undefined;
     const enabled = Object.entries(table?.providers ?? {}).filter(([, p]) => p.enabled === true).map(([name]) => name);
     const routes = Object.keys(table?.routes ?? {}).filter((r) => enabled.includes(r.split("/")[0]!));
-    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > 0 ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher" });
+    // A stored route whose window cannot start a task (card "Fixed-part sizing after T08", follow-up), by the same rule as the first-call admission with the route's own reply limit: named with the window it needs.
+    // With no route that can start one, the step is not done: the team cannot run a task.
+    const tooSmall = routes.flatMap((r) => {
+      const e = table?.routes?.[r];
+      const window = e?.contextTokens, reply = typeof e?.maxTokens === "number" && Number.isSafeInteger(e.maxTokens) && e.maxTokens >= 0 ? e.maxTokens : DEFAULT_REPLY_TOKENS;
+      const need = typeof window === "number" ? windowNeeded(window, reply) : undefined;
+      return need === undefined ? [] : [`${r} (${grouped(window as number)} tokens${reply === DEFAULT_REPLY_TOKENS ? "" : ` with a reply limit of ${grouped(reply)}`}; needs ${grouped(need)})`];
+    });
+    const small = tooSmall.length === 0 ? "" : `; no task can start on ${tooSmall.length === routes.length ? (routes.length === 1 ? "it" : "any of them") : `${tooSmall.length} of them`}: ${tooSmall.slice(0, 3).join(", ")}${tooSmall.length > 3 ? ` and ${tooSmall.length - 3} more` : ""}`;
+    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > tooSmall.length ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)${small}` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher. A route named as too small: add its provider again with the model's real window, or lower the route's reply limit with routing.budget.set" });
 
     let hosts = 0; let announced = 0;
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });
