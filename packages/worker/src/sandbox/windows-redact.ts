@@ -92,8 +92,10 @@ const REDACTED_HEADS = new Set(["S-1-5-21", "S-1-12-1", "S-1-5-5", "S-1-5-83"]);
 const isRedactedHead = (sid: string, after: string): boolean => after.startsWith("-<") && REDACTED_HEADS.has(sid.toUpperCase());
 const WELL_KNOWN = /^(?:nt authority|builtin|nt service|nt virtual machine|window manager|font driver host|everyone|users|administrators|guests|system|creator owner|authenticated users|all application packages|trustedinstaller|<host>|<user>)$/i;
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const SEP = String.raw`(?:\\\\|\\|/)+`;
-/** An e-mail address, tried only where `eachEmail` starts it (sticky). */
+/** A run of path separators. One character class, not an alternation of `\\\\`, `\\` and `/`: those split a run of backslashes in exponentially many ways, and a home-folder
+ * search that failed after two such runs (`C:` + 24 backslashes + `Users` + 24 backslashes) took minutes. */
+const SEP = String.raw`[\\/]+`;
+/** An e-mail address, tried only where `replaceEmails` starts it (sticky). */
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/y;
 const isEmailLocal = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
 /**
@@ -116,6 +118,42 @@ function replaceEmails(text: string, as: (email: string) => string): string {
   return copied === 0 ? text : out + text.slice(copied);
 }
 const hasEmail = (text: string): boolean => { let found = false; replaceEmails(text, (m) => { found = true; return m; }); return found; };
+/**
+ * Which of `words` occur anywhere in `text`, ignoring the case of A to Z (as the case-insensitive searches below do for these ASCII words), in one pass over the text
+ * (Aho-Corasick): searching once per word took time growing with the number of words times the length of the text.
+ */
+function occurring(text: string, words: readonly string[]): Set<string> {
+  interface Node { readonly next: Map<number, Node>; fail: Node | null; readonly ends: string[]; seen: boolean }
+  const lower = (c: number): number => (c >= 65 && c <= 90 ? c + 32 : c);
+  const root: Node = { next: new Map(), fail: null, ends: [], seen: false };
+  for (const w of words) {
+    let n = root;
+    for (let i = 0; i < w.length; i++) { const c = lower(w.charCodeAt(i)); let k = n.next.get(c); if (k === undefined) { k = { next: new Map(), fail: null, ends: [], seen: false }; n.next.set(c, k); } n = k; }
+    n.ends.push(w);
+  }
+  const queue: Node[] = [];
+  for (const k of root.next.values()) { k.fail = root; queue.push(k); }
+  for (let q = 0; q < queue.length; q++) {
+    const n = queue[q]!;
+    for (const [c, k] of n.next) {
+      let f = n.fail;
+      while (f !== null && !f.next.has(c)) f = f.fail;
+      k.fail = f === null ? root : f.next.get(c)!;
+      queue.push(k);
+    }
+  }
+  let n = root;
+  for (let i = 0; i < text.length; i++) {
+    const c = lower(text.charCodeAt(i));
+    while (n !== root && !n.next.has(c)) n = n.fail!;
+    n = n.next.get(c) ?? root;
+    // Each node and the nodes its failure links lead to are marked once; a marked node's chain is already marked.
+    for (let m: Node | null = n; m !== null && m !== root && !m.seen; m = m.fail) m.seen = true;
+  }
+  const found = new Set<string>();
+  for (const k of queue) if (k.seen) for (const w of k.ends) found.add(w);
+  return found;
+}
 
 function localNames(): { users: string[]; hosts: string[] } {
   const users: string[] = [];
@@ -150,14 +188,21 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/(?<![\w:])(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}(?![\w:])|(?<![\w:])(?:[0-9a-f]{1,4}:)+:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?(?![\w:])/gi, "<ip>");
 
   const local = localNames();
-  const users = [...local.users, ...(names.users ?? []), ...fromEmail].flatMap(withPieces).filter((u) => u.length >= 2);
   const hosts = [...local.hosts, ...(names.hosts ?? [])].flatMap((h) => [h, h.split("\\")[0]!]).filter((h) => h.length >= 2);
   for (const o of names.other ?? []) if (o.text.length >= 2) out = out.replace(new RegExp(escapeRe(o.text), "gi"), o.as);
+  // A name taken from an e-mail address is searched for only if it occurs in the text (or in the placeholders written below, which the searches also see): one search
+  // per address over the whole text took time growing with the square of a line that held many addresses. These names are made of e-mail characters only and the
+  // searches below only put in placeholders, whose `<`, `>` and `\` are none of them, so a name that does not occur here can never be found below: the result is the
+  // same as searching for every name.
+  const emailNames = fromEmail.flatMap(withPieces);
+  const emailShort = fromEmail.map(shortPrefix);
+  const present = fromEmail.length === 0 ? new Set<string>() : occurring(`${out}\n<host>\\<user>`, [...emailNames, ...emailShort]);
+  const users = [...[...local.users, ...(names.users ?? [])].flatMap(withPieces), ...emailNames.filter((u) => present.has(u))].filter((u) => u.length >= 2);
   // Known names first (longest first), so that a home folder such as "Alice Smith" is already partly a placeholder when the home rule runs.
   const byLength = (a: string, b: string): number => b.length - a.length;
   for (const h of [...new Set(hosts)].sort(byLength)) for (const u of [...new Set(users)].sort(byLength)) out = out.replace(new RegExp(`${escapeRe(h)}\\\\{1,4}${escapeRe(u)}(?![A-Za-z0-9_])`, "gi"), "<host>\\<user>");
   // 8.3 short names (ROBERT~1, ROBERT~1.DES) anywhere, before the plain names are replaced.
-  for (const p of new Set([...local.users, ...(names.users ?? []), ...fromEmail].map(shortPrefix))) if (p.length >= 3) out = out.replace(new RegExp(String.raw`(?<![A-Za-z0-9_])${escapeRe(p)}~\d+(?:\.\w{1,3})?`, "gi"), "<user>");
+  for (const p of new Set([...[...local.users, ...(names.users ?? [])].map(shortPrefix), ...emailShort.filter((p) => present.has(p))])) if (p.length >= 3) out = out.replace(new RegExp(String.raw`(?<![A-Za-z0-9_])${escapeRe(p)}~\d+(?:\.\w{1,3})?`, "gi"), "<user>");
   for (const u of [...new Set(users)].sort(byLength)) out = out.replace(wholeWord(u), "<user>");
   for (const h of [...new Set(hosts)].sort(byLength)) out = out.replace(wholeWord(h), "<host>");
   out = out.replace(/<host>(?:\.[A-Za-z0-9-]+)+/g, "<host>");
@@ -173,8 +218,10 @@ export function redact(text: string, names: RedactionNames = {}): string {
     const body = line.replace(/\r$/, "");
     // A line that starts in column 0 begins with the folder's path; one that starts with blanks is a continuation holding only the account.
     // `(?!\s)` keeps the blank runs from being retried shorter, which could never match where the longest did not and took time growing with the square of their length.
-    const first = /^(\S+\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
-    const more = /^(\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(].*)$/.exec(body);
+    // The rights run to the end of the line whatever they hold (`[^]*`): `.*$` stopped at a carriage return or line separator inside the line, so the rule did not apply
+    // there and every later `:(` was tried again to the end of the line, taking time growing with the square of its length.
+    const first = /^(\S+\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(][^]*)$/.exec(body);
+    const more = /^(\s+)(?!\s)(.*?):(\((?:[A-Z]{1,5})[,)(][^]*)$/.exec(body);
     const m = more ?? first;
     if (m === null) return line;
     const account = m[2]!.trim();

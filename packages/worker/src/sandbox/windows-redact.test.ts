@@ -260,3 +260,37 @@ test("redaction time grows with the length of the text, not its square: 3 MB on 
   assert.equal(redact(`C:\\work${" ".repeat(50_000)}DESKTOP-4F2K9\\Kim:(F)`, names), `C:\\work${" ".repeat(50_000)}<host>\\<user>:(F)`);
   assert.equal(redact(`${" ".repeat(50_000)}Kim Lee:(OI)(CI)(RX)`, names), `${" ".repeat(50_000)}<user>:(OI)(CI)(RX)`);
 });
+
+test("re-check: no search is retried in exponentially or quadratically many ways (separator runs, a break inside an access-list line, many addresses), and what each rule redacted is still redacted", { timeout: 30_000 }, () => {
+  const timed = (kind: string, text: string): string => {
+    const started = process.hrtime.bigint();
+    const out = redact(text, names);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 1500, `${kind}: ${ms} ms`);
+    return out;
+  };
+  // Runs of separators around a home root that is not followed by a name: each run could be split in exponentially many ways (22 and 22 backslashes took 15 s, 24 and
+  // 24 took two minutes). The sizes here are kept small enough that the old patterns fail this test by time instead of hanging it.
+  for (const text of ["C:\\\\Users\\\\Kim Lee\\x", "C:/\\/Users//\\Kim Lee\\x", `C:${"\\".repeat(30)}Users${"\\".repeat(30)}Kim Lee\\x`]) assert.ok(!/Kim/.test(redact(text, names)) && redact(text, names).includes("<home>"), text);
+  timed("separator runs", `C:${"\\".repeat(22)}Users${"\\".repeat(22)}`);
+  timed("separator runs, repeated", `C:${"\\".repeat(8)}Users${"\\".repeat(8)}`.repeat(100_000));
+  // An access-list line with a carriage return or a line separator inside: the rule did not apply, and every later `:(` was tried again to the end of the line.
+  for (const brk of ["\r", "\u2028"]) {
+    assert.equal(redact(`C:\\work OTHERPC\\Bob:(F)${brk}more`, names), `C:\\work <user>:(F)${brk}more`);
+    assert.equal(redact(`   Bob Q:(OI)(CI)(F)${brk}x`, names), `   <user>:(OI)(CI)(F)${brk}x`);
+    const out = timed(`access list with ${JSON.stringify(brk)}`, `x ${":(F,".repeat(40_000)}${brk}y`);
+    assert.ok(out.startsWith("x <user>:(F,"), out.slice(0, 40));
+    timed(`3 MB access list with ${JSON.stringify(brk)}`, `x Bob${":(F,".repeat(750_000)}${brk}y`);
+  }
+  // 1 MB of different addresses on one line (3 MB takes about 1.5 s here, linear): each local part was searched for over the whole text. A local part that does occur elsewhere is still redacted there,
+  // as its 8.3 short name and after a machine name.
+  const many = Array.from({ length: 60_000 }, (_, i) => `q${i.toString(36)}@ex.com `).join("");
+  assert.ok(many.length > 600_000);
+  const out = timed("many addresses", `${many}pat.quinlan@ex.com then pat.quinlan, PATQUI~1.TXT and DESKTOP-4F2K9\\pat.quinlan, quinlan; pat.quinlanx stays`);
+  assert.ok(out.endsWith("<email> then <user>, <user> and <host>\\<user>, <user>; pat.quinlanx stays"), out.slice(-120));
+  assert.ok(!/q[0-9a-z]+@/.test(out));
+  // A local part that matches a word of a placeholder still behaves as it did (the placeholders are searched too).
+  assert.equal(redact("user@ex.com JimBob", names), redact("user@ex.com JimBob", { ...names, users: [...names.users, "user"] }));
+  // A local part found only as the end of a longer run of name characters (the one-pass search must follow its fallback links).
+  assert.equal(redact("x-ann.leeroy@ex.com ann.lee@ex.com; see x-ann.lee", names), "<email> <email>; see x-<user>");
+});
