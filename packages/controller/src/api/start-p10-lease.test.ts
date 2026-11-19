@@ -54,11 +54,10 @@ test("the integrator lease through the state API and chat, and a landing that mu
     assert.equal((await land(ann, "w1")).error?.code, "invalid_command");
     assert.equal((await land(ann, "w2", { leaseId: lease.leaseId, fence: 4 })).error?.code, "fenced");
     assert.equal((await land(bob, "w3", { leaseId: lease.leaseId, fence: 1 })).error?.code, "forbidden", "a lease is its holder's: another agent (here without the right at all) is refused");
+    // The lease passes; the landing queue (P10 queue slice) then refuses it: an integrator lands only a queued approved submission, and this task has none.
     const past = await land(ann, "w5", { leaseId: lease.leaseId, fence: 1 });
-    assert.equal(past.error?.code, undefined, JSON.stringify(past));
-    assert.equal(past.result.state, "refused", "the lease passed; with no host on this controller the landing is refused for that reason, not for the lease");
-    assert.match(past.result.summary, /no host/);
-    assert.equal(past.result.lease.fence, 1);
+    assert.equal(past.error?.code, "invalid_transition", JSON.stringify(past));
+    assert.match(past.error!.message ?? "", /no approved submission in the landing queue/);
     assert.equal((await call(ann, "workspace.request", { operation: "refresh", taskId: task, reason: "x", leaseId: lease.leaseId, fence: 1 }, "w6")).error?.code, "invalid_command");
 
     // P10 review. The owner may leave the lease out (a lease ID is never the owner's own words, so this is how a landing asked in chat can pass): the live lease of the landing branch is used and recorded.
