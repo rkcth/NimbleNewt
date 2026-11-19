@@ -18,7 +18,7 @@ import { probeUrl } from "../projects/probes.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -729,7 +729,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_EXEMPT : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // A probe's address is the reach the owner approves (card P04i): it must be written out whole in the owner's message, exactly as given; a part of a longer address or one in other letter case is not theirs.
       // An address the probe would refuse is refused here, before it is shown: the proposal then always shows the whole address, as it would be asked (second review).
@@ -1096,7 +1096,16 @@ export class ChatService {
       // right in words. The name is looked up as an assignment's is (exactly one active agent, case ignored; none is refused, two are asked about) and the right is drawn up for that agent's principal.
       const grantName = args["agentName"];
       delete args["agentName"];
-      let namedGrantee: { principal: string; name: string } | undefined;
+      // A bundle of rights (card D01): "let Ann work on Garden" asks for every right Ann's own roles stand for, in that project. It is drawn up below, once the project and the times are settled.
+      const bundle = args["bundle"];
+      delete args["bundle"];
+      if (bundle !== undefined) {
+        if (intent.op !== "grant.create") return refuse("invalid_command", "bundle is not an argument of this operation");
+        if (typeof bundle !== "string" || !GRANT_BUNDLES.has(bundle)) return refuse("invalid_command", `bundle must be one of ${[...GRANT_BUNDLES].join(", ")}: the rights the agent's own roles stand for`);
+        if (args["action"] !== undefined) return refuse("invalid_command", "the right is named twice over, as one action and as the agent's whole bundle; which one is meant has to be settled.");
+        if (grantName === undefined) return refuse("invalid_command", "a bundle of rights is given to an agent named by its name; which agent should have it?");
+      }
+      let namedGrantee: { principal: string; name: string; roles: readonly string[] } | undefined;
       if (grantName !== undefined) {
         if (intent.op !== "grant.create") return refuse("invalid_command", "agentName is not an argument of this operation");
         if (args["grantee"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as a grantee and by name; which one is meant has to be settled.");
@@ -1105,7 +1114,7 @@ export class ChatService {
         const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === grantName.trim().toLowerCase());
         if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(grantName.trim(), 80)}`);
         if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(grantName.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
-        namedGrantee = { principal: `agent:${String(exact[0]!["id"])}`, name: String(exact[0]!["friendlyName"]).slice(0, 80) };
+        namedGrantee = { principal: `agent:${String(exact[0]!["id"])}`, name: String(exact[0]!["friendlyName"]).slice(0, 80), roles: Array.isArray(exact[0]!["roles"]) ? (exact[0]!["roles"] as unknown[]).filter((r): r is string => typeof r === "string") : [] };
       }
       for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant did you mean, by its grt- ID?" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
       // The principal found from the owner's name is not in their words (only the name is), so it is put in after the check above.
@@ -1153,6 +1162,19 @@ export class ChatService {
           if (!found.ok) return found;
           labels[found.id] = found.name;
         } else return refuse("invalid_command", "Which project should this right cover, or should it cover every project?");
+        if (bundle !== undefined && namedGrantee !== undefined) {
+          // A bundle is for one project (first review): a plain "let Ann work" sentence never reaches every project at once; rights for every project are named one by one.
+          if (scope === "*") return refuse("invalid_command", `a bundle of rights covers one project, never every project. Which project should ${quotedText(namedGrantee.name, 80)} work on? To give rights in every project, name each right.`);
+          const drawn = await this.#rightsBundle(token, namedGrantee, args, typeof scope === "string" ? labels[scope] ?? scope : "");
+          if (!drawn.ok) return drawn;
+          // One grant.create per right, each with the same grantee, scope, times and reason; the last is the command's own step, pushed at the end like every other command's.
+          // The action is put first, so each line of the proposal starts with the right it gives.
+          const rest = { ...args };
+          for (const action of drawn.actions.slice(0, -1)) steps.push({ op: intent.op, args: { action, ...rest }, commandId: "" });
+          for (const key of Object.keys(args)) delete args[key];
+          Object.assign(args, { action: drawn.actions[drawn.actions.length - 1] }, rest);
+          fillNotes.push(drawn.note);
+        }
       }
     }
 
@@ -2147,6 +2169,39 @@ export class ChatService {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
     if (response.ok) return (response.result["items"] as Record<string, unknown>[] | undefined) ?? [];
     throw new DomainError(response.error.code === "unauthenticated" ? "unauthenticated" : "unavailable", response.error.message);
+  }
+
+  /**
+   * The rights a bundle stands for (card D01): every capability of the agent's own roles, as the role templates list them now, in the order the roles and their capabilities are written, each once.
+   * A right the agent already holds in exactly that scope for good (active, no start, no end, no idle window, no terms, not derived) is left out, so saying it twice gives nothing twice.
+   * An agent with no role, a role with no template, a template holding a wildcard or an approval, or nothing left to give is refused with what to do instead; nothing is guessed.
+   */
+  async #rightsBundle(token: string, agent: { principal: string; name: string; roles: readonly string[] }, args: Readonly<Record<string, unknown>>, projectName: string): Promise<{ ok: true; actions: string[]; note: string } | ReturnType<typeof refuse>> {
+    const who = quotedText(agent.name, 80);
+    if (agent.roles.length === 0) return refuse("invalid_command", `${who} has no role, so there is no bundle of rights to give. Give ${who} a role first (for example "make ${agent.name} an author"), or name the rights one by one.`);
+    const templates = new Map((await this.#listAll(token, "role.list", {})).map((r) => [String(r["name"]), Array.isArray(r["capabilities"]) ? (r["capabilities"] as unknown[]).filter((c): c is string => typeof c === "string") : []]));
+    const unknown = agent.roles.find((r) => !templates.has(r));
+    if (unknown !== undefined) return refuse("not_found", `the role ${quotedText(unknown, 60)} of ${who} has no template, so what it stands for is not known. Name the rights one by one, or define the role first.`);
+    const actions = [...new Set(agent.roles.flatMap((r) => templates.get(r) ?? []))];
+    if (actions.length === 0) return refuse("invalid_command", `the roles of ${who} (${agent.roles.join(", ")}) stand for no rights, so there is nothing to give. Name the rights one by one.`);
+    // A template may hold a wildcard (`*`, `task.*`); a plain sentence never draws one up (first review): each line of a bundle names one exact right, so the owner sees what each one gives.
+    const wide = actions.find((a) => a === "*" || a.endsWith(".*"));
+    if (wide !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(wide, 60)}, which covers more than one right, so no bundle was drawn up. Name the rights one by one.`);
+    // An approval right (`approve.…`) lets an agent's action through without asking the owner; a plain "let Ann work" sentence never gives one (first review), as an agent never derives one and a meeting never grants one.
+    const waiver = actions.find((a) => a.startsWith("approve."));
+    if (waiver !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(waiver, 60)}, an approval that lets actions through without asking you, so no bundle was drawn up. Name the rights one by one.`);
+    // A right held for good already covers whatever times the new one would have; one that starts later, ends, lapses, rests on another right or holds only under terms (hours, environments, a spend limit) does not.
+    // Only the agent's own rights count (second review): the list is asked for by grantee, and each item is checked again, so another agent's right in the project never leaves one of Ann's out.
+    const held = new Set((await this.#listAll(token, "grant.list", { grantee: agent.principal }))
+      .filter((g) => g["grantee"] === agent.principal && g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined && g["terms"] === undefined)
+      .map((g) => String(g["action"])));
+    const fresh = actions.filter((a) => !held.has(a));
+    const where = quotedText(projectName, 80);
+    if (fresh.length === 0) return refuse("invalid_command", `${who} already holds every right of the role${agent.roles.length === 1 ? "" : "s"} ${agent.roles.join(", ")} in ${where}, so nothing was drawn up.`);
+    if (fresh.length > GRANT_BUNDLE_LIMIT) return refuse("invalid_command", `the roles of ${who} stand for ${String(fresh.length)} rights, more than the ${String(GRANT_BUNDLE_LIMIT)} one proposal can show. Name the rights you want in smaller groups.`);
+    const skipped = actions.filter((a) => held.has(a));
+    const note = `These are the rights the role${agent.roles.length === 1 ? "" : "s"} ${agent.roles.join(", ")} of ${who} stand${agent.roles.length === 1 ? "s" : ""} for, each only in ${where}${skipped.length === 0 ? "" : `; already held there and left out: ${skipped.join(", ")}`}. Saying yes gives them all; to give fewer, say no and name the rights you want.`;
+    return { ok: true, actions: fresh, note };
   }
 
   /** Every item of a list operation, bounded (five pages). */
