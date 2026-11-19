@@ -34,8 +34,14 @@ test("own-hardware: the Windows evidence job runs only by hand from main, every 
   const j = job(text, "sandbox-windows");
   assert.match(j, /if: github\.repository == 'rkcth\/NimbleNewt' && github\.ref == 'refs\/heads\/main'/);
   assert.match(j, /runs-on: \[self-hosted, nimblenewt-windows\]/);
-  const ids = ["fs", "wsb", "wd", "g05", "g06", "y02"];
+  const ids = ["fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
   for (const id of ids) assert.match(step(j, id), /\n {8}continue-on-error: true\n/, id);
+  // Every evidence step has its own timeout, so a stuck one ends as a failure and the cleanup, outcome and upload steps still run inside the job's limit.
+  for (const id of ids) assert.match(step(j, id), /\n {8}timeout-minutes: \d+\n/, id);
+  // The leftovers of a step stopped by its timeout are released whatever happened before.
+  assert.match(step(j, "cleanup"), /\n {8}if: always\(\)\n/);
+  assert.match(step(j, "cleanup"), /node scripts\/wsb-cleanup\.mjs --local "\$RUNNER_TEMP\/g05-local"/);
+  assert.ok(j.indexOf("id: cleanup") > j.indexOf("id: y02") && j.indexOf("id: cleanup") < j.indexOf("Job summary and outcome"));
   const outcome = j.slice(j.indexOf("- name: Job summary and outcome"));
   assert.match(outcome, /if: always\(\)/);
   for (const id of ids) assert.match(outcome, new RegExp(`\\$\\{\\{ steps\\.${id}\\.outcome \\}\\}`), id);
@@ -58,10 +64,11 @@ test("own-hardware: the outcome step, run as bash runs it on the runner, passes 
       writeFileSync(summary, "");
       for (const [f, text] of Object.entries(logs)) { const p = join(dir, f); spawnSync("mkdir", ["-p", dirname(p)]); writeFileSync(p, text); }
       // The runner's own options for `shell: bash`.
-      const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { encoding: "utf8", env: { PATH: process.env.PATH, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: summary, ...outcomes } });
+      // From the checkout's root, as the runner runs it (the script calls scripts/redact-log.mjs; needs the build).
+      const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { cwd: root, encoding: "utf8", env: { PATH: process.env.PATH, RUNNER_TEMP: dir, GITHUB_STEP_SUMMARY: summary, COMPUTERNAME: "MYPC", ...outcomes } });
       return { status: r.status, summary: readFileSync(summary, "utf8") };
     };
-    const ids = ["FS", "WSB", "WD", "G05", "G06", "Y02"];
+    const ids = ["FS", "WSB", "WD", "G05", "G06", "Y02", "CLEAN"];
     const all = Object.fromEntries(ids.map((k) => [k, "success"]));
     const ok = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n" });
     assert.equal(ok.status, 0, ok.summary);
@@ -72,8 +79,11 @@ test("own-hardware: the outcome step, run as bash runs it on the runner, passes 
     assert.equal(early.status, 1);
     assert.match(early.summary, /\| Y02 scenarios \| failure \|/);
     // Home folders in the copied log lines are replaced.
-    const home = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n", "g05-local/g05.log": "wrote C:\\Users\\someone\\x\n" });
+    const home = run(all, { "y02-wsb-local/y02.log": "sandbox-escape-refused: pass (50/50)\n", "g05-local/g05.log": "wrote C:\\Users\\someone\\x\n", "g05-local/cleanup.log": "the console session belongs to MYPC\\ownername, not the configured owner\n" });
     assert.doesNotMatch(home.summary, /someone/);
+    assert.doesNotMatch(home.summary, /ownername/);
+    assert.match(home.summary, /<home>/);
+    assert.match(home.summary, /\| Leftovers of the Sandbox runs released \| success \|/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -98,6 +108,15 @@ test("own-hardware: only redacted or data-only evidence is uploaded; the unredac
   assert.match(fs, /function State/);
   assert.doesNotMatch(fs, /VolumeLabel|FileSystemLabel|SerialNumber|USERNAME/);
   assert.match(step(j, "g06"), /packages\/worker\/dist\/workspace\/long-paths\.test\.js/);
+  // The job log is public: every step that prints a command's output passes it through the redaction filter (the full text goes to a local file only).
+  for (const id of ["wd", "g05", "g06", "y02", "cleanup"]) {
+    const run = step(j, id).slice(step(j, id).indexOf("run: |"));
+    const printing = run.split("\n").filter((l) => /^\s+node /.test(l));
+    assert.ok(printing.length > 0, id);
+    for (const l of printing) assert.match(l, /2>&1 \| tee "[^"]+" \| node scripts\/redact-log\.mjs$/, `${id}: ${l}`);
+  }
+  // The Sandbox tests' own output stays in the local folder.
+  assert.match(step(j, "wsb"), /> "\$NIMBLENEWT_WSB_LOCAL\/output\.txt" 2>&1/);
 });
 
 test("exhaustive: the Y02 scenario set runs on hosted Linux and macOS with the sandbox and uploads its report", () => {
@@ -112,5 +131,35 @@ test("exhaustive: the Y02 scenario set runs on hosted Linux and macOS with the s
 test("every action in the evidence workflows is pinned to a full commit", () => {
   for (const name of ["own-hardware.yml", "exhaustive.yml", "qa.yml"]) {
     for (const m of read(name).matchAll(/uses: ([^\s]+)/g)) assert.match(m[1], /@[0-9a-f]{40}$/, `${name}: ${m[1]}`);
+  }
+});
+
+test("redact-log: account, home and console names are replaced line by line; without the redaction code nothing of the input is shown", { skip: process.platform === "win32" ? "POSIX paths in the check" : false }, () => {
+  const input = ["plain line", "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\nn-g06-x failed", "the console session belongs to MYPC\\janed, not the configured owner", "owner PC\\cfgowner set"].join("\n");
+  const r = spawnSync(process.execPath, [join(root, "scripts", "redact-log.mjs")], { input, encoding: "utf8", env: { ...process.env, COMPUTERNAME: "MYPC", NIMBLENEWT_WSB_OWNER: "PC\\cfgowner" } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split("\n");
+  assert.equal(lines[0], "plain line");
+  assert.doesNotMatch(r.stdout, /Jane|janed|cfgowner|MYPC/);
+  assert.match(lines[1], /<home>/);
+  assert.equal(lines.length, 5);
+  // A copy of the script without the built code next to it: it withholds everything and says so.
+  const dir = mkdtempSync(join(tmpdir(), "nn-redact-log-"));
+  try {
+    spawnSync("mkdir", ["-p", join(dir, "scripts")]);
+    writeFileSync(join(dir, "scripts", "redact-log.mjs"), readFileSync(join(root, "scripts", "redact-log.mjs")));
+    const off = spawnSync(process.execPath, [join(dir, "scripts", "redact-log.mjs")], { input, encoding: "utf8" });
+    assert.equal(off.status, 0);
+    assert.equal(off.stdout, "<4 lines withheld: the redaction code could not be loaded>\n");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("wsb-cleanup: bad usage exits 2; off Windows it does nothing and exits 0", () => {
+  const usage = spawnSync(process.execPath, [join(root, "scripts", "wsb-cleanup.mjs"), "--bogus"], { encoding: "utf8" });
+  assert.equal(usage.status, 2);
+  if (process.platform !== "win32") {
+    const r = spawnSync(process.execPath, [join(root, "scripts", "wsb-cleanup.mjs")], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /not Windows/);
   }
 });

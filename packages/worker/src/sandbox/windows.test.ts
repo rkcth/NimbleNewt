@@ -9,6 +9,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
+import { evidenceControlDirs, releaseLeftovers, sandboxRunning } from "./windows-cleanup.js";
 import { aclSteps, checkIdentity, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
@@ -702,6 +703,65 @@ describe("Windows launcher: running a job", () => {
     host.writeText("C:\\Jobs\\a\\keep.txt", "x");
     await backend.release!({ ...plan, env: { NIMBLENEWT_WSB_JOB: "C:\\Jobs\\a" } });
     assert.ok(host.exists("C:\\Jobs\\a\\keep.txt"), "a directory outside the jobs directory is never touched");
+  });
+
+  test("own-hardware cleanup: jobs a killed evidence run left in its test folders are released (sandbox stopped, ACLs back) and the folder goes; a live or failing one is kept", async () => {
+    const host = new SimHost();
+    const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const leave = (control: string, job: string, sandbox: string, folder: string): void => {
+      const jobDir = `${control}\\jobs\\${job}`;
+      host.writeText(`${jobDir}\\job.json`, "{}");
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: sandbox }));
+      host.sandboxes.add(sandbox);
+      host.writeText(`${jobDir}\\acl-0.txt`, "saved");
+      host.saved.set(key(`${jobDir}\\acl-0.txt`), orig); host.savedFor.set(key(`${jobDir}\\acl-0.txt`), folder);
+      host.writeText(`${jobDir}\\acl.json`, JSON.stringify([{ path: folder, parent: folder.slice(0, folder.lastIndexOf("\\")), file: `${jobDir}\\acl-0.txt` }]));
+      host.acl.set(key(folder), [...orig, "PC\\robert:(OI)(CI)M"]);
+    };
+    const real = "C:\\ProgramData\\nn-wsb-real-ab12cd";
+    const hostTest = "C:\\ProgramData\\nn-wsb-host-zz9yx8";
+    host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+    leave(`${real}\\control`, "job-1", "00000000-0000-4000-8000-0000000000b1", `${real}\\job1\\work`);
+    leave("D:\\a\\_temp\\nn-g05-wsb\\control", "job-2", "00000000-0000-4000-8000-0000000000b2", "C:\\T\\nn-g05-x\\work");
+    // The host test's base has two control folders; one job there cannot be undone, so that base stays whole.
+    host.mkdirp(`${hostTest}\\control`);
+    leave(`${hostTest}\\control-acl`, "job-3", "00000000-0000-4000-8000-0000000000b3", `${hostTest}\\x\\work`);
+    host.saved.delete(key(`${hostTest}\\control-acl\\jobs\\job-3\\acl-0.txt`));
+    // Unrelated folders are not looked at.
+    host.mkdirp("C:\\ProgramData\\NimbleNewt\\control\\jobs\\other");
+    host.mkdirp("C:\\ProgramData\\nn-wsb-real-toolong1\\control\\jobs\\other");
+    const dirs = evidenceControlDirs(host);
+    assert.deepEqual([...dirs].sort(), [`${hostTest}\\control`, `${hostTest}\\control-acl`, `${real}\\control`, "D:\\a\\_temp\\nn-g05-wsb\\control"].sort());
+    assert.equal(await sandboxRunning(host, ident), "running");
+    const r = await releaseLeftovers(host, dirs, ident);
+    assert.equal(r.released, 2);
+    assert.equal(r.kept.length, 1);
+    assert.match(r.kept[0]!, /could not be restored/);
+    assert.equal(r.removedBases, 1);
+    assert.equal(host.exists(real), false, "the real test's folder is gone");
+    assert.ok(host.exists(`${hostTest}\\control-acl\\jobs\\job-3\\acl.json`), "a job that could not be undone keeps its record");
+    assert.deepEqual(host.acl.get(key("C:\\T\\nn-g05-x\\work")), orig);
+    assert.equal(host.exists("D:\\a\\_temp\\nn-g05-wsb\\control\\jobs\\job-2"), false);
+    assert.ok(host.exists("C:\\ProgramData\\NimbleNewt\\control\\jobs\\other"));
+    assert.ok(host.exists("C:\\ProgramData\\nn-wsb-real-toolong1\\control\\jobs\\other"));
+    assert.equal(host.sandboxes.has("00000000-0000-4000-8000-0000000000b1"), false);
+    assert.equal(host.sandboxes.has("00000000-0000-4000-8000-0000000000b2"), false);
+    // A folder whose lock is held by a live process is left alone, jobs and all.
+    const live = "C:\\ProgramData\\nn-wsb-real-live01";
+    host.writeText(`${live}\\control\\jobs\\job-4\\job.json`, "{}");
+    host.writeText(`${live}\\control\\sandbox.lock`, JSON.stringify({ pid: 777, jobDir: `${live}\\control\\jobs\\job-4` }));
+    host.alive.add(777);
+    const again = await releaseLeftovers(host, [`${live}\\control`], ident);
+    assert.equal(again.removedBases, 0);
+    assert.equal(again.released, 0);
+    assert.match(again.kept.join(), /in use/);
+    assert.ok(host.exists(`${live}\\control\\jobs\\job-4\\job.json`));
+    // Nothing else is reported as running once only the kept job's sandbox is stopped by hand.
+    host.sandboxes.clear();
+    assert.equal(await sandboxRunning(host, ident), "none");
+    host.pkg = undefined;
+    assert.equal(await sandboxRunning(host, ident), "unknown");
   });
 });
 

@@ -34,6 +34,9 @@ if (command === "run") {
     console.error(usage); process.exit(2);
   }
   if (out === undefined || (flag("workdir-check") !== undefined && flag("windows-summary") === undefined) || (flag("local") !== undefined && !rest.includes("--redact"))) { console.error(usage); process.exit(2); }
+  // Windows: the owner and share account default to the console user, as in windows-real.test.ts; which default was taken is printed (source words only, never the name).
+  const consoleUser = await worker.windowsConsoleUser();
+  if (process.platform === "win32") { const id = worker.evidenceIdentity(process.env, consoleUser); console.log(`  Windows Sandbox owner: ${id.ownerSource}; share account: ${id.shareSource} (configured = NIMBLENEWT_WSB_OWNER / NIMBLENEWT_WSB_SHARE_IDENTITY, console = the account signed in at the console, runner = this process's account)`); }
   let report = await worker.produceReport(root);
   const summaryFile = flag("windows-summary");
   if (summaryFile !== undefined) {
@@ -55,7 +58,7 @@ if (command === "run") {
   // On Windows the account at the console (and a configured owner or share account) is often not the account this runs as, so it is not among the names redaction knows by
   // itself: look it up and hide it too. A failed lookup leaves the general rules (any `<machine>\account`, home folders, SIDs).
   const names = { users: [process.env["NIMBLENEWT_WSB_OWNER"], process.env["NIMBLENEWT_WSB_SHARE_IDENTITY"]].filter((n) => typeof n === "string" && n.length >= 2) };
-  if (redact && process.platform === "win32") { try { const s = await worker.windowsRealHost().session(); if (typeof s.consoleUser === "string") names.users.push(s.consoleUser); } catch { /* the general rules still apply */ } }
+  if (redact && consoleUser !== undefined) names.users.push(consoleUser);
   const shown = redact ? worker.redactReport(report, names) : report;
   if (redact) {
     const local = flag("local");

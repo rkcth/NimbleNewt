@@ -113,6 +113,7 @@ jobs:
       - name: Record the filesystem (G06)
         id: fs
         continue-on-error: true
+        timeout-minutes: 10
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -151,6 +152,8 @@ jobs:
       - name: Run the real Windows Sandbox tests
         id: wsb
         continue-on-error: true
+        # Step timeouts: a stuck step ends with a failure and the later steps (the cleanup, the outcome, the uploads) still run inside the job's 300 minutes.
+        timeout-minutes: 90
         shell: bash
         env:
           NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"
@@ -170,17 +173,19 @@ jobs:
       - name: Controller working-directory check (G05)
         id: wd
         continue-on-error: true
+        timeout-minutes: 10
         shell: bash
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/g05-local"
-          node scripts/g05-workdir-check.mjs --out "$RUNNER_TEMP/g05-local/workdir.json" 2>&1 | tee "$RUNNER_TEMP/g05-local/workdir.log"
+          node scripts/g05-workdir-check.mjs --out "$RUNNER_TEMP/g05-local/workdir.json" 2>&1 | tee "$RUNNER_TEMP/g05-local/workdir.log" | node scripts/redact-log.mjs
       # G05: the containment suite through the production launcher with the Windows Sandbox backend, with the `windows` block filled from the Sandbox tests' summary and the check above.
       # Only the REDACTED report is uploaded (the repository is public); the unredacted one stays in the local folder on the machine. The supervisor-ACL rule is report-only for the same
       # reason as the tests above (the checkout is writable by the runner's account), so the report says report-only and the gate keeps blocking on the strict check.
       - name: G05 containment, redacted
         id: g05
         continue-on-error: true
+        timeout-minutes: 60
         shell: bash
         env:
           NIMBLENEWT_WSB_SUPERVISOR_ACL: report-only
@@ -189,22 +194,24 @@ jobs:
           mkdir -p "$RUNNER_TEMP/g05-windows" "$RUNNER_TEMP/g05-local"
           EXTRA=()
           if [ -f "$RUNNER_TEMP/sandbox-windows/summary.json" ]; then EXTRA+=(--windows-summary "$RUNNER_TEMP/sandbox-windows/summary.json"); if [ -f "$RUNNER_TEMP/g05-local/workdir.json" ]; then EXTRA+=(--workdir-check "$RUNNER_TEMP/g05-local/workdir.json"); fi; else echo "no Sandbox summary: the report has no windows block"; fi
-          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/g05-windows" "${EXTRA[@]}" --redact --local "$RUNNER_TEMP/g05-local" 2>&1 | tee "$RUNNER_TEMP/g05-local/g05.log"
+          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/g05-windows" "${EXTRA[@]}" --redact --local "$RUNNER_TEMP/g05-local" 2>&1 | tee "$RUNNER_TEMP/g05-local/g05.log" | node scripts/redact-log.mjs
       # G06: paths over 260 characters on this machine's real filesystem (packages/worker/src/workspace/long-paths.test.ts; the Windows-only test runs here).
       - name: G06 long paths on this machine
         id: g06
         continue-on-error: true
+        timeout-minutes: 30
         shell: bash
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/g06-host"
-          node --import ./scripts/offline-guard.mjs --test --test-timeout=600000 packages/worker/dist/workspace/long-paths.test.js 2>&1 | tee "$RUNNER_TEMP/g06-local.log"
+          node --import ./scripts/offline-guard.mjs --test --test-timeout=600000 packages/worker/dist/workspace/long-paths.test.js 2>&1 | tee "$RUNNER_TEMP/g06-local.log" | node scripts/redact-log.mjs
           grep -E "^# (tests|pass|fail|cancelled|skipped|todo) " "$RUNNER_TEMP/g06-local.log" > "$RUNNER_TEMP/g06-host/long-paths-counts.txt" || true
       # Y02: the scenario set with the real Windows Sandbox (scripts/y02-checkpoint.mjs run). Its report holds counts, the commit and the OS type only. The Sandbox tests it runs write their
       # summary and findings to folders of their own here, so they do not replace the summary uploaded above.
       - name: Y02 scenarios with the real Windows Sandbox
         id: y02
         continue-on-error: true
+        timeout-minutes: 150
         shell: bash
         env:
           NIMBLENEWT_REAL_WINDOWS_SANDBOX: "1"
@@ -215,7 +222,19 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/y02-windows" "$RUNNER_TEMP/y02-wsb-local"
-          node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02-windows" 2>&1 | tee "$RUNNER_TEMP/y02-wsb-local/y02.log"
+          node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02-windows" 2>&1 | tee "$RUNNER_TEMP/y02-wsb-local/y02.log" | node scripts/redact-log.mjs
+      # What a step stopped by its timeout (or a cancelled run) left behind: each leftover job's sandbox is stopped and its access lists restored through the backend's own release
+      # (scripts/wsb-cleanup.mjs); a Windows Sandbox still running afterwards is reported, not stopped. Counts only in the log; the reasons stay in the local folder.
+      - name: Release leftovers of the Sandbox runs
+        id: cleanup
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g05-local"
+          node scripts/wsb-cleanup.mjs --local "$RUNNER_TEMP/g05-local" 2>&1 | tee "$RUNNER_TEMP/g05-local/cleanup.log" | node scripts/redact-log.mjs
       - name: Job summary and outcome
         if: always()
         shell: bash
@@ -226,6 +245,7 @@ jobs:
           G05: ${{ steps.g05.outcome }}
           G06: ${{ steps.g06.outcome }}
           Y02: ${{ steps.y02.outcome }}
+          CLEAN: ${{ steps.cleanup.outcome }}
         run: |
           {
             echo "## Windows evidence run (A03b, G05, G06, Y02)"
@@ -239,15 +259,17 @@ jobs:
             echo "| G05 containment, redacted | $G05 |"
             echo "| G06 long paths | $G06 |"
             echo "| Y02 scenarios | $Y02 |"
+            echo "| Leftovers of the Sandbox runs released | $CLEAN |"
             echo
             if [ -f "$RUNNER_TEMP/sandbox-windows/summary.json" ]; then echo "Sandbox tests: $(node -p "JSON.stringify(require(process.argv[1]).counts)" "$RUNNER_TEMP/sandbox-windows/summary.json" 2>/dev/null || echo unreadable)"; fi
-            for f in "$RUNNER_TEMP/g05-local/workdir.log" "$RUNNER_TEMP/g05-local/g05.log" "$RUNNER_TEMP/g06-host/long-paths-counts.txt"; do
-              if [ -f "$f" ]; then echo; echo '```'; tail -n 15 "$f" | sed -e 's/[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ ]*/<home>/g'; echo '```'; fi
+            # The copied lines go through the same redaction as the step logs (scripts/redact-log.mjs).
+            for f in "$RUNNER_TEMP/g05-local/workdir.log" "$RUNNER_TEMP/g05-local/g05.log" "$RUNNER_TEMP/g06-host/long-paths-counts.txt" "$RUNNER_TEMP/g05-local/cleanup.log"; do
+              if [ -f "$f" ]; then echo; echo '```'; tail -n 15 "$f" | node scripts/redact-log.mjs; echo '```'; fi
             done
             # `|| true`: bash steps run with -e and pipefail, and a log with no scenario line (the run stopped early) must not end this step before the outcome check below.
-            if [ -f "$RUNNER_TEMP/y02-wsb-local/y02.log" ]; then echo; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02-wsb-local/y02.log" | tail -n 12 | sed -e 's/[A-Za-z]:[\\/][Uu]sers[\\/][^\\/ ]*/<home>/g' || true; echo '```'; fi
+            if [ -f "$RUNNER_TEMP/y02-wsb-local/y02.log" ]; then echo; echo '```'; grep -E "^[a-z0-9-]+: (pass|FAIL)|scenarios hold" "$RUNNER_TEMP/y02-wsb-local/y02.log" | tail -n 12 | node scripts/redact-log.mjs || true; echo '```'; fi
           } >> "$GITHUB_STEP_SUMMARY"
-          for o in "$FS" "$WSB" "$WD" "$G05" "$G06" "$Y02"; do if [ "$o" != "success" ]; then echo "at least one step did not succeed (see the table in the job summary)"; exit 1; fi; done
+          for o in "$FS" "$WSB" "$WD" "$G05" "$G06" "$Y02" "$CLEAN"; do if [ "$o" != "success" ]; then echo "at least one step did not succeed (see the table in the job summary)"; exit 1; fi; done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
